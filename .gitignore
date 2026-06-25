@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Results (large/generated files)
+results/
+
+# SPICE artifacts
+*.cir
+*.dat
+
+# OS
+.DS_Store
+Thumbs.db
