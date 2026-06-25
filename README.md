@@ -1,6 +1,6 @@
 # Evolvable Hardware — Half-Adder via Spiking Neural Networks
 
-An ISEF research project implementing **Edwards indirect encoding** to evolve spiking neural network (SNN) circuits that compute logic functions.
+A research project implementing **Edwards indirect encoding** to evolve spiking neural network (SNN) circuits that compute logic functions.
 
 ## What it does
 
