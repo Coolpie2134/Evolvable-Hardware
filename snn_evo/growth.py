@@ -27,14 +27,15 @@ def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int,
                 best_dist, best_out = d, gene.self_out
     return best_out if best_out else 1
 
-def grow_snn(genome: Genome) -> Dict[Tuple[int, int], int]:
-    grid: Dict[Tuple[int, int], int] = {SEED_A: SEED_STATE, SEED_B: SEED_STATE}
-    for iteration in range(MAX_ITER):
+def _grow_steps(genome, seeds, grid_size, iters):
+    """Yield the grid after each growth iteration (not including the seed state)."""
+    grid: Dict[Tuple[int, int], int] = {pos: SEED_STATE for pos in seeds}
+    for iteration in range(iters):
         frontier: Dict[Tuple[int, int], int] = {}
         for (x, y) in list(grid):
             for dx, dy in ((0,1),(0,-1),(1,0),(-1,0)):
                 nx, ny = x+dx, y+dy
-                if (0 <= nx < GRID_SIZE and 0 <= ny < GRID_SIZE
+                if (0 <= nx < grid_size and 0 <= ny < grid_size
                         and (nx,ny) not in grid and (nx,ny) not in frontier):
                     frontier[(nx, ny)] = 0
         working = {**grid, **frontier}
@@ -45,7 +46,25 @@ def grow_snn(genome: Genome) -> Dict[Tuple[int, int], int]:
             ns = _lookup(genome, sn, ss, se, sw, state, iteration)
             if ns:
                 next_grid[(x, y)] = ns
-        next_grid[SEED_A] = SEED_STATE
-        next_grid[SEED_B] = SEED_STATE
+        for pos in seeds:
+            next_grid[pos] = SEED_STATE
         grid = next_grid
+        yield grid
+
+
+def grow_snn(genome: Genome, seeds=(SEED_A, SEED_B),
+             grid_size: int = GRID_SIZE, iters: int = MAX_ITER
+             ) -> Dict[Tuple[int, int], int]:
+    grid: Dict[Tuple[int, int], int] = {pos: SEED_STATE for pos in seeds}
+    for grid in _grow_steps(genome, seeds, grid_size, iters):
+        pass
     return grid
+
+
+def grow_snn_snapshots(genome: Genome, seeds=(SEED_A, SEED_B),
+                       grid_size: int = GRID_SIZE, iters: int = MAX_ITER):
+    """Return list of (iters+1) grid dicts: seed state followed by each iteration."""
+    snapshots = [{pos: SEED_STATE for pos in seeds}]
+    for grid in _grow_steps(genome, seeds, grid_size, iters):
+        snapshots.append(dict(grid))
+    return snapshots

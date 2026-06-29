@@ -1,5 +1,6 @@
 from __future__ import annotations
 import dataclasses
+from typing import Tuple
 from .genome import GRID_SIZE
 
 @dataclasses.dataclass
@@ -25,11 +26,41 @@ SEED_A     = (0, 3)
 SEED_B     = (0, 5)
 SYN_WEIGHT = 2.0
 
-def interpret_grid(grid, n_outputs=1):
+
+@dataclasses.dataclass(frozen=True)
+class Arch:
+    """
+    Tunable substrate parameters (the electrical model), kept separate from the
+    Target (the problem). Threaded through interpretation so it survives the
+    process pool. NB: whether a coincidence/AND detector is buildable hinges on
+    syn_weight vs max(vth_levels): if one synapse (syn_weight) already exceeds
+    the highest threshold, every neuron is an OR and XOR is unrepresentable.
+    """
+    syn_weight: float = SYN_WEIGHT
+    vth_levels: Tuple[float, float, float, float] = (0.3, 0.5, 0.7, 0.9)
+    tau_levels: Tuple[float, float] = (8.0, 15.0)
+
+
+DEFAULT_ARCH = Arch()
+
+
+def interpret_grid(grid, n_outputs=1, target=None, arch=None):
+    """
+    Build (neurons, synapses) from a grown grid.
+
+    If `target` is given, input/output layout follows the target (any number of
+    inputs and outputs). Otherwise the legacy 2-seed, sum/carry heuristic is used
+    (controlled by n_outputs) so existing callers keep working unchanged.
+    """
+    if arch is None:
+        arch = DEFAULT_ARCH
+    input_pos = list(target.inputs) if target is not None else [SEED_A, SEED_B]
+    grid_size = target.grid_size    if target is not None else GRID_SIZE
+
     neurons    = []
     pos_to_id  = {}
-    vth_levels = [0.3, 0.5, 0.7, 0.9]
-    tau_levels = [8.0, 15.0]
+    vth_levels = arch.vth_levels
+    tau_levels = arch.tau_levels
 
     for (x, y), state in sorted(grid.items()):
         if state == 0:
@@ -39,31 +70,35 @@ def interpret_grid(grid, n_outputs=1):
         tau   = tau_levels[(state >> 2) & 0x1]
         excit = not bool((state >> 3) & 0x1)
         n = Neuron(id=nid, x=x, y=y, state=state, vth=vth, tau=tau,
-                   excit=excit, is_input=((x, y) in (SEED_A, SEED_B)))
+                   excit=excit, is_input=((x, y) in input_pos))
         neurons.append(n)
         pos_to_id[(x, y)] = nid
 
-    mid_y      = GRID_SIZE // 2
-    non_input  = [n for n in neurons if not n.is_input]
-    x_cols     = sorted(set(n.x for n in non_input), reverse=True)
+    non_input = [n for n in neurons if not n.is_input]
 
-    if n_outputs == 1:
-        if x_cols:
-            best = min([n for n in non_input if n.x == x_cols[0]],
-                       key=lambda n: abs(n.y - mid_y))
+    if target is not None and target.output_strategy == "terminals":
+        # Assign each output role to the nearest free grown neuron to its terminal.
+        for term in target.outputs:
+            tx, ty = term.pos
+            cands  = [n for n in non_input if not n.is_output]
+            if not cands:
+                break
+            best = min(cands, key=lambda n: abs(n.x - tx) + abs(n.y - ty))
             best.is_output = True
-            best.out_role  = "sum"
+            best.out_role  = term.role
     else:
-        if len(x_cols) >= 1:
-            best = min([n for n in non_input if n.x == x_cols[0]],
+        # Legacy heuristic: outputs are nearest-to-mid in the rightmost columns.
+        roles  = ([t.role for t in target.outputs] if target is not None
+                  else (["sum"] if n_outputs == 1 else ["sum", "carry"]))
+        mid_y  = grid_size // 2
+        x_cols = sorted(set(n.x for n in non_input), reverse=True)
+        for i, role in enumerate(roles):
+            if i >= len(x_cols):
+                break
+            best = min([n for n in non_input if n.x == x_cols[i]],
                        key=lambda n: abs(n.y - mid_y))
             best.is_output = True
-            best.out_role  = "sum"
-        if len(x_cols) >= 2:
-            best = min([n for n in non_input if n.x == x_cols[1]],
-                       key=lambda n: abs(n.y - mid_y))
-            best.is_output = True
-            best.out_role  = "carry"
+            best.out_role  = role
 
     synapses = []
     seen     = set()
@@ -79,7 +114,7 @@ def interpret_grid(grid, n_outputs=1):
             seen.add(pair)
             sign = 1.0 if neurons[pre_id].excit else -1.0
             synapses.append(Synapse(pre=pre_id, post=post_id,
-                                    weight=sign * SYN_WEIGHT))
+                                    weight=sign * arch.syn_weight))
     return neurons, synapses
 
 def circuit_summary(neurons, synapses):

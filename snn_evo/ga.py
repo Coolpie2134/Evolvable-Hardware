@@ -2,11 +2,14 @@ from __future__ import annotations
 import copy, math, random, os
 from concurrent.futures import ProcessPoolExecutor
 
+from functools import partial
+
 from .genome import (Genome, random_gene, random_chromosome,
                      random_genome, MAX_STATE, MAX_GENES, MAX_CHROMS)
 from .growth import grow_snn
 from .snn import interpret_grid, circuit_summary
-from .fitness import evaluate, N_OUTPUTS
+from .fitness import evaluate, score, N_OUTPUTS
+from .targets import get_target, DEFAULT_TARGET
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10
@@ -16,16 +19,20 @@ N_WORKERS      = min(os.cpu_count() or 2, 8)
 
 # ── evaluation ────────────────────────────────────────────────────
 
-def evaluate_genome(genome):
-    grid = grow_snn(genome)
-    if len(grid) <= 2:
+def evaluate_genome(genome, target=None, arch=None):
+    if target is None:
+        target = get_target(DEFAULT_TARGET)
+    grid = grow_snn(genome, seeds=tuple(target.inputs),
+                    grid_size=target.grid_size, iters=target.iters)
+    if len(grid) <= target.n_inputs:
         return 0.0
-    neurons, synapses = interpret_grid(grid, n_outputs=N_OUTPUTS)
-    return evaluate(neurons, synapses)
+    neurons, synapses = interpret_grid(grid, target=target, arch=arch)
+    return score(neurons, synapses, target)
 
-def _eval_batch(genomes):
+def _eval_batch(genomes, target=None, arch=None):
+    fn = partial(evaluate_genome, target=target, arch=arch)
     with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-        return [f.result() for f in [ex.submit(evaluate_genome, g) for g in genomes]]
+        return [f.result() for f in [ex.submit(fn, g) for g in genomes]]
 
 # ── genetic operators ──────────────────────────────────────────────
 
@@ -92,10 +99,12 @@ def tournament(population, fitnesses):
 
 # ── main loop ─────────────────────────────────────────────────────
 
-def evolve(generations=100, verbose=True, n_chroms=2, pop=None):
+def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arch=None):
+    if target is None:
+        target = get_target(DEFAULT_TARGET)
     popsize    = pop or POPSIZE
     population = [random_genome(n_chroms) for _ in range(popsize)]
-    fitnesses  = _eval_batch(population)
+    fitnesses  = _eval_batch(population, target, arch)
     best_idx   = max(range(popsize), key=lambda i: fitnesses[i])
     best_genome  = copy.deepcopy(population[best_idx])
     best_fitness = fitnesses[best_idx]
@@ -115,15 +124,16 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None):
             if len(new_pop) < popsize:
                 new_pop.append(mutate(cb))
         population = new_pop[:popsize]
-        fitnesses  = _eval_batch(population)
+        fitnesses  = _eval_batch(population, target, arch)
         gi = max(range(popsize), key=lambda i: fitnesses[i])
         if fitnesses[gi] > best_fitness:
             best_fitness = fitnesses[gi]
             best_genome  = copy.deepcopy(population[gi])
         if verbose and (gen % 10 == 0 or fitnesses[gi] >= 1.0):
             mean_f = sum(fitnesses) / popsize
-            grid   = grow_snn(best_genome)
-            ns, ss = interpret_grid(grid, n_outputs=N_OUTPUTS)
+            grid   = grow_snn(best_genome, seeds=tuple(target.inputs),
+                              grid_size=target.grid_size, iters=target.iters)
+            ns, ss = interpret_grid(grid, target=target, arch=arch)
             print("%5d  %6.4f  %6.4f  %s" % (gen, best_fitness, mean_f,
                                                circuit_summary(ns, ss)))
         if best_fitness >= 1.0:
