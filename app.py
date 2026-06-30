@@ -35,6 +35,7 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 import matplotlib.gridspec as gridspec
 import numpy as np
 
@@ -42,7 +43,7 @@ from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
                      circuit_summary, score, random_genome,
                      TARGETS, DEFAULT_TARGET, get_target, truth_table_target,
                      Arch, DEFAULT_ARCH)
-from snn_evo.genome import GRID_SIZE
+from snn_evo.genome import GRID_SIZE, MAX_STATE
 from snn_evo.ga import mutate, crossover, tournament, _eval_batch, ELITE_FRAC
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
 
@@ -200,21 +201,65 @@ def grid_to_rgba(grid, grid_size, seed_set, output_pos):
     return img
 
 
+def build_genome_text(genome, fitness=None):
+    """Render the genome as a readable, aligned chromosome/gene table."""
+    chroms  = list(getattr(genome, 'chromosomes', []) or [])
+    n_total = sum(len(c.genes) for c in chroms)
+    L = []
+    head = 'Genome  -  %d chromosome%s,  %d genes' % (
+        len(chroms), '' if len(chroms) == 1 else 's', n_total)
+    if fitness is not None:
+        head += '   (fitness = %.4f)' % fitness
+    L.append(head)
+    L.append('')
+    L.append('Each gene maps an expected neighbourhood (the 4 sides N/E/S/W + the cell')
+    L.append("itself) to an output state. During growth a cell adopts the output of the")
+    L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
+    L.append("'until' = the gene only applies while the growth iteration <= that limit.")
+    L.append('split = the crossover point used when two genomes mate.')
+    L.append('')
+    if not chroms:
+        L.append('(empty genome)')
+        return '\n'.join(L)
+
+    hdr = '    #  |   N    E    S    W  | self |  out | until'
+    sep = '  -----+---------------------+------+------+-------'
+    for ci, c in enumerate(chroms):
+        L.append('Chromosome %s     tag=%-4d  split=%-2d   (%d genes)'
+                 % (chr(ord('a') + ci), c.tag, c.split, len(c.genes)))
+        L.append(hdr)
+        L.append(sep)
+        for gi, g in enumerate(c.genes):
+            if 0 < c.split == gi:
+                L.append('       - - - - - - split - - - - - -')
+            L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d'
+                     % (gi, g.state_n, g.state_e, g.state_s, g.state_w,
+                        g.self_in, g.self_out, g.limit))
+        L.append('')
+    return '\n'.join(L)
+
+
 # ── GA background worker ──────────────────────────────────────────────────────
 
-def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event):
+def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event, base_seed=None):
     """
     Run the GA with random restarts against `target` / `arch`. Posts to queue q:
-        ('gen',  seed, gen, best_fit, mean_fit)
+        ('gen',  try, gen, best_fit, mean_fit)
         ('best', genome, fitness)
         ('done', genome, fitness)
+
+    base_seed=None  -> reseed from system entropy each restart (different runs).
+    base_seed=int   -> reproducible: restart i uses seed base_seed + i.
     """
     best_fit = 0.0
     best_g   = None
-    for seed in range(tries):
+    for try_i in range(tries):
         if stop_event.is_set():
             break
-        random.seed(seed + 1)
+        if base_seed is None:
+            random.seed()                    # entropy — different every run
+        else:
+            random.seed(base_seed + try_i)
         population = [random_genome(n_chroms) for _ in range(pop)]
         fitnesses  = _eval_batch(population, target, arch)
         bi         = max(range(pop), key=lambda i: fitnesses[i])
@@ -244,7 +289,7 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event):
                     best_fit, best_g = f, copy.deepcopy(g)
                     q.put(('best', copy.deepcopy(best_g), best_fit))
             mean_f = sum(fitnesses) / len(fitnesses)
-            q.put(('gen', seed + 1, gen, f, mean_f))
+            q.put(('gen', try_i + 1, gen, f, mean_f))
             if f >= 1.0:
                 break
         if best_fit >= 1.0:
@@ -396,6 +441,7 @@ class App:
         self._pop_var   = lentry('Pop:',   50)
         self._gens_var  = lentry('Gens:',  30)
         self._tries_var = lentry('Tries:', 20)
+        self._seed_var  = lentry('Seed:',  'random', width=7)
 
         self._graded_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(ctrl, text='Graded', variable=self._graded_var).pack(side='left', padx=(8, 0))
@@ -424,8 +470,14 @@ class App:
         self._vmin_var   = aentry('Vth min:',    DEFAULT_ARCH.vth_levels[0])
         self._vmax_var   = aentry('Vth max:',    DEFAULT_ARCH.vth_levels[-1])
         self._cur_var    = aentry('Input I:',    self.target.high)
+
+        ttk.Separator(ctrl2, orient='vertical').pack(side='left', fill='y', padx=8)
+        self._grid_var   = aentry('Grid:',   self.target.grid_size, width=4)
+        self._iters_var  = aentry('Iters:',  self.target.iters,     width=4)
+        self._chroms_var = aentry('Chroms:', 2,                     width=4)
+
         ttk.Button(ctrl2, text='Reset', width=6, command=self._reset_arch).pack(side='left', padx=8)
-        ttk.Label(ctrl2, text='(Syn weight vs Vth changes the firing regime — defaults work well)',
+        ttk.Label(ctrl2, text='(layout: grid size, growth iterations, chromosomes per genome)',
                   foreground='#888888').pack(side='left', padx=6)
 
         nb = ttk.Notebook(self.root)
@@ -433,6 +485,7 @@ class App:
         self._build_evolve_tab(nb)
         self._build_growth_tab(nb)
         self._build_voltage_tab(nb)
+        self._build_genome_tab(nb)
 
         self._status = tk.StringVar(
             value='Ready — pick a target, set parameters, click Run (or Load Saved).')
@@ -487,6 +540,16 @@ class App:
         self._draw_placeholder(self._volt_fig, self._volt_canvas,
                                'Run the GA or Load Saved to see membrane voltages.')
 
+    def _build_genome_tab(self, nb):
+        frame = ttk.Frame(nb)
+        nb.add(frame, text='Genome')
+        self._genome_fig = plt.figure(figsize=(11, 7.5))
+        self._genome_fig.patch.set_facecolor('#f5f5f5')
+        self._genome_canvas = FigureCanvasTkAgg(self._genome_fig, master=frame)
+        self._genome_canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+        self._draw_placeholder(self._genome_fig, self._genome_canvas,
+                               'Run the GA or Load Saved to see the evolved genome.')
+
     @staticmethod
     def _draw_placeholder(fig, canvas, msg):
         fig.clf()
@@ -506,10 +569,25 @@ class App:
         name = self._target_var.get()
         self.target = self._all_targets().get(name, get_target(DEFAULT_TARGET))
         self._cur_var.set(str(self.target.high))
+        self._grid_var.set(str(self.target.grid_size))
+        self._iters_var.set(str(self.target.iters))
         n_cases = len(self.target.cases)
         self._status.set('Target: %s — %d inputs, %d outputs, %d cases%s' % (
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
             '   (large — evolution will be slow)' if n_cases > 32 else ''))
+
+    def _effective_target(self, high, graded, grid_size, iters):
+        """Apply the GUI's high/graded/grid/iters knobs to the selected target,
+        keeping I/O on-grid (terminal outputs moved to the new right edge)."""
+        t = dataclasses.replace(self.target, high=high, graded=graded,
+                                grid_size=grid_size, iters=iters)
+        inputs = [(x, min(y, grid_size - 1)) for (x, y) in t.inputs]
+        t = dataclasses.replace(t, inputs=inputs)
+        if t.output_strategy == 'terminals':
+            outs = [dataclasses.replace(o, pos=(grid_size - 1, min(o.pos[1], grid_size - 1)))
+                    for o in t.outputs]
+            t = dataclasses.replace(t, outputs=outs)
+        return t
 
     def _read_arch(self):
         """Parse the substrate fields -> (Arch, input_high, ok)."""
@@ -531,6 +609,9 @@ class App:
         self._vmin_var.set(str(DEFAULT_ARCH.vth_levels[0]))
         self._vmax_var.set(str(DEFAULT_ARCH.vth_levels[-1]))
         self._cur_var.set(str(self.target.high))
+        self._grid_var.set(str(self.target.grid_size))
+        self._iters_var.set(str(self.target.iters))
+        self._chroms_var.set('2')
 
     def _open_custom(self):
         CustomTargetDialog(self.root, self._on_custom_built)
@@ -555,13 +636,40 @@ class App:
             self._status.set('Invalid parameters — Pop>=2, Gens>=1, Tries>=1 (integers).')
             return
 
+        seed_txt = self._seed_var.get().strip().lower()
+        if seed_txt in ('', 'random', 'rand', 'none'):
+            # pick an explicit seed so the run is recorded and replayable
+            base_seed = random.randrange(1, 2_000_000_000)
+        else:
+            try:
+                base_seed = int(seed_txt)
+            except ValueError:
+                self._status.set("Invalid seed — use an integer or 'random'.")
+                return
+        self._active_seed = base_seed
+        # show the actual seed in the field so it's visible and replayable
+        # (type 'random' again to draw a fresh one)
+        self._seed_var.set(str(base_seed))
+
         arch, high, ok = self._read_arch()
         if not ok:
             self._status.set('Invalid substrate — Syn weight>0, Input I>0, 0<=Vth min<=Vth max.')
             return
-        eff_target = dataclasses.replace(self.target, graded=self._graded_var.get(), high=high)
+
+        try:
+            grid_size = int(self._grid_var.get())
+            iters     = int(self._iters_var.get())
+            n_chroms  = int(self._chroms_var.get())
+            if grid_size < 3 or iters < 1 or n_chroms < 1:
+                raise ValueError
+        except ValueError:
+            self._status.set('Invalid layout — Grid>=3, Iters>=1, Chroms>=1 (integers).')
+            return
+
+        eff_target = self._effective_target(high, self._graded_var.get(), grid_size, iters)
         self._active_target = eff_target
         self._active_arch   = arch
+        self._active_chroms = n_chroms
         self._disp_target   = eff_target
         self._disp_arch     = arch
 
@@ -583,12 +691,12 @@ class App:
         self._stop_event = threading.Event()
         self._worker = threading.Thread(
             target=_ga_worker,
-            args=(gens, pop, 2, tries, eff_target, arch, self.q, self._stop_event),
+            args=(gens, pop, n_chroms, tries, eff_target, arch, self.q, self._stop_event, base_seed),
             daemon=True)
         self._worker.start()
-        self._status.set('Evolving %s …  pop=%d  gens=%d  tries=%d  syn_w=%.2f  Vth%s%s' %
-                         (self.target.name, pop, gens, tries, arch.syn_weight,
-                          str(arch.vth_levels), '  [graded]' if self._graded_var.get() else ''))
+        self._status.set('Evolving %s …  pop=%d  gens=%d  tries=%d  seed=%d  syn_w=%.2f%s' %
+                         (self.target.name, pop, gens, tries, base_seed,
+                          arch.syn_weight, '  [graded]' if self._graded_var.get() else ''))
 
     def _stop_ga(self):
         self._stop_event.set()
@@ -615,6 +723,12 @@ class App:
         self._vmin_var.set(str(saved_arch.vth_levels[0]))
         self._vmax_var.set(str(saved_arch.vth_levels[-1]))
         self._cur_var.set(str(saved_target.high))
+        self._grid_var.set(str(saved_target.grid_size))
+        self._iters_var.set(str(saved_target.iters))
+        saved_seed = state.get('seed')
+        if saved_seed is not None:
+            self._seed_var.set(str(saved_seed))
+            self._active_seed = saved_seed
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
             self._target_cb['values'] = list(TARGETS) + list(self._custom)
@@ -632,7 +746,7 @@ class App:
                 msg  = self.q.get_nowait()
                 kind = msg[0]
                 if kind == 'gen':
-                    _, seed, gen, best_f, mean_f = msg
+                    _, try_n, gen, best_f, mean_f = msg
                     self._abs_gen += 1
                     self._gen_history.append((self._abs_gen, best_f, mean_f))
                     xs  = [d[0] for d in self._gen_history]
@@ -642,8 +756,9 @@ class App:
                     self._mean_line.set_data(xs, mys)
                     self._fit_ax.set_xlim(0, max(xs) + 1)
                     self._fit_canvas.draw_idle()
-                    self._status.set('%s  seed=%d  gen=%d  best=%.4f  mean=%.4f' %
-                                     (self.target.name, seed, gen, best_f, mean_f))
+                    self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  mean=%.4f' %
+                                     (self.target.name, getattr(self, '_active_seed', 0),
+                                      try_n, gen, best_f, mean_f))
                 elif kind == 'best':
                     _, genome, fit = msg
                     self.best_genome  = genome
@@ -660,7 +775,8 @@ class App:
                             pickle.dump({'best_genome': genome, 'best_fitness': fit,
                                          'target': save_target,
                                          'target_name': save_target.name,
-                                         'arch': save_arch}, f)
+                                         'arch': save_arch,
+                                         'seed': getattr(self, '_active_seed', None)}, f)
                         self._update_all(genome, fit)
                     self._run_btn.config(state='normal')
                     self._stop_btn.config(state='disabled')
@@ -668,18 +784,24 @@ class App:
                     self._target_cb.config(state='readonly')
                     self._save_btn.config(state='normal' if genome else 'disabled')
                     saved = ('  saved → %s' % CKPT) if genome else ''
-                    self._status.set('Done — %s fitness=%.4f%s' %
-                                     (self.target.name, fit, saved))
+                    self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s' %
+                                     (self.target.name, fit,
+                                      getattr(self, '_active_seed', 0), saved))
         except queue.Empty:
             pass
         self.root.after(60, self._poll)
 
     # ── display updates ───────────────────────────────────────────────────────
 
+    def _seed_tag(self):
+        s = getattr(self, '_active_seed', None)
+        return ('   seed=%d' % s) if s is not None else ''
+
     def _update_all(self, genome, fitness):
         self._update_truth_table(genome)
         self._draw_growth(genome, fitness)
         self._draw_voltages(genome)
+        self._draw_genome(genome, fitness)
 
     def _set_tt(self, text):
         self._tt_text.config(state='normal')
@@ -713,7 +835,7 @@ class App:
 
         self._growth_fig.clf()
         self._growth_fig.suptitle(
-            '%s — Circuit Growth   (fitness=%.4f)' % (target.name, fitness),
+            '%s — Circuit Growth   (fitness=%.4f)%s' % (target.name, fitness, self._seed_tag()),
             fontsize=10, fontweight='bold', y=0.995)
         axes = self._growth_fig.subplots(
             nrows, ncols, squeeze=False,
@@ -789,7 +911,7 @@ class App:
         self._volt_fig.clf()
         extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
                 '  (first %d of %d cases)' % (MAX_VOLT_CASES, len(target.cases))
-        self._volt_fig.suptitle('%s — Membrane Voltages%s' % (target.name, extra),
+        self._volt_fig.suptitle('%s — Membrane Voltages%s%s' % (target.name, extra, self._seed_tag()),
                                 fontsize=10, fontweight='bold', y=0.99)
         gspec = gridspec.GridSpec(n_rows, n_cols, figure=self._volt_fig,
                                   hspace=0.6, wspace=0.35,
@@ -814,18 +936,123 @@ class App:
                 ax.set_ylim(-0.15, neuron.vth + 0.35)
                 ax.set_ylabel('V', fontsize=8)
                 if row == 0:
-                    enc = ' (comp)' if term.complement_inputs else ''
-                    ax.set_title("%s  pos=%s%s" % (term.role, (neuron.x, neuron.y), enc),
-                                 fontsize=9)
+                    notes = []
+                    if term.complement_inputs:
+                        notes.append('complement in')
+                    if term.invert_spike:
+                        notes.append('fires => 0')
+                    note = ('  [%s]' % ', '.join(notes)) if notes else ''
+                    ax.set_title("%s  pos=%s%s" % (term.role, (neuron.x, neuron.y), note),
+                                 fontsize=8.5)
                 ax.text(0.02, 0.88, 'in=%s' % ''.join(map(str, in_bits)),
                         transform=ax.transAxes, fontsize=7.5, va='top')
-                res = 'exp=%d act=%d %s' % (exp, act, 'OK' if act == exp else 'FAIL')
+                # Make the spike->logic mapping explicit so an inverted (carry)
+                # output doesn't look like the result contradicts the trace.
+                fy  = 'Y' if fired else 'N'
+                res = 'fired=%s -> %d  exp=%d  %s' % (fy, act, exp,
+                                                          'OK' if act == exp else 'FAIL')
                 ax.text(0.98, 0.88, res, transform=ax.transAxes,
-                        fontsize=8, va='top', ha='right',
+                        fontsize=7.5, va='top', ha='right',
                         color='green' if act == exp else 'red', fontweight='bold')
                 if row == n_rows - 1:
                     ax.set_xlabel('Time (ms)', fontsize=8)
         self._volt_canvas.draw_idle()
+
+    # ── genome viewer ─────────────────────────────────────────────────────────
+
+    # one colour per cell-state (categorical, so equal states read the same)
+    _STATE_CMAP = plt.cm.tab20
+
+    def _state_color(self, v):
+        c = self._STATE_CMAP(v % 20)
+        lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+        return c, ('white' if lum < 0.55 else '#222')
+
+    def _draw_gene(self, ax, ox, oy, gene):
+        """One gene as a card: a 3x3 neighbourhood pattern -> output chip."""
+        # card
+        ax.add_patch(FancyBboxPatch((ox - 0.25, oy - 0.45), 6.3, 3.9,
+                     boxstyle='round,pad=0.02,rounding_size=0.2',
+                     facecolor='white', edgecolor='#cdd6e2', lw=1.0, zorder=1))
+
+        def chip(cx, cy, val, sz=0.92, fs=8.5):
+            face, txt = self._state_color(val)
+            ax.add_patch(FancyBboxPatch((cx, cy), sz, sz,
+                         boxstyle='round,pad=0,rounding_size=0.14',
+                         facecolor=face, edgecolor='#5b6b7d', lw=0.7, zorder=2))
+            ax.text(cx + sz / 2, cy + sz / 2, str(val), ha='center', va='center',
+                    fontsize=fs, fontweight='bold', color=txt, zorder=3)
+
+        # plus-shaped neighbourhood (y grows downward; axis is inverted below)
+        chip(ox + 1, oy + 0, gene.state_n)                 # N
+        chip(ox + 0, oy + 1, gene.state_w)                 # W
+        chip(ox + 1, oy + 1, gene.self_in)                 # centre = expected self
+        chip(ox + 2, oy + 1, gene.state_e)                 # E
+        chip(ox + 1, oy + 2, gene.state_s)                 # S
+        # output chip (bigger), with an arrow from the pattern
+        ax.add_patch(FancyArrowPatch((ox + 3.1, oy + 1.45), (ox + 4.05, oy + 1.45),
+                     arrowstyle='-|>', mutation_scale=11, color='#445', lw=1.4, zorder=2))
+        chip(ox + 4.2, oy + 0.85, gene.self_out, sz=1.25, fs=11)
+        # growth limit badge (top-right of card)
+        ax.text(ox + 5.85, oy - 0.18, 'it<=%d' % gene.limit, ha='right', va='top',
+                fontsize=6.5, color='#888', zorder=3)
+
+    def _draw_genome(self, genome, fitness):
+        fig = self._genome_fig
+        fig.clf()
+        chroms = list(getattr(genome, 'chromosomes', []) or [])
+        if not chroms:
+            self._draw_placeholder(fig, self._genome_canvas, '(empty genome)')
+            return
+        n_total = sum(len(c.genes) for c in chroms)
+        title = 'Genome  —  %d chromosome%s,  %d genes' % (
+            len(chroms), '' if len(chroms) == 1 else 's', n_total)
+        if fitness is not None:
+            title += '   (fitness = %.4f)' % fitness
+        title += self._seed_tag()
+
+        ax = fig.add_subplot(111)
+        ax.set_title(title, fontsize=11, fontweight='bold', pad=12)
+        ax.axis('off')
+
+        CW, CH  = 7.0, 4.4        # card footprint (incl. spacing)
+        per_row = 4
+        cap     = 48              # keep cards readable; note the rest
+        y       = 0.0
+        drawn   = 0
+        truncated = False
+
+        for ci, chrom in enumerate(chroms):
+            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %d   ·   %d genes"
+                    % (chr(ord('a') + ci), chrom.tag, chrom.split, len(chrom.genes)),
+                    fontsize=9.5, fontweight='bold', color='#334', va='bottom')
+            y += 1.0
+            ng = len(chrom.genes)
+            for gi, gene in enumerate(chrom.genes):
+                if drawn >= cap:
+                    truncated = True
+                    break
+                self._draw_gene(ax, (gi % per_row) * CW, y + (gi // per_row) * CH, gene)
+                drawn += 1
+            y += (math.ceil(ng / per_row) if ng else 1) * CH + 0.7
+            if truncated:
+                ax.text(0.0, y, '…  %d more genes not shown' % (n_total - cap),
+                        fontsize=9, color='#a00', va='bottom')
+                y += 1.0
+                break
+
+        ax.text(0.0, y + 0.2,
+                'card = one gene: the plus is the expected neighbourhood '
+                '(N/E/S/W sides + centre = self), the chip after -> is the output state; '
+                'growth picks the gene closest (min Hamming distance) to a cell, active while iter <= limit.',
+                fontsize=7.5, color='#666', va='bottom', wrap=True)
+
+        ax.set_xlim(-0.4, per_row * CW)
+        ax.set_ylim(0, y + 1.4)
+        ax.invert_yaxis()
+        ax.set_aspect('equal', adjustable='box')
+        fig.tight_layout()
+        self._genome_canvas.draw_idle()
 
     # ── save PNGs ─────────────────────────────────────────────────────────────
 
@@ -838,10 +1065,17 @@ class App:
         ts   = time.strftime('%Y%m%d_%H%M%S')
         growth_png = os.path.join(RESULTS_DIR, 'growth_%s_%s.png'  % (safe, ts))
         volt_png   = os.path.join(RESULTS_DIR, 'voltage_%s_%s.png' % (safe, ts))
+        genome_png = os.path.join(RESULTS_DIR, 'genome_%s_%s.png'  % (safe, ts))
+        genome_txt = os.path.join(RESULTS_DIR, 'genome_%s_%s.txt'  % (safe, ts))
         self._growth_fig.savefig(growth_png, dpi=140, bbox_inches='tight', facecolor='white')
         self._volt_fig.savefig(volt_png,     dpi=130, bbox_inches='tight', facecolor='white')
-        self._status.set('Saved  %s  and  %s  →  results/' %
-                         (os.path.basename(growth_png), os.path.basename(volt_png)))
+        self._genome_fig.savefig(genome_png, dpi=130, bbox_inches='tight', facecolor='white')
+        with open(genome_txt, 'w', encoding='utf-8') as f:
+            seed = getattr(self, '_active_seed', None)
+            if seed is not None:
+                f.write('seed = %d\n\n' % seed)
+            f.write(build_genome_text(self.best_genome, self.best_fitness))
+        self._status.set('Saved growth / voltage / genome (png + txt) (%s) → results/' % ts)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
