@@ -48,13 +48,16 @@ import os
 import random
 import sys
 import select
-import termios
-import tty
 import functools
 
-from concept.common.terminal import setnodelay, setnormal, read_nonblocking, read_blocking_char
-from concept.common.ga import GEN_POP, GEN_START, GEN_CHEM, GEN_SOLN, GEN_ALL, do_one_generation
-from concept.common.ancestry import quadcheck, ancestors
+# Genuinely-shared, platform-guarded terminal I/O (identical across all sims).
+from concept.common.terminal import (setnodelay, setnormal,
+                                      read_nonblocking, read_blocking_char, NullIO)
+
+# GUI bridge: when a GUI engine sets this, main() streams per-generation stats
+# through it and takes pause/stop from it instead of the terminal. None = CLI.
+GUI = None
+GUI_READY = True    # main() implements the GUI hook
 
 #----------------*
 # Some constants
@@ -86,7 +89,7 @@ SIZEY = 8       # solution space size in y
 CELLSXY = SIZEX * SIZEY
 
 
-def abs(a):
+def ABS(a):
     return -a if a < 0 else a
 
 
@@ -383,7 +386,17 @@ def enumerate_neighbors(cref):
 # Terminal raw-mode helpers (replace setnodelay/setnormal from termios)
 #----------------------------------------------------------------------#
 
-_saved_term_settings = None
+# Terminal raw-mode helpers now come from concept.common.terminal (imported above).
+
+
+#----------------------------------------------------------------------#
+# Fast, cheap pseudorandom
+#----------------------------------------------------------------------#
+
+_prnv = [0] * 256
+_pridx = 0
+
+
 def init_pseudo():
     global _prnv
     _prnv = [random.randrange(255) for _ in range(256)]
@@ -399,6 +412,23 @@ def get_pseudo():
 #----------------------------------------------------------------------#
 # Routine to set the random seed from the current time in microseconds
 #----------------------------------------------------------------------#
+
+def setrandom():
+    random.seed()
+    init_pseudo()
+
+
+#----------------------------------------------#
+# Determine fitness from the "solution" vector
+# Balance ones and zeros, and allow the
+# "reverse" solution to have equal fitness.
+#
+# Each species may have its own solution.
+#----------------------------------------------#
+
+_find_solution_t0 = 0
+_find_solution_t1 = 0
+
 
 def find_solution(species, bitstream):
     global cursoln, _find_solution_t0, _find_solution_t1
@@ -541,7 +571,7 @@ def evaluate(organism, fout):
 
                             elif code == EVAL_HAS_N_NEIGHBORS:
                                 number = len(neighbors[rel_orient])
-                                eval_result = ev["weight"] - abs(number - ev["number"])
+                                eval_result = ev["weight"] - ABS(number - ev["number"])
 
                             elif code == EVAL_NEIGHBOR_MATCHES:
                                 number = 0
@@ -1023,6 +1053,47 @@ def freepop(population):
 # the return values ensure that the list will
 # end up ordered greatest to least.
 #----------------------------------------------#
+
+def _tagcomp(a, b):
+    if a > b:
+        return -1
+    return 1
+
+
+#----------------------------------------------#
+# Check for the equality of pairs of numbers
+#----------------------------------------------#
+
+def quadcheck(a1, b1, a2, b2):
+    if a1 == a2 and b1 == b2:
+        return True
+    elif a1 == b2 and b1 == a2:
+        return True
+    return False
+
+
+#----------------------------------------------#
+# Routine that checks if two individuals have
+# the same ancestors to two generations back.
+#----------------------------------------------#
+
+def ancestors(org1, org2):
+    if quadcheck(org1.tag[1], org1.tag[2], org2.tag[1], org2.tag[2]):
+        return True
+    elif quadcheck(org1.tag[3], org1.tag[4], org2.tag[3], org2.tag[4]):
+        return True
+    elif quadcheck(org1.tag[5], org1.tag[6], org2.tag[5], org2.tag[6]):
+        return True
+    elif quadcheck(org1.tag[3], org1.tag[4], org2.tag[5], org2.tag[6]):
+        return True
+    elif quadcheck(org1.tag[5], org1.tag[6], org2.tag[3], org2.tag[4]):
+        return True
+    return False
+
+
+#----------------------------------------------#
+#----------------------------------------------#
+
 def do_one_generation(population, ruleset, fitness_scale):
     """Returns (pairings_x, pairings_y) lists, each of length POPSIZE."""
 
@@ -1034,6 +1105,12 @@ def do_one_generation(population, ruleset, fitness_scale):
         for _ in range(fitness_scale - 1):
             organism.scaled *= organism.fitness
         totalfit += organism.scaled
+
+    # Degenerate generation (everyone scored 0): uniform selection, avoid /0.
+    if totalfit == 0:
+        for i in range(POPSIZE):
+            population[i].scaled = 1
+        totalfit = POPSIZE
 
     pairings_x = [None] * POPSIZE
     pairings_y = [None] * POPSIZE
@@ -1228,10 +1305,10 @@ def rebuild_stuff(rtype, population):
 #----------------------------------------------#
 
 def main():
-    fout = sys.stdout
-    random.seed()
+    fout = NullIO() if GUI is not None else sys.stdout
+    setrandom()
 
-    statfile = open("stat.dat", "w")
+    statfile = None if GUI is not None else open("stat.dat", "w")
 
     population = None
 
@@ -1249,7 +1326,8 @@ def main():
         fout.write("When running, key h=print command help\n")
         fout.write("Hit any key to start:")
         fout.flush()
-        sys.stdin.read(1)
+        if GUI is None:
+            sys.stdin.read(1)
         fout.write("\n\n")
         setnodelay(fd)
 
@@ -1285,6 +1363,23 @@ def main():
                         maxbin = i
             else:
                 maxbin = bintop
+
+            if GUI is not None:
+                fits = [o.fitness for o in population]
+                typ  = next((o for o in population if o.fitness == maxbin), population[0])
+                GUI.report({
+                    "generation":   generation,
+                    "fitnesses":    fits,
+                    "best_fitness": max(fits),
+                    "mean_fitness": sum(fits) / len(fits),
+                    "max_fitness":  CELLSXY + STOPFIT,
+                    "best_grid":    [[typ.bitstream[x][y] for x in range(SIZEX)]
+                                     for y in range(SIZEY)],
+                    "target_grid":  None,
+                    "best_stop":    typ.stop,
+                    "extra":        {},
+                })
+                GUI.checkpoint()
 
             for i in range(POPSIZE):
                 organism = population[i]
@@ -1336,7 +1431,7 @@ def main():
             # Check terminal input status
 
             while True:
-                c = read_nonblocking(fd)
+                c = None if GUI is not None else read_nonblocking(fd)
                 if c is None:
                     break
                 c = c.lower()

@@ -16,11 +16,15 @@ import os
 import random
 import sys
 import select
-import termios
-import tty
 
-from concept.common.terminal import setnodelay, setnormal, read_nonblocking, read_blocking_char
-from concept.common.ga import GEN_POP, GEN_START, GEN_CHEM, GEN_SOLN, GEN_ALL, do_one_generation
+# Genuinely-shared, platform-guarded terminal I/O (identical across all sims).
+from concept.common.terminal import (setnodelay, setnormal,
+                                      read_nonblocking, read_blocking_char, NullIO)
+
+# GUI bridge: when a GUI engine sets this, main() streams per-generation stats
+# through it and takes pause/stop from it instead of the terminal. None = CLI.
+GUI = None
+GUI_READY = True    # main() implements the GUI hook
 
 #----------------*
 # Some constants
@@ -41,7 +45,7 @@ RESULTSPACE = 1 << CONTEXTBITS
 SOLUTIONSPACE = 1 << BITSTREAM
 
 
-def abs(a):
+def ABS(a):
     return -a if a < 0 else a
 
 
@@ -80,7 +84,23 @@ chemistry = [0] * RESULTSPACE        # mapping of symbols to result bits
 # Terminal raw-mode helpers (replace setnodelay/setnormal from termios)
 #----------------------------------------------------------------------#
 
-_saved_term_settings = None
+# Terminal raw-mode helpers now come from concept.common.terminal (imported above).
+
+
+#----------------------------------------------------------------------#
+# Routine to set the random seed from the current time in microseconds
+#----------------------------------------------------------------------#
+
+def setrandom():
+    random.seed()
+
+
+#----------------------------------------------#
+# Compute "tag" for an organism.  This is a
+# simple if imperfect way to quickly tell if
+# two organisms have the same genetic code.
+#----------------------------------------------#
+
 def compute_tag(organism):
     tag = 0
     for gp in organism.chromosome:
@@ -134,9 +154,9 @@ def evaluate(organism, fout):
             mindist = 1000
             for gp in organism.chromosome:
                 rule, result = gp
-                distance = abs(key[0] - rule[0])
-                distance += abs(key[1] - rule[1])
-                distance += abs(key[2] - rule[2])
+                distance = ABS(key[0] - rule[0])
+                distance += ABS(key[1] - rule[1])
+                distance += ABS(key[2] - rule[2])
                 if distance < mindist:
                     mindist = distance
                     gmatch = gp
@@ -343,8 +363,8 @@ def print_stuff(organism, fout):
 def main():
     global cellinit, chemistry
 
-    fout = sys.stdout
-    random.seed()
+    fout = NullIO() if GUI is not None else sys.stdout
+    setrandom()
 
     fd = sys.stdin.fileno()
 
@@ -406,7 +426,8 @@ def main():
 
     fout.write("Hit any key to start:")
     fout.flush()
-    sys.stdin.read(1)
+    if GUI is None:
+        sys.stdin.read(1)
     fout.write("\n\n")
     setnodelay(fd)
 
@@ -529,6 +550,23 @@ def main():
 
         fout.write("\nGeneration %d: " % generation)
 
+        if GUI is not None:
+            allfits = [population[j][i].fitness
+                       for j in range(SPECIES) for i in range(POPSIZE)]
+            best = max((maxfitorg[j] for j in range(SPECIES)), key=lambda o: o.fitness)
+            GUI.report({
+                "generation":   generation,
+                "fitnesses":    allfits,
+                "best_fitness": best.fitness,
+                "mean_fitness": sum(allfits) / len(allfits),
+                "max_fitness":  BITSTREAM + STOPFIT,
+                "best_grid":    [[(best.bitstream >> b) & 1 for b in range(BITSTREAM)]],
+                "target_grid":  None,
+                "best_stop":    best.stop,
+                "extra":        {"species": SPECIES},
+            })
+            GUI.checkpoint()
+
         for j in range(SPECIES):
             fout.write(
                 "Maximally fit organism fitness %d bits 0x%x stop %d\n"
@@ -552,7 +590,7 @@ def main():
 
         # Check terminal input status
 
-        c = read_nonblocking(fd)
+        c = None if GUI is not None else read_nonblocking(fd)
         if c is not None:
             c = c.lower()
             if c == 'w':

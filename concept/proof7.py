@@ -11,6 +11,11 @@
 import random
 import sys
 
+# GUI bridge: when a GUI engine sets this, main() streams per-generation stats
+# through it and takes pause/stop from it instead of printing. None = CLI.
+GUI = None
+GUI_READY = True    # main() implements the GUI hook
+
 #--------------------------------------------------#
 # Constants
 #--------------------------------------------------#
@@ -64,6 +69,14 @@ solution_fitness = [0] * SOLUTIONSPACE
 #----------------------------------------------------------------------#
 # Routine to set the random seed from the current time in microseconds
 #----------------------------------------------------------------------#
+
+def setrandom():
+    random.seed()
+
+
+#----------------------------------------------#
+# Solution-generating routine.
+#----------------------------------------------#
 
 def solution(bitstream):
     maxspace = 1 << (SIZE_X * SIZE_Y)
@@ -124,11 +137,12 @@ def init_solution():
         solution_bitstream[i] = i
         solution_fitness[i] = 0
 
-    sys.stdout.write("Solutions with maximum fitness %d:\n" % maxfit)
-    for i in range(solutionspace):
-        if solution_fitness[i] == maxfit:
-            sys.stdout.write("0x%04x\n" % i)
-    sys.stdout.write("\n")
+    if GUI is None:
+        sys.stdout.write("Solutions with maximum fitness %d:\n" % maxfit)
+        for i in range(solutionspace):
+            if solution_fitness[i] == maxfit:
+                sys.stdout.write("0x%04x\n" % i)
+        sys.stdout.write("\n")
 
 
 #-------------------------------------------------#
@@ -345,7 +359,7 @@ def random_organism(organism):
 #----------------------------------------------#
 
 def main():
-    random.seed()
+    setrandom()
 
     # Generate a random initial seed to be used by all individuals
     for y in range(SIZE_Y):
@@ -363,19 +377,20 @@ def main():
 
     # Print the initial cell and the corresponding bitstream
 
-    sys.stdout.write("Initial cell:\n   ")
-    for y in range(SIZE_Y):
-        for x in range(SIZE_X):
-            sys.stdout.write("%d" % cellinit[x][y])
-        sys.stdout.write("\n   ")
-
-    bitstream = 0
-    i = 0
-    for x in range(SIZE_X):
+    if GUI is None:
+        sys.stdout.write("Initial cell:\n   ")
         for y in range(SIZE_Y):
-            bitstream |= (cellinit[x][y] << i)
-            i += 1
-    sys.stdout.write("\nInitial cell corresponds to bitstream 0x%03x\n\n" % bitstream)
+            for x in range(SIZE_X):
+                sys.stdout.write("%d" % cellinit[x][y])
+            sys.stdout.write("\n   ")
+
+        bitstream = 0
+        i = 0
+        for x in range(SIZE_X):
+            for y in range(SIZE_Y):
+                bitstream |= (cellinit[x][y] << i)
+                i += 1
+        sys.stdout.write("\nInitial cell corresponds to bitstream 0x%03x\n\n" % bitstream)
 
     init_solution()
 
@@ -394,6 +409,12 @@ def main():
             organism = population[i]
             evaluate(organism, 0)
             totalfit += organism.fitness
+
+        # Degenerate generation (everyone scored 0): uniform selection, avoid /0.
+        if totalfit == 0:
+            for i in range(POPSIZE):
+                population[i].fitness = 1
+            totalfit = POPSIZE
 
         # Each individual gets to take part in a number of matings
         # according to (individual fitness / population fitness) times
@@ -445,29 +466,38 @@ def main():
             if binsleft == 0:
                 break
 
-        # Diagnostic
-
-        if binsleft == 0:
-            sys.stdout.write("Population filled at i = %d\n" % i)
+        # Report results
+        if GUI is not None:
+            fits = [o.fitness for o in population]
+            GUI.report({
+                "generation":   generation,
+                "fitnesses":    fits,
+                "best_fitness": maxfitorg.fitness,
+                "mean_fitness": sum(fits) / len(fits),
+                "max_fitness":  max(solution_fitness) + STOPFIT,
+                "best_grid":    [[(maxfitorg.bitstream >> (x * SIZE_Y + y)) & 1
+                                  for x in range(SIZE_X)] for y in range(SIZE_Y)],
+                "target_grid":  None,
+                "best_stop":    maxfitorg.stop,
+                "extra":        {},
+            })
+            GUI.checkpoint()
         else:
-            sys.stdout.write("Population done with %d bins unfilled\n" % binsleft)
-
-        # Done with the population. Report results
-
-        sys.stdout.write("Generation %d: " % generation)
-
-        sys.stdout.write(
-            "Maximally fit organism fitness %d bits 0x%x stop %d\n"
-            % (maxfitorg.fitness, maxfitorg.bitstream, maxfitorg.stop)
-        )
-
-        sys.stdout.write("   Chromosome table:\n")
-        for gp in maxfitorg.chromosome:
-            sys.stdout.write("  0x%03x | %d\n" % (gp[0], gp[1]))
-        sys.stdout.write("\n")
-
-        sys.stdout.write("   Growth:\n")
-        evaluate(maxfitorg, 1)
+            if binsleft == 0:
+                sys.stdout.write("Population filled at i = %d\n" % i)
+            else:
+                sys.stdout.write("Population done with %d bins unfilled\n" % binsleft)
+            sys.stdout.write("Generation %d: " % generation)
+            sys.stdout.write(
+                "Maximally fit organism fitness %d bits 0x%x stop %d\n"
+                % (maxfitorg.fitness, maxfitorg.bitstream, maxfitorg.stop)
+            )
+            sys.stdout.write("   Chromosome table:\n")
+            for gp in maxfitorg.chromosome:
+                sys.stdout.write("  0x%03x | %d\n" % (gp[0], gp[1]))
+            sys.stdout.write("\n")
+            sys.stdout.write("   Growth:\n")
+            evaluate(maxfitorg, 1)
 
         # Create the next generation by crossover recombination
 
@@ -519,8 +549,9 @@ def main():
             if random.randrange(100) == 0:
                 random_mutate(population[i])
 
-    sys.stdout.write("Done!\n")
-    sys.exit(0)
+    if GUI is None:
+        sys.stdout.write("Done!\n")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

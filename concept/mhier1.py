@@ -26,15 +26,16 @@ import os
 import random
 import sys
 import select
-import termios
-import tty
 import functools
 
-from concept.common.terminal import setnodelay, setnormal, read_nonblocking, read_blocking_char
-from concept.common.ga import GEN_POP, GEN_START, GEN_CHEM, GEN_SOLN, GEN_ALL, do_one_generation
-from concept.common.history import HIST_LIMIT, HISTORY, hist_compare, update_history
-from concept.common.solution_tree import (make_solution, find_solution,
-                                          free_solution, find_searchspace, new_tree)
+# Genuinely-shared, platform-guarded terminal I/O (identical across all sims).
+from concept.common.terminal import (setnodelay, setnormal,
+                                      read_nonblocking, read_blocking_char, NullIO)
+
+# GUI bridge: when a GUI engine sets this, main() streams per-generation stats
+# through it and takes pause/stop from it instead of the terminal. None = CLI.
+GUI = None
+GUI_READY = True    # main() implements the GUI hook
 
 #----------------*
 # Some constants
@@ -61,11 +62,11 @@ SIZEY = 5      # solution space size in y
 CELLSXY = SIZEX * SIZEY
 
 
-def abs(a):
+def ABS(a):
     return -a if a < 0 else a
 
 
-def min(a, b):
+def MIN(a, b):
     return a if a < b else b
 
 
@@ -128,11 +129,20 @@ solution = [[0] * SIZEY for _ in range(SIZEX)]   # the actual solution
 stree = None
 
 
+# Terminal raw-mode helpers now come from concept.common.terminal (imported above).
+
 #----------------------------------------------------------------------#
-# Terminal raw-mode helpers (replace setnodelay/setnormal from termios)
+# Routine to set the random seed from the current time in microseconds
 #----------------------------------------------------------------------#
 
-_saved_term_settings = None
+def setrandom():
+    random.seed()
+
+
+#----------------------------------------------#
+# Variable block size fitness function
+#----------------------------------------------#
+
 def fitness_function(bitstream):
     sxnor = [[0] * SIZEY for _ in range(SIZEX)]
     btotal = 0
@@ -147,9 +157,9 @@ def fitness_function(bitstream):
         return 0
 
     # Encourage non-trivial solutions (balanced 1s and 0s)
-    fittotal = CELLSXY - abs((btotal << 1) - CELLSXY)
+    fittotal = CELLSXY - ABS((btotal << 1) - CELLSXY)
 
-    blockmax = min(SIZEX, SIZEY)
+    blockmax = MIN(SIZEX, SIZEY)
 
     for m in range(2, blockmax):
         for x in range(SIZEX + 1 - m):
@@ -172,6 +182,70 @@ def fitness_function(bitstream):
 #----------------------------------------------#
 # Create a random matrix to solve.
 #----------------------------------------------#
+
+def make_solution(fout):
+    for x in range(SIZEX):
+        for y in range(SIZEY):
+            solution[x][y] = random.randrange(2)
+
+
+#--------------------------------------------------------------#
+# Solve for fitness, creating a quick lookup tree as we go.
+# If this solution has been visited before, then we don't need
+# to do the full calculation; just return the value.  This
+# makes most fitness calculations very fast.
+#--------------------------------------------------------------#
+
+def find_solution(node, bitstream, bitidx):
+    if bitidx == CELLSXY:
+        return node["fitness"]
+    else:
+        x = bitidx // SIZEY
+        y = bitidx % SIZEX
+        bit = bitstream[x][y]
+        key = "one" if bit else "zero"
+        sseek = node[key]
+        if sseek is None:
+            sseek = {"zero": None, "one": None, "fitness": None}
+            node[key] = sseek
+            if bitidx == (CELLSXY - 1):
+                # Full solution calculation is required
+                sseek["fitness"] = fitness_function(bitstream)
+        return find_solution(sseek, bitstream, bitidx + 1)
+
+
+#-----------------------------------------------#
+# Free memory allocated to the fitness function
+#-----------------------------------------------#
+
+def free_solution(node, bitidx):
+    # In Python, memory is garbage-collected automatically; this is a
+    # no-op kept for structural fidelity with the original program.
+    pass
+
+
+#------------------------------------------------------#
+# Visit all of the leaves in the solution tree and
+# report how many solutions we have visited.
+#------------------------------------------------------#
+
+def find_searchspace(node, bitidx):
+    count = 0
+    if node is not None:
+        if bitidx < CELLSXY:
+            if node["zero"] is not None:
+                count += find_searchspace(node["zero"], bitidx + 1)
+            if node["one"] is not None:
+                count += find_searchspace(node["one"], bitidx + 1)
+        else:
+            count += 1
+    return count
+
+
+#-------------------------------------------------#
+# Growth algorithm and fitness evaluation routine
+#-------------------------------------------------#
+
 def evaluate(organism, fout):
     cellnext = [[0] * SIZEY for _ in range(SIZEX)]
     cellarray = [[0] * SIZEY for _ in range(SIZEX)]
@@ -223,7 +297,7 @@ def evaluate(organism, fout):
                         for ll in range(KERNEL):
                             for kk in range(KERNEL):
                                 sdist = key[kk][ll] - rule[kk][ll]
-                                distance += abs(sdist)
+                                distance += ABS(sdist)
                                 if distance > mindist:
                                     abort = True
                                     break
@@ -540,13 +614,63 @@ def print_stuff(organism, fout):
 # the return values ensure that the list will
 # end up ordered greatest to least.
 #----------------------------------------------#
+
+def _tagcomp(a, b):
+    if a > b:
+        return -1
+    return 1
+
+
+#----------------------------------------------#
+# Compare the histories of two organisms.  If
+# they share any direct ancestor out to
+# HIST_LIMIT generations back, return True.
+# Otherwise, return False.
+#
+# history = 0 indicates the first generation
+# and should never return True.
+#----------------------------------------------#
+
+def hist_compare(org1, org2):
+    for k in range(1, HIST_LIMIT):
+        l = (1 << k) - 1
+        m = (1 << (k + 1)) - 1
+        for j in range(l, m):
+            if org1.history[k] == org2.history[j]:
+                if org1.history[k] != 0:
+                    return True
+    return False
+
+
+#----------------------------------------------#
+# Update the history for an organism by
+# combining the histories of both parents
+#----------------------------------------------#
+
+def update_history(org, px, py):
+    # TO BE DONE---generalize the statements below
+    org.history[1] = px.history[0]
+    org.history[2] = py.history[0]
+
+    for k in range(1, HIST_LIMIT):
+        n = (1 << (k - 1)) - 1     # (0, 1, 3, 7)
+        l = (1 << k) - 1            # (1, 3, 7, 15)
+        for j in range(n + 1):
+            org.history[l + j] = px.history[n + j]
+            org.history[l + n + 1 + j] = py.history[n + j]
+
+
+#----------------------------------------------#
+# Here's the application program. . .
+#----------------------------------------------#
+
 def main():
     global cellinit, chemistry, stree
 
-    fout = sys.stdout
-    random.seed()
+    fout = NullIO() if GUI is not None else sys.stdout
+    setrandom()
 
-    statfile = open("stat.dat", "w")
+    statfile = None if GUI is not None else open("stat.dat", "w")
 
     population = None
     fitness_bins = None
@@ -600,7 +724,8 @@ def main():
         fout.write("When running, key h=print command help\n")
         fout.write("Hit any key to start:")
         fout.flush()
-        sys.stdin.read(1)
+        if GUI is None:
+            sys.stdin.read(1)
         fout.write("\n\n")
         setnodelay(fd)
 
@@ -719,6 +844,24 @@ def main():
                 if fitness_bins[i] > fitness_bins[maxbin]:
                     maxbin = i
 
+            if GUI is not None:
+                fits = [o.fitness for o in population]
+                typ  = next((o for o in population if o.fitness == maxbin), population[0])
+                GUI.report({
+                    "generation":   generation,
+                    "fitnesses":    fits,
+                    "best_fitness": max(fits),
+                    "mean_fitness": sum(fits) / len(fits),
+                    "max_fitness":  maxfit,
+                    "best_grid":    [[typ.bitstream[x][y] for x in range(SIZEX)]
+                                     for y in range(SIZEY)],
+                    "target_grid":  [[solution[x][y] for x in range(SIZEX)]
+                                     for y in range(SIZEY)],
+                    "best_stop":    typ.stop,
+                    "extra":        {"searched": find_searchspace(stree, 0)},
+                })
+                GUI.checkpoint()
+
             # Print results for first organism in this bin; compare with solution.
 
             for i in range(POPSIZE):
@@ -771,7 +914,7 @@ def main():
 
             # Check terminal input status
 
-            c = read_nonblocking(fd)
+            c = None if GUI is not None else read_nonblocking(fd)
             if c is not None:
                 c = c.lower()
                 if c == 'w':

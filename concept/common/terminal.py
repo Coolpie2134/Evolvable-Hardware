@@ -13,6 +13,12 @@ try:
 except ImportError:          # Windows
     _HAS_TERMIOS = False
 
+
+class NullIO:
+    """A do-nothing output sink, used to silence a sim's `fout` in GUI mode."""
+    def write(self, *a, **k):  return 0
+    def flush(self):           pass
+
 _saved_term_settings = None
 
 

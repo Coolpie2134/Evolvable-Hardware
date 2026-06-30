@@ -17,11 +17,15 @@ import os
 import random
 import sys
 import select
-import termios
-import tty
 
-from concept.common.terminal import setnodelay, setnormal, read_nonblocking, read_blocking_char
-from concept.common.ga import GEN_POP, GEN_START, GEN_CHEM, GEN_SOLN, GEN_ALL, do_one_generation
+# Genuinely-shared, platform-guarded terminal I/O (identical across all sims).
+from concept.common.terminal import (setnodelay, setnormal,
+                                      read_nonblocking, read_blocking_char, NullIO)
+
+# GUI bridge: when a GUI engine sets this, main() streams per-generation stats
+# through it and takes pause/stop from it instead of the terminal. None = CLI.
+GUI = None
+GUI_READY = True    # main() implements the GUI hook
 
 #----------------*
 # Some constants
@@ -41,7 +45,7 @@ RESULTSPACE = 5
 ENDSYMBOL = 100
 
 
-def abs(a):
+def ABS(a):
     return -a if a < 0 else a
 
 
@@ -86,7 +90,24 @@ chemistry = [0] * RESULTSPACE     # mapping of symbols to result bits
 # Terminal raw-mode helpers (replace setnodelay/setnormal from termios)
 #----------------------------------------------------------------------#
 
-_saved_term_settings = None
+# Terminal raw-mode helpers now come from concept.common.terminal (imported above).
+
+
+#----------------------------------------------------------------------#
+# Routine to set the random seed from the current time in microseconds
+#----------------------------------------------------------------------#
+
+def setrandom():
+    random.seed()
+
+
+#----------------------------------------------#
+# Fitness function.
+# Count all groups of bits larger than 1 that
+# match the solution.  Multiply the result by
+# the length of the correct sequence
+#----------------------------------------------#
+
 def fitness_function(bitstream):
     result = 0
     solnxnor = (~(bitstream ^ solution)) & ((1 << BITSTREAM) - 1)
@@ -142,7 +163,7 @@ def evaluate(organism, fout):
                 distance = 0
                 for i in range(KERNEL):
                     sdist = key[i] - rule[i]
-                    distance += abs(sdist)
+                    distance += ABS(sdist)
                 if distance < mindist:
                     mindist = distance
                     gmatch = gp
@@ -372,8 +393,8 @@ def print_stuff(organism, fout):
 def main():
     global solution, cellinit, chemistry
 
-    fout = sys.stdout
-    random.seed()
+    fout = NullIO() if GUI is not None else sys.stdout
+    setrandom()
 
     population = None
     fitness_bins = None
@@ -431,7 +452,8 @@ def main():
         fout.write("When running, w=write, r=re-run, m=mutation e=elitism q=quit.\n")
         fout.write("Hit any key to start:")
         fout.flush()
-        sys.stdin.read(1)
+        if GUI is None:
+            sys.stdin.read(1)
         fout.write("\n\n")
         setnodelay(fd)
 
@@ -559,6 +581,22 @@ def main():
                 if fitness_bins[i] > fitness_bins[maxbin]:
                     maxbin = i
 
+            if GUI is not None:
+                fits = [o.fitness for o in population]
+                typ  = next((o for o in population if o.fitness == maxbin), population[0])
+                GUI.report({
+                    "generation":   generation,
+                    "fitnesses":    fits,
+                    "best_fitness": max(fits),
+                    "mean_fitness": sum(fits) / len(fits),
+                    "max_fitness":  maxfit,
+                    "best_grid":    [[(typ.bitstream >> b) & 1 for b in range(BITSTREAM)]],
+                    "target_grid":  None,
+                    "best_stop":    typ.stop,
+                    "extra":        {},
+                })
+                GUI.checkpoint()
+
             # Print results for first organism in this bin
             for i in range(POPSIZE):
                 organism = population[i]
@@ -584,7 +622,7 @@ def main():
 
             # Check terminal input status
 
-            c = read_nonblocking(fd)
+            c = None if GUI is not None else read_nonblocking(fd)
             if c is not None:
                 c = c.lower()
                 if c == 'w':
