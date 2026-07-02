@@ -18,6 +18,7 @@ MEAN_MUTATIONS = 1.2
 N_WORKERS      = min(os.cpu_count() or 2, 8)
 
 # ── evaluation ────────────────────────────────────────────────────
+# (the nervous / temporal backends have their own GA: see nv_evo/ga.py)
 
 def evaluate_genome(genome, target=None, arch=None):
     if target is None:
@@ -97,6 +98,21 @@ def tournament(population, fitnesses):
     idx = random.sample(range(len(population)), min(TOURNAMENT_K, len(population)))
     return population[max(idx, key=lambda i: fitnesses[i])]
 
+def next_population(population, fitnesses):
+    """One generation: elites survive, the rest are tournament-selected
+    crossover + mutation offspring."""
+    pop     = len(population)
+    n_elite = max(1, int(pop * ELITE_FRAC))
+    order   = sorted(range(pop), key=lambda i: fitnesses[i], reverse=True)
+    new_pop = [copy.deepcopy(population[i]) for i in order[:n_elite]]
+    while len(new_pop) < pop:
+        ca, cb = crossover(tournament(population, fitnesses),
+                           tournament(population, fitnesses))
+        new_pop.append(mutate(ca))
+        if len(new_pop) < pop:
+            new_pop.append(mutate(cb))
+    return new_pop[:pop]
+
 # ── main loop ─────────────────────────────────────────────────────
 
 def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arch=None):
@@ -114,16 +130,7 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arc
         print("-" * 72)
 
     for gen in range(generations):
-        n_elite   = max(1, int(popsize * ELITE_FRAC))
-        elite_idx = sorted(range(popsize), key=lambda i: fitnesses[i], reverse=True)
-        new_pop   = [copy.deepcopy(population[i]) for i in elite_idx[:n_elite]]
-        while len(new_pop) < popsize:
-            ca, cb = crossover(tournament(population, fitnesses),
-                               tournament(population, fitnesses))
-            new_pop.append(mutate(ca))
-            if len(new_pop) < popsize:
-                new_pop.append(mutate(cb))
-        population = new_pop[:popsize]
+        population = next_population(population, fitnesses)
         fitnesses  = _eval_batch(population, target, arch)
         gi = max(range(popsize), key=lambda i: fitnesses[i])
         if fitnesses[gi] > best_fitness:

@@ -1,0 +1,44 @@
+"""
+nv_evo — "nervous network" backend (Edwards, *Circuit Morphologies and
+Ontogenies*, EH'02, Architecture 1).
+
+Fully independent of snn_evo: its own hex genome + growth, its own targets and
+its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
+
+  * each grown cell is a nervous-net node whose state routes its neighbours to
+    two excitatory inputs (E1, E2) and one inhibitory input (I1);
+  * a node fires when  (E1 AND E2) AND NOT I1  — genuine coincidence detection
+    (the paper's Fig. 3 table; every state is a buffer or an AND, optionally
+    vetoed — there is no disjunction);
+  * dynamics are asynchronous edge-triggered pulses (pulse.py): a triggered
+    node emits a fixed-width pulse after a fixed delay; inputs are injected
+    onto the perimeter nets (wired-OR). Nothing happens without an input, and
+    memory / oscillation are a pulse circulating around a loop of buffers
+    "until stopped by application of an inhibitory input" (delay-line memory);
+  * scoring samples the wires once per tick: combinational targets read
+    whether the output cell ever pulses; temporal targets score the sampled
+    trace, and the GA's fitness shaping favours nets whose signal graph can
+    actually hold state.
+
+Quick start
+-----------
+from nv_evo import evolve_nervous, TEMPORAL_TARGETS
+best, fit = evolve_nervous(TEMPORAL_TARGETS['SR latch'], generations=60)
+"""
+from .hexgrid import hex_dirs, hex_pixel, ROUTING_HEX, routing_kind, node_fires
+from .genome import (HexGene, Chromosome, Genome, random_hex_gene,
+                     random_hex_chromosome, random_hex_genome)
+from .pulse import PulseSim, DELAY, WIDTH, COINC, TICK
+from .nervous import (ROUTING, SEED_STATE, interpret_nervous, evaluate_nervous,
+                      score_nervous, nervous_truth_table, nervous_case_outputs,
+                      circuit_summary_nervous, grow_nervous, grow_nervous_snapshots)
+from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
+                      sr_latch, toggle_ff, oscillator, echo,
+                      coincidence_detector, one_shot, pair_detector)
+from .temporal import (run_nervous, score_temporal,
+                       prepare_net, windowed_score, exact_tick_accuracy,
+                       place_outputs_by_trace, signal_graph, cycle_nodes,
+                       loop_profile)
+from .ga import (evaluate_nv, eval_batch_nv, mutate_nv, mutate_hex,
+                 crossover_nv, tournament_nv, next_population,
+                 evolve_nervous, genome_signature)

@@ -44,8 +44,13 @@ from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
                      TARGETS, DEFAULT_TARGET, get_target, truth_table_target,
                      Arch, DEFAULT_ARCH)
 from snn_evo.genome import GRID_SIZE, MAX_STATE
-from snn_evo.ga import mutate, crossover, tournament, _eval_batch, ELITE_FRAC
+from snn_evo.ga import _eval_batch, next_population
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
+from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
+                    nervous_case_outputs, circuit_summary_nervous, ROUTING)
+from nv_evo import TEMPORAL_TARGETS
+from nv_evo.viz import draw_hex_net
+from interactive import InteractiveTab
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
 CKPT        = os.path.join(RESULTS_DIR, 'best_genome.pkl')
@@ -201,6 +206,26 @@ def grid_to_rgba(grid, grid_size, seed_set, output_pos):
     return img
 
 
+def grid_to_rgba_nervous(grid, grid_size, seed_set, output_pos):
+    """RGBA image of a nervous net: nodes coloured by routing type."""
+    img = np.ones((grid_size, grid_size, 4), dtype=float)
+    for (x, y), state in grid.items():
+        row, col = grid_size - 1 - y, x
+        if (x, y) in seed_set:
+            img[row, col] = [0.9, 0.1, 0.1, 1.0]             # red — input seed
+        elif (x, y) in output_pos:
+            img[row, col] = [0.1, 0.8, 0.2, 1.0]             # green — output
+        else:
+            e1, e2, i1 = ROUTING[state & 0xF]
+            if i1 is not None:
+                img[row, col] = [0.90, 0.50, 0.10, 0.95]     # orange — inhibited / veto
+            elif e1 == e2:
+                img[row, col] = [0.55, 0.75, 0.95, 0.9]      # light blue — buffer
+            else:
+                img[row, col] = [0.15, 0.35, 0.85, 0.95]     # blue — coincidence (AND)
+    return img
+
+
 def build_genome_text(genome, fitness=None):
     """Render the genome as a readable, aligned chromosome/gene table."""
     chroms  = list(getattr(genome, 'chromosomes', []) or [])
@@ -212,18 +237,28 @@ def build_genome_text(genome, fitness=None):
         head += '   (fitness = %.4f)' % fitness
     L.append(head)
     L.append('')
-    L.append('Each gene maps an expected neighbourhood (the 4 sides N/E/S/W + the cell')
+    hexmode = bool(chroms and chroms[0].genes and hasattr(chroms[0].genes[0], 'ctx_l'))
+    sides = 'hex sides L/R/D' if hexmode else 'the 4 sides N/E/S/W'
+    L.append('Each gene maps an expected neighbourhood (%s + the cell' % sides)
     L.append("itself) to an output state. During growth a cell adopts the output of the")
     L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
-    L.append("'until' = the gene only applies while the growth iteration <= that limit.")
+    if hexmode:
+        L.append("out = 0 means the cell is off (dead); L/R are read in the node's")
+        L.append("own orientation (context rotation).")
+    else:
+        L.append("'until' = the gene only applies while the growth iteration <= that limit.")
     L.append('split = the crossover point used when two genomes mate.')
     L.append('')
     if not chroms:
         L.append('(empty genome)')
         return '\n'.join(L)
 
-    hdr = '    #  |   N    E    S    W  | self |  out | until'
-    sep = '  -----+---------------------+------+------+-------'
+    if hexmode:
+        hdr = '    #  |   L    R    D  | self |  out'
+        sep = '  -----+----------------+------+------'
+    else:
+        hdr = '    #  |   N    E    S    W  | self |  out | until'
+        sep = '  -----+---------------------+------+------+-------'
     for ci, c in enumerate(chroms):
         L.append('Chromosome %s     tag=%-4d  split=%-2d   (%d genes)'
                  % (chr(ord('a') + ci), c.tag, c.split, len(c.genes)))
@@ -232,18 +267,23 @@ def build_genome_text(genome, fitness=None):
         for gi, g in enumerate(c.genes):
             if 0 < c.split == gi:
                 L.append('       - - - - - - split - - - - - -')
-            L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d'
-                     % (gi, g.state_n, g.state_e, g.state_s, g.state_w,
-                        g.self_in, g.self_out, g.limit))
+            if hexmode:
+                L.append('  %4d | %4d %4d %4d | %4d | %4d'
+                         % (gi, g.ctx_l, g.ctx_r, g.ctx_d, g.self_in, g.self_out))
+            else:
+                L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d'
+                         % (gi, g.state_n, g.state_e, g.state_s, g.state_w,
+                            g.self_in, g.self_out, g.limit))
         L.append('')
     return '\n'.join(L)
 
 
 # ── GA background worker ──────────────────────────────────────────────────────
 
-def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event, base_seed=None):
+def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
+               base_seed=None, backend='snn'):
     """
-    Run the GA with random restarts against `target` / `arch`. Posts to queue q:
+    Run the GA with random restarts against `target` / `arch` / `backend`. Posts to queue q:
         ('gen',  try, gen, best_fit, mean_fit)
         ('best', genome, fitness)
         ('done', genome, fitness)
@@ -251,6 +291,21 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event, base_see
     base_seed=None  -> reseed from system entropy each restart (different runs).
     base_seed=int   -> reproducible: restart i uses seed base_seed + i.
     """
+    # each backend brings its own genome, operators and evaluator (snn_evo/ga.py
+    # vs nv_evo/ga.py — the nervous GA is tuned for loops/memory); this loop
+    # only orchestrates restarts and reports progress.
+    if backend == 'nervous':
+        from nv_evo import random_hex_genome
+        from nv_evo.ga import eval_batch_nv, next_population as next_pop_nv
+        cache       = {}     # fitness cache shared across restarts (same target)
+        make_genome = lambda: random_hex_genome(n_chroms)
+        eval_batch  = lambda genomes: eval_batch_nv(genomes, target, cache)
+        step        = lambda population, fits: next_pop_nv(population, fits, make_genome)
+    else:
+        make_genome = lambda: random_genome(n_chroms)
+        eval_batch  = lambda genomes: _eval_batch(genomes, target, arch)
+        step        = next_population
+
     best_fit = 0.0
     best_g   = None
     for try_i in range(tries):
@@ -260,8 +315,8 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event, base_see
             random.seed()                    # entropy — different every run
         else:
             random.seed(base_seed + try_i)
-        population = [random_genome(n_chroms) for _ in range(pop)]
-        fitnesses  = _eval_batch(population, target, arch)
+        population = [make_genome() for _ in range(pop)]
+        fitnesses  = eval_batch(population)
         bi         = max(range(pop), key=lambda i: fitnesses[i])
         g, f       = copy.deepcopy(population[bi]), fitnesses[bi]
         if f > best_fit:
@@ -270,17 +325,8 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event, base_see
         for gen in range(gens):
             if stop_event.is_set():
                 break
-            n_e     = max(1, int(pop * ELITE_FRAC))
-            ei      = sorted(range(pop), key=lambda i: fitnesses[i], reverse=True)
-            new_pop = [copy.deepcopy(population[i]) for i in ei[:n_e]]
-            while len(new_pop) < pop:
-                ca, cb = crossover(tournament(population, fitnesses),
-                                   tournament(population, fitnesses))
-                new_pop.append(mutate(ca))
-                if len(new_pop) < pop:
-                    new_pop.append(mutate(cb))
-            population = new_pop[:pop]
-            fitnesses  = _eval_batch(population, target, arch)
+            population = step(population, fitnesses)
+            fitnesses  = eval_batch(population)
             gi         = max(range(pop), key=lambda i: fitnesses[i])
             if fitnesses[gi] > f:
                 f = fitnesses[gi]
@@ -411,8 +457,9 @@ class App:
         self._custom      = {}     # name -> Target for user-built targets
         self.target       = get_target(DEFAULT_TARGET)
         # what the display tabs currently reflect (set on Run / Load):
-        self._disp_target = self.target
-        self._disp_arch   = DEFAULT_ARCH
+        self._disp_target  = self.target
+        self._disp_arch    = DEFAULT_ARCH
+        self._disp_backend = 'snn'
         self._build_ui()
         self._poll()
 
@@ -422,10 +469,19 @@ class App:
         ctrl = ttk.Frame(self.root, padding=(6, 4))
         ctrl.pack(fill='x', side='top')
 
+        ttk.Label(ctrl, text='Model:').pack(side='left', padx=(2, 2))
+        self._backend_var = tk.StringVar(value='SNN')
+        self._backend_cb  = ttk.Combobox(ctrl, textvariable=self._backend_var,
+                                         values=['SNN', 'Nervous'], width=8, state='readonly')
+        self._backend_cb.pack(side='left')
+        self._backend_cb.bind('<<ComboboxSelected>>', self._on_backend_change)
+
+        ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=8)
+
         ttk.Label(ctrl, text='Target:').pack(side='left', padx=(2, 2))
         self._target_var = tk.StringVar(value=DEFAULT_TARGET)
         self._target_cb  = ttk.Combobox(ctrl, textvariable=self._target_var,
-                                        values=list(TARGETS), width=14, state='readonly')
+                                        values=list(self._all_targets()), width=16, state='readonly')
         self._target_cb.pack(side='left')
         self._target_cb.bind('<<ComboboxSelected>>', self._on_target_change)
         ttk.Button(ctrl, text='Custom…', command=self._open_custom).pack(side='left', padx=3)
@@ -444,7 +500,8 @@ class App:
         self._seed_var  = lentry('Seed:',  'random', width=7)
 
         self._graded_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ctrl, text='Graded', variable=self._graded_var).pack(side='left', padx=(8, 0))
+        self._graded_chk = ttk.Checkbutton(ctrl, text='Graded', variable=self._graded_var)
+        self._graded_chk.pack(side='left', padx=(8, 0))
 
         ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=8)
 
@@ -455,43 +512,80 @@ class App:
         for b in (self._run_btn, self._stop_btn, self._load_btn, self._save_btn):
             b.pack(side='left', padx=3)
 
-        # ── second row: tunable substrate (Arch) parameters ──
+        # ── second row: model-specific parameters ──
         ctrl2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl2.pack(fill='x', side='top')
-        ttk.Label(ctrl2, text='Substrate:').pack(side='left', padx=(2, 4))
 
-        def aentry(label, default, width=5):
-            ttk.Label(ctrl2, text=label).pack(side='left', padx=(6, 2))
+        def aentry(parent, label, default, width=5):
+            ttk.Label(parent, text=label).pack(side='left', padx=(6, 2))
             v = tk.StringVar(value=str(default))
-            ttk.Entry(ctrl2, textvariable=v, width=width).pack(side='left')
+            ttk.Entry(parent, textvariable=v, width=width).pack(side='left')
             return v
 
-        self._syn_var    = aentry('Syn weight:', DEFAULT_ARCH.syn_weight)
-        self._vmin_var   = aentry('Vth min:',    DEFAULT_ARCH.vth_levels[0])
-        self._vmax_var   = aentry('Vth max:',    DEFAULT_ARCH.vth_levels[-1])
-        self._cur_var    = aentry('Input I:',    self.target.high)
+        # substrate group (SNN only — hidden for nervous nets)
+        self._arch_frame = ttk.Frame(ctrl2)
+        self._arch_frame.pack(side='left')
+        ttk.Label(self._arch_frame, text='Substrate:').pack(side='left', padx=(2, 0))
+        self._syn_var  = aentry(self._arch_frame, 'Syn weight:', DEFAULT_ARCH.syn_weight)
+        self._vmin_var = aentry(self._arch_frame, 'Vth min:',    DEFAULT_ARCH.vth_levels[0])
+        self._vmax_var = aentry(self._arch_frame, 'Vth max:',    DEFAULT_ARCH.vth_levels[-1])
+        self._cur_var  = aentry(self._arch_frame, 'Input I:',    self.target.high)
+        self._arch_sep = ttk.Separator(ctrl2, orient='vertical')
+        self._arch_sep.pack(side='left', fill='y', padx=8)
 
-        ttk.Separator(ctrl2, orient='vertical').pack(side='left', fill='y', padx=8)
-        self._grid_var   = aentry('Grid:',   self.target.grid_size, width=4)
-        self._iters_var  = aentry('Iters:',  self.target.iters,     width=4)
-        self._chroms_var = aentry('Chroms:', 2,                     width=4)
+        # layout group (applies to both models)
+        self._layout_frame = ttk.Frame(ctrl2)
+        self._layout_frame.pack(side='left')
+        ttk.Label(self._layout_frame, text='Layout:').pack(side='left', padx=(2, 0))
+        self._grid_var   = aentry(self._layout_frame, 'Grid:',   self.target.grid_size, width=4)
+        self._iters_var  = aentry(self._layout_frame, 'Iters:',  self.target.iters,     width=4)
+        self._chroms_var = aentry(self._layout_frame, 'Chroms:', 2,                     width=4)
+        ttk.Button(self._layout_frame, text='Reset', width=6,
+                   command=self._reset_arch).pack(side='left', padx=8)
 
-        ttk.Button(ctrl2, text='Reset', width=6, command=self._reset_arch).pack(side='left', padx=8)
-        ttk.Label(ctrl2, text='(layout: grid size, growth iterations, chromosomes per genome)',
-                  foreground='#888888').pack(side='left', padx=6)
+        self._model_note = ttk.Label(ctrl2, text='', foreground='#888888')
+        self._model_note.pack(side='left', padx=6)
 
-        nb = ttk.Notebook(self.root)
+        self._nb = nb = ttk.Notebook(self.root)
         nb.pack(fill='both', expand=True, padx=4, pady=(0, 2))
         self._build_evolve_tab(nb)
         self._build_growth_tab(nb)
         self._build_voltage_tab(nb)
         self._build_genome_tab(nb)
+        self._interactive = InteractiveTab(self._add_tab(nb, 'Interactive'),
+                                           self.current_circuit)
 
         self._status = tk.StringVar(
-            value='Ready — pick a target, set parameters, click Run (or Load Saved).')
+            value='Ready — pick a model and target, set parameters, click Run (or Load Saved).')
         ttk.Label(self.root, textvariable=self._status, anchor='w',
                   relief='sunken', padding=(6, 2)).pack(
             fill='x', side='bottom', padx=4, pady=(0, 4))
+
+        self._reconfigure_for_backend()      # set initial model-specific layout
+
+    def _reconfigure_for_backend(self):
+        """Show only the controls / tab labels relevant to the selected model."""
+        nv = self._backend() == 'nervous'
+        if nv:
+            self._arch_frame.pack_forget()
+            self._arch_sep.pack_forget()
+            self._graded_chk.state(['disabled'])
+            self._model_note.config(
+                text='Nervous net — coincidence (AND) + inhibition; loops circulate '
+                     'injected pulses (memory). Substrate (Vth/Syn/Input) and Graded do not apply.')
+            self._set_tab_label(self._volt_tab, 'Activity')
+        else:
+            self._arch_frame.pack(side='left', before=self._layout_frame)
+            self._arch_sep.pack(side='left', fill='y', padx=8, before=self._layout_frame)
+            self._graded_chk.state(['!disabled'])
+            self._model_note.config(text='SNN — leaky integrate-and-fire neurons.')
+            self._set_tab_label(self._volt_tab, 'Voltage Traces')
+
+    def _set_tab_label(self, frame, text):
+        try:
+            self._nb.tab(frame, text=text)
+        except Exception:
+            pass
 
     def _build_evolve_tab(self, nb):
         frame = ttk.Frame(nb)
@@ -533,12 +627,25 @@ class App:
     def _build_voltage_tab(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text='Voltage Traces')
+        self._volt_tab = frame
         self._volt_fig = plt.figure(figsize=(11, 7.5))
         self._volt_fig.patch.set_facecolor('#f5f5f5')
         self._volt_canvas = FigureCanvasTkAgg(self._volt_fig, master=frame)
         self._volt_canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
         self._draw_placeholder(self._volt_fig, self._volt_canvas,
                                'Run the GA or Load Saved to see membrane voltages.')
+
+    def _add_tab(self, nb, label):
+        frame = ttk.Frame(nb)
+        nb.add(frame, text=label)
+        return frame
+
+    def current_circuit(self):
+        """For the Interactive tab: the most-recent best genome + its context."""
+        if self.best_genome is None:
+            return None
+        return {'genome': self.best_genome, 'target': self._disp_target,
+                'backend': self._disp_backend, 'arch': self._disp_arch}
 
     def _build_genome_tab(self, nb):
         frame = ttk.Frame(nb)
@@ -562,6 +669,7 @@ class App:
 
     def _all_targets(self):
         d = dict(TARGETS)
+        d.update(TEMPORAL_TARGETS)
         d.update(self._custom)
         return d
 
@@ -571,6 +679,14 @@ class App:
         self._cur_var.set(str(self.target.high))
         self._grid_var.set(str(self.target.grid_size))
         self._iters_var.set(str(self.target.iters))
+        if getattr(self.target, 'temporal', False):
+            self._backend_var.set('Nervous')      # temporal runs on the nervous net
+            self._reconfigure_for_backend()
+            self._status.set('Target: %s — temporal nervous net (loops / memory); '
+                             '%d in, %d out, %d ticks. Watch/test it in the Interactive tab.'
+                             % (self.target.name, self.target.n_inputs,
+                                self.target.n_outputs, self.target.T))
+            return
         n_cases = len(self.target.cases)
         self._status.set('Target: %s — %d inputs, %d outputs, %d cases%s' % (
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
@@ -579,6 +695,9 @@ class App:
     def _effective_target(self, high, graded, grid_size, iters):
         """Apply the GUI's high/graded/grid/iters knobs to the selected target,
         keeping I/O on-grid (terminal outputs moved to the new right edge)."""
+        if getattr(self.target, 'temporal', False):
+            # temporal targets have fixed close I/O and no high/graded fields
+            return dataclasses.replace(self.target, grid_size=grid_size, iters=iters)
         t = dataclasses.replace(self.target, high=high, graded=graded,
                                 grid_size=grid_size, iters=iters)
         inputs = [(x, min(y, grid_size - 1)) for (x, y) in t.inputs]
@@ -588,6 +707,17 @@ class App:
                     for o in t.outputs]
             t = dataclasses.replace(t, outputs=outs)
         return t
+
+    def _backend(self):
+        return 'nervous' if self._backend_var.get().lower().startswith('nerv') else 'snn'
+
+    def _on_backend_change(self, _evt=None):
+        self._reconfigure_for_backend()
+        if self._backend() == 'nervous':
+            self._status.set('Model: Nervous net — coincidence + inhibition + loops; '
+                             'best with small grids and close I/O.')
+        else:
+            self._status.set('Model: SNN — leaky integrate-and-fire neurons.')
 
     def _read_arch(self):
         """Parse the substrate fields -> (Arch, input_high, ok)."""
@@ -618,8 +748,7 @@ class App:
 
     def _on_custom_built(self, target):
         self._custom[target.name] = target
-        names = list(TARGETS) + [n for n in self._custom if n not in TARGETS]
-        self._target_cb['values'] = names
+        self._target_cb['values'] = list(self._all_targets())
         self._target_var.set(target.name)
         self._on_target_change()
 
@@ -666,12 +795,15 @@ class App:
             self._status.set('Invalid layout — Grid>=3, Iters>=1, Chroms>=1 (integers).')
             return
 
+        backend = self._backend()
         eff_target = self._effective_target(high, self._graded_var.get(), grid_size, iters)
-        self._active_target = eff_target
-        self._active_arch   = arch
-        self._active_chroms = n_chroms
-        self._disp_target   = eff_target
-        self._disp_arch     = arch
+        self._active_target  = eff_target
+        self._active_arch    = arch
+        self._active_chroms  = n_chroms
+        self._active_backend = backend
+        self._disp_target    = eff_target
+        self._disp_arch      = arch
+        self._disp_backend   = backend
 
         self._gen_history.clear()
         self._abs_gen = 0
@@ -687,16 +819,18 @@ class App:
         self._load_btn.config(state='disabled')
         self._save_btn.config(state='disabled')
         self._target_cb.config(state='disabled')
+        self._backend_cb.config(state='disabled')
 
         self._stop_event = threading.Event()
         self._worker = threading.Thread(
             target=_ga_worker,
-            args=(gens, pop, n_chroms, tries, eff_target, arch, self.q, self._stop_event, base_seed),
+            args=(gens, pop, n_chroms, tries, eff_target, arch, self.q, self._stop_event,
+                  base_seed, backend),
             daemon=True)
         self._worker.start()
-        self._status.set('Evolving %s …  pop=%d  gens=%d  tries=%d  seed=%d  syn_w=%.2f%s' %
-                         (self.target.name, pop, gens, tries, base_seed,
-                          arch.syn_weight, '  [graded]' if self._graded_var.get() else ''))
+        self._status.set('Evolving %s [%s] …  pop=%d  gens=%d  tries=%d  seed=%d%s' %
+                         (self.target.name, backend, pop, gens, tries, base_seed,
+                          '  [graded]' if self._graded_var.get() else ''))
 
     def _stop_ga(self):
         self._stop_event.set()
@@ -729,9 +863,14 @@ class App:
         if saved_seed is not None:
             self._seed_var.set(str(saved_seed))
             self._active_seed = saved_seed
+        saved_backend = state.get('backend', 'snn')
+        self._disp_backend   = saved_backend
+        self._active_backend = saved_backend
+        self._backend_var.set('Nervous' if saved_backend == 'nervous' else 'SNN')
+        self._reconfigure_for_backend()
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
-            self._target_cb['values'] = list(TARGETS) + list(self._custom)
+            self._target_cb['values'] = list(self._all_targets())
         self._target_var.set(saved_target.name)
         self._status.set('Loaded %s  fitness=%.4f  syn_w=%.2f' %
                          (saved_target.name, self.best_fitness, saved_arch.syn_weight))
@@ -776,12 +915,14 @@ class App:
                                          'target': save_target,
                                          'target_name': save_target.name,
                                          'arch': save_arch,
-                                         'seed': getattr(self, '_active_seed', None)}, f)
+                                         'seed': getattr(self, '_active_seed', None),
+                                         'backend': getattr(self, '_active_backend', 'snn')}, f)
                         self._update_all(genome, fit)
                     self._run_btn.config(state='normal')
                     self._stop_btn.config(state='disabled')
                     self._load_btn.config(state='normal')
                     self._target_cb.config(state='readonly')
+                    self._backend_cb.config(state='readonly')
                     self._save_btn.config(state='normal' if genome else 'disabled')
                     saved = ('  saved → %s' % CKPT) if genome else ''
                     self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s' %
@@ -811,18 +952,32 @@ class App:
 
     def _update_truth_table(self, genome):
         try:
-            text = build_truth_table(genome, self._disp_target, self._disp_arch)
+            if getattr(self._disp_target, 'temporal', False):
+                text = ('Temporal target: %s\n\n'
+                        'This is a time-based nervous net (loops / memory / oscillation),\n'
+                        'not a static truth table.\n\n'
+                        'Open the Interactive tab and use Step / Run to drive the inputs\n'
+                        'and watch the output pulse trains over time.'
+                        % self._disp_target.name)
+            elif self._disp_backend == 'nervous':
+                text = nervous_truth_table(genome, self._disp_target)
+            else:
+                text = build_truth_table(genome, self._disp_target, self._disp_arch)
         except Exception as exc:
             text = 'Error building truth table:\n' + str(exc)
         self._set_tt(text)
 
     def _draw_growth(self, genome, fitness):
         target = self._disp_target
+        if self._disp_backend == 'nervous':
+            self._draw_growth_hex(genome, target, fitness)
+            return
         try:
             grid, ns_list, _ = interpret_for(genome, target, self._disp_arch)
             output_pos = {(n.x, n.y): n.out_role for n in ns_list if n.is_output}
             snapshots  = grow_snn_snapshots(genome, seeds=tuple(target.inputs),
                                             grid_size=target.grid_size, iters=target.iters)
+            rgba_fn = grid_to_rgba
         except Exception:
             return
 
@@ -844,7 +999,7 @@ class App:
 
         for idx, snap in enumerate(snapshots):
             ax  = flat[idx]
-            img = grid_to_rgba(snap, gs, seed_set, output_pos)
+            img = rgba_fn(snap, gs, seed_set, output_pos)
             ax.imshow(img, origin='upper', aspect='equal', interpolation='nearest',
                       extent=[-0.5, gs - 0.5, -0.5, gs - 0.5])
             for i in range(gs + 1):
@@ -869,18 +1024,64 @@ class App:
         leg_ax = flat[n_panels]
         leg_ax.set_visible(True)
         leg_ax.axis('off')
-        patches = [
-            mpatches.Patch(color=(0.9, 0.1, 0.1),    label='Input seed'),
-            mpatches.Patch(color=(0.1, 0.8, 0.2),    label='Output neuron'),
-            mpatches.Patch(color=(0.15, 0.35, 0.85), label='Excitatory'),
-            mpatches.Patch(color=(0.90, 0.50, 0.10), label='Inhibitory'),
-            mpatches.Patch(color=(1.0, 1.0, 1.0),    label='Empty', edgecolor='#aaa'),
-        ]
+        if self._disp_backend == 'nervous':
+            patches = [
+                mpatches.Patch(color=(0.9, 0.1, 0.1),    label='Input seed'),
+                mpatches.Patch(color=(0.1, 0.8, 0.2),    label='Output'),
+                mpatches.Patch(color=(0.55, 0.75, 0.95), label='Buffer (relay)'),
+                mpatches.Patch(color=(0.15, 0.35, 0.85), label='Coincidence (AND)'),
+                mpatches.Patch(color=(0.90, 0.50, 0.10), label='Inhibited (veto)'),
+                mpatches.Patch(color=(1.0, 1.0, 1.0),    label='Empty', edgecolor='#aaa'),
+            ]
+        else:
+            patches = [
+                mpatches.Patch(color=(0.9, 0.1, 0.1),    label='Input seed'),
+                mpatches.Patch(color=(0.1, 0.8, 0.2),    label='Output neuron'),
+                mpatches.Patch(color=(0.15, 0.35, 0.85), label='Excitatory'),
+                mpatches.Patch(color=(0.90, 0.50, 0.10), label='Inhibitory'),
+                mpatches.Patch(color=(1.0, 1.0, 1.0),    label='Empty', edgecolor='#aaa'),
+            ]
         leg_ax.legend(handles=patches, loc='center', fontsize=7.5,
-                      frameon=False, title='Cell type', title_fontsize=8)
+                      frameon=False, title='Node type', title_fontsize=8)
+        self._growth_canvas.draw_idle()
+
+    def _draw_growth_hex(self, genome, target, fitness):
+        """Growth tab for the hex nervous net: snapshots as honeycomb panels,
+        the final one wired (excitatory green / inhibitory red)."""
+        try:
+            snaps = grow_nervous_snapshots(genome, seeds=tuple(target.inputs),
+                                           grid_size=target.grid_size, iters=target.iters)
+            routing, in_pos, out_pos = interpret_nervous(snaps[-1], target)
+            if getattr(target, 'temporal', False):
+                from nv_evo import place_outputs_by_trace
+                out_pos, _ = place_outputs_by_trace(snaps[-1], routing, in_pos, target)
+        except Exception:
+            return
+        fig = self._growth_fig
+        fig.clf()
+        fig.suptitle('%s — hex nervous-net growth   (fitness=%.4f)%s'
+                     % (target.name, fitness, self._seed_tag()),
+                     fontsize=10, fontweight='bold', y=0.995)
+        gs    = target.grid_size
+        n     = len(snaps)
+        ncols = min(5, max(3, math.ceil(math.sqrt(n))))
+        nrows = math.ceil(n / ncols)
+        axes  = fig.subplots(nrows, ncols, squeeze=False)
+        flat  = [a for row in axes for a in row]
+        for idx, snap in enumerate(snaps):
+            rt   = {p: ROUTING[s & 0xF] for p, s in snap.items()}
+            last = (idx == n - 1)
+            draw_hex_net(flat[idx], snap, gs, routing=rt, in_pos=in_pos,
+                         out_pos=(out_pos if last else {}), show_edges=last,
+                         title=('Iter %d (%d)' % (idx, len(snap))) if idx else 'Seed (%d)' % len(snap))
+        for idx in range(n, len(flat)):
+            flat[idx].set_visible(False)
         self._growth_canvas.draw_idle()
 
     def _draw_voltages(self, genome):
+        if self._disp_backend == 'nervous':
+            self._draw_activity(genome)
+            return
         target = self._disp_target
         try:
             _, ns, ss = interpret_for(genome, target, self._disp_arch)
@@ -958,6 +1159,48 @@ class App:
                     ax.set_xlabel('Time (ms)', fontsize=8)
         self._volt_canvas.draw_idle()
 
+    def _draw_activity(self, genome):
+        """Nervous-net version of the Voltage tab: node activity per input case."""
+        target = self._disp_target
+        if getattr(target, 'temporal', False):
+            self._draw_placeholder(self._volt_fig, self._volt_canvas,
+                                   'Temporal target — drive it over time in the Interactive tab '
+                                   '(Step / Run).')
+            return
+        try:
+            grid, in_pos, out_pos, cases = nervous_case_outputs(genome, target)
+        except Exception:
+            self._draw_placeholder(self._volt_fig, self._volt_canvas,
+                                   '(nervous: cannot evaluate this circuit)')
+            return
+        if not cases:
+            self._draw_placeholder(self._volt_fig, self._volt_canvas,
+                                   '(nervous: circuit incomplete — inputs/outputs missing)')
+            return
+
+        gs      = target.grid_size
+        cases   = cases[:MAX_VOLT_CASES]
+        routing = interpret_nervous(grid, target)[0]
+        self._volt_fig.clf()
+        extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
+                '  (first %d of %d)' % (MAX_VOLT_CASES, len(target.cases))
+        self._volt_fig.suptitle('%s — hex nervous-net activity per case%s%s'
+                                % (target.name, extra, self._seed_tag()),
+                                fontsize=10, fontweight='bold', y=0.99)
+        axes = self._volt_fig.subplots(1, len(cases), squeeze=False)[0]
+        for ci, case in enumerate(cases):
+            all_ok = all(case['acts'][t.role] == case['out_bits'][i]
+                         for i, t in enumerate(target.outputs))
+            res = '  '.join('%s %d/%d' % (t.role, case['out_bits'][i], case['acts'][t.role])
+                            for i, t in enumerate(target.outputs))
+            draw_hex_net(axes[ci], grid, gs, routing=routing, in_pos=in_pos, out_pos=out_pos,
+                         activity=case['node_outputs'], show_edges=True,
+                         title='in=%s\n%s  %s' % (''.join(map(str, case['in_bits'])), res,
+                                                  'OK' if all_ok else 'FAIL'))
+            axes[ci].set_title(axes[ci].get_title(),
+                               color='green' if all_ok else 'red', fontsize=7)
+        self._volt_canvas.draw_idle()
+
     # ── genome viewer ─────────────────────────────────────────────────────────
 
     # one colour per cell-state (categorical, so equal states read the same)
@@ -983,19 +1226,27 @@ class App:
             ax.text(cx + sz / 2, cy + sz / 2, str(val), ha='center', va='center',
                     fontsize=fs, fontweight='bold', color=txt, zorder=3)
 
-        # plus-shaped neighbourhood (y grows downward; axis is inverted below)
-        chip(ox + 1, oy + 0, gene.state_n)                 # N
-        chip(ox + 0, oy + 1, gene.state_w)                 # W
-        chip(ox + 1, oy + 1, gene.self_in)                 # centre = expected self
-        chip(ox + 2, oy + 1, gene.state_e)                 # E
-        chip(ox + 1, oy + 2, gene.state_s)                 # S
+        # neighbourhood (y grows downward; axis is inverted below)
+        if hasattr(gene, 'ctx_l'):                         # hex gene: L / R / D
+            chip(ox + 0, oy + 1, gene.ctx_l)               # L
+            chip(ox + 1, oy + 1, gene.self_in)             # centre = expected self
+            chip(ox + 2, oy + 1, gene.ctx_r)               # R
+            chip(ox + 1, oy + 2, gene.ctx_d)               # D
+        else:                                              # SNN gene: N / E / S / W plus
+            chip(ox + 1, oy + 0, gene.state_n)             # N
+            chip(ox + 0, oy + 1, gene.state_w)             # W
+            chip(ox + 1, oy + 1, gene.self_in)             # centre = expected self
+            chip(ox + 2, oy + 1, gene.state_e)             # E
+            chip(ox + 1, oy + 2, gene.state_s)             # S
         # output chip (bigger), with an arrow from the pattern
         ax.add_patch(FancyArrowPatch((ox + 3.1, oy + 1.45), (ox + 4.05, oy + 1.45),
                      arrowstyle='-|>', mutation_scale=11, color='#445', lw=1.4, zorder=2))
         chip(ox + 4.2, oy + 0.85, gene.self_out, sz=1.25, fs=11)
-        # growth limit badge (top-right of card)
-        ax.text(ox + 5.85, oy - 0.18, 'it<=%d' % gene.limit, ha='right', va='top',
-                fontsize=6.5, color='#888', zorder=3)
+        # growth-limit badge (top-right of card) — SNN genes only; the hex gene
+        # has no per-gene iteration limit (paper-faithful associative memory)
+        if hasattr(gene, 'limit'):
+            ax.text(ox + 5.85, oy - 0.18, 'it<=%d' % gene.limit, ha='right', va='top',
+                    fontsize=6.5, color='#888', zorder=3)
 
     def _draw_genome(self, genome, fitness):
         fig = self._genome_fig
@@ -1041,10 +1292,15 @@ class App:
                 y += 1.0
                 break
 
+        _hex = bool(chroms and chroms[0].genes and hasattr(chroms[0].genes[0], 'ctx_l'))
+        _sides = 'hex L/R/D sides' if _hex else 'N/E/S/W sides'
+        _tail = ('.' if _hex else
+                 ', active while iter <= limit.')
         ax.text(0.0, y + 0.2,
-                'card = one gene: the plus is the expected neighbourhood '
-                '(N/E/S/W sides + centre = self), the chip after -> is the output state; '
-                'growth picks the gene closest (min Hamming distance) to a cell, active while iter <= limit.',
+                'card = one gene: the cluster is the expected neighbourhood '
+                '(%s + centre = self), the chip after -> is the output state; '
+                'growth picks the gene closest (min Hamming distance) to a cell%s'
+                % (_sides, _tail),
                 fontsize=7.5, color='#666', va='bottom', wrap=True)
 
         ax.set_xlim(-0.4, per_row * CW)
