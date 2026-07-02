@@ -35,7 +35,7 @@ from .nervous import (ROUTING, SEED_STATE, interpret_nervous, evaluate_nervous,
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
                       sr_latch, toggle_ff, oscillator, echo,
                       coincidence_detector, one_shot, pair_detector)
-from .temporal import (run_nervous, score_temporal,
+from .temporal import (run_nervous, score_temporal, temporal_report,
                        prepare_net, windowed_score, exact_tick_accuracy,
                        place_outputs_by_trace, signal_graph, cycle_nodes,
                        loop_profile)

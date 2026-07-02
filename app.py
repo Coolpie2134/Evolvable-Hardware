@@ -47,7 +47,8 @@ from snn_evo.genome import GRID_SIZE, MAX_STATE
 from snn_evo.ga import _eval_batch, next_population
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
 from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
-                    nervous_case_outputs, circuit_summary_nervous, ROUTING)
+                    nervous_case_outputs, circuit_summary_nervous, ROUTING,
+                    temporal_report)
 from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from interactive import InteractiveTab
@@ -682,8 +683,14 @@ class App:
         if getattr(self.target, 'temporal', False):
             self._backend_var.set('Nervous')      # temporal runs on the nervous net
             self._reconfigure_for_backend()
+            # show what this target IS right away in the Evolution tab's panel
+            try:
+                self._set_tt(temporal_report(self.target))
+            except Exception:
+                pass
             self._status.set('Target: %s — temporal nervous net (loops / memory); '
-                             '%d in, %d out, %d ticks. Watch/test it in the Interactive tab.'
+                             '%d in, %d out, %d ticks. See the Evolution tab for '
+                             'what it must do; test it in the Interactive tab.'
                              % (self.target.name, self.target.n_inputs,
                                 self.target.n_outputs, self.target.T))
             return
@@ -953,12 +960,7 @@ class App:
     def _update_truth_table(self, genome):
         try:
             if getattr(self._disp_target, 'temporal', False):
-                text = ('Temporal target: %s\n\n'
-                        'This is a time-based nervous net (loops / memory / oscillation),\n'
-                        'not a static truth table.\n\n'
-                        'Open the Interactive tab and use Step / Run to drive the inputs\n'
-                        'and watch the output pulse trains over time.'
-                        % self._disp_target.name)
+                text = temporal_report(self._disp_target, genome)
             elif self._disp_backend == 'nervous':
                 text = nervous_truth_table(genome, self._disp_target)
             else:

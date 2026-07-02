@@ -222,6 +222,60 @@ def score_temporal(genome, ttarget):
     return windowed_score(traces, ttarget)
 
 
+def temporal_report(ttarget, genome=None):
+    """Human-readable explanation of a temporal target for the GUI: what the
+    circuit must do, the trial bank (input pulses vs expected trace), and —
+    when a genome is given — the evolved net's actual traces with per-trial
+    scores. '.' marks unscored ticks (latency / settle windows)."""
+    lines = ['Target: %s   [temporal nervous net]' % ttarget.name]
+    desc = getattr(ttarget, 'description', '')
+    if desc:
+        lines += [''] + desc.splitlines()
+    lines += ['',
+              '%d input%s, output %s read wherever the behaviour appears '
+              '(trace-matched),' % (ttarget.n_inputs,
+                                    '' if ttarget.n_inputs == 1 else 's',
+                                    '/'.join(t.role for t in ttarget.outputs)),
+              '%d ticks per trial, %d trials. \'.\' = unscored tick; a stored-1'
+              % (ttarget.T, len(ttarget.trials)),
+              'hold counts if the cell keeps ringing (phase-tolerant).']
+
+    prep = traces = None
+    if genome is not None:
+        prep = prepare_net(genome, ttarget)
+        if prep is None:
+            lines += ['', '(circuit incomplete — grew too little or inputs dead)']
+        else:
+            _, _, _, out_pos, traces = prep
+            for t in ttarget.outputs:
+                lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
+
+    names = [chr(65 + i) for i in range(ttarget.n_inputs)]
+    for ti, trial in enumerate(ttarget.trials):
+        pulses = {n: [t for t in range(len(trial.streams)) if trial.streams[t][i]]
+                  for i, n in enumerate(names)}
+        lines += ['', 'Trial %d:  %s' % (ti + 1, '   '.join(
+            '%s pulses@%s' % (n, p if p else '(none)') for n, p in pulses.items()))]
+        for role, exp in trial.expected.items():
+            lines.append('  expect %s %s' % (
+                ''.join('.' if e is None else str(e) for e in exp),
+                role if len(trial.expected) > 1 else ''))
+            if traces is not None:
+                tr = traces.get(role, [])
+                tr_i = tr[ti] if ti < len(tr) else []
+                lines.append('  actual %s (score %.3f)' % (
+                    ''.join(str(v) for v in tr_i), _role_trace_score(tr_i, exp)))
+    if traces is not None:
+        lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
+                  % (windowed_score(traces, ttarget),
+                     '   SOLVED' if windowed_score(traces, ttarget) >= 0.999 else '',
+                     exact_tick_accuracy(traces, ttarget))]
+    else:
+        lines += ['', '(run the GA or Load Saved to see the evolved traces here;',
+                  ' drive it live in the Interactive tab with Step / Run)']
+    return '\n'.join(lines)
+
+
 # ── feedback-loop analysis (for the GA's loop-aware shaping) ────────────────────
 
 def signal_graph(grid, routing):

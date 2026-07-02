@@ -44,6 +44,7 @@ class TemporalTarget:
     iters:           int = 10
     output_strategy: str = "terminals"
     temporal:        bool = True          # marker so the GUI/GA can dispatch
+    description:     str = ''             # human explanation, shown in the GUI
 
     @property
     def n_inputs(self):  return len(self.inputs)
@@ -106,7 +107,13 @@ def sr_latch(grid_size=5):
         trials.append(Trial(_pulse_streams(T, 2, pulses),
                             {'Q': _hold_trace(T, events)}))
     return TemporalTarget('SR latch', [Set, Reset], [out], T, trials,
-                          grid_size=grid_size, iters=10)
+                          grid_size=grid_size, iters=10, description=(
+        'One bit of memory. A pulse on Set (input A) drives Q high and it must\n'
+        'HOLD with no further input — the bit is stored as a pulse circulating\n'
+        'in a loop, so sustained ringing counts as holding. A pulse on Reset\n'
+        '(input B) must break the circulation and leave Q silent.\n'
+        'Trials shift the Set/Reset timing (one has no Reset at all: hold\n'
+        'forever), so only a real, timing-independent latch scores 1.0.'))
 
 
 def _toggle_trial(T, pulses):
@@ -127,7 +134,12 @@ def toggle_ff(grid_size=5):
     banks = ([3, 9, 14], [4, 12], [2, 7, 12], [3, 10, 15], [5, 11], [2, 8, 15])
     return TemporalTarget('Toggle flip-flop', [In], [out], T,
                           [_toggle_trial(T, p) for p in banks],
-                          grid_size=grid_size, iters=10)
+                          grid_size=grid_size, iters=10, description=(
+        'Each input pulse FLIPS the stored bit: pulse -> Q rings, next pulse ->\n'
+        'Q silent, and so on (a frequency divider). Needs a loop the input can\n'
+        'both load and clear, depending on its current state.\n'
+        'Six schedules with odd AND even pulse gaps at varied phases — a\n'
+        'phase-locked ring that only toggles for one spacing fails.'))
 
 
 def oscillator(grid_size=5, period=2):
@@ -159,7 +171,11 @@ def oscillator(grid_size=5, period=2):
             phase += 1
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('Oscillator (period %d)' % period, [In], [out], T,
-                          trials, grid_size=grid_size, iters=10)
+                          trials, grid_size=grid_size, iters=10, description=(
+        'A single kick pulse must start a free-running alternation: the pulse\n'
+        'circulates a loop of buffers forever, read as Q toggling every tick.\n'
+        'Correctly, NOTHING may happen before the kick (no input -> no output);\n'
+        'trials kick at different ticks so a one-shot blip chain cannot pass.'))
 
 
 def echo(grid_size=5, delay=3):
@@ -175,7 +191,11 @@ def echo(grid_size=5, delay=3):
         exp = [None] * delay + [streams[t - delay][0] for t in range(delay, T)]
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('Echo (delay %d)' % delay, [In], [out], T, trials,
-                          grid_size=grid_size, iters=10)
+                          grid_size=grid_size, iters=10, description=(
+        'Output must reproduce the input pulse train EXACTLY %d ticks later —\n'
+        'a pure delay line (each hop through a node costs one tick, so the\n'
+        'signal path must be exactly %d hops). The simplest temporal target;\n'
+        'trials use varied spacings including back-to-back pulses.' % (delay, delay)))
 
 
 def coincidence_detector(grid_size=5, latency=3):
@@ -204,7 +224,11 @@ def coincidence_detector(grid_size=5, latency=3):
             for t in range(latency, T)]
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('Coincidence (2-in)', [A, B], [out], T, trials,
-                          grid_size=grid_size, iters=10)
+                          grid_size=grid_size, iters=10, description=(
+        'Output pulses if and only if BOTH inputs pulse on the same tick —\n'
+        'the nervous node\'s marquee capability (E1 AND E2 edge coincidence).\n'
+        'Pulses staggered by 1-2 ticks and lone single-input pulses must stay\n'
+        'silent: the async coincidence window enforces this physically.'))
 
 
 def one_shot(grid_size=5, width=3, latency=3):
@@ -227,7 +251,13 @@ def one_shot(grid_size=5, width=3, latency=3):
                 exp[p + latency + width] = None            # turn-off transient
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('One-shot (%d ticks)' % width, [In], [out], T, trials,
-                          grid_size=grid_size, iters=10)
+                          grid_size=grid_size, iters=10, description=(
+        'A monostable: each input pulse triggers a burst of activity at Q that\n'
+        'lasts %d ticks and must then SHUT ITSELF OFF — a loop that loads\n'
+        'itself and, after a delay, inhibits itself. The first target where the\n'
+        'inhibitory veto is constructive rather than just a reset line.\n'
+        'Bursts count phase-tolerantly (ringing is fine); the silence after\n'
+        'each burst must be real, and it must re-trigger for later pulses.' % width))
 
 
 def pair_detector(grid_size=5, gap=2, latency=3):
@@ -253,7 +283,12 @@ def pair_detector(grid_size=5, gap=2, latency=3):
             for t in range(latency + gap, T)]
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('Pair detector (gap %d)' % gap, [In], [out], T, trials,
-                          grid_size=grid_size, iters=10)
+                          grid_size=grid_size, iters=10, description=(
+        'Fires only when two input pulses arrive EXACTLY %d ticks apart: a\n'
+        'delay line feeds one arm of a coincidence node and the direct path\n'
+        'feeds the other, so the second pulse of a correctly-spaced pair meets\n'
+        'the delayed first pulse — timing used as computation. Wrong gaps and\n'
+        'lone pulses must stay silent.' % gap))
 
 
 TEMPORAL_TARGETS = {
