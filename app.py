@@ -51,7 +51,9 @@ from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervo
                     temporal_report)
 from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
+from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
+import ui_compat
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
 CKPT        = os.path.join(RESULTS_DIR, 'best_genome.pkl')
@@ -238,14 +240,25 @@ def build_genome_text(genome, fitness=None):
         head += '   (fitness = %.4f)' % fitness
     L.append(head)
     L.append('')
-    hexmode = bool(chroms and chroms[0].genes and hasattr(chroms[0].genes[0], 'ctx_l'))
-    sides = 'hex sides L/R/D' if hexmode else 'the 4 sides N/E/S/W'
+    g0 = chroms[0].genes[0] if (chroms and chroms[0].genes) else None
+    hexmode = g0 is not None and hasattr(g0, 'ctx_l')
+    lutmode = g0 is not None and hasattr(g0, 'ctx_n')
+    sides = ('hex sides L/R/D' if hexmode
+             else 'the 4 sides N/E/S/W (each a 16-bit LUT)' if lutmode
+             else 'the 4 sides N/E/S/W')
     L.append('Each gene maps an expected neighbourhood (%s + the cell' % sides)
     L.append("itself) to an output state. During growth a cell adopts the output of the")
     L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
     if hexmode:
         L.append("out = 0 means the cell is off (dead); L/R are read in the node's")
         L.append("own orientation (context rotation).")
+    elif lutmode:
+        L.append('Each 16-bit LUT is really a BOOLEAN FUNCTION of the four bits the cell')
+        L.append('receives from its neighbours — shown here minimised as out = f(N,S,E,W)')
+        L.append("(¬ = not, · = and, + = or).  'out' is the LUT this gene installs; a")
+        L.append("growth gene is one whose own context is empty (self = dead), the only")
+        L.append('kind that can bring a dead cell to life.  out = 0 means that direction')
+        L.append('stays dead.  Raw hex is kept in brackets for reference.')
     else:
         L.append("'until' = the gene only applies while the growth iteration <= that limit.")
     L.append('split = the crossover point used when two genomes mate.')
@@ -257,26 +270,49 @@ def build_genome_text(genome, fitness=None):
     if hexmode:
         hdr = '    #  |   L    R    D  | self |  out'
         sep = '  -----+----------------+------+------'
+    elif lutmode:
+        hdr = sep = None                          # block layout instead of a row
     else:
         hdr = '    #  |   N    E    S    W  | self |  out | until'
         sep = '  -----+---------------------+------+------+-------'
     for ci, c in enumerate(chroms):
-        L.append('Chromosome %s     tag=%-4d  split=%-2d   (%d genes)'
-                 % (chr(ord('a') + ci), c.tag, c.split, len(c.genes)))
-        L.append(hdr)
-        L.append(sep)
+        tel = getattr(c, 'telomere', None)
+        L.append('Chromosome %s     tag=%-4d  split=%-2d%s   (%d genes)'
+                 % (chr(ord('a') + ci), c.tag, c.split,
+                    ('  telomere=%d' % tel) if tel is not None else '',
+                    len(c.genes)))
+        if hdr:
+            L.append(hdr)
+            L.append(sep)
         for gi, g in enumerate(c.genes):
             if 0 < c.split == gi:
                 L.append('       - - - - - - split - - - - - -')
             if hexmode:
                 L.append('  %4d | %4d %4d %4d | %4d | %4d'
                          % (gi, g.ctx_l, g.ctx_r, g.ctx_d, g.self_in, g.self_out))
+            elif lutmode:
+                L.extend(_lut_gene_lines(gi, g))
             else:
                 L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d'
                          % (gi, g.state_n, g.state_e, g.state_s, g.state_w,
                             g.self_in, g.self_out, g.limit))
         L.append('')
     return '\n'.join(L)
+
+
+def _lut_gene_lines(gi, g):
+    """Readable two-line view of one LUT gene: the boolean function the gene
+    installs (out, decoded from its 16-bit table to logic over the neighbour
+    inputs N/S/E/W) plus the raw hex of every table for reference. The tables
+    themselves are drawn as truth grids on the Growth tab. See lut_evo/boolfn.py."""
+    from lut_evo.boolfn import lut_sop, popcount
+    kind = 'growth' if g.self_in == 0 else 'maint '
+    return [
+        '  %3d %s  out = %s' % (gi, kind, lut_sop(g.self_out)),
+        '            hex  out=%04X (%d/16 on)   ctx N/E/S/W=%04X %04X %04X %04X   self=%04X'
+        % (g.self_out, popcount(g.self_out),
+           g.ctx_n, g.ctx_e, g.ctx_s, g.ctx_w, g.self_in),
+    ]
 
 
 # ── GA background worker ──────────────────────────────────────────────────────
@@ -295,17 +331,41 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
     # each backend brings its own genome, operators and evaluator (snn_evo/ga.py
     # vs nv_evo/ga.py — the nervous GA is tuned for loops/memory); this loop
     # only orchestrates restarts and reports progress.
+    # `step(pop, fits, cases)` advances one generation. Convergence is NOT forced:
+    # every backend runs a steady exploratory GA (elitism + tournament/lexicase +
+    # immigrants), so the population contracts onto a genome only as far as
+    # selection naturally drives it. The SNN GA takes no per-case vectors.
+    diversify_fn = None      # set for nervous/lut: build a generation of solvers
+    # Stress-induced mutagenesis (SOS response): the nervous GA raises its
+    # mutation rate the longer a run stalls. stress_fn maps generations-stalled
+    # -> a multiplier on the baseline rate; the other backends hold it at 1.0.
+    stress_fn, base_mm = (lambda s: 1.0), 1.0
     if backend == 'nervous':
         from nv_evo import random_hex_genome
-        from nv_evo.ga import eval_batch_nv, next_population as next_pop_nv
+        from nv_evo.ga import (eval_batch_cases, next_population as next_pop_nv,
+                               diversify as _div, stress_multiplier, MEAN_MUTATIONS)
         cache       = {}     # fitness cache shared across restarts (same target)
         make_genome = lambda: random_hex_genome(n_chroms)
-        eval_batch  = lambda genomes: eval_batch_nv(genomes, target, cache)
-        step        = lambda population, fits: next_pop_nv(population, fits, make_genome)
+        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache)
+        step        = lambda p, fits, cv, mm: next_pop_nv(p, fits, make_genome, cv, mm)
+        stress_fn, base_mm = stress_multiplier, MEAN_MUTATIONS
+        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
+    elif backend == 'lut':
+        from lut_evo import random_lut_genome
+        from lut_evo.ga import (eval_batch_cases, next_population as next_pop_lut,
+                                diversify as _div)
+        cache       = {}
+        make_genome = lambda: random_lut_genome(n_chroms)
+        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache)
+        step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv)
+        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
     else:
         make_genome = lambda: random_genome(n_chroms)
-        eval_batch  = lambda genomes: _eval_batch(genomes, target, arch)
-        step        = next_population
+        eval_batch  = lambda genomes: (_eval_batch(genomes, target, arch), None)
+        step        = lambda p, fits, cv, mm: next_population(p, fits)
+
+    def size(genome):
+        return sum(len(c.genes) for c in genome.chromosomes)
 
     best_fit = 0.0
     best_g   = None
@@ -317,30 +377,67 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
         else:
             random.seed(base_seed + try_i)
         population = [make_genome() for _ in range(pop)]
-        fitnesses  = eval_batch(population)
-        bi         = max(range(pop), key=lambda i: fitnesses[i])
+        fitnesses, cases = eval_batch(population)
+        bi         = max(range(pop),
+                         key=lambda i: (fitnesses[i], -size(population[i])))
         g, f       = copy.deepcopy(population[bi]), fitnesses[bi]
         if f > best_fit:
             best_fit, best_g = f, copy.deepcopy(g)
             q.put(('best', copy.deepcopy(best_g), best_fit))
+        # generation-0 point so the chart shows something even when the very
+        # first population already contains a solution
+        q.put(('gen', try_i + 1, 0, f, sum(fitnesses) / len(fitnesses)))
+        # no early stop at fitness 1.0: the run continues so the parsimony
+        # tie-break keeps shrinking a solved genome. Convergence is not forced —
+        # the population contracts only as far as selection naturally drives it.
+        stagnation = 0
         for gen in range(gens):
             if stop_event.is_set():
                 break
-            population = step(population, fitnesses)
-            fitnesses  = eval_batch(population)
-            gi         = max(range(pop), key=lambda i: fitnesses[i])
-            if fitnesses[gi] > f:
+            mm = base_mm * stress_fn(stagnation)     # SOS response
+            population = step(population, fitnesses, cases, mm)
+            fitnesses, cases = eval_batch(population)
+            gi         = max(range(pop),
+                             key=lambda i: (fitnesses[i], -size(population[i])))
+            # SOS tracks FITNESS plateaus only — a parsimony-only win updates the
+            # champion but must not reset the stress counter (see nv_evo.ga).
+            if fitnesses[gi] > f + 1e-12:
+                stagnation = 0
+            else:
+                stagnation += 1
+            if (fitnesses[gi] > f
+                    or (fitnesses[gi] == f and size(population[gi]) < size(g))):
                 f = fitnesses[gi]
                 g = copy.deepcopy(population[gi])
-                if f > best_fit:
+                if (f > best_fit
+                        or (f == best_fit and best_g is not None
+                            and size(g) < size(best_g))):
                     best_fit, best_g = f, copy.deepcopy(g)
                     q.put(('best', copy.deepcopy(best_g), best_fit))
             mean_f = sum(fitnesses) / len(fitnesses)
-            q.put(('gen', try_i + 1, gen, f, mean_f))
-            if f >= 1.0:
-                break
+            q.put(('gen', try_i + 1, gen + 1, f, mean_f))
         if best_fit >= 1.0:
-            break
+            break                            # solved after a full run: no restart
+
+    # Diversification: rather than a monoculture of the champion, spread across
+    # the neutral network to build a whole generation of DISTINCT valid solvers
+    # (each genotypically unique, each still solving). The count is honest — it
+    # returns as many unique solvers as the target's neutral network admits.
+    n_unique = 0
+    if diversify_fn is not None and best_g is not None and best_fit > 0 and not stop_event.is_set():
+        valid = 1.0 if best_fit >= 0.999 else max(0.0, best_fit - 1e-6)
+        try:
+            seeds = [gg for gg, ff in zip(population, fitnesses) if ff >= valid] or [best_g]
+            pool  = diversify_fn(seeds, valid)
+            n_unique = len(pool)
+            if pool:
+                with open(os.path.join(RESULTS_DIR, 'solver_generation.pkl'), 'wb') as fp:
+                    pickle.dump({'genomes': pool, 'target': target,
+                                 'backend': backend, 'valid': valid}, fp)
+                q.put(('diverse', n_unique, valid))
+        except Exception:
+            pass
+
     q.put(('done', copy.deepcopy(best_g) if best_g else None, best_fit))
 
 
@@ -461,7 +558,18 @@ class App:
         self._disp_target  = self.target
         self._disp_arch    = DEFAULT_ARCH
         self._disp_backend = 'snn'
+        # consistent ttk theme + resolved monospace font (Windows/Linux parity)
+        ui_compat.apply_theme(root)
+        self._mono = ui_compat.mono_family(root)
         self._build_ui()
+        # Pin an explicit window geometry once everything is laid out. A toplevel
+        # with a programmatic geometry keeps that size instead of auto-resizing
+        # to its content, so switching notebook tabs no longer resizes the window
+        # (an X11-visible bug; Windows tolerated the content-driven sizing).
+        root.update_idletasks()
+        w = max(root.winfo_reqwidth(), 1040)
+        h = max(root.winfo_reqheight(), 720)
+        root.geometry('%dx%d' % (w, h))
         self._poll()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -473,7 +581,8 @@ class App:
         ttk.Label(ctrl, text='Model:').pack(side='left', padx=(2, 2))
         self._backend_var = tk.StringVar(value='SNN')
         self._backend_cb  = ttk.Combobox(ctrl, textvariable=self._backend_var,
-                                         values=['SNN', 'Nervous'], width=8, state='readonly')
+                                         values=['SNN', 'Nervous', 'LUT'],
+                                         width=8, state='readonly')
         self._backend_cb.pack(side='left')
         self._backend_cb.bind('<<ComboboxSelected>>', self._on_backend_change)
 
@@ -534,20 +643,54 @@ class App:
         self._arch_sep = ttk.Separator(ctrl2, orient='vertical')
         self._arch_sep.pack(side='left', fill='y', padx=8)
 
-        # layout group (applies to both models)
+        # genome group. Grid / Iters were removed: growth is now self-limiting —
+        # the nervous telomere is a Hayflick bound, so neither a grid clip nor an
+        # iteration cap governs it (grid_size survives only as each target's I/O
+        # layout scale, taken from the target itself). Only the genome's
+        # chromosome count remains tunable here.
         self._layout_frame = ttk.Frame(ctrl2)
         self._layout_frame.pack(side='left')
-        ttk.Label(self._layout_frame, text='Layout:').pack(side='left', padx=(2, 0))
-        self._grid_var   = aentry(self._layout_frame, 'Grid:',   self.target.grid_size, width=4)
-        self._iters_var  = aentry(self._layout_frame, 'Iters:',  self.target.iters,     width=4)
-        self._chroms_var = aentry(self._layout_frame, 'Chroms:', 2,                     width=4)
+        ttk.Label(self._layout_frame, text='Genome:').pack(side='left', padx=(2, 0))
+        self._chroms_var = aentry(self._layout_frame, 'Chroms:', 2, width=4)
         ttk.Button(self._layout_frame, text='Reset', width=6,
                    command=self._reset_arch).pack(side='left', padx=8)
 
         self._model_note = ttk.Label(ctrl2, text='', foreground='#888888')
         self._model_note.pack(side='left', padx=6)
 
-        self._nb = nb = ttk.Notebook(self.root)
+        # ── third row: GA + substrate-physics tuning (applied on Run) ──
+        from nv_evo.ga import MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM, TOURNAMENT_K as _TK
+        from nv_evo.pulse import DELAY as _D, WIDTH as _W, COINC as _C
+        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, delay=_D, width=_W, coinc=_C)
+        ctrl3 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        ctrl3.pack(fill='x', side='top')
+
+        ga_frame = ttk.Frame(ctrl3); ga_frame.pack(side='left')
+        ttk.Label(ga_frame, text='GA:').pack(side='left', padx=(2, 0))
+        self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4)
+        self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4)
+        self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3)
+        ttk.Separator(ctrl3, orient='vertical').pack(side='left', fill='y', padx=8)
+
+        # pulse-physics group (nervous net only)
+        self._pulse_frame = ttk.Frame(ctrl3)
+        self._pulse_frame.pack(side='left')
+        ttk.Label(self._pulse_frame, text='Pulse:').pack(side='left', padx=(2, 0))
+        self._delay_var = aentry(self._pulse_frame, 'Delay:', _D, width=4)
+        self._width_var = aentry(self._pulse_frame, 'Width:', _W, width=4)
+        self._coinc_var = aentry(self._pulse_frame, 'Coinc:', _C, width=4)
+        self._pulse_sep = ttk.Separator(ctrl3, orient='vertical')
+        self._pulse_sep.pack(side='left', fill='y', padx=8)
+        self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
+                                           command=self._reset_tuning)
+        self._tune_reset_btn.pack(side='left', padx=4)
+
+        # Fix a natural size on the notebook and stop it from resizing to fit
+        # whichever tab is shown. On X11 a matplotlib canvas in a freshly-mapped
+        # tab requests its figsize*dpi in pixels, and without this the whole
+        # window would jump size every time you switched tabs. width/height give
+        # the notebook a fixed request; the tab frames fill it via expand.
+        self._nb = nb = ttk.Notebook(self.root, width=1120, height=680)
         nb.pack(fill='both', expand=True, padx=4, pady=(0, 2))
         self._build_evolve_tab(nb)
         self._build_growth_tab(nb)
@@ -566,14 +709,22 @@ class App:
 
     def _reconfigure_for_backend(self):
         """Show only the controls / tab labels relevant to the selected model."""
-        nv = self._backend() == 'nervous'
-        if nv:
+        backend = self._backend()
+        if backend != 'snn':
             self._arch_frame.pack_forget()
             self._arch_sep.pack_forget()
             self._graded_chk.state(['disabled'])
-            self._model_note.config(
-                text='Nervous net — coincidence (AND) + inhibition; loops circulate '
-                     'injected pulses (memory). Substrate (Vth/Syn/Input) and Graded do not apply.')
+            if backend == 'nervous':
+                note = ('Nervous net — HEX array (each cell wired to 3 neighbours L/R/D); '
+                        'coincidence (AND) + inhibition, loops circulate injected pulses '
+                        '(memory). Substrate (Vth/Syn/Input) and Graded do not apply.')
+            else:
+                note = ('LUT array — SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
+                        '4 directional 16-bit lookup tables per cell, latched & synchronous '
+                        '(paper Architecture 2 / sim6). Recurrent & dynamical — TEMPORAL '
+                        'targets only (it cannot settle to combinational logic). '
+                        'Substrate/Graded do not apply.')
+            self._model_note.config(text=note)
             self._set_tab_label(self._volt_tab, 'Activity')
         else:
             self._arch_frame.pack(side='left', before=self._layout_frame)
@@ -581,6 +732,20 @@ class App:
             self._graded_chk.state(['!disabled'])
             self._model_note.config(text='SNN — leaky integrate-and-fire neurons.')
             self._set_tab_label(self._volt_tab, 'Voltage Traces')
+        # pulse-physics knobs apply only to the nervous net's pulse engine.
+        # Re-pack relative to the always-present Reset button (the separator is
+        # itself hidden for other models, so it can't be a pack anchor).
+        if hasattr(self, '_pulse_frame'):
+            if backend == 'nervous':
+                self._pulse_frame.pack(side='left', before=self._tune_reset_btn)
+                self._pulse_sep.pack(side='left', fill='y', padx=8,
+                                     before=self._tune_reset_btn)
+            else:
+                self._pulse_frame.pack_forget()
+                self._pulse_sep.pack_forget()
+        # dropdown offers only backend-valid targets (LUT hides combinational)
+        if hasattr(self, '_target_cb'):
+            self._refresh_target_list()
 
     def _set_tab_label(self, frame, text):
         try:
@@ -612,7 +777,7 @@ class App:
         right.pack(side='right', fill='both', padx=(0, 6), pady=6)
         self._tt_text = scrolledtext.ScrolledText(
             right, width=58, height=22,
-            font=('Courier New', 9), state='disabled', wrap='none')
+            font=(self._mono, 9), state='disabled', wrap='none')
         self._tt_text.pack(fill='both', expand=True)
 
     def _build_growth_tab(self, nb):
@@ -674,14 +839,34 @@ class App:
         d.update(self._custom)
         return d
 
+    def _targets_for_backend(self, backend):
+        """Targets offered in the dropdown for a backend. The LUT substrate is a
+        chaotic recurrent CA that cannot settle to input-dependent combinational
+        logic — it only works for TEMPORAL targets — so combinational targets are
+        hidden when LUT is selected (see lut_evo settling note)."""
+        if backend == 'lut':
+            d = dict(TEMPORAL_TARGETS)
+            d.update({k: v for k, v in self._custom.items()
+                      if getattr(v, 'temporal', False)})
+            return d
+        return self._all_targets()
+
+    def _refresh_target_list(self):
+        """Repopulate the dropdown for the current backend; if the current
+        selection is no longer valid there, switch to the first available."""
+        names = list(self._targets_for_backend(self._backend()))
+        self._target_cb['values'] = names
+        if names and self._target_var.get() not in names:
+            self._target_var.set(names[0])
+            self._on_target_change()
+
     def _on_target_change(self, _evt=None):
         name = self._target_var.get()
         self.target = self._all_targets().get(name, get_target(DEFAULT_TARGET))
         self._cur_var.set(str(self.target.high))
-        self._grid_var.set(str(self.target.grid_size))
-        self._iters_var.set(str(self.target.iters))
         if getattr(self.target, 'temporal', False):
-            self._backend_var.set('Nervous')      # temporal runs on the nervous net
+            if self._backend() == 'snn':          # temporal needs nervous or LUT
+                self._backend_var.set('Nervous')
             self._reconfigure_for_backend()
             # show what this target IS right away in the Evolution tab's panel
             try:
@@ -699,30 +884,62 @@ class App:
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
             '   (large — evolution will be slow)' if n_cases > 32 else ''))
 
-    def _effective_target(self, high, graded, grid_size, iters):
-        """Apply the GUI's high/graded/grid/iters knobs to the selected target,
-        keeping I/O on-grid (terminal outputs moved to the new right edge)."""
+    def _effective_target(self, high, graded):
+        """Apply the GUI's high/graded knobs to the selected target. Growth is no
+        longer grid/iters-bounded (the nervous telomere is self-limiting), so the
+        target keeps its own I/O layout — grid_size/iters are left untouched."""
         if getattr(self.target, 'temporal', False):
             # temporal targets have fixed close I/O and no high/graded fields
-            return dataclasses.replace(self.target, grid_size=grid_size, iters=iters)
-        t = dataclasses.replace(self.target, high=high, graded=graded,
-                                grid_size=grid_size, iters=iters)
-        inputs = [(x, min(y, grid_size - 1)) for (x, y) in t.inputs]
-        t = dataclasses.replace(t, inputs=inputs)
-        if t.output_strategy == 'terminals':
-            outs = [dataclasses.replace(o, pos=(grid_size - 1, min(o.pos[1], grid_size - 1)))
-                    for o in t.outputs]
-            t = dataclasses.replace(t, outputs=outs)
-        return t
+            return dataclasses.replace(self.target)
+        return dataclasses.replace(self.target, high=high, graded=graded)
+
+    def _reset_tuning(self):
+        d = self._tune_defaults
+        self._mut_var.set(str(d['mut']));   self._imm_var.set(str(d['imm']))
+        self._tourn_var.set(str(d['tk']));  self._delay_var.set(str(d['delay']))
+        self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
+
+    def _apply_tuning(self):
+        """Push the GUI's GA / pulse-physics knobs into the backend modules and
+        os.environ (so the fresh ProcessPool workers that evaluate genomes pick
+        the physics up at import). Returns True on success."""
+        try:
+            mut = float(self._mut_var.get()); imm = float(self._imm_var.get())
+            tk_ = int(self._tourn_var.get())
+            delay = float(self._delay_var.get()); width = float(self._width_var.get())
+            coinc = float(self._coinc_var.get())
+            if mut < 0 or not (0 <= imm < 1) or tk_ < 1 or delay <= 0 or width <= 0 or coinc < 0:
+                raise ValueError
+        except ValueError:
+            return False
+        import nv_evo.ga as nga, lut_evo.ga as lga, nv_evo.pulse as npulse
+        for mod in (nga, lga):
+            mod.MEAN_MUTATIONS = mut
+            mod.IMMIGRANT_FRAC = imm
+            mod.TOURNAMENT_K   = tk_
+        npulse.DELAY, npulse.WIDTH, npulse.COINC = delay, width, coinc
+        os.environ['NV_DELAY'] = str(delay)
+        os.environ['NV_WIDTH'] = str(width)
+        os.environ['NV_COINC'] = str(coinc)
+        return True
 
     def _backend(self):
-        return 'nervous' if self._backend_var.get().lower().startswith('nerv') else 'snn'
+        v = self._backend_var.get().lower()
+        if v.startswith('nerv'):
+            return 'nervous'
+        if v.startswith('lut'):
+            return 'lut'
+        return 'snn'
 
     def _on_backend_change(self, _evt=None):
         self._reconfigure_for_backend()
-        if self._backend() == 'nervous':
+        backend = self._backend()
+        if backend == 'nervous':
             self._status.set('Model: Nervous net — coincidence + inhibition + loops; '
                              'best with small grids and close I/O.')
+        elif backend == 'lut':
+            self._status.set('Model: LUT array — square grid, 4 neighbours, four 16-bit '
+                             'lookup tables per cell, latched & synchronous (sim6 / Arch 2).')
         else:
             self._status.set('Model: SNN — leaky integrate-and-fire neurons.')
 
@@ -746,8 +963,6 @@ class App:
         self._vmin_var.set(str(DEFAULT_ARCH.vth_levels[0]))
         self._vmax_var.set(str(DEFAULT_ARCH.vth_levels[-1]))
         self._cur_var.set(str(self.target.high))
-        self._grid_var.set(str(self.target.grid_size))
-        self._iters_var.set(str(self.target.iters))
         self._chroms_var.set('2')
 
     def _open_custom(self):
@@ -793,17 +1008,20 @@ class App:
             return
 
         try:
-            grid_size = int(self._grid_var.get())
-            iters     = int(self._iters_var.get())
-            n_chroms  = int(self._chroms_var.get())
-            if grid_size < 3 or iters < 1 or n_chroms < 1:
+            n_chroms = int(self._chroms_var.get())
+            if n_chroms < 1:
                 raise ValueError
         except ValueError:
-            self._status.set('Invalid layout — Grid>=3, Iters>=1, Chroms>=1 (integers).')
+            self._status.set('Invalid genome — Chroms>=1 (integer).')
+            return
+
+        if not self._apply_tuning():
+            self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
+                             'Tournament>=1, Delay/Width>0, Coinc>=0.')
             return
 
         backend = self._backend()
-        eff_target = self._effective_target(high, self._graded_var.get(), grid_size, iters)
+        eff_target = self._effective_target(high, self._graded_var.get())
         self._active_target  = eff_target
         self._active_arch    = arch
         self._active_chroms  = n_chroms
@@ -814,6 +1032,7 @@ class App:
 
         self._gen_history.clear()
         self._abs_gen = 0
+        self._n_unique_solvers = 0
         self._best_line.set_data([], [])
         self._mean_line.set_data([], [])
         self._fit_ax.set_xlim(0, max(gens * tries, 10) + 1)
@@ -864,8 +1083,6 @@ class App:
         self._vmin_var.set(str(saved_arch.vth_levels[0]))
         self._vmax_var.set(str(saved_arch.vth_levels[-1]))
         self._cur_var.set(str(saved_target.high))
-        self._grid_var.set(str(saved_target.grid_size))
-        self._iters_var.set(str(saved_target.iters))
         saved_seed = state.get('seed')
         if saved_seed is not None:
             self._seed_var.set(str(saved_seed))
@@ -873,7 +1090,7 @@ class App:
         saved_backend = state.get('backend', 'snn')
         self._disp_backend   = saved_backend
         self._active_backend = saved_backend
-        self._backend_var.set('Nervous' if saved_backend == 'nervous' else 'SNN')
+        self._backend_var.set({'nervous': 'Nervous', 'lut': 'LUT'}.get(saved_backend, 'SNN'))
         self._reconfigure_for_backend()
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
@@ -905,11 +1122,21 @@ class App:
                     self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  mean=%.4f' %
                                      (self.target.name, getattr(self, '_active_seed', 0),
                                       try_n, gen, best_f, mean_f))
+                elif kind == 'diverse':
+                    _, n_unique, valid = msg
+                    self._n_unique_solvers = n_unique
+                    self._status.set('Diversifying — built %d genotypically UNIQUE '
+                                     'solvers (each ≥ %.3f) → results/solver_generation.pkl'
+                                     % (n_unique, valid))
                 elif kind == 'best':
                     _, genome, fit = msg
                     self.best_genome  = genome
                     self.best_fitness = fit
-                    self._update_all(genome, fit)
+                    # Coalesce the expensive full redraw: new bests arrive in
+                    # bursts early on, and redrawing the growth/genome/trace
+                    # panels each time makes the UI lag. Stash it and let the
+                    # throttle below repaint at most a few times a second.
+                    self._pending_best = (genome, fit)
                 elif kind == 'done':
                     _, genome, fit = msg
                     if genome is not None:
@@ -924,6 +1151,7 @@ class App:
                                          'arch': save_arch,
                                          'seed': getattr(self, '_active_seed', None),
                                          'backend': getattr(self, '_active_backend', 'snn')}, f)
+                        self._pending_best = None      # final draw supersedes it
                         self._update_all(genome, fit)
                     self._run_btn.config(state='normal')
                     self._stop_btn.config(state='disabled')
@@ -932,11 +1160,21 @@ class App:
                     self._backend_cb.config(state='readonly')
                     self._save_btn.config(state='normal' if genome else 'disabled')
                     saved = ('  saved → %s' % CKPT) if genome else ''
-                    self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s' %
+                    nu = getattr(self, '_n_unique_solvers', 0)
+                    div = ('  |  %d unique valid solvers' % nu) if nu else ''
+                    self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s' %
                                      (self.target.name, fit,
-                                      getattr(self, '_active_seed', 0), saved))
+                                      getattr(self, '_active_seed', 0), saved, div))
         except queue.Empty:
             pass
+        # throttled repaint of the display panels for the latest best (≤ ~1.6/s)
+        pend = getattr(self, '_pending_best', None)
+        if pend is not None:
+            now = time.time()
+            if now - getattr(self, '_last_full_draw', 0.0) > 0.6:
+                self._pending_best = None
+                self._last_full_draw = now
+                self._update_all(*pend)
         self.root.after(60, self._poll)
 
     # ── display updates ───────────────────────────────────────────────────────
@@ -960,9 +1198,16 @@ class App:
     def _update_truth_table(self, genome):
         try:
             if getattr(self._disp_target, 'temporal', False):
-                text = temporal_report(self._disp_target, genome)
+                if self._disp_backend == 'lut':
+                    from lut_evo import lut_report
+                    text = lut_report(self._disp_target, genome)
+                else:
+                    text = temporal_report(self._disp_target, genome)
             elif self._disp_backend == 'nervous':
                 text = nervous_truth_table(genome, self._disp_target)
+            elif self._disp_backend == 'lut':
+                from lut_evo import lut_truth_table
+                text = lut_truth_table(genome, self._disp_target)
             else:
                 text = build_truth_table(genome, self._disp_target, self._disp_arch)
         except Exception as exc:
@@ -973,6 +1218,9 @@ class App:
         target = self._disp_target
         if self._disp_backend == 'nervous':
             self._draw_growth_hex(genome, target, fitness)
+            return
+        if self._disp_backend == 'lut':
+            self._draw_growth_lut(genome, target, fitness)
             return
         try:
             grid, ns_list, _ = interpret_for(genome, target, self._disp_arch)
@@ -1080,9 +1328,172 @@ class App:
             flat[idx].set_visible(False)
         self._growth_canvas.draw_idle()
 
+    def _draw_growth_lut(self, genome, target, fitness):
+        """Growth tab for the LUT array: honeycomb-equivalent square panels drawn
+        with the first-class renderer (per-side capability nibs + I/O markers),
+        the final panel showing the mature organism, plus a legend."""
+        try:
+            from lut_evo import grow_lut_snapshots, place_outputs_by_trace
+            from lut_evo.ga import _place_outputs_combinational
+            snaps = grow_lut_snapshots(genome, seeds=tuple(target.inputs),
+                                       grid_size=target.grid_size, iters=target.iters)
+        except Exception:
+            return
+        final  = snaps[-1] if snaps else {}
+        in_pos = [p for p in target.inputs if p in final]
+        try:
+            if getattr(target, 'temporal', False):
+                out_pos, _ = place_outputs_by_trace(final, list(target.inputs), target)
+            else:
+                out_pos = _place_outputs_combinational(final, target)
+        except Exception:
+            out_pos = {}
+        fig = self._growth_fig
+        fig.clf()
+        fig.suptitle('%s — LUT array growth   (fitness=%.4f)%s'
+                     % (target.name, fitness, self._seed_tag()),
+                     fontsize=10, fontweight='bold', y=0.995)
+        n = len(snaps)
+        # The distinct lookup tables actually present in the mature organism,
+        # most common first — shown below as REAL truth tables (green=1/white=0)
+        # so the raw table content is visible, not just the wedge-colour hash.
+        from collections import Counter
+        from lut_evo import lut_sop
+        from lut_evo.viz import _lut_color
+        counts = Counter(v for st in final.values() for v in st if v)
+        luts   = [v for v, _ in counts.most_common(8)]
+        total  = n + 1 + len(luts)                  # snapshots + legend + LUT gallery
+        ncols  = min(6, max(3, math.ceil(math.sqrt(total))))
+        nrows  = math.ceil(total / ncols)
+        axes   = fig.subplots(nrows, ncols, squeeze=False)
+        flat   = [a for row in axes for a in row]
+        for idx, snap in enumerate(snaps):
+            last = (idx == n - 1)
+            draw_lut_net(flat[idx], snap, in_pos=in_pos,
+                         out_pos=(out_pos if last else {}), show_edges=True,
+                         title=('Iter %d (%d)' % (idx, len(snap))) if idx
+                               else 'Seed (%d)' % len(snap))
+        leg = flat[n]
+        leg.set_visible(True); leg.axis('off')
+        patches = [
+            mpatches.Patch(facecolor='white', edgecolor='#b02020', lw=2, label='Input seed'),
+            mpatches.Patch(facecolor='white', edgecolor='#17902f', lw=2, label='Output cell'),
+            mpatches.Patch(facecolor='#7ec8e3', edgecolor='#c3ccd6',
+                           label='Cell = 4 directional LUTs'),
+            mpatches.Patch(facecolor='#e0b0ff', edgecolor='#c3ccd6',
+                           label='wedge colour = that LUT’s state'),
+            mpatches.Patch(facecolor=(0.95, 0.96, 0.97), edgecolor='#c3ccd6',
+                           label='Dead direction (LUT = 0)'),
+            mpatches.Patch(facecolor='#1ea64a', edgecolor='#b9c2cc',
+                           label='tables below: green=1, white=0'),
+        ]
+        leg.legend(handles=patches, loc='center', fontsize=7.5, frameon=False,
+                   title='LUT array  (colour = LUT state, per Fig. 13;\nactual lookup tables shown below)',
+                   title_fontsize=8)
+        for k, v in enumerate(luts):
+            sop = lut_sop(v)
+            if len(sop) > 16:
+                sop = sop[:15] + '…'
+            draw_lut_table(flat[n + 1 + k], v, swatch=_lut_color(v),
+                           title='LUT %04X  ×%d\n%s' % (v, counts[v], sop))
+        for idx in range(total, len(flat)):
+            flat[idx].set_visible(False)
+        self._growth_canvas.draw_idle()
+
+    def _draw_lut_dynamics(self, genome):
+        """Activity tab for a temporal LUT target: the paper's Fig. 14 'motion
+        picture' as a filmstrip — the array's OUTPUT BITS (green=1 / red=0 per
+        direction) at a spread of ticks through the first trial, so the running
+        dynamics that ARE the LUT's computation are visible over time."""
+        target = self._disp_target
+        try:
+            from lut_evo import grow_lut, LutSim, place_outputs_by_trace
+            grid = grow_lut(genome, seeds=tuple(target.inputs),
+                            grid_size=target.grid_size, iters=target.iters)
+            if len(grid) <= target.n_inputs:
+                raise ValueError
+            out_pos, _ = place_outputs_by_trace(grid, list(target.inputs), target)
+        except Exception:
+            self._draw_placeholder(self._volt_fig, self._volt_canvas,
+                                   '(LUT: circuit incomplete — grew too little)')
+            return
+        trial   = target.trials[0]
+        in_pos  = [p for p in target.inputs if p in grid]
+        sim     = LutSim(grid)
+        frames  = []                                   # (tick, nibble-map)
+        for t in range(target.T):
+            sim.step({target.inputs[i]: trial.streams[t][i]
+                      for i in range(target.n_inputs)})
+            frames.append((t, dict(sim.out)))
+        # show up to 8 evenly-spaced ticks
+        k    = min(8, len(frames))
+        idxs = [round(i * (len(frames) - 1) / max(1, k - 1)) for i in range(k)]
+        self._volt_fig.clf()
+        self._volt_fig.suptitle('%s — LUT output dynamics over ticks  '
+                                '(green=1 / red=0, Fig. 14)%s'
+                                % (target.name, self._seed_tag()),
+                                fontsize=10, fontweight='bold', y=0.99)
+        ncols = min(4, k)
+        nrows = math.ceil(k / ncols)
+        axes  = self._volt_fig.subplots(nrows, ncols, squeeze=False)
+        flat  = [a for row in axes for a in row]
+        for j, fi in enumerate(idxs):
+            tick, nib = frames[fi]
+            draw_lut_net(flat[j], grid, activity=nib, in_pos=in_pos,
+                         out_pos=out_pos, show_edges=True, title='tick %d' % tick)
+        for j in range(k, len(flat)):
+            flat[j].set_visible(False)
+        self._volt_canvas.draw_idle()
+
+    def _draw_activity_lut(self, genome):
+        """Activity tab for the LUT array. Temporal targets (the only kind LUT
+        runs) show the running output dynamics; the combinational per-case view
+        is kept defensively for any combinational target reaching here."""
+        target = self._disp_target
+        if getattr(target, 'temporal', False):
+            self._draw_lut_dynamics(genome)
+            return
+        try:
+            from lut_evo import lut_case_outputs
+            grid, out_pos, cases = lut_case_outputs(genome, target)
+        except Exception:
+            self._draw_placeholder(self._volt_fig, self._volt_canvas,
+                                   '(LUT: cannot evaluate this circuit)')
+            return
+        if not cases:
+            self._draw_placeholder(self._volt_fig, self._volt_canvas,
+                                   '(LUT: circuit incomplete — inputs/outputs missing)')
+            return
+        in_pos = [p for p in target.inputs if p in grid]
+        cases  = cases[:MAX_VOLT_CASES]
+        self._volt_fig.clf()
+        extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
+                '  (first %d of %d)' % (MAX_VOLT_CASES, len(target.cases))
+        self._volt_fig.suptitle('%s — LUT array response per case%s%s'
+                                % (target.name, extra, self._seed_tag()),
+                                fontsize=10, fontweight='bold', y=0.99)
+        axes = self._volt_fig.subplots(1, len(cases), squeeze=False)[0]
+        for ci, case in enumerate(cases):
+            all_ok = all(case['acts'][t.role] == case['out_bits'][i]
+                         for i, t in enumerate(target.outputs))
+            res = '  '.join('%s %d/%s' % (t.role, case['out_bits'][i],
+                            '?' if case['acts'][t.role] is None else case['acts'][t.role])
+                            for i, t in enumerate(target.outputs))
+            settled = '' if case.get('stable', True) else '  (unsettled)'
+            draw_lut_net(axes[ci], grid, activity=case['node_nibbles'],
+                         in_pos=in_pos, out_pos=out_pos, show_edges=True,
+                         title='in=%s\n%s  %s%s' % (''.join(map(str, case['in_bits'])),
+                                                  res, 'OK' if all_ok else 'FAIL', settled))
+            axes[ci].set_title(axes[ci].get_title(),
+                               color='green' if all_ok else 'red', fontsize=7)
+        self._volt_canvas.draw_idle()
+
     def _draw_voltages(self, genome):
         if self._disp_backend == 'nervous':
             self._draw_activity(genome)
+            return
+        if self._disp_backend == 'lut':
+            self._draw_activity_lut(genome)
             return
         target = self._disp_target
         try:
@@ -1220,13 +1631,17 @@ class App:
                      boxstyle='round,pad=0.02,rounding_size=0.2',
                      facecolor='white', edgecolor='#cdd6e2', lw=1.0, zorder=1))
 
+        lut = hasattr(gene, 'ctx_n')                       # 16-bit LUT gene
+
         def chip(cx, cy, val, sz=0.92, fs=8.5):
-            face, txt = self._state_color(val)
+            face, txt = self._state_color((val * 2654435761) % 20 if lut else val)
             ax.add_patch(FancyBboxPatch((cx, cy), sz, sz,
                          boxstyle='round,pad=0,rounding_size=0.14',
                          facecolor=face, edgecolor='#5b6b7d', lw=0.7, zorder=2))
-            ax.text(cx + sz / 2, cy + sz / 2, str(val), ha='center', va='center',
-                    fontsize=fs, fontweight='bold', color=txt, zorder=3)
+            ax.text(cx + sz / 2, cy + sz / 2,
+                    ('%04X' % val) if lut else str(val), ha='center', va='center',
+                    fontsize=(fs * 0.55) if lut else fs,
+                    fontweight='bold', color=txt, zorder=3)
 
         # neighbourhood (y grows downward; axis is inverted below)
         if hasattr(gene, 'ctx_l'):                         # hex gene: L / R / D
@@ -1234,6 +1649,12 @@ class App:
             chip(ox + 1, oy + 1, gene.self_in)             # centre = expected self
             chip(ox + 2, oy + 1, gene.ctx_r)               # R
             chip(ox + 1, oy + 2, gene.ctx_d)               # D
+        elif lut:                                          # LUT gene: N / E / S / W (hex)
+            chip(ox + 1, oy + 0, gene.ctx_n)               # N
+            chip(ox + 0, oy + 1, gene.ctx_w)               # W
+            chip(ox + 1, oy + 1, gene.self_in)             # centre = expected self
+            chip(ox + 2, oy + 1, gene.ctx_e)               # E
+            chip(ox + 1, oy + 2, gene.ctx_s)               # S
         else:                                              # SNN gene: N / E / S / W plus
             chip(ox + 1, oy + 0, gene.state_n)             # N
             chip(ox + 0, oy + 1, gene.state_w)             # W
@@ -1276,8 +1697,11 @@ class App:
         truncated = False
 
         for ci, chrom in enumerate(chroms):
-            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %d   ·   %d genes"
-                    % (chr(ord('a') + ci), chrom.tag, chrom.split, len(chrom.genes)),
+            tel = getattr(chrom, 'telomere', None)
+            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %d%s   ·   %d genes"
+                    % (chr(ord('a') + ci), chrom.tag, chrom.split,
+                       ('   ·   telomere %d' % tel) if tel is not None else '',
+                       len(chrom.genes)),
                     fontsize=9.5, fontweight='bold', color='#334', va='bottom')
             y += 1.0
             ng = len(chrom.genes)

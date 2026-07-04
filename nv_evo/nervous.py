@@ -15,6 +15,7 @@ what forms the excitatory / inhibitory loops.
 from __future__ import annotations
 
 from .hexgrid import hex_dirs, hex_frontier_cells, ROUTING_HEX, routing_kind
+from .genome import germline_telomere
 
 ROUTING    = ROUTING_HEX       # back-compat name (used by the GUI colourer)
 SEED_STATE = 1
@@ -29,56 +30,142 @@ def _h4(a, b):
 
 # ── hex growth (native hex genome: self_out == 0 means the cell dies) ──────────
 # Context reads the 3 hex neighbours (L/R/D) + self, matched against each gene's
-# ctx_l/ctx_r/ctx_d/self_in by minimum Hamming distance — exactly the paper's
-# associative-memory lookup (all genes apply at every iteration; there is no
-# per-gene time gate). Directions are the node's own orientation-relative L/R/D
-# (see hex_dirs), so a single gene can express symmetric structure.
+# ctx_l/ctx_r/ctx_d/self_in by minimum Hamming distance. Directions are the
+# node's own orientation-relative L/R/D (see hex_dirs).
+#
+# The field is UNBOUNDED; the genome bounds its own size BIOLOGICALLY, with a
+# telomere acting as a Hayflick division limit (see genome.py):
+#   * per-cell telomere — a cell divides (births a live frontier cell) only if a
+#     live neighbour still has telomere > 0; the daughter inherits parent - 1.
+#     A cell at telomere 0 is senescent: alive and functional, but it cannot
+#     divide, so growth provably halts at radius L (the germline length) from the
+#     seeds. This alone bounds SIZE (was grid_size) and DURATION (was iters);
+#   * the empty-cell guard — even where a lineage still has telomere to spend, an
+#     empty cell only comes alive via a GROWTH rule (self_in == 0; sim6
+#     table_lookup: "if self is zero and not an exact match, return zero").
+# Maintenance rules (self_in != 0) act on LIVE cells every step regardless of
+# telomere — telomeres limit a cell's REPLICATION, not its function, exactly as
+# in biology.
 
 def _lookup_nv(genome, sL, sR, sD, si):
+    """Associative next-state lookup (min Hamming). No time/telomere term — the
+    telomere now gates DIVISION per cell in _grow_step, not which genes exist."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
         return 0
-    best_out, best_dist = 0, 1 << 30
+    best_gene, best_dist = None, 1 << 30
     for chrom in genome.chromosomes:
         for gene in chrom.genes:
             d = (_h4(gene.ctx_l, sL) + _h4(gene.ctx_r, sR) +
                  _h4(gene.ctx_d, sD) + _h4(gene.self_in, si))
             if d < best_dist:
-                best_dist, best_out = d, gene.self_out
-    return best_out          # 0 = off / death (native)
+                best_dist, best_gene = d, gene
+    if best_gene is None:
+        return 0
+    if si == 0 and best_gene.self_in != 0:         # empty cells grow only via
+        return 0                                   # growth rules (sim6 guard)
+    return best_gene.self_out                      # 0 = off / death (native)
 
 
-def _grow_step(genome, grid, seeds, grid_size):
-    frontier = {}
-    for (x, y) in list(grid):
-        for (nx, ny) in hex_frontier_cells(x, y, grid_size):
-            if (nx, ny) not in grid and (nx, ny) not in frontier:
-                frontier[(nx, ny)] = 0
-    working = {**grid, **frontier}
-    nxt = {}
-    for (x, y), state in working.items():
+def _next_state(genome, sL, sR, sD, si, cache):
+    """Cached _lookup_nv keyed on context alone (telomere no longer affects the
+    lookup, so the cache is valid for the whole run — sim6 table_lookup_cached)."""
+    key = (sL, sR, sD, si)
+    ns = cache.get(key)
+    if ns is None:
+        ns = _lookup_nv(genome, sL, sR, sD, si)
+        cache[key] = ns
+    return ns
+
+
+def _grow_step(genome, grid, tel, seeds, L, cache):
+    """One development step. `grid` = {pos: state}, `tel` = {pos: remaining
+    telomere}. Returns (next_grid, next_tel).
+
+      * surviving cells: every live cell runs its maintenance lookup and keeps
+        its telomere (function, not replication);
+      * division: an empty frontier cell is born only if some live neighbour
+        still has telomere > 0 (the Hayflick gate) AND a growth rule fires; the
+        daughter inherits (max live-neighbour telomere) - 1;
+      * seeds: germline / stem cells, always present at full telomere L."""
+    nxt, nxt_tel = {}, {}
+    # maintenance / survival of the existing organism
+    for (x, y), state in grid.items():
         nb = hex_dirs(x, y)
-        ns = _lookup_nv(genome, working.get(nb['L'], 0), working.get(nb['R'], 0),
-                        working.get(nb['D'], 0), state)
+        ns = _next_state(genome, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
+                         grid.get(nb['D'], 0), state, cache)
         if ns:
             nxt[(x, y)] = ns
+            nxt_tel[(x, y)] = tel.get((x, y), 0)
+    # division into empty frontier cells (Hayflick-gated)
+    frontier = set()
+    for (x, y) in grid:
+        for cell in hex_frontier_cells(x, y):
+            if cell not in grid:
+                frontier.add(cell)
+    for (x, y) in frontier:
+        nb = hex_dirs(x, y)
+        parent_tel = max((tel.get(nb[d], 0) for d in ('L', 'R', 'D')
+                          if nb[d] in grid), default=0)
+        if parent_tel <= 0:                       # every neighbour senescent
+            continue                              # -> no division (Hayflick)
+        ns = _next_state(genome, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
+                         grid.get(nb['D'], 0), 0, cache)
+        if ns:
+            nxt[(x, y)] = ns
+            nxt_tel[(x, y)] = parent_tel - 1
     for pos in seeds:
         nxt[pos] = SEED_STATE
-    return nxt
+        nxt_tel[pos] = L
+    return nxt, nxt_tel
 
 
-def grow_nervous(genome, seeds, grid_size, iters):
+# Growth is bounded SOLELY by the telomere — there is no external iteration cap
+# and no grid-size clip. Spatially the organism can never pass radius L from the
+# seeds (the telomere runs out), so cell addition provably stops after ~L steps.
+# What remains is the paper's state settling — "the cycles of table lookups may
+# continue but the growth stops due to the fact that all queries return the same
+# value out as was passed in" (§6-7) — which ends at a fixed point or 2-cycle,
+# detected for early exit. The iteration budget is derived ENTIRELY from L: a
+# state change propagates one cell per step, so settling the whole organism
+# (diameter ~2L) after the ~L growth steps needs O(L) more — hence 3L + margin.
+# Nothing outside the genome's own telomere governs how far or how long it grows.
+
+def _grow_budget(L):
+    return 3 * L + 6
+
+
+# `grid_size` and `iters` are accepted but IGNORED — vestigial, kept only so
+# existing callers and pickles keep working. Growth is governed entirely by the
+# genome's telomere (Hayflick limit); pass nothing and it still self-limits.
+
+def grow_nervous(genome, seeds, grid_size=None, iters=None):
+    """Grow on the unbounded field until the attractor (fixed point or 2-cycle).
+    Size and duration are bounded by the genome's telomere ALONE — `grid_size`
+    and `iters` are ignored (see note above)."""
+    L = germline_telomere(genome)
     grid = {pos: SEED_STATE for pos in seeds}
-    for _ in range(iters):
-        grid = _grow_step(genome, grid, seeds, grid_size)
+    tel  = {pos: L for pos in seeds}
+    prev, cache = None, {}
+    for _ in range(_grow_budget(L)):
+        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache)
+        if nxt == grid or nxt == prev:      # fixed point (mature) or 2-cycle
+            return nxt
+        prev, grid, tel = grid, nxt, nxt_tel
     return grid
 
 
-def grow_nervous_snapshots(genome, seeds, grid_size, iters):
+def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
+    L = germline_telomere(genome)
     snaps = [{pos: SEED_STATE for pos in seeds}]
     grid = dict(snaps[0])
-    for _ in range(iters):
-        grid = _grow_step(genome, grid, seeds, grid_size)
-        snaps.append(dict(grid))
+    tel  = {pos: L for pos in seeds}
+    prev, cache = None, {}
+    for _ in range(_grow_budget(L)):
+        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache)
+        snaps.append(dict(nxt))
+        if nxt == grid or nxt == prev:
+            break
+        prev, grid, tel = grid, nxt, nxt_tel
     return snaps
 
 

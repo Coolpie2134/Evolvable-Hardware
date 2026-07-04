@@ -33,12 +33,17 @@ from .nervous import (ROUTING, SEED_STATE, interpret_nervous, evaluate_nervous,
                       score_nervous, nervous_truth_table, nervous_case_outputs,
                       circuit_summary_nervous, grow_nervous, grow_nervous_snapshots)
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
-                      sr_latch, toggle_ff, oscillator, echo,
-                      coincidence_detector, one_shot, pair_detector)
+                      spike_target, sr_latch, toggle_ff, oscillator, echo,
+                      pattern_generator, coincidence_detector, one_shot,
+                      pair_detector, temporal_xor, ordered_sequence, veto_gate,
+                      burst_generator, divide_by_3)
+from .oracle import (oracle_target, holdout_score, ORACLE_TARGETS, ORACLE_SPECS,
+                     sample_streams, label_trace)
 from .temporal import (run_nervous, score_temporal, temporal_report,
                        prepare_net, windowed_score, exact_tick_accuracy,
                        place_outputs_by_trace, signal_graph, cycle_nodes,
                        loop_profile)
-from .ga import (evaluate_nv, eval_batch_nv, mutate_nv, mutate_hex,
-                 crossover_nv, tournament_nv, next_population,
-                 evolve_nervous, genome_signature)
+from .ga import (evaluate_nv, evaluate_nv_full, eval_batch_nv, eval_batch_cases,
+                 mutate_nv, mutate_hex, crossover_nv, tournament_nv,
+                 select_parent, next_population, evolve_nervous,
+                 genome_signature, diversify)

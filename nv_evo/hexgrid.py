@@ -37,18 +37,24 @@ def hex_dirs(x, y):
     return {'D': (x, y - 1), 'R': (x - 1, y), 'L': (x + 1, y)}  # down-node (mirror)
 
 
-def hex_frontier_cells(x, y, grid_size):
-    """In-bounds honeycomb neighbours of (x, y) (for growth frontier expansion)."""
-    out = []
-    for (nx, ny) in hex_dirs(x, y).values():
-        if 0 <= nx < grid_size and 0 <= ny < grid_size:
-            out.append((nx, ny))
-    return out
+def hex_frontier_cells(x, y):
+    """Honeycomb neighbours of (x, y) for growth frontier expansion. The field
+    is UNBOUNDED — "if the field is big enough, the circuit can dictate its own
+    boundary" (§3); size is limited genetically (a chromosome's telomere is a
+    Hayflick limit — a cell stops dividing once its telomere runs out) and by
+    growth converging to its attractor, not by walls."""
+    return list(hex_dirs(x, y).values())
 
 
 def hex_pixel(x, y):
-    """Pixel centre for drawing (x, y) as a honeycomb: every other row shifts."""
-    return (x + (0.5 if (y % 2) else 0.0), y * 0.8660254)   # sqrt(3)/2 row pitch
+    """Drawing position of node (x, y): a true honeycomb-VERTEX layout —
+    "cells are positioned at the corners of a hex array" (automaton_arrays).
+    Nodes sit on zigzag (triangular) rows joined by vertical rungs, so each
+    node visibly touches exactly its two diagonal row-neighbours (L, R) and
+    one vertical partner (D): the paper's trestle / brick-wall picture, with
+    all three edges unit length."""
+    return (x * 0.8660254,                                   # sqrt(3)/2
+            y * 1.5 + (0.25 if (x + y) % 2 == 0 else -0.25))
 
 
 # ── the paper's 16 useful routing combinations (Edwards EH'02, Fig. 3) ──────────

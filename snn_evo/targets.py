@@ -212,12 +212,94 @@ def _full_adder() -> Target:
     )
 
 
+# ── more complex combinational functions (work on SNN, Nervous and LUT) ─────────
+# Each is just an explicit truth table, so nothing in the core library changes.
+# They span the interesting classes: data routing (mux/demux/decoder), voting,
+# wide parity, arithmetic (multiplier) and relational logic (comparator).
+
+def mux2_target(grid_size: int = GRID_SIZE) -> Target:
+    """2-to-1 multiplexer: inputs A, B, Sel -> out = Sel ? B : A. The classic
+    'route one of two data lines' primitive — needs the select line to gate two
+    different paths, which is harder than any single gate."""
+    rows = [((a, b, s), (b if s else a,))
+            for s in (0, 1) for a in (0, 1) for b in (0, 1)]
+    return truth_table_target("2:1 MUX", 3, ["Y"], rows, grid_size=grid_size)
+
+
+def majority3_target(grid_size: int = GRID_SIZE) -> Target:
+    """3-input majority vote: out = 1 iff at least two inputs are high (the
+    carry of a full adder, and a fault-tolerant voter)."""
+    rows = [((a, b, c), (1 if a + b + c >= 2 else 0,))
+            for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+    return truth_table_target("Majority-3", 3, ["M"], rows, grid_size=grid_size)
+
+
+def parity3_target(grid_size: int = GRID_SIZE) -> Target:
+    """3-input odd parity: out = a XOR b XOR c. Wider XOR is the textbook hard
+    case for these substrates (not linearly separable, no single-gate shortcut)."""
+    rows = [((a, b, c), (a ^ b ^ c,))
+            for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+    return truth_table_target("Parity-3 (XOR3)", 3, ["P"], rows, grid_size=grid_size)
+
+
+def decoder2to4_target(grid_size: int = GRID_SIZE) -> Target:
+    """2-to-4 one-hot decoder: inputs A1 A0 select which of D0..D3 goes high
+    (a demultiplex / address-decode primitive — four outputs, exactly one hot)."""
+    rows = []
+    for a0 in (0, 1):
+        for a1 in (0, 1):
+            idx = a0 | (a1 << 1)
+            rows.append(((a0, a1), tuple(1 if i == idx else 0 for i in range(4))))
+    return truth_table_target("2-to-4 decoder", 2, ["D0", "D1", "D2", "D3"],
+                              rows, grid_size=grid_size)
+
+
+def comparator2_target(grid_size: int | None = None) -> Target:
+    """2-bit magnitude comparator: A=(A1 A0), B=(B1 B0) -> GT, EQ, LT (one hot
+    per case). Relational logic across two multi-bit operands — three coupled
+    outputs that must partition every input."""
+    if grid_size is None:
+        grid_size = max(GRID_SIZE, 4)
+    rows = []
+    for a in range(4):
+        for b in range(4):
+            a0, a1 = a & 1, (a >> 1) & 1
+            b0, b1 = b & 1, (b >> 1) & 1
+            rows.append(((a0, a1, b0, b1),
+                         (1 if a > b else 0, 1 if a == b else 0, 1 if a < b else 0)))
+    return truth_table_target("2-bit comparator", 4, ["GT", "EQ", "LT"],
+                              rows, grid_size=grid_size)
+
+
+def multiplier2_target(grid_size: int | None = None) -> Target:
+    """2x2 unsigned multiplier: A=(A1 A0), B=(B1 B0) -> 4-bit product P0..P3.
+    The hardest combinational preset — four outputs, each a different nonlinear
+    function of all four inputs (P0 = A0&B0, P3 = A1&B1&(A0|B0)-ish, etc.)."""
+    if grid_size is None:
+        grid_size = max(GRID_SIZE, 4)
+    rows = []
+    for a in range(4):
+        for b in range(4):
+            a0, a1 = a & 1, (a >> 1) & 1
+            b0, b1 = b & 1, (b >> 1) & 1
+            p = a * b
+            rows.append(((a0, a1, b0, b1), tuple((p >> i) & 1 for i in range(4))))
+    return truth_table_target("2x2 multiplier", 4, ["P0", "P1", "P2", "P3"],
+                              rows, grid_size=grid_size)
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 TARGETS = {
     "Half adder": _half_adder(),
     "Full adder": _full_adder(),
     "2-bit adder": adder_target(2),
+    "2:1 MUX": mux2_target(),
+    "Majority-3": majority3_target(),
+    "Parity-3 (XOR3)": parity3_target(),
+    "2-to-4 decoder": decoder2to4_target(),
+    "2-bit comparator": comparator2_target(),
+    "2x2 multiplier": multiplier2_target(),
 }
 for _g in _GATES:
     TARGETS[_g] = gate_target(_g)
