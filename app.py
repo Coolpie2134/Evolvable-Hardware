@@ -336,28 +336,32 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
     # immigrants), so the population contracts onto a genome only as far as
     # selection naturally drives it. The SNN GA takes no per-case vectors.
     diversify_fn = None      # set for nervous/lut: build a generation of solvers
-    # Stress-induced mutagenesis (SOS response): the nervous GA raises its
-    # mutation rate the longer a run stalls. stress_fn maps generations-stalled
-    # -> a multiplier on the baseline rate; the other backends hold it at 1.0.
-    stress_fn, base_mm = (lambda s: 1.0), 1.0
+    # Two dynamic mutation-rate controls compose each generation:
+    #   base_mm * alpha**gen           — simulated-annealing cooldown (MUT_DECAY)
+    #                     * stress_fn() — SOS reheat while a run is stalled
+    # alpha defaults to 1.0 (no anneal); the SNN backend holds both at their
+    # neutral values (stress_fn ≡ 1, no rate threading).
+    stress_fn, base_mm, alpha = (lambda s: 1.0), 1.0, 1.0
     if backend == 'nervous':
         from nv_evo import random_hex_genome
         from nv_evo.ga import (eval_batch_cases, next_population as next_pop_nv,
-                               diversify as _div, stress_multiplier, MEAN_MUTATIONS)
+                               diversify as _div, stress_multiplier,
+                               MEAN_MUTATIONS, MUT_DECAY)
         cache       = {}     # fitness cache shared across restarts (same target)
         make_genome = lambda: random_hex_genome(n_chroms)
         eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache)
         step        = lambda p, fits, cv, mm: next_pop_nv(p, fits, make_genome, cv, mm)
-        stress_fn, base_mm = stress_multiplier, MEAN_MUTATIONS
+        stress_fn, base_mm, alpha = stress_multiplier, MEAN_MUTATIONS, MUT_DECAY
         diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
     elif backend == 'lut':
-        from lut_evo import random_lut_genome
         from lut_evo.ga import (eval_batch_cases, next_population as next_pop_lut,
-                                diversify as _div)
+                                diversify as _div, make_seed_genome,
+                                MEAN_MUTATIONS, MUT_DECAY)
         cache       = {}
-        make_genome = lambda: random_lut_genome(n_chroms)
+        make_genome = lambda: make_seed_genome(n_chroms)   # honours SEED_MODE toggle
         eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache)
-        step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv)
+        step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv, mm)
+        base_mm, alpha = MEAN_MUTATIONS, MUT_DECAY
         diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
     else:
         make_genome = lambda: random_genome(n_chroms)
@@ -391,10 +395,12 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
         # tie-break keeps shrinking a solved genome. Convergence is not forced —
         # the population contracts only as far as selection naturally drives it.
         stagnation = 0
+        mut_rate   = base_mm                          # annealing schedule
         for gen in range(gens):
             if stop_event.is_set():
                 break
-            mm = base_mm * stress_fn(stagnation)     # SOS response
+            mut_rate *= alpha                         # anneal: cool down
+            mm = mut_rate * stress_fn(stagnation)     # SOS reheats plateaus
             population = step(population, fitnesses, cases, mm)
             fitnesses, cases = eval_batch(population)
             gi         = max(range(pop),
@@ -605,8 +611,11 @@ class App:
             return v
 
         self._pop_var   = lentry('Pop:',   50)
-        self._gens_var  = lentry('Gens:',  30)
-        self._tries_var = lentry('Tries:', 20)
+        # long single run instead of many short restarts, so slow steady progress
+        # is visible (user-preferred; was Gens=30, Tries=20 which restarted every
+        # 30 generations before any trend showed).
+        self._gens_var  = lentry('Gens:',  500)
+        self._tries_var = lentry('Tries:', 1)
         self._seed_var  = lentry('Seed:',  'random', width=7)
 
         self._graded_var = tk.BooleanVar(value=False)
@@ -652,16 +661,26 @@ class App:
         self._layout_frame.pack(side='left')
         ttk.Label(self._layout_frame, text='Genome:').pack(side='left', padx=(2, 0))
         self._chroms_var = aentry(self._layout_frame, 'Chroms:', 2, width=4)
-        ttk.Button(self._layout_frame, text='Reset', width=6,
-                   command=self._reset_arch).pack(side='left', padx=8)
+        # LUT only: seed the population with dense sim6-style ontogeny genomes
+        # (rich morphology) and drop parsimony so they aren't pruned back to
+        # sparse. Much slower, and measured to solve WORSE than random — an
+        # exploratory shape mode, off by default. Shown only for the LUT backend.
+        self._ontogeny_var = tk.BooleanVar(value=False)
+        self._ontogeny_chk = ttk.Checkbutton(self._layout_frame, text='Ontogeny seed',
+                                              variable=self._ontogeny_var)
+        self._layout_reset_btn = ttk.Button(self._layout_frame, text='Reset', width=6,
+                                             command=self._reset_arch)
+        self._layout_reset_btn.pack(side='left', padx=8)
 
         self._model_note = ttk.Label(ctrl2, text='', foreground='#888888')
         self._model_note.pack(side='left', padx=6)
 
         # ── third row: GA + substrate-physics tuning (applied on Run) ──
-        from nv_evo.ga import MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM, TOURNAMENT_K as _TK
+        from nv_evo.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
+                               TOURNAMENT_K as _TK, MUT_DECAY as _AL)
         from nv_evo.pulse import DELAY as _D, WIDTH as _W, COINC as _C
-        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, delay=_D, width=_W, coinc=_C)
+        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL,
+                                   delay=_D, width=_W, coinc=_C)
         ctrl3 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl3.pack(fill='x', side='top')
 
@@ -670,6 +689,8 @@ class App:
         self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4)
         self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4)
         self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3)
+        # simulated-annealing decay: mutation rate *= α each generation (1 = off)
+        self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6)
         ttk.Separator(ctrl3, orient='vertical').pack(side='left', fill='y', padx=8)
 
         # pulse-physics group (nervous net only)
@@ -743,6 +764,13 @@ class App:
             else:
                 self._pulse_frame.pack_forget()
                 self._pulse_sep.pack_forget()
+        # ontogeny-seed toggle applies only to the LUT backend
+        if hasattr(self, '_ontogeny_chk'):
+            if backend == 'lut':
+                self._ontogeny_chk.pack(side='left', padx=(4, 0),
+                                        before=self._layout_reset_btn)
+            else:
+                self._ontogeny_chk.pack_forget()
         # dropdown offers only backend-valid targets (LUT hides combinational)
         if hasattr(self, '_target_cb'):
             self._refresh_target_list()
@@ -896,7 +924,8 @@ class App:
     def _reset_tuning(self):
         d = self._tune_defaults
         self._mut_var.set(str(d['mut']));   self._imm_var.set(str(d['imm']))
-        self._tourn_var.set(str(d['tk']));  self._delay_var.set(str(d['delay']))
+        self._tourn_var.set(str(d['tk']));  self._alpha_var.set(str(d['alpha']))
+        self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
 
     def _apply_tuning(self):
@@ -905,10 +934,11 @@ class App:
         the physics up at import). Returns True on success."""
         try:
             mut = float(self._mut_var.get()); imm = float(self._imm_var.get())
-            tk_ = int(self._tourn_var.get())
+            tk_ = int(self._tourn_var.get()); alpha = float(self._alpha_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coinc = float(self._coinc_var.get())
-            if mut < 0 or not (0 <= imm < 1) or tk_ < 1 or delay <= 0 or width <= 0 or coinc < 0:
+            if (mut < 0 or not (0 <= imm < 1) or tk_ < 1 or not (0 < alpha <= 1)
+                    or delay <= 0 or width <= 0 or coinc < 0):
                 raise ValueError
         except ValueError:
             return False
@@ -917,6 +947,11 @@ class App:
             mod.MEAN_MUTATIONS = mut
             mod.IMMIGRANT_FRAC = imm
             mod.TOURNAMENT_K   = tk_
+            mod.MUT_DECAY      = alpha
+        # LUT ontogeny-seed toggle: dense biomorph seeds + no parsimony pruning
+        onto = bool(self._ontogeny_var.get())
+        lga.SEED_MODE = 'ontogeny' if onto else 'random'
+        lga.PARSIMONY = not onto
         npulse.DELAY, npulse.WIDTH, npulse.COINC = delay, width, coinc
         os.environ['NV_DELAY'] = str(delay)
         os.environ['NV_WIDTH'] = str(width)
@@ -964,6 +999,7 @@ class App:
         self._vmax_var.set(str(DEFAULT_ARCH.vth_levels[-1]))
         self._cur_var.set(str(self.target.high))
         self._chroms_var.set('2')
+        self._ontogeny_var.set(False)
 
     def _open_custom(self):
         CustomTargetDialog(self.root, self._on_custom_built)
@@ -1017,7 +1053,7 @@ class App:
 
         if not self._apply_tuning():
             self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
-                             'Tournament>=1, Delay/Width>0, Coinc>=0.')
+                             'Tournament>=1, 0<α<=1, Delay/Width>0, Coinc>=0.')
             return
 
         backend = self._backend()
@@ -1103,7 +1139,28 @@ class App:
 
     # ── queue polling ─────────────────────────────────────────────────────────
 
+    def _redraw_fit_chart(self, max_pts=2000):
+        """Push the best/mean history to the chart. The full history is kept (it's
+        only three floats per generation) but the PLOTTED line is decimated to at
+        most `max_pts` points, so the redraw cost stays flat whether the run is
+        500 generations or 100,000 — the chart never becomes the bottleneck."""
+        hist = self._gen_history
+        if not hist:
+            return
+        if len(hist) > max_pts:
+            step = len(hist) // max_pts + 1
+            pts  = hist[::step]
+            if pts[-1][0] != hist[-1][0]:      # always keep the latest point
+                pts = pts + [hist[-1]]
+        else:
+            pts = hist
+        self._best_line.set_data([d[0] for d in pts], [d[1] for d in pts])
+        self._mean_line.set_data([d[0] for d in pts], [d[2] for d in pts])
+        self._fit_ax.set_xlim(0, hist[-1][0] + 1)
+        self._fit_canvas.draw_idle()
+
     def _poll(self):
+        last_gen = None                        # newest 'gen' this poll — redraw ONCE
         try:
             while True:
                 msg  = self.q.get_nowait()
@@ -1112,16 +1169,7 @@ class App:
                     _, try_n, gen, best_f, mean_f = msg
                     self._abs_gen += 1
                     self._gen_history.append((self._abs_gen, best_f, mean_f))
-                    xs  = [d[0] for d in self._gen_history]
-                    bys = [d[1] for d in self._gen_history]
-                    mys = [d[2] for d in self._gen_history]
-                    self._best_line.set_data(xs, bys)
-                    self._mean_line.set_data(xs, mys)
-                    self._fit_ax.set_xlim(0, max(xs) + 1)
-                    self._fit_canvas.draw_idle()
-                    self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  mean=%.4f' %
-                                     (self.target.name, getattr(self, '_active_seed', 0),
-                                      try_n, gen, best_f, mean_f))
+                    last_gen = (try_n, gen, best_f, mean_f)
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
                     self._n_unique_solvers = n_unique
@@ -1167,6 +1215,12 @@ class App:
                                       getattr(self, '_active_seed', 0), saved, div))
         except queue.Empty:
             pass
+        if last_gen is not None:               # redraw the fitness chart once per poll
+            self._redraw_fit_chart()
+            try_n, gen, best_f, mean_f = last_gen
+            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  mean=%.4f' %
+                             (self.target.name, getattr(self, '_active_seed', 0),
+                              try_n, gen, best_f, mean_f))
         # throttled repaint of the display panels for the latest best (≤ ~1.6/s)
         pend = getattr(self, '_pending_best', None)
         if pend is not None:

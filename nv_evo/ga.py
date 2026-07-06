@@ -63,9 +63,23 @@ POPSIZE        = 120
 ELITE_FRAC     = 0.10
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
-MEAN_MUTATIONS = 1.2
+MEAN_MUTATIONS = 4.0         # HOT-START mutation rate for simulated annealing:
+                            # broad early exploration, cooled each generation by
+                            # MUT_DECAY toward ~0 as the genes self-organise.
+                            # (Was 1.2; annealing wants a high start — see below.)
+MUT_DECAY      = 0.99        # simulated-annealing α: mutation rate *= α every
+                             # generation. 0.99 cools 4.0 -> ~0.03 by gen 500
+                             # (aggressive). α is PER-GENERATION, so tie it to run
+                             # length — for very long runs use α close to 1
+                             # (e.g. 0.9999); α = 1.0 disables annealing.
 LOOP_WEIGHT    = 0.05          # max shaping bonus, as a fraction of (1 - score)
 N_WORKERS      = min(os.cpu_count() or 2, 8)
+
+# Very long runs (10k–100k generations) accumulate one fitness-cache entry per
+# distinct genome ever seen. That is the only structure that grows without bound
+# over a run, so cap it: when it exceeds this, drop it and let it refill (elites
+# re-cache within a generation). Everything else the loop keeps is O(1) per gen.
+FITNESS_CACHE_MAX = 200_000
 
 
 # ── evaluation ─────────────────────────────────────────────────────────────────
@@ -123,6 +137,8 @@ def eval_batch_cases(genomes, target, cache=None):
     ({signature: (fit, cases)}, owned by the caller) skips seen genomes."""
     out  = [None] * len(genomes)
     todo = list(range(len(genomes)))
+    if cache is not None and len(cache) > FITNESS_CACHE_MAX:
+        cache.clear()                      # bound memory on very long runs
     if cache is not None:
         sigs = [genome_signature(g) for g in genomes]
         todo = [i for i in todo if sigs[i] not in cache]
@@ -362,6 +378,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
     best_rank    = rank_key(best_genome, best_fitness)
 
     solved_at, stagnation = None, 0
+    mut_rate = MEAN_MUTATIONS               # annealing schedule (see MUT_DECAY)
     if verbose:
         print("%5s  %6s  %6s  %5s" % ("Gen", "Best", "Mean", "Mut"))
         print("-" * 30)
@@ -369,7 +386,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
     # keeps shrinking a solved genome. Convergence is not forced — the population
     # contracts only as far as selection naturally drives it (see next_population).
     for gen in range(generations):
-        mm = MEAN_MUTATIONS * stress_multiplier(stagnation)   # SOS response
+        mut_rate *= MUT_DECAY                                  # anneal: cool down
+        mm = mut_rate * stress_multiplier(stagnation)          # SOS reheats plateaus
         population = next_population(population, fitnesses, make_genome, cases, mm)
         fitnesses, cases = eval_batch_cases(population, target, cache)
         gi = max(range(pop),
@@ -391,9 +409,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             if verbose:
                 print("Solved at generation %d." % gen)
         if verbose and gen % 10 == 0:
-            print("%5d  %6.4f  %6.4f  %5.2f" % (gen, best_fitness,
-                                                sum(fitnesses) / pop,
-                                                stress_multiplier(stagnation)))
+            print("%5d  %6.4f  %6.4f  %5.3f" % (gen, best_fitness,
+                                                sum(fitnesses) / pop, mm))
     return best_genome, best_fitness
 
 

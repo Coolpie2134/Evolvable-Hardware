@@ -1,6 +1,6 @@
 # Evolvable Hardware — Logic Circuits via Grown Neural Substrates
 
-A research project implementing **Edwards indirect encoding** to evolve grown circuits, with two independent backends: spiking neural networks (SNN) and hexagonal "nervous nets".
+A research project implementing **Edwards indirect encoding** to evolve grown circuits, with three backends: spiking neural networks (SNN), hexagonal "nervous nets", and a square **LUT array** (the paper's Architecture 2 / `sim6`).
 
 ## What it does
 
@@ -13,7 +13,7 @@ A genetic algorithm evolves a genome that encodes growth rules. Starting from in
 
   (The **hex** nervous array is the degree-3 case — `automaton_arrays.pdf`: 3 neighbours, 3 LUTs of 8 states — drawn as a brick-wall; deliberately *not* the degree-6 triangular reading.)
 
-The SNN and nervous backends share no code; the LUT backend shares only the problem definitions and trace-scoring maths. Growth in the nervous and LUT models happens on an **unbounded field** — "if the field is big enough, the circuit can dictate its own boundary" — and runs until it **converges to a stable attractor** (the paper's "naturally self-limiting growth" / maturity), with the iteration count as a safety cap only. Size is bounded **genetically** rather than by a wall: each chromosome carries an evolvable **telomere** that expires its *growth* rules (genes with `self_in == 0`, the only ones that can turn an empty cell live — sim6's `set_limit` caps exactly these), while *maintenance* rules keep refining live cells; once every telomere is spent, expansion provably stops and the maintenance rules settle the attractor. The GA never stops early at fitness 1.0 — runs continue so that, via a parsimony tie-break (at equal fitness the smaller genome wins), solved genomes keep shrinking. Convergence is **not forced**: reproduction stays a single steady exploratory regime (elitism + tournament/lexicase parents + random immigrants), so the population contracts onto a genome only as far as selection genuinely favours it — it converges naturally when a solution truly out-competes the field, and keeps exploring otherwise (the population *mean* is therefore not herded up to the best).
+The SNN and nervous backends share no code; the LUT backend shares only the problem definitions and trace-scoring maths. Growth in the nervous and LUT models happens on an **unbounded field** — "if the field is big enough, the circuit can dictate its own boundary" — and runs until it **converges to a stable attractor** (the paper's "naturally self-limiting growth" / maturity). Size is bounded **genetically** rather than by a wall. In the nervous net the evolvable **telomere** is now a per-cell **Hayflick limit**: seed/germline cells start with the genome's telomere length *L*, a cell may divide (bring an empty neighbour to life via a `self_in == 0` growth rule) only while its telomere is unspent, and each daughter inherits one less — so the organism provably halts its own growth at radius *L* from the seeds. This *alone* bounds both size and duration, so the old grid-size clip and iteration cap have been **removed** (they no longer affect nervous growth — grid size survives only as an I/O layout scale). *Maintenance* rules (`self_in != 0`) act on live cells every step regardless of telomere — telomeres limit replication, not function, as in biology. (The LUT backend still uses the simpler per-chromosome telomere that expires growth rules after a fixed iteration count.) The GA never stops early at fitness 1.0 — runs continue so that, via a **senescence / parsimony tie-break** (at equal fitness the smaller genome wins, then the one that grows a smaller, cheaper body — a shorter telomere), solved genomes keep shrinking. Convergence is **not forced**: reproduction stays a single steady exploratory regime (elitism + tournament/lexicase parents + random immigrants), so the population contracts onto a genome only as far as selection genuinely favours it — it converges naturally when a solution truly out-competes the field, and keeps exploring otherwise (the population *mean* is therefore not herded up to the best).
 
 ## How it works
 
@@ -33,6 +33,9 @@ The SNN and nervous backends share no code; the LUT backend shares only the prob
   - *Phase-tolerant recall*: because a bit is stored as a pulse *circulating* in a loop, it reads as a ripple (e.g. `1010`) at any one cell — the honeycomb has no triangles, so the phases can't be OR'd back into a steady level. Recall therefore allows ±1 tick of coverage (a stored 1 counts as hit if the cell fires on that tick or an adjacent one), while precision stays exact so spurious firing is still punished.
 - **Describe a target as spike events** (`nv_evo.spike_target`): define a new temporal function directly from test cases — `spike_target(name, cases, T, n_inputs=…)` where each case is `(input_spikes, output_spikes)` (input ticks per input, expected output ticks). Pair it with `nv_evo.ga.diversify` to turn one solution into a whole generation of genotypically-unique valid solvers.
 - **Loop-aware GA** (`nv_evo/ga.py`): shaping that rewards feedback cycles the inputs can write and the outputs can read, gene-duplication mutations that build repeated loop motifs, random immigrants against premature convergence, and a fitness cache
+- **Biologically-inspired search dynamics** (`nv_evo/ga.py`, `lut_evo/ga.py`): a **senescence / metabolic cost** (at equal fitness the genome that grows a smaller, cheaper body wins — parsimony extended to organism size via the telomere); **stress-induced hypermutation** (the bacterial SOS response — the mutation rate ramps up when a run stalls and relaxes on progress); and **simulated-annealing mutation decay** (an *Anneal α* that multiplies the per-child mutation rate each generation, for a hot-start / cool-down schedule). Very long runs stay tractable — the fitness cache is size-bounded and the live fitness chart is decimated, so 10k–100k-generation runs don't gum up
+- **LUT logic view** (`lut_evo/boolfn.py`): every 16-bit lookup table is really a boolean function of the four neighbour input bits, so it is decoded to a minimised sum-of-products expression `out = f(N,S,E,W)` (verified exact over all 65 536 tables) — the genome reads as logic instead of hex, and the Growth tab shows the mature organism's distinct tables as actual 4×4 truth grids
+- **sim6 ontogeny** (`lut_evo/ontogeny.py`): a faithful port of the reference `table_create` morphogenesis that *grows* a dense genome on the fly (inventing a gene per unseen context), reproducing sim6's varied biomorphs. Runs as a standalone shape-browser (`py -m lut_evo.ontogeny`) or as an optional GUI **Ontogeny seed** toggle for the LUT backend. Diagnostic finding: the GA's drift to small "diamond" genomes is genome *sparsity*, not the growth engine — dense ontogeny seeds restore the rich shapes but (measured) solve *worse* and cost ~50×, so the toggle is off by default
 
 ## Files
 
@@ -44,7 +47,9 @@ The SNN and nervous backends share no code; the LUT backend shares only the prob
 | `nv_evo/` | Nervous-net backend (hex genome, honeycomb growth, pulse dynamics, targets, GA) |
 | `nv_evo/targets.py` | Temporal target registry (SR latch, toggle, oscillator, pattern generator, echo, coincidence, one-shot, pair detector) |
 | `lut_evo/` | LUT-array backend (16-bit lookup cells, paper Architecture 2) |
-| `nv_evo/ga.py` | Loop/memory-tuned GA (shaping, duplication, immigrants, caching) |
+| `lut_evo/boolfn.py` | Decode 16-bit LUTs to boolean logic (minimised SOP over N/S/E/W) |
+| `lut_evo/ontogeny.py` | sim6 `table_create` morphogenesis — shape browser + optional GA seed |
+| `nv_evo/ga.py` | Loop/memory-tuned GA (shaping, duplication, immigrants, caching, senescence cost, SOS hypermutation, annealing) |
 
 ## Usage
 
@@ -54,10 +59,15 @@ pip install -r requirements.txt
 python app.py        # launch the GUI
 ```
 
-In the GUI: pick a **Target** from the dropdown (or click **Custom…** to enter your
-own truth table), set Pop / Gens / Tries, and click **Run**. Use **Load Saved** to
-reload `results/best_genome.pkl` and **Save PNGs** to export the growth and voltage
-figures.
+In the GUI: pick a **Model** (SNN / Nervous / LUT) and a **Target** from the dropdown
+(or click **Custom…** to enter your own truth table), set Pop / Gens / Tries plus the
+GA tuning row — **Mutations/child** and **Anneal α** (α < 1 cools the mutation rate
+each generation for a hot-start simulated-annealing schedule; α = 1 is off),
+immigrants and tournament size — and click **Run**. Defaults are a single long run
+(Gens 500, Tries 1) with a hot-start anneal (Mutations 4.0, α 0.99) so slow, steady
+progress is visible. Growth is self-limiting via the telomere, so there are no
+grid-size or iteration controls. Use **Load Saved** to reload `results/best_genome.pkl`
+and **Save PNGs** to export the growth and voltage figures.
 
 Tick **Graded** for harder targets (adders, large custom tables): instead of a binary
 pass/fail per output it gives smooth partial credit, which keeps a usable fitness

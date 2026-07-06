@@ -21,8 +21,10 @@ POPSIZE        = 120
 ELITE_FRAC     = 0.10
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
-MEAN_MUTATIONS = 1.2
+MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see nv_evo.ga)
+MUT_DECAY      = 0.99        # simulated-annealing α; 4.0 -> ~0.03 by gen 500
 N_WORKERS      = min(os.cpu_count() or 2, 8)
+FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 
 
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
@@ -270,6 +272,8 @@ def eval_batch_cases(genomes, target, cache=None):
     """(fitnesses, case_vectors) in parallel; cache holds (fit, cases)."""
     out  = [None] * len(genomes)
     todo = list(range(len(genomes)))
+    if cache is not None and len(cache) > FITNESS_CACHE_MAX:
+        cache.clear()                      # bound memory on very long runs
     if cache is not None:
         sigs = [genome_signature(g) for g in genomes]
         todo = [i for i in todo if sigs[i] not in cache]
@@ -342,11 +346,11 @@ def mutate_lut(genome, mean_mutations=None):
         elif op == "tweak" and chrom.genes:
             idx = random.randrange(len(chrom.genes))
             chrom.genes[idx] = _tweak_gene(chrom.genes[idx])
-        elif op == "duplicate" and chrom.genes and len(chrom.genes) < MAX_GENES:
+        elif op == "duplicate" and chrom.genes and len(chrom.genes) < _gene_cap():
             src = random.choice(chrom.genes)
             chrom.genes.insert(random.randrange(len(chrom.genes) + 1),
                                _tweak_gene(src))
-        elif op == "add_gene" and len(chrom.genes) < MAX_GENES:
+        elif op == "add_gene" and len(chrom.genes) < _gene_cap():
             chrom.genes.append(random_lut_gene())
         elif op == "del_gene" and len(chrom.genes) > 1:
             chrom.genes.pop(random.randrange(len(chrom.genes)))
@@ -384,9 +388,41 @@ def n_genes(genome):
     return sum(len(c.genes) for c in genome.chromosomes)
 
 
+# ── Stage-1 ontogeny seeding + parsimony exemption (see lut_evo/ontogeny.py) ─────
+# SEED_MODE 'ontogeny' seeds the population/immigrants with sim6-style biomorph
+# genomes (dense, rich shapes) instead of sparse random ones. Those genomes are
+# large, so PARSIMONY=False drops the smaller-genome tie-break that would
+# otherwise prune them straight back to sparse (re-diamonding them). Both default
+# to the original behaviour; the GUI/experiments flip them together.
+SEED_MODE     = 'random'          # 'random' | 'ontogeny'
+PARSIMONY     = True              # False = don't favour smaller genomes at ties
+ONTOGENY_CAP  = 350               # max genes kept from an ontogeny biomorph
+
+
+def make_seed_genome(n_chroms=2):
+    """The population/immigrant factory, honouring SEED_MODE."""
+    if SEED_MODE == 'ontogeny':
+        from .ontogeny import random_ontogeny_genome
+        return random_ontogeny_genome(n_chroms, cap_genes=ONTOGENY_CAP)
+    return random_lut_genome(n_chroms)
+
+
+def _tiebreak(genome):
+    """Tie-break term for equal fitness: prefer fewer genes when PARSIMONY, else
+    neutral (ontogeny genomes must not be pruned back to sparse)."""
+    return -n_genes(genome) if PARSIMONY else 0
+
+
+def _gene_cap():
+    """Per-chromosome gene cap for add/duplicate mutations — relaxed to
+    ONTOGENY_CAP in ontogeny mode so dense genomes can still grow, kept tight
+    (MAX_GENES) for the sparse random path."""
+    return ONTOGENY_CAP if SEED_MODE == 'ontogeny' else MAX_GENES
+
+
 def tournament_lut(population, fitnesses):
     idx = random.sample(range(len(population)), min(TOURNAMENT_K, len(population)))
-    return population[max(idx, key=lambda i: (fitnesses[i], -n_genes(population[i])))]
+    return population[max(idx, key=lambda i: (fitnesses[i], _tiebreak(population[i])))]
 
 
 def select_parent(population, fitnesses, case_vecs=None):
@@ -397,48 +433,52 @@ def select_parent(population, fitnesses, case_vecs=None):
     return tournament_lut(population, fitnesses)
 
 
-def next_population(population, fitnesses, make_genome=None, case_vecs=None):
+def next_population(population, fitnesses, make_genome=None, case_vecs=None,
+                    mean_mutations=None):
     """One generation of a steady, exploratory GA — elitism + immigrants +
     recombination/mutation, parents via ε-lexicase when per-case vectors are
     available (temporal targets), else tournament. Convergence is NOT forced:
     the population contracts onto a genome only insofar as selection favours it
-    (see nv_evo.ga.next_population)."""
+    (see nv_evo.ga.next_population). `mean_mutations` overrides the mutation rate
+    for this generation (used by the annealing schedule)."""
     pop = len(population)
     if make_genome is None:
-        make_genome = random_lut_genome
+        make_genome = make_seed_genome
     n_elite = max(1, int(pop * ELITE_FRAC))
     n_imm   = int(round(pop * IMMIGRANT_FRAC))
     order   = sorted(range(pop),
-                     key=lambda i: (fitnesses[i], -n_genes(population[i])),
+                     key=lambda i: (fitnesses[i], _tiebreak(population[i])),
                      reverse=True)
     new_pop = [copy.deepcopy(population[i]) for i in order[:n_elite]]
     new_pop += [make_genome() for _ in range(min(n_imm, pop - len(new_pop)))]
     parent = lambda: select_parent(population, fitnesses, case_vecs)
     while len(new_pop) < pop:
         ca, cb = crossover_lut(parent(), parent())
-        new_pop.append(mutate_lut(ca))
+        new_pop.append(mutate_lut(ca, mean_mutations))
         if len(new_pop) < pop:
-            new_pop.append(mutate_lut(cb))
+            new_pop.append(mutate_lut(cb, mean_mutations))
     return new_pop[:pop]
 
 
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
-    make_genome = lambda: random_lut_genome(n_chroms)
+    make_genome = lambda: make_seed_genome(n_chroms)     # honours SEED_MODE
     cache       = {}
     population  = [make_genome() for _ in range(pop)]
     fitnesses, cases = eval_batch_cases(population, target, cache)
     bi           = max(range(pop),
-                       key=lambda i: (fitnesses[i], -n_genes(population[i])))
+                       key=lambda i: (fitnesses[i], _tiebreak(population[i])))
     best_genome  = copy.deepcopy(population[bi])
     best_fitness = fitnesses[bi]
+    mut_rate     = MEAN_MUTATIONS            # annealing schedule (see MUT_DECAY)
     for gen in range(generations):
-        population = next_population(population, fitnesses, make_genome, cases)
+        mut_rate *= MUT_DECAY
+        population = next_population(population, fitnesses, make_genome, cases, mut_rate)
         fitnesses, cases = eval_batch_cases(population, target, cache)
         gi = max(range(pop),
-                 key=lambda i: (fitnesses[i], -n_genes(population[i])))
+                 key=lambda i: (fitnesses[i], _tiebreak(population[i])))
         if (fitnesses[gi] > best_fitness
                 or (fitnesses[gi] == best_fitness
-                    and n_genes(population[gi]) < n_genes(best_genome))):
+                    and _tiebreak(population[gi]) > _tiebreak(best_genome))):
             best_fitness = fitnesses[gi]
             best_genome  = copy.deepcopy(population[gi])
         if verbose and gen % 10 == 0:
