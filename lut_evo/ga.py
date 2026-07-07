@@ -14,8 +14,20 @@ from functools import partial
 
 from nv_evo.temporal import _role_trace_score, windowed_score, exact_tick_accuracy
 from .genome import (LUT_STATES, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
+                     Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome, random_lut_genome)
 from .lut import grow_lut, LutSim
+
+
+def clone_genome(genome):
+    """Fast structural copy (shared, never-in-place-mutated gene objects; fresh
+    structure) — an identical-behaviour, ~10x cheaper replacement for
+    copy.deepcopy on the reproduction hot path. See nv_evo.ga.clone_genome."""
+    return Genome(
+        chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
+                                telomere=getattr(c, 'telomere', MAX_TELOMERE))
+                     for c in genome.chromosomes],
+        tag=genome.tag)
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10
@@ -268,8 +280,10 @@ def genome_signature(genome):
         for c in genome.chromosomes)
 
 
-def eval_batch_cases(genomes, target, cache=None):
-    """(fitnesses, case_vectors) in parallel; cache holds (fit, cases)."""
+def eval_batch_cases(genomes, target, cache=None, executor=None):
+    """(fitnesses, case_vectors) in parallel; cache holds (fit, cases). A
+    persistent `executor` is reused instead of spawning a fresh pool per call
+    (large speed-up on Windows); omitting it keeps the one-shot-pool behaviour."""
     out  = [None] * len(genomes)
     todo = list(range(len(genomes)))
     if cache is not None and len(cache) > FITNESS_CACHE_MAX:
@@ -282,8 +296,12 @@ def eval_batch_cases(genomes, target, cache=None):
                 out[i] = cache[sigs[i]]
     if todo:
         fn = partial(evaluate_lut_full, target=target)
-        with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-            results = list(ex.map(fn, [genomes[i] for i in todo]))
+        subset = [genomes[i] for i in todo]
+        if executor is not None:
+            results = list(executor.map(fn, subset))
+        else:
+            with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+                results = list(ex.map(fn, subset))
         for i, r in zip(todo, results):
             out[i] = r
             if cache is not None:
@@ -331,7 +349,7 @@ _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 
 
 def mutate_lut(genome, mean_mutations=None):
-    g = copy.deepcopy(genome)
+    g = clone_genome(genome)
     lam = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
     for _ in range(_poisson(lam)):
         if not g.chromosomes:
@@ -364,7 +382,7 @@ def mutate_lut(genome, mean_mutations=None):
 
 
 def crossover_lut(pa, pb):
-    ca, cb = copy.deepcopy(pa), copy.deepcopy(pb)
+    ca, cb = clone_genome(pa), clone_genome(pb)
     used_b = set()
     for i, chrom_a in enumerate(ca.chromosomes):
         best_j, best_dist = None, float("inf")
@@ -449,7 +467,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     order   = sorted(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])),
                      reverse=True)
-    new_pop = [copy.deepcopy(population[i]) for i in order[:n_elite]]
+    new_pop = [clone_genome(population[i]) for i in order[:n_elite]]
     new_pop += [make_genome() for _ in range(min(n_imm, pop - len(new_pop)))]
     parent = lambda: select_parent(population, fitnesses, case_vecs)
     while len(new_pop) < pop:
@@ -463,28 +481,32 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
     make_genome = lambda: make_seed_genome(n_chroms)     # honours SEED_MODE
     cache       = {}
-    population  = [make_genome() for _ in range(pop)]
-    fitnesses, cases = eval_batch_cases(population, target, cache)
-    bi           = max(range(pop),
-                       key=lambda i: (fitnesses[i], _tiebreak(population[i])))
-    best_genome  = copy.deepcopy(population[bi])
-    best_fitness = fitnesses[bi]
-    mut_rate     = MEAN_MUTATIONS            # annealing schedule (see MUT_DECAY)
-    for gen in range(generations):
-        mut_rate *= MUT_DECAY
-        population = next_population(population, fitnesses, make_genome, cases, mut_rate)
-        fitnesses, cases = eval_batch_cases(population, target, cache)
-        gi = max(range(pop),
-                 key=lambda i: (fitnesses[i], _tiebreak(population[i])))
-        if (fitnesses[gi] > best_fitness
-                or (fitnesses[gi] == best_fitness
-                    and _tiebreak(population[gi]) > _tiebreak(best_genome))):
-            best_fitness = fitnesses[gi]
-            best_genome  = copy.deepcopy(population[gi])
-        if verbose and gen % 10 == 0:
-            print("%5d  %6.4f  %6.4f" % (gen, best_fitness,
-                                         sum(fitnesses) / pop))
-    return best_genome, best_fitness
+    ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
+    try:
+        population  = [make_genome() for _ in range(pop)]
+        fitnesses, cases = eval_batch_cases(population, target, cache, ex)
+        bi           = max(range(pop),
+                           key=lambda i: (fitnesses[i], _tiebreak(population[i])))
+        best_genome  = clone_genome(population[bi])
+        best_fitness = fitnesses[bi]
+        mut_rate     = MEAN_MUTATIONS        # annealing schedule (see MUT_DECAY)
+        for gen in range(generations):
+            mut_rate *= MUT_DECAY
+            population = next_population(population, fitnesses, make_genome, cases, mut_rate)
+            fitnesses, cases = eval_batch_cases(population, target, cache, ex)
+            gi = max(range(pop),
+                     key=lambda i: (fitnesses[i], _tiebreak(population[i])))
+            if (fitnesses[gi] > best_fitness
+                    or (fitnesses[gi] == best_fitness
+                        and _tiebreak(population[gi]) > _tiebreak(best_genome))):
+                best_fitness = fitnesses[gi]
+                best_genome  = clone_genome(population[gi])
+            if verbose and gen % 10 == 0:
+                print("%5d  %6.4f  %6.4f" % (gen, best_fitness,
+                                             sum(fitnesses) / pop))
+        return best_genome, best_fitness
+    finally:
+        ex.shutdown()
 
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,

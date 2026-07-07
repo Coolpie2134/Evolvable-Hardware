@@ -23,6 +23,7 @@ Usage:
 """
 import sys, os, math, time, random, copy, pickle, threading, queue, dataclasses
 import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -342,24 +343,27 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
     # alpha defaults to 1.0 (no anneal); the SNN backend holds both at their
     # neutral values (stress_fn ≡ 1, no rate threading).
     stress_fn, base_mm, alpha = (lambda s: 1.0), 1.0, 1.0
+    _pool = None             # persistent worker pool (nervous/lut) reused across gens
     if backend == 'nervous':
         from nv_evo import random_hex_genome
         from nv_evo.ga import (eval_batch_cases, next_population as next_pop_nv,
                                diversify as _div, stress_multiplier,
-                               MEAN_MUTATIONS, MUT_DECAY)
+                               MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
         cache       = {}     # fitness cache shared across restarts (same target)
+        _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
         make_genome = lambda: random_hex_genome(n_chroms)
-        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache)
+        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
         step        = lambda p, fits, cv, mm: next_pop_nv(p, fits, make_genome, cv, mm)
         stress_fn, base_mm, alpha = stress_multiplier, MEAN_MUTATIONS, MUT_DECAY
         diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
     elif backend == 'lut':
         from lut_evo.ga import (eval_batch_cases, next_population as next_pop_lut,
                                 diversify as _div, make_seed_genome,
-                                MEAN_MUTATIONS, MUT_DECAY)
+                                MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
         cache       = {}
+        _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
         make_genome = lambda: make_seed_genome(n_chroms)   # honours SEED_MODE toggle
-        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache)
+        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
         step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv, mm)
         base_mm, alpha = MEAN_MUTATIONS, MUT_DECAY
         diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
@@ -373,57 +377,61 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
 
     best_fit = 0.0
     best_g   = None
-    for try_i in range(tries):
-        if stop_event.is_set():
-            break
-        if base_seed is None:
-            random.seed()                    # entropy — different every run
-        else:
-            random.seed(base_seed + try_i)
-        population = [make_genome() for _ in range(pop)]
-        fitnesses, cases = eval_batch(population)
-        bi         = max(range(pop),
-                         key=lambda i: (fitnesses[i], -size(population[i])))
-        g, f       = copy.deepcopy(population[bi]), fitnesses[bi]
-        if f > best_fit:
-            best_fit, best_g = f, copy.deepcopy(g)
-            q.put(('best', copy.deepcopy(best_g), best_fit))
-        # generation-0 point so the chart shows something even when the very
-        # first population already contains a solution
-        q.put(('gen', try_i + 1, 0, f, sum(fitnesses) / len(fitnesses)))
-        # no early stop at fitness 1.0: the run continues so the parsimony
-        # tie-break keeps shrinking a solved genome. Convergence is not forced —
-        # the population contracts only as far as selection naturally drives it.
-        stagnation = 0
-        mut_rate   = base_mm                          # annealing schedule
-        for gen in range(gens):
+    try:                                     # ensure the worker pool is released
+        for try_i in range(tries):
             if stop_event.is_set():
                 break
-            mut_rate *= alpha                         # anneal: cool down
-            mm = mut_rate * stress_fn(stagnation)     # SOS reheats plateaus
-            population = step(population, fitnesses, cases, mm)
-            fitnesses, cases = eval_batch(population)
-            gi         = max(range(pop),
-                             key=lambda i: (fitnesses[i], -size(population[i])))
-            # SOS tracks FITNESS plateaus only — a parsimony-only win updates the
-            # champion but must not reset the stress counter (see nv_evo.ga).
-            if fitnesses[gi] > f + 1e-12:
-                stagnation = 0
+            if base_seed is None:
+                random.seed()                # entropy — different every run
             else:
-                stagnation += 1
-            if (fitnesses[gi] > f
-                    or (fitnesses[gi] == f and size(population[gi]) < size(g))):
-                f = fitnesses[gi]
-                g = copy.deepcopy(population[gi])
-                if (f > best_fit
-                        or (f == best_fit and best_g is not None
-                            and size(g) < size(best_g))):
-                    best_fit, best_g = f, copy.deepcopy(g)
-                    q.put(('best', copy.deepcopy(best_g), best_fit))
-            mean_f = sum(fitnesses) / len(fitnesses)
-            q.put(('gen', try_i + 1, gen + 1, f, mean_f))
-        if best_fit >= 1.0:
-            break                            # solved after a full run: no restart
+                random.seed(base_seed + try_i)
+            population = [make_genome() for _ in range(pop)]
+            fitnesses, cases = eval_batch(population)
+            bi         = max(range(pop),
+                             key=lambda i: (fitnesses[i], -size(population[i])))
+            g, f       = copy.deepcopy(population[bi]), fitnesses[bi]
+            if f > best_fit:
+                best_fit, best_g = f, copy.deepcopy(g)
+                q.put(('best', copy.deepcopy(best_g), best_fit))
+            # generation-0 point so the chart shows something even when the very
+            # first population already contains a solution
+            q.put(('gen', try_i + 1, 0, f, sum(fitnesses) / len(fitnesses)))
+            # no early stop at fitness 1.0: the run continues so the parsimony
+            # tie-break keeps shrinking a solved genome. Convergence is not forced —
+            # the population contracts only as far as selection naturally drives it.
+            stagnation = 0
+            mut_rate   = base_mm                          # annealing schedule
+            for gen in range(gens):
+                if stop_event.is_set():
+                    break
+                mut_rate *= alpha                         # anneal: cool down
+                mm = mut_rate * stress_fn(stagnation)     # SOS reheats plateaus
+                population = step(population, fitnesses, cases, mm)
+                fitnesses, cases = eval_batch(population)
+                gi         = max(range(pop),
+                                 key=lambda i: (fitnesses[i], -size(population[i])))
+                # SOS tracks FITNESS plateaus only — a parsimony-only win updates the
+                # champion but must not reset the stress counter (see nv_evo.ga).
+                if fitnesses[gi] > f + 1e-12:
+                    stagnation = 0
+                else:
+                    stagnation += 1
+                if (fitnesses[gi] > f
+                        or (fitnesses[gi] == f and size(population[gi]) < size(g))):
+                    f = fitnesses[gi]
+                    g = copy.deepcopy(population[gi])
+                    if (f > best_fit
+                            or (f == best_fit and best_g is not None
+                                and size(g) < size(best_g))):
+                        best_fit, best_g = f, copy.deepcopy(g)
+                        q.put(('best', copy.deepcopy(best_g), best_fit))
+                mean_f = sum(fitnesses) / len(fitnesses)
+                q.put(('gen', try_i + 1, gen + 1, f, mean_f))
+            if best_fit >= 1.0:
+                break                        # solved after a full run: no restart
+    finally:
+        if _pool is not None:
+            _pool.shutdown()                 # released even if evaluation errors
 
     # Diversification: rather than a monoculture of the champion, spread across
     # the neutral network to build a whole generation of DISTINCT valid solvers

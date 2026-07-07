@@ -52,11 +52,12 @@ def _lookup_nv(genome, sL, sR, sD, si):
     telomere now gates DIVISION per cell in _grow_step, not which genes exist."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
         return 0
-    best_gene, best_dist = None, 1 << 30
-    for chrom in genome.chromosomes:
-        for gene in chrom.genes:
-            d = (_h4(gene.ctx_l, sL) + _h4(gene.ctx_r, sR) +
-                 _h4(gene.ctx_d, sD) + _h4(gene.self_in, si))
+    pc = _PC4                      # local ref + inlined popcount: this loop ran
+    best_gene, best_dist = None, 1 << 30   # ~3.4M times/200 evals — the _h4 call
+    for chrom in genome.chromosomes:       # overhead was ~15% of eval (sim6 did
+        for gene in chrom.genes:           # the same inlining in table_lookup).
+            d = (pc[(gene.ctx_l ^ sL) & 0xF] + pc[(gene.ctx_r ^ sR) & 0xF] +
+                 pc[(gene.ctx_d ^ sD) & 0xF] + pc[(gene.self_in ^ si) & 0xF])
             if d < best_dist:
                 best_dist, best_gene = d, gene
     if best_gene is None:

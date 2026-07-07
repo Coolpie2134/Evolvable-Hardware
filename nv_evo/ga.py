@@ -55,8 +55,23 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 from .genome import (MAX_STATE, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
+                     Genome, Chromosome,
                      random_hex_gene, random_hex_chromosome, random_hex_genome)
 from .nervous import score_nervous
+
+
+def clone_genome(genome):
+    """Fast structural copy: new Genome/Chromosome objects with fresh gene LISTS
+    but SHARED gene objects. Safe because genes are never mutated in place —
+    mutation always builds a new gene via _tweak_gene — so sharing the (immutable)
+    gene objects is equivalent to deep-copying them. copy.deepcopy dominated
+    reproduction (~90% of next_population's time); this replaces it on the hot
+    path with an identical-behaviour, ~10x cheaper copy."""
+    return Genome(
+        chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
+                                telomere=getattr(c, 'telomere', MAX_TELOMERE))
+                     for c in genome.chromosomes],
+        tag=genome.tag)
 from .temporal import prepare_net, windowed_score, loop_profile
 
 POPSIZE        = 120
@@ -132,9 +147,13 @@ def genome_signature(genome):
         for c in genome.chromosomes)
 
 
-def eval_batch_cases(genomes, target, cache=None):
+def eval_batch_cases(genomes, target, cache=None, executor=None):
     """Evaluate a population in parallel -> (fitnesses, case_vectors). `cache`
-    ({signature: (fit, cases)}, owned by the caller) skips seen genomes."""
+    ({signature: (fit, cases)}, owned by the caller) skips seen genomes. If a
+    persistent `executor` (a ProcessPoolExecutor) is passed, it is reused instead
+    of spawning a fresh worker pool every call — on Windows the per-generation
+    spawn+re-import dominated runtime, so reuse is a large speed-up. Omitting it
+    keeps the original one-shot-pool behaviour."""
     out  = [None] * len(genomes)
     todo = list(range(len(genomes)))
     if cache is not None and len(cache) > FITNESS_CACHE_MAX:
@@ -147,8 +166,12 @@ def eval_batch_cases(genomes, target, cache=None):
                 out[i] = cache[sigs[i]]
     if todo:
         fn = partial(evaluate_nv_full, target=target)
-        with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-            results = list(ex.map(fn, [genomes[i] for i in todo]))
+        subset = [genomes[i] for i in todo]
+        if executor is not None:
+            results = list(executor.map(fn, subset))
+        else:
+            with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+                results = list(ex.map(fn, subset))
         for i, r in zip(todo, results):
             out[i] = r
             if cache is not None:
@@ -189,7 +212,7 @@ _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 
 
 def mutate_nv(genome, mean_mutations=None):
-    g = copy.deepcopy(genome)
+    g = clone_genome(genome)
     lam = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
     for _ in range(_poisson(lam)):
         if not g.chromosomes:
@@ -229,7 +252,7 @@ mutate_hex = mutate_nv
 
 def crossover_nv(pa, pb):
     """Tag-matched single-point crossover (same scheme as the SNN GA)."""
-    ca, cb = copy.deepcopy(pa), copy.deepcopy(pb)
+    ca, cb = clone_genome(pa), clone_genome(pb)
     used_b = set()
     for i, chrom_a in enumerate(ca.chromosomes):
         best_j, best_dist = None, float("inf")
@@ -353,7 +376,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]),
                      reverse=True)
-    new_pop = [copy.deepcopy(population[i]) for i in order[:n_elite]]
+    new_pop = [clone_genome(population[i]) for i in order[:n_elite]]
     new_pop += [make_genome() for _ in range(min(n_imm, pop - len(new_pop)))]
     parent = lambda: select_parent(population, fitnesses, case_vecs)
     while len(new_pop) < pop:
@@ -369,49 +392,53 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
     make_genome = lambda: random_hex_genome(n_chroms)
     cache       = {}
-    population  = [make_genome() for _ in range(pop)]
-    fitnesses, cases = eval_batch_cases(population, target, cache)
-    bi           = max(range(pop),
-                       key=lambda i: rank_key(population[i], fitnesses[i]))
-    best_genome  = copy.deepcopy(population[bi])
-    best_fitness = fitnesses[bi]
-    best_rank    = rank_key(best_genome, best_fitness)
+    ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
+    try:                                                       # (avoids per-gen respawn)
+        population  = [make_genome() for _ in range(pop)]
+        fitnesses, cases = eval_batch_cases(population, target, cache, ex)
+        bi           = max(range(pop),
+                           key=lambda i: rank_key(population[i], fitnesses[i]))
+        best_genome  = clone_genome(population[bi])
+        best_fitness = fitnesses[bi]
+        best_rank    = rank_key(best_genome, best_fitness)
 
-    solved_at, stagnation = None, 0
-    mut_rate = MEAN_MUTATIONS               # annealing schedule (see MUT_DECAY)
-    if verbose:
-        print("%5s  %6s  %6s  %5s" % ("Gen", "Best", "Mean", "Mut"))
-        print("-" * 30)
-    # NO early stop at best == 1.0: the run continues so the parsimony tie-break
-    # keeps shrinking a solved genome. Convergence is not forced — the population
-    # contracts only as far as selection naturally drives it (see next_population).
-    for gen in range(generations):
-        mut_rate *= MUT_DECAY                                  # anneal: cool down
-        mm = mut_rate * stress_multiplier(stagnation)          # SOS reheats plateaus
-        population = next_population(population, fitnesses, make_genome, cases, mm)
-        fitnesses, cases = eval_batch_cases(population, target, cache)
-        gi = max(range(pop),
-                 key=lambda i: rank_key(population[i], fitnesses[i]))
-        gen_rank = rank_key(population[gi], fitnesses[gi])
-        # SOS tracks FITNESS plateaus only: a parsimony-only win (same fitness,
-        # leaner body) still updates the champion but must NOT reset the stress
-        # counter, or the ever-shrinking tie-break would keep it pinned at 1.0.
-        if fitnesses[gi] > best_fitness + 1e-12:
-            stagnation = 0
-        else:
-            stagnation += 1
-        if gen_rank > best_rank:
-            best_rank    = gen_rank
-            best_fitness = fitnesses[gi]
-            best_genome  = copy.deepcopy(population[gi])
-        if solved_at is None and best_fitness >= 1.0:
-            solved_at = gen
-            if verbose:
-                print("Solved at generation %d." % gen)
-        if verbose and gen % 10 == 0:
-            print("%5d  %6.4f  %6.4f  %5.3f" % (gen, best_fitness,
-                                                sum(fitnesses) / pop, mm))
-    return best_genome, best_fitness
+        solved_at, stagnation = None, 0
+        mut_rate = MEAN_MUTATIONS           # annealing schedule (see MUT_DECAY)
+        if verbose:
+            print("%5s  %6s  %6s  %5s" % ("Gen", "Best", "Mean", "Mut"))
+            print("-" * 30)
+        # NO early stop at best == 1.0: the run continues so the parsimony tie-break
+        # keeps shrinking a solved genome. Convergence is not forced — the population
+        # contracts only as far as selection naturally drives it (see next_population).
+        for gen in range(generations):
+            mut_rate *= MUT_DECAY                                  # anneal: cool down
+            mm = mut_rate * stress_multiplier(stagnation)          # SOS reheats plateaus
+            population = next_population(population, fitnesses, make_genome, cases, mm)
+            fitnesses, cases = eval_batch_cases(population, target, cache, ex)
+            gi = max(range(pop),
+                     key=lambda i: rank_key(population[i], fitnesses[i]))
+            gen_rank = rank_key(population[gi], fitnesses[gi])
+            # SOS tracks FITNESS plateaus only: a parsimony-only win (same fitness,
+            # leaner body) still updates the champion but must NOT reset the stress
+            # counter, or the ever-shrinking tie-break would keep it pinned at 1.0.
+            if fitnesses[gi] > best_fitness + 1e-12:
+                stagnation = 0
+            else:
+                stagnation += 1
+            if gen_rank > best_rank:
+                best_rank    = gen_rank
+                best_fitness = fitnesses[gi]
+                best_genome  = clone_genome(population[gi])
+            if solved_at is None and best_fitness >= 1.0:
+                solved_at = gen
+                if verbose:
+                    print("Solved at generation %d." % gen)
+            if verbose and gen % 10 == 0:
+                print("%5d  %6.4f  %6.4f  %5.3f" % (gen, best_fitness,
+                                                    sum(fitnesses) / pop, mm))
+        return best_genome, best_fitness
+    finally:
+        ex.shutdown()
 
 
 # ── diversification: a whole generation of DISTINCT valid solutions ──────────────
