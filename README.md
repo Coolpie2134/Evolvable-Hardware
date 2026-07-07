@@ -64,8 +64,9 @@ In the GUI: pick a **Model** (SNN / Nervous / LUT) and a **Target** from the dro
 (or click **Custom…** to enter your own truth table), set Pop / Gens / Tries plus the
 GA tuning row — **Mutations/child**, **Anneal α** (α < 1 cools the mutation rate
 each generation for a hot-start simulated-annealing schedule; α = 1 is off),
-immigrants, tournament size and **Elites** (exact number of top genomes copied
-unchanged into the next generation) — and click **Run**. The fitness chart plots
+immigrants, tournament size and **Elites** (size of the elite *breeding pool* — the
+top N genomes are the recombination parents for the next generation but are **not**
+copied over verbatim; 0 = breed from the whole population) — and click **Run**. The fitness chart plots
 three lines: all-time best (monotonic), the best of the current generation (dips
 at each restart when Tries > 1), and the population mean. Defaults are a single long run
 (Gens 500, Tries 1) with a hot-start anneal (Mutations 4.0, α 0.99) so slow, steady

@@ -708,7 +708,9 @@ class App:
         self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4)
         self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4)
         self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3)
-        # exact number of top genomes copied unchanged into the next generation
+        # size of the elite breeding pool: the top N genomes are the recombination
+        # parents for the next generation (they are NOT copied over verbatim). 0 =
+        # select parents from the whole population.
         self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3)
         # simulated-annealing decay: mutation rate *= α each generation (1 = off)
         self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6)

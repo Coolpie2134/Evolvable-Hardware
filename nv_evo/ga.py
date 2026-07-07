@@ -376,14 +376,25 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     if make_genome is None:
         make_genome = random_hex_genome
     n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
-    n_elite = max(0, min(n_elite, pop))      # 0 = no elitism, up to the whole pop
+    n_elite = max(0, min(n_elite, pop))
     n_imm   = int(round(pop * IMMIGRANT_FRAC))
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]),
                      reverse=True)
-    new_pop = [clone_genome(population[i]) for i in order[:n_elite]]
-    new_pop += [make_genome() for _ in range(min(n_imm, pop - len(new_pop)))]
-    parent = lambda: select_parent(population, fitnesses, case_vecs)
+    # Elites are the RECOMBINATION PARENT POOL (truncation selection): the top
+    # n_elite genomes breed the next generation but are NOT copied into it verbatim
+    # — no elitist survival, so the population's best can regress (the run's champion
+    # is tracked separately, so the final answer is never lost). Parents are drawn by
+    # tournament WITHIN that pool (TOURNAMENT_K=1 → uniform among elites). n_elite==0
+    # falls back to normal selection over the whole population.
+    new_pop = [make_genome() for _ in range(min(n_imm, pop))]      # random immigrants
+    if n_elite > 0:
+        elite = order[:n_elite]
+        k = min(TOURNAMENT_K, len(elite))
+        parent = lambda: population[max(random.sample(elite, k),
+                                        key=lambda i: rank_key(population[i], fitnesses[i]))]
+    else:
+        parent = lambda: select_parent(population, fitnesses, case_vecs)
     while len(new_pop) < pop:
         ca, cb = crossover_nv(parent(), parent())
         new_pop.append(mutate_nv(ca, mean_mutations))
