@@ -62,12 +62,17 @@ python app.py        # launch the GUI
 
 In the GUI: pick a **Model** (SNN / Nervous / LUT) and a **Target** from the dropdown
 (or click **Custom…** to enter your own truth table), set Pop / Gens / Tries plus the
-GA tuning row — **Mutations/child** and **Anneal α** (α < 1 cools the mutation rate
+GA tuning row — **Mutations/child**, **Anneal α** (α < 1 cools the mutation rate
 each generation for a hot-start simulated-annealing schedule; α = 1 is off),
-immigrants and tournament size — and click **Run**. Defaults are a single long run
+immigrants, tournament size and **Elites** (exact number of top genomes copied
+unchanged into the next generation) — and click **Run**. The fitness chart plots
+three lines: all-time best (monotonic), the best of the current generation (dips
+at each restart when Tries > 1), and the population mean. Defaults are a single long run
 (Gens 500, Tries 1) with a hot-start anneal (Mutations 4.0, α 0.99) so slow, steady
 progress is visible. Growth is self-limiting via the telomere, so there are no
-grid-size or iteration controls. Use **Load Saved** to reload `results/best_genome.pkl`
+grid-size or iteration controls; **Max telomere** caps how large organisms may
+grow (a chromosome's telomere is its growth *radius*, and eval cost ≈ radius²) —
+lower it (e.g. 8–10) to keep runs fast, or raise it to allow bigger nets. Use **Load Saved** to reload `results/best_genome.pkl`
 and **Save PNGs** to export the growth and voltage figures.
 
 Tick **Graded** for harder targets (adders, large custom tables): instead of a binary

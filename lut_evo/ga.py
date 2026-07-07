@@ -30,7 +30,8 @@ def clone_genome(genome):
         tag=genome.tag)
 
 POPSIZE        = 120
-ELITE_FRAC     = 0.10
+ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT set
+ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELITE_FRAC
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
 MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see nv_evo.ga)
@@ -462,7 +463,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     pop = len(population)
     if make_genome is None:
         make_genome = make_seed_genome
-    n_elite = max(1, int(pop * ELITE_FRAC))
+    n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
+    n_elite = max(0, min(n_elite, pop))      # 0 = no elitism, up to the whole pop
     n_imm   = int(round(pop * IMMIGRANT_FRAC))
     order   = sorted(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])),

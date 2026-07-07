@@ -55,7 +55,7 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 from .genome import (MAX_STATE, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
-                     Genome, Chromosome,
+                     Genome, Chromosome, germline_telomere,
                      random_hex_gene, random_hex_chromosome, random_hex_genome)
 from .nervous import score_nervous
 
@@ -75,7 +75,8 @@ def clone_genome(genome):
 from .temporal import prepare_net, windowed_score, loop_profile
 
 POPSIZE        = 120
-ELITE_FRAC     = 0.10
+ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT set
+ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELITE_FRAC
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
 MEAN_MUTATIONS = 4.0         # HOT-START mutation rate for simulated annealing:
@@ -285,11 +286,14 @@ def total_telomere(genome):
 def rank_key(genome, fitness):
     """Selection / ranking key (maximise). Fitness dominates absolutely; ties
     break toward a cheaper organism — SENESCENCE / METABOLIC COST: fewer genes
-    first (the paper's parsimony pressure), then a shorter total telomere, so a
-    genome that solves the task with a SMALLER, self-limiting body out-competes an
-    equally-fit bloated one. Both tie-breaks leave the fitness value itself
-    untouched, so a solved run still reads exactly 1.0 while complexity shrinks."""
-    return (fitness, -n_genes(genome), -total_telomere(genome))
+    first (the paper's parsimony pressure), then a shorter GERMLINE telomere (the
+    organism's growth RADIUS = its real body-size cost). Using the germline (max)
+    telomere, not the SUM over chromosomes, is deliberate: the sum penalises
+    chromosome COUNT — it collapsed multi-chromosome genomes to 1 even when each
+    chromosome was small — whereas the germline reflects actual organism size and
+    leaves chromosome count to gene-parsimony alone. Neither tie-break distorts
+    the fitness value, so a solved run still reads exactly 1.0."""
+    return (fitness, -n_genes(genome), -germline_telomere(genome))
 
 
 def tournament_nv(population, fitnesses):
@@ -371,7 +375,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     pop = len(population)
     if make_genome is None:
         make_genome = random_hex_genome
-    n_elite = max(1, int(pop * ELITE_FRAC))
+    n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
+    n_elite = max(0, min(n_elite, pop))      # 0 = no elitism, up to the whole pop
     n_imm   = int(round(pop * IMMIGRANT_FRAC))
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]),

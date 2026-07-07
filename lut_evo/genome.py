@@ -74,7 +74,7 @@ def random_lut_chromosome(n_genes=None) -> Chromosome:
         genes = [random_lut_gene() for _ in range(n_genes)],
         split = random.randint(1, max(1, n_genes - 1)),
         tag   = random.randint(0, 999),
-        telomere = random.randint(2, 5),
+        telomere = random.randint(2, min(5, MAX_TELOMERE)),
     )
 
 

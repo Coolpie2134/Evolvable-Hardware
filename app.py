@@ -394,8 +394,10 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
                 best_fit, best_g = f, copy.deepcopy(g)
                 q.put(('best', copy.deepcopy(best_g), best_fit))
             # generation-0 point so the chart shows something even when the very
-            # first population already contains a solution
-            q.put(('gen', try_i + 1, 0, f, sum(fitnesses) / len(fitnesses)))
+            # first population already contains a solution. Chart lines: best_fit =
+            # all-time best (monotonic, never drops even across restarts); f = this
+            # generation's population best (dips at each restart).
+            q.put(('gen', try_i + 1, 0, best_fit, sum(fitnesses) / len(fitnesses), f))
             # no early stop at fitness 1.0: the run continues so the parsimony
             # tie-break keeps shrinking a solved genome. Convergence is not forced —
             # the population contracts only as far as selection naturally drives it.
@@ -426,7 +428,10 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
                         best_fit, best_g = f, copy.deepcopy(g)
                         q.put(('best', copy.deepcopy(best_g), best_fit))
                 mean_f = sum(fitnesses) / len(fitnesses)
-                q.put(('gen', try_i + 1, gen + 1, f, mean_f))
+                gen_best = fitnesses[gi]                 # best in THIS generation
+                # blue = all-time best (best_fit, monotonic); green = this gen (dips
+                # at restarts); within a single try these coincide (strict elitism).
+                q.put(('gen', try_i + 1, gen + 1, best_fit, mean_f, gen_best))
             if best_fit >= 1.0:
                 break                        # solved after a full run: no restart
     finally:
@@ -669,6 +674,12 @@ class App:
         self._layout_frame.pack(side='left')
         ttk.Label(self._layout_frame, text='Genome:').pack(side='left', padx=(2, 0))
         self._chroms_var = aentry(self._layout_frame, 'Chroms:', 2, width=4)
+        # Telomere ceiling: caps how far a chromosome's telomere — the organism's
+        # growth RADIUS — may drift via mutation (and bounds fresh-genome init).
+        # Eval cost tracks cell count ~ radius^2, so this is the lever for run
+        # speed vs how big nets may grow. Lower it (e.g. 8-10) to keep runs fast;
+        # the default 20 allows large organisms.
+        self._maxtel_var = aentry(self._layout_frame, 'Max telomere:', 20, width=4)
         # LUT only: seed the population with dense sim6-style ontogeny genomes
         # (rich morphology) and drop parsimony so they aren't pruned back to
         # sparse. Much slower, and measured to solve WORSE than random — an
@@ -687,7 +698,7 @@ class App:
         from nv_evo.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
                                TOURNAMENT_K as _TK, MUT_DECAY as _AL)
         from nv_evo.pulse import DELAY as _D, WIDTH as _W, COINC as _C
-        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL,
+        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL, elite=5,
                                    delay=_D, width=_W, coinc=_C)
         ctrl3 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl3.pack(fill='x', side='top')
@@ -697,6 +708,8 @@ class App:
         self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4)
         self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4)
         self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3)
+        # exact number of top genomes copied unchanged into the next generation
+        self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3)
         # simulated-annealing decay: mutation rate *= α each generation (1 = off)
         self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6)
         ttk.Separator(ctrl3, orient='vertical').pack(side='left', fill='y', padx=8)
@@ -802,7 +815,9 @@ class App:
         self._fit_ax.set_xlim(0, 10)
         self._fit_ax.set_title('Fitness vs Generation', fontsize=10)
         self._fit_ax.grid(True, alpha=0.3)
-        self._best_line, = self._fit_ax.plot([], [], 'b-',  lw=1.5, label='Best')
+        self._best_line, = self._fit_ax.plot([], [], 'b-',  lw=1.5, label='Best (all-time)')
+        self._genbest_line, = self._fit_ax.plot([], [], color='#1ea64a', lw=1.0,
+                                                label='Best (this gen)', alpha=0.85)
         self._mean_line, = self._fit_ax.plot([], [], 'r--', lw=1.0, label='Mean', alpha=0.7)
         self._fit_ax.legend(fontsize=8)
         self._fit_fig.tight_layout()
@@ -933,6 +948,7 @@ class App:
         d = self._tune_defaults
         self._mut_var.set(str(d['mut']));   self._imm_var.set(str(d['imm']))
         self._tourn_var.set(str(d['tk']));  self._alpha_var.set(str(d['alpha']))
+        self._elite_var.set(str(d['elite']))
         self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
 
@@ -943,23 +959,31 @@ class App:
         try:
             mut = float(self._mut_var.get()); imm = float(self._imm_var.get())
             tk_ = int(self._tourn_var.get()); alpha = float(self._alpha_var.get())
+            elite = int(self._elite_var.get())
+            maxtel = int(self._maxtel_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coinc = float(self._coinc_var.get())
             if (mut < 0 or not (0 <= imm < 1) or tk_ < 1 or not (0 < alpha <= 1)
-                    or delay <= 0 or width <= 0 or coinc < 0):
+                    or elite < 0 or maxtel < 2 or delay <= 0 or width <= 0 or coinc < 0):
                 raise ValueError
         except ValueError:
             return False
         import nv_evo.ga as nga, lut_evo.ga as lga, nv_evo.pulse as npulse
+        import nv_evo.genome as nvg, lut_evo.genome as lvg
         for mod in (nga, lga):
             mod.MEAN_MUTATIONS = mut
             mod.IMMIGRANT_FRAC = imm
             mod.TOURNAMENT_K   = tk_
             mod.MUT_DECAY      = alpha
+            mod.ELITE_COUNT    = elite      # exact # of elites carried forward
         # LUT ontogeny-seed toggle: dense biomorph seeds + no parsimony pruning
         onto = bool(self._ontogeny_var.get())
         lga.SEED_MODE = 'ontogeny' if onto else 'random'
         lga.PARSIMONY = not onto
+        # telomere ceiling — caps organism radius. Set on the genome modules
+        # (fresh-genome init) AND the ga modules (telomere mutation); all
+        # main-process (no env needed — growth workers just grow the stored value).
+        nvg.MAX_TELOMERE = lvg.MAX_TELOMERE = nga.MAX_TELOMERE = lga.MAX_TELOMERE = maxtel
         npulse.DELAY, npulse.WIDTH, npulse.COINC = delay, width, coinc
         os.environ['NV_DELAY'] = str(delay)
         os.environ['NV_WIDTH'] = str(width)
@@ -1008,6 +1032,7 @@ class App:
         self._cur_var.set(str(self.target.high))
         self._chroms_var.set('2')
         self._ontogeny_var.set(False)
+        self._maxtel_var.set('20')
 
     def _open_custom(self):
         CustomTargetDialog(self.root, self._on_custom_built)
@@ -1061,7 +1086,8 @@ class App:
 
         if not self._apply_tuning():
             self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
-                             'Tournament>=1, 0<α<=1, Delay/Width>0, Coinc>=0.')
+                             'Tournament>=1, Elites>=0, 0<α<=1, Max telomere>=2, '
+                             'Delay/Width>0, Coinc>=0.')
             return
 
         backend = self._backend()
@@ -1079,6 +1105,7 @@ class App:
         self._n_unique_solvers = 0
         self._best_line.set_data([], [])
         self._mean_line.set_data([], [])
+        self._genbest_line.set_data([], [])
         self._fit_ax.set_xlim(0, max(gens * tries, 10) + 1)
         self._fit_ax.set_title('Fitness vs Generation — %s' % self.target.name, fontsize=10)
         self._fit_canvas.draw_idle()
@@ -1164,6 +1191,7 @@ class App:
             pts = hist
         self._best_line.set_data([d[0] for d in pts], [d[1] for d in pts])
         self._mean_line.set_data([d[0] for d in pts], [d[2] for d in pts])
+        self._genbest_line.set_data([d[0] for d in pts], [d[3] for d in pts])
         self._fit_ax.set_xlim(0, hist[-1][0] + 1)
         self._fit_canvas.draw_idle()
 
@@ -1174,9 +1202,9 @@ class App:
                 msg  = self.q.get_nowait()
                 kind = msg[0]
                 if kind == 'gen':
-                    _, try_n, gen, best_f, mean_f = msg
+                    _, try_n, gen, best_f, mean_f, gen_best = msg
                     self._abs_gen += 1
-                    self._gen_history.append((self._abs_gen, best_f, mean_f))
+                    self._gen_history.append((self._abs_gen, best_f, mean_f, gen_best))
                     last_gen = (try_n, gen, best_f, mean_f)
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
