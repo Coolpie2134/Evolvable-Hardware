@@ -388,7 +388,11 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     # tournament WITHIN that pool (TOURNAMENT_K=1 → uniform among elites). n_elite==0
     # falls back to normal selection over the whole population.
     new_pop = [make_genome() for _ in range(min(n_imm, pop))]      # random immigrants
-    if n_elite > 0:
+    # ε-lexicase (when selected) must stream over the WHOLE population; the elite-only
+    # breeding pool would otherwise mask it whenever elites>0, so bypass the pool then.
+    use_lexicase = (SELECTION == 'lexicase' and case_vecs is not None
+                    and case_vecs[0] is not None)
+    if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
         k = min(TOURNAMENT_K, len(elite))
         parent = lambda: population[max(random.sample(elite, k),
@@ -460,7 +464,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
 # ── diversification: a whole generation of DISTINCT valid solutions ──────────────
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
-              cache=None):
+              cache=None, executor=None):
     """Fill a population with genomes that are BOTH valid (fitness >= `valid`)
     AND genotypically unique (no two share a genome_signature). Starting from the
     valid `seeds`, it walks the NEUTRAL NETWORK — neutral mutation produces a
@@ -476,8 +480,9 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
         cache = {}
     if batch is None:
         batch = max(48, pop_size)
+    _eval = lambda gs: eval_batch_cases(gs, target, cache, executor)[0]   # reuse pool
     pool, seen = [], set()
-    for g, f in zip(seeds, eval_batch_nv(list(seeds), target, cache)):
+    for g, f in zip(seeds, _eval(list(seeds))):
         s = genome_signature(g)
         if f >= valid and s not in seen:
             pool.append(g); seen.add(s)
@@ -493,7 +498,7 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
             if s not in seen:                 # reject clones/known genotypes
                 seen.add(s)                   # (invalid ones stay flagged: no re-eval)
                 cands.append(c); sigs.append(s)
-        for c, f in zip(cands, eval_batch_nv(cands, target, cache)):
+        for c, f in zip(cands, _eval(cands)):
             if f >= valid and len(pool) < pop_size:
                 pool.append(c)
     return pool[:pop_size]

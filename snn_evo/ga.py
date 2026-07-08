@@ -30,10 +30,16 @@ def evaluate_genome(genome, target=None, arch=None):
     neurons, synapses = interpret_grid(grid, target=target, arch=arch)
     return score(neurons, synapses, target)
 
-def _eval_batch(genomes, target=None, arch=None):
+def _eval_batch(genomes, target=None, arch=None, executor=None):
+    """Evaluate a population -> list of fitnesses. A persistent `executor`
+    (ProcessPoolExecutor) is reused instead of spawning a fresh pool every call —
+    on Windows the per-generation spawn+re-import dominated runtime, so reuse is a
+    large speed-up (matches nv_evo/lut_evo). Omitting it keeps the one-shot pool."""
     fn = partial(evaluate_genome, target=target, arch=arch)
+    if executor is not None:
+        return list(executor.map(fn, genomes))
     with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-        return [f.result() for f in [ex.submit(fn, g) for g in genomes]]
+        return list(ex.map(fn, genomes))
 
 # ── genetic operators ──────────────────────────────────────────────
 

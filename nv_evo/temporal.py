@@ -359,13 +359,20 @@ def temporal_report(ttarget, genome=None):
               '(trace-matched),' % (ttarget.n_inputs,
                                     '' if ttarget.n_inputs == 1 else 's',
                                     '/'.join(t.role for t in ttarget.outputs)),
-              '%d ticks per trial, %d trials. \'.\' = unscored tick; a stored-1'
+              "%d ticks per trial, %d trials. '.' = unscored tick."
               % (ttarget.T, len(ttarget.trials)),
-              'hold counts if the cell keeps ringing (phase-tolerant). Scoring is',
-              'precision/recall (F1) of the output HIGHS only: recall = expected',
-              '1s the output hits (a do-nothing output scores 0), precision = of',
-              'its own pulses, the fraction that belong (always-high scores low).',
-              '(The "exact per-tick" number below is a plain diagnostic.)']
+              '',
+              'WHY a 1111 hold is satisfied by 1010: a node is refractory for',
+              'DELAY+WIDTH after each firing, so NO wire can stay high — max duty',
+              'is 50%. A stored 1 is a pulse circulating a loop, read as ringing',
+              '(1010...) at any one cell. The F1 metric below (the SAME one the GA',
+              'optimises) therefore counts an expected 1 as hit if the cell fires',
+              'on it or an adjacent tick (±1 ring tolerance), while every pulse',
+              'landing on an expected-0 tick costs precision exactly:',
+              '    highs hit  — expected 1s the output reaches (misses cost)',
+              '    pulses ok  — its own pulses that belong (extras cost)',
+              '(The "exact per-tick" number at the bottom ignores ring tolerance;',
+              'a perfect circulating-pulse latch reads ~0.75 there by physics.)']
 
     prep = traces = None
     if genome is not None:
@@ -390,12 +397,19 @@ def temporal_report(ttarget, genome=None):
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []
-                lines.append('  actual %s (score %.3f)' % (
-                    ''.join(str(v) for v in tr_i), _role_trace_score(tr_i, exp)))
+                # show the SELECTION metric (F1) with its components, not the old
+                # 'balanced' diagnostic — that one under-counted spurious pulses
+                # and made failing trials read deceptively high.
+                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp)
+                s = _f1(tp_rec, n_exp, tp_prec, n_act)
+                lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
+                             % (''.join(str(v) for v in tr_i), s,
+                                'PASS' if s >= 0.999 else 'FAIL',
+                                tp_rec, n_exp, tp_prec, n_act))
     if traces is not None:
+        total = windowed_score(traces, ttarget)
         lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
-                  % (windowed_score(traces, ttarget),
-                     '   SOLVED' if windowed_score(traces, ttarget) >= 0.999 else '',
+                  % (total, '   SOLVED' if total >= 0.999 else '',
                      exact_tick_accuracy(traces, ttarget))]
     else:
         lines += ['', '(run the GA or Load Saved to see the evolved traces here;',

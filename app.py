@@ -54,6 +54,7 @@ from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
+from designer import DesignerTab
 import ui_compat
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
@@ -355,21 +356,25 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
         eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
         step        = lambda p, fits, cv, mm: next_pop_nv(p, fits, make_genome, cv, mm)
         stress_fn, base_mm, alpha = stress_multiplier, MEAN_MUTATIONS, MUT_DECAY
-        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
+        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid,
+                                                 cache=cache, executor=_pool)
     elif backend == 'lut':
         from lut_evo.ga import (eval_batch_cases, next_population as next_pop_lut,
                                 diversify as _div, make_seed_genome,
                                 MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
         cache       = {}
         _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
-        make_genome = lambda: make_seed_genome(n_chroms)   # honours SEED_MODE toggle
+        make_genome = lambda: make_seed_genome(n_chroms)   # ontogeny biomorph seeds
         eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
         step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv, mm)
         base_mm, alpha = MEAN_MUTATIONS, MUT_DECAY
-        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid, cache=cache)
+        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid,
+                                                 cache=cache, executor=_pool)
     else:
+        from snn_evo.ga import N_WORKERS as _SNN_WORKERS
+        _pool       = ProcessPoolExecutor(max_workers=_SNN_WORKERS)   # reuse (no per-gen respawn)
         make_genome = lambda: random_genome(n_chroms)
-        eval_batch  = lambda genomes: (_eval_batch(genomes, target, arch), None)
+        eval_batch  = lambda genomes: (_eval_batch(genomes, target, arch, _pool), None)
         step        = lambda p, fits, cv, mm: next_population(p, fits)
 
     def size(genome):
@@ -377,7 +382,9 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
 
     best_fit = 0.0
     best_g   = None
-    try:                                     # ensure the worker pool is released
+    population, fitnesses = [], []            # referenced by diversify if a restart
+                                             # is interrupted before its own loop runs
+    try:
         for try_i in range(tries):
             if stop_event.is_set():
                 break
@@ -429,35 +436,41 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
                         q.put(('best', copy.deepcopy(best_g), best_fit))
                 mean_f = sum(fitnesses) / len(fitnesses)
                 gen_best = fitnesses[gi]                 # best in THIS generation
-                # blue = all-time best (best_fit, monotonic); green = this gen (dips
-                # at restarts); within a single try these coincide (strict elitism).
+                # blue = all-time best (best_fit, monotonic); green = this gen's
+                # population best, which can dip below blue mid-run: elites breed the
+                # next generation but are NOT copied verbatim, so the population's
+                # best regresses between improvements (and at each restart).
                 q.put(('gen', try_i + 1, gen + 1, best_fit, mean_f, gen_best))
             if best_fit >= 1.0:
                 break                        # solved after a full run: no restart
+
+        # Diversification: rather than a monoculture of the champion, spread across
+        # the neutral network to build a whole generation of DISTINCT valid solvers
+        # (each genotypically unique, each still solving). The count is honest — it
+        # returns as many unique solvers as the target's neutral network admits.
+        # The worker pool is still alive here, so diversify reuses it too.
+        n_unique = 0
+        if diversify_fn is not None and best_g is not None and best_fit > 0 and not stop_event.is_set():
+            valid = 1.0 if best_fit >= 0.999 else max(0.0, best_fit - 1e-6)
+            try:
+                seeds = [gg for gg, ff in zip(population, fitnesses) if ff >= valid] or [best_g]
+                pool  = diversify_fn(seeds, valid)
+                n_unique = len(pool)
+                if pool:
+                    with open(os.path.join(RESULTS_DIR, 'solver_generation.pkl'), 'wb') as fp:
+                        pickle.dump({'genomes': pool, 'target': target,
+                                     'backend': backend, 'valid': valid}, fp)
+                    q.put(('diverse', n_unique, valid))
+            except Exception:
+                pass
+    except Exception:                        # any backend/eval failure: surface it
+        import traceback                      # instead of wedging the GUI with the
+        q.put(('error', traceback.format_exc(limit=3)))   # controls disabled forever
     finally:
         if _pool is not None:
             _pool.shutdown()                 # released even if evaluation errors
-
-    # Diversification: rather than a monoculture of the champion, spread across
-    # the neutral network to build a whole generation of DISTINCT valid solvers
-    # (each genotypically unique, each still solving). The count is honest — it
-    # returns as many unique solvers as the target's neutral network admits.
-    n_unique = 0
-    if diversify_fn is not None and best_g is not None and best_fit > 0 and not stop_event.is_set():
-        valid = 1.0 if best_fit >= 0.999 else max(0.0, best_fit - 1e-6)
-        try:
-            seeds = [gg for gg, ff in zip(population, fitnesses) if ff >= valid] or [best_g]
-            pool  = diversify_fn(seeds, valid)
-            n_unique = len(pool)
-            if pool:
-                with open(os.path.join(RESULTS_DIR, 'solver_generation.pkl'), 'wb') as fp:
-                    pickle.dump({'genomes': pool, 'target': target,
-                                 'backend': backend, 'valid': valid}, fp)
-                q.put(('diverse', n_unique, valid))
-        except Exception:
-            pass
-
-    q.put(('done', copy.deepcopy(best_g) if best_g else None, best_fit))
+        # ALWAYS report completion, so _poll re-enables the controls even on error
+        q.put(('done', copy.deepcopy(best_g) if best_g else None, best_fit))
 
 
 # ── custom truth-table dialog ─────────────────────────────────────────────────
@@ -648,10 +661,13 @@ class App:
         ctrl2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl2.pack(fill='x', side='top')
 
-        def aentry(parent, label, default, width=5):
+        def aentry(parent, label, default, width=5, store=None):
             ttk.Label(parent, text=label).pack(side='left', padx=(6, 2))
             v = tk.StringVar(value=str(default))
-            ttk.Entry(parent, textvariable=v, width=width).pack(side='left')
+            e = ttk.Entry(parent, textvariable=v, width=width)
+            e.pack(side='left')
+            if store is not None:
+                store.append(e)                # so the widget can be enabled/disabled
             return v
 
         # substrate group (SNN only — hidden for nervous nets)
@@ -680,13 +696,6 @@ class App:
         # speed vs how big nets may grow. Lower it (e.g. 8-10) to keep runs fast;
         # the default 20 allows large organisms.
         self._maxtel_var = aentry(self._layout_frame, 'Max telomere:', 20, width=4)
-        # LUT only: seed the population with dense sim6-style ontogeny genomes
-        # (rich morphology) and drop parsimony so they aren't pruned back to
-        # sparse. Much slower, and measured to solve WORSE than random — an
-        # exploratory shape mode, off by default. Shown only for the LUT backend.
-        self._ontogeny_var = tk.BooleanVar(value=False)
-        self._ontogeny_chk = ttk.Checkbutton(self._layout_frame, text='Ontogeny seed',
-                                              variable=self._ontogeny_var)
         self._layout_reset_btn = ttk.Button(self._layout_frame, text='Reset', width=6,
                                              command=self._reset_arch)
         self._layout_reset_btn.pack(side='left', padx=8)
@@ -705,15 +714,27 @@ class App:
 
         ga_frame = ttk.Frame(ctrl3); ga_frame.pack(side='left')
         ttk.Label(ga_frame, text='GA:').pack(side='left', padx=(2, 0))
-        self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4)
-        self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4)
-        self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3)
+        # the nervous/LUT GAs read these; the SNN GA has its own fixed constants and
+        # ignores them, so the whole row is disabled when SNN is selected (see
+        # _reconfigure_for_backend). Widgets are collected so they can be toggled.
+        self._ga_entries = []
+        self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4, store=self._ga_entries)
+        self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4, store=self._ga_entries)
+        self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3, store=self._ga_entries)
         # size of the elite breeding pool: the top N genomes are the recombination
         # parents for the next generation (they are NOT copied over verbatim). 0 =
         # select parents from the whole population.
-        self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3)
+        self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3, store=self._ga_entries)
         # simulated-annealing decay: mutation rate *= α each generation (1 = off)
-        self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6)
+        self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6, store=self._ga_entries)
+        # ε-lexicase selection (nervous/LUT temporal targets only): streams over the
+        # whole population instead of tournament, bypassing the elite pool so it can
+        # actually act. Off = tournament (the tuned default).
+        self._lexicase_var = tk.BooleanVar(value=False)
+        self._lexicase_chk = ttk.Checkbutton(ga_frame, text='ε-lexicase',
+                                              variable=self._lexicase_var)
+        self._lexicase_chk.pack(side='left', padx=(6, 0))
+        self._ga_entries.append(self._lexicase_chk)
         ttk.Separator(ctrl3, orient='vertical').pack(side='left', fill='y', padx=8)
 
         # pulse-physics group (nervous net only)
@@ -742,6 +763,8 @@ class App:
         self._build_genome_tab(nb)
         self._interactive = InteractiveTab(self._add_tab(nb, 'Interactive'),
                                            self.current_circuit)
+        self._designer = DesignerTab(self._add_tab(nb, 'Designer'),
+                                     get_circuit=self.current_circuit)
 
         self._status = tk.StringVar(
             value='Ready — pick a model and target, set parameters, click Run (or Load Saved).')
@@ -787,13 +810,17 @@ class App:
             else:
                 self._pulse_frame.pack_forget()
                 self._pulse_sep.pack_forget()
-        # ontogeny-seed toggle applies only to the LUT backend
-        if hasattr(self, '_ontogeny_chk'):
-            if backend == 'lut':
-                self._ontogeny_chk.pack(side='left', padx=(4, 0),
-                                        before=self._layout_reset_btn)
-            else:
-                self._ontogeny_chk.pack_forget()
+        # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
+        # feeds the nervous & LUT GAs only; the SNN GA uses its own fixed constants
+        # and ignores them — so disable the whole row for SNN rather than let it look
+        # as if it applies.
+        if hasattr(self, '_ga_entries'):
+            st = 'disabled' if backend == 'snn' else 'normal'
+            for w in self._ga_entries:
+                try:
+                    w.configure(state=st)
+                except tk.TclError:
+                    pass
         # dropdown offers only backend-valid targets (LUT hides combinational)
         if hasattr(self, '_target_cb'):
             self._refresh_target_list()
@@ -953,6 +980,8 @@ class App:
         self._elite_var.set(str(d['elite']))
         self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
+        if hasattr(self, '_lexicase_var'):
+            self._lexicase_var.set(False)    # tournament is the tuned default
 
     def _apply_tuning(self):
         """Push the GUI's GA / pulse-physics knobs into the backend modules and
@@ -978,10 +1007,9 @@ class App:
             mod.TOURNAMENT_K   = tk_
             mod.MUT_DECAY      = alpha
             mod.ELITE_COUNT    = elite      # exact # of elites carried forward
-        # LUT ontogeny-seed toggle: dense biomorph seeds + no parsimony pruning
-        onto = bool(self._ontogeny_var.get())
-        lga.SEED_MODE = 'ontogeny' if onto else 'random'
-        lga.PARSIMONY = not onto
+        # parent-selection scheme — nervous & LUT share nga.SELECTION (lut reads it),
+        # so setting it here switches both backends between tournament and ε-lexicase.
+        nga.SELECTION = 'lexicase' if bool(self._lexicase_var.get()) else 'tournament'
         # telomere ceiling — caps organism radius. Set on the genome modules
         # (fresh-genome init) AND the ga modules (telomere mutation); all
         # main-process (no env needed — growth workers just grow the stored value).
@@ -1033,7 +1061,6 @@ class App:
         self._vmax_var.set(str(DEFAULT_ARCH.vth_levels[-1]))
         self._cur_var.set(str(self.target.high))
         self._chroms_var.set('2')
-        self._ontogeny_var.set(False)
         self._maxtel_var.set('20')
 
     def _open_custom(self):
@@ -1105,6 +1132,7 @@ class App:
         self._gen_history.clear()
         self._abs_gen = 0
         self._n_unique_solvers = 0
+        self._ga_error = None
         self._best_line.set_data([], [])
         self._mean_line.set_data([], [])
         self._genbest_line.set_data([], [])
@@ -1142,11 +1170,21 @@ class App:
             return
         with open(CKPT, 'rb') as f:
             state = pickle.load(f)
+        if state.get('hand_built') and state.get('best_genome') is None:
+            # a Designer phenotype with no genome: the main tabs all regrow from
+            # DNA, so there is nothing to show here — open it in the Designer.
+            self._status.set('Hand-built design (no genome) — open it in the '
+                             'Designer tab (Load design…).')
+            return
         self.best_genome  = state['best_genome']
         self.best_fitness = state['best_fitness']
+        # a Designer design with a genome AND hand edits: the main app regrows
+        # from DNA, so it cannot reproduce the exact hand-edited grid — flag it
+        # so the user knows to open it in the Designer for the precise circuit.
+        hand_edited = bool(state.get('hand_built') and state.get('grid_edited'))
         saved_target = state.get('target')
         if saved_target is None:
-            saved_target = get_target(state.get('target_name', DEFAULT_TARGET))
+            saved_target = get_target(state.get('target_name') or DEFAULT_TARGET)
         saved_arch = state.get('arch') or DEFAULT_ARCH
         self.target       = saved_target
         self._disp_target = saved_target
@@ -1164,36 +1202,54 @@ class App:
         self._disp_backend   = saved_backend
         self._active_backend = saved_backend
         self._backend_var.set({'nervous': 'Nervous', 'lut': 'LUT'}.get(saved_backend, 'SNN'))
-        self._reconfigure_for_backend()
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
-            self._target_cb['values'] = list(self._all_targets())
+        self._reconfigure_for_backend()      # filters the dropdown for the backend
+        self._refresh_target_list()          # keep the backend filter (don't re-broaden;
+                                             # LUT deliberately hides combinational targets)
         self._target_var.set(saved_target.name)
-        self._status.set('Loaded %s  fitness=%.4f  syn_w=%.2f' %
-                         (saved_target.name, self.best_fitness, saved_arch.syn_weight))
+        warn = ('   — hand-edited design: this view is REGROWN from the genome; '
+                'open the Designer tab to see the exact edited circuit'
+                if hand_edited else '')
+        self._status.set('Loaded %s  fitness=%.4f  syn_w=%.2f%s' %
+                         (saved_target.name, self.best_fitness, saved_arch.syn_weight, warn))
         self._update_all(self.best_genome, self.best_fitness)
         self._save_btn.config(state='normal')
 
     # ── queue polling ─────────────────────────────────────────────────────────
 
     def _redraw_fit_chart(self, max_pts=2000):
-        """Push the best/mean history to the chart. The full history is kept (it's
-        only three floats per generation) but the PLOTTED line is decimated to at
-        most `max_pts` points, so the redraw cost stays flat whether the run is
-        500 generations or 100,000 — the chart never becomes the bottleneck."""
+        """Push the best/mean/gen-best history to the chart. The full history is
+        kept (three floats per generation) but each PLOTTED line is reduced to at
+        most ~`max_pts` points so redraw cost stays flat on 100k-generation runs.
+
+        Reduction is a per-bucket MIN/MAX ENVELOPE per series, not a stride: the
+        old `hist[::step]` sampling silently dropped single-generation features,
+        so the spiky green gen-best line's dips vanished (and reappeared) as the
+        stride changed with run length. Keeping each bucket's extremes means a
+        one-generation dip or spike is always drawn, at any zoom-out level."""
         hist = self._gen_history
         if not hist:
             return
-        if len(hist) > max_pts:
-            step = len(hist) // max_pts + 1
-            pts  = hist[::step]
-            if pts[-1][0] != hist[-1][0]:      # always keep the latest point
-                pts = pts + [hist[-1]]
+        series = ((self._best_line, 1), (self._mean_line, 2),
+                  (self._genbest_line, 3))
+        if len(hist) <= max_pts:
+            xs = [d[0] for d in hist]
+            for line, col in series:
+                line.set_data(xs, [d[col] for d in hist])
         else:
-            pts = hist
-        self._best_line.set_data([d[0] for d in pts], [d[1] for d in pts])
-        self._mean_line.set_data([d[0] for d in pts], [d[2] for d in pts])
-        self._genbest_line.set_data([d[0] for d in pts], [d[3] for d in pts])
+            size = math.ceil(len(hist) / (max_pts // 2))
+            for line, col in series:
+                xs, ys = [], []
+                for b in range(0, len(hist), size):
+                    chunk = hist[b:b + size]
+                    lo = min(chunk, key=lambda d: d[col])
+                    hi = max(chunk, key=lambda d: d[col])
+                    for d in sorted({lo[0]: lo, hi[0]: hi}.values()):
+                        xs.append(d[0]); ys.append(d[col])
+                if xs[-1] != hist[-1][0]:          # always keep the latest point
+                    xs.append(hist[-1][0]); ys.append(hist[-1][col])
+                line.set_data(xs, ys)
         self._fit_ax.set_xlim(0, hist[-1][0] + 1)
         self._fit_canvas.draw_idle()
 
@@ -1214,6 +1270,10 @@ class App:
                     self._status.set('Diversifying — built %d genotypically UNIQUE '
                                      'solvers (each ≥ %.3f) → results/solver_generation.pkl'
                                      % (n_unique, valid))
+                elif kind == 'error':
+                    _, tb = msg
+                    lines = tb.strip().splitlines()
+                    self._ga_error = lines[-1] if lines else 'unknown error'
                 elif kind == 'best':
                     _, genome, fit = msg
                     self.best_genome  = genome
@@ -1245,12 +1305,16 @@ class App:
                     self._target_cb.config(state='readonly')
                     self._backend_cb.config(state='readonly')
                     self._save_btn.config(state='normal' if genome else 'disabled')
-                    saved = ('  saved → %s' % CKPT) if genome else ''
-                    nu = getattr(self, '_n_unique_solvers', 0)
-                    div = ('  |  %d unique valid solvers' % nu) if nu else ''
-                    self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s' %
-                                     (self.target.name, fit,
-                                      getattr(self, '_active_seed', 0), saved, div))
+                    if getattr(self, '_ga_error', None):
+                        self._status.set('GA stopped on error: %s  (controls re-enabled)'
+                                         % self._ga_error)
+                    else:
+                        saved = ('  saved → %s' % CKPT) if genome else ''
+                        nu = getattr(self, '_n_unique_solvers', 0)
+                        div = ('  |  %d unique valid solvers' % nu) if nu else ''
+                        self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s' %
+                                         (self.target.name, fit,
+                                          getattr(self, '_active_seed', 0), saved, div))
         except queue.Empty:
             pass
         if last_gen is not None:               # redraw the fitness chart once per poll

@@ -4,15 +4,17 @@ lut_evo/ga.py — scoring and GA for the LUT array.
 Problem definitions (TemporalTarget / snn Target) and the trace-scoring maths
 (windowed, level-balanced, phase-tolerant) are shared with the rest of the
 project; only the substrate differs. Selection uses the same recipe as the
-nervous GA: elites + random immigrants + tournament with a parsimony tie-break
-(at equal fitness the smaller genome wins), and NO early stop at 1.0.
+nervous GA — elites + random immigrants + tournament, NO early stop at 1.0 —
+but WITHOUT the parsimony tie-break: seeds are dense sim6-style ontogeny
+biomorphs (rich morphology), and parsimony pruned them back to sparse diamonds.
 """
 from __future__ import annotations
 import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
-from nv_evo.temporal import _role_trace_score, windowed_score, exact_tick_accuracy
+from nv_evo.temporal import (_role_trace_score, _pr_counts, _f1,
+                             windowed_score, exact_tick_accuracy)
 from .genome import (LUT_STATES, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome, random_lut_genome)
@@ -42,28 +44,28 @@ FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
 
-def _run_states(grid, in_pos, streams, T):
-    sim, states = LutSim(grid), []
-    for t in range(T):
-        states.append(sim.step({in_pos[i]: streams[t][i]
-                                for i in range(len(in_pos))}))
-    return states
-
-
 OUT_RADIUS = 12   # read the output near its terminal (see nv temporal.py)
 
 
 def place_outputs_by_trace(grid, in_pos, ttarget):
     """{role: cell}, traces — each role read at the live non-input cell nearest
     its terminal whose trace best matches the expectation across all trials
-    (terminal-distance tie-break), exactly like the nervous backend."""
+    (terminal-distance tie-break), exactly like the nervous backend.
+
+    The per-trial dynamics run in numpy (LutSim.run_bits): one [T, ncells]
+    emit-bit matrix per trial, from which any candidate cell's trace is a column
+    slice — no per-tick dicts (that dict churn dominated LUT scoring)."""
     in_set = set(in_pos)
     out_pos = {t.role: None for t in ttarget.outputs}
     traces  = {}
     if len(grid) <= len(in_set):
         return out_pos, traces
-    trial_states = [_run_states(grid, in_pos, tr.streams, ttarget.T)
-                    for tr in ttarget.trials]
+    sim = LutSim(grid)                       # one sim, reset between trials
+    cidx = sim._cidx
+    trial_B = []                             # [T, ncells] emit-bit matrix per trial
+    for tr in ttarget.trials:
+        sim.reset()
+        trial_B.append(sim.run_bits(tr.streams, in_pos, ttarget.T))
     used = set()
     for term in ttarget.outputs:
         tx, ty = term.pos
@@ -73,12 +75,13 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         for c in cands:
             if c in used:
                 continue
+            col = cidx[c]
             scores = []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                tr = [trial_states[ti][t].get(c, 0) for t in range(ttarget.T)]
+                tr = trial_B[ti][:, col].tolist()
                 scores.append(_role_trace_score(tr, exp))
             s   = sum(scores) / len(scores) if scores else 0.0
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
@@ -88,8 +91,8 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
             break
         used.add(best)
         out_pos[term.role] = best
-        traces[term.role]  = [[trial_states[ti][t].get(best, 0)
-                               for t in range(ttarget.T)]
+        col = cidx[best]
+        traces[term.role]  = [trial_B[ti][:, col].tolist()
                               for ti in range(len(ttarget.trials))]
     return out_pos, traces
 
@@ -407,36 +410,50 @@ def n_genes(genome):
     return sum(len(c.genes) for c in genome.chromosomes)
 
 
-# ── Stage-1 ontogeny seeding + parsimony exemption (see lut_evo/ontogeny.py) ─────
-# SEED_MODE 'ontogeny' seeds the population/immigrants with sim6-style biomorph
-# genomes (dense, rich shapes) instead of sparse random ones. Those genomes are
-# large, so PARSIMONY=False drops the smaller-genome tie-break that would
-# otherwise prune them straight back to sparse (re-diamonding them). Both default
-# to the original behaviour; the GUI/experiments flip them together.
-SEED_MODE     = 'random'          # 'random' | 'ontogeny'
-PARSIMONY     = True              # False = don't favour smaller genomes at ties
+# ── ontogeny seeding is THE seed path (see lut_evo/ontogeny.py) ──────────────────
+# Sparse random genomes grow near-uniform DIAMONDS — the "uninteresting" LUTs.
+# Richness tracks gene density (sim6's table_create invents a gene per unseen
+# context), so the population/immigrants are seeded with sim6-style biomorph
+# genomes, and the smaller-genome parsimony tie-break is dropped: it pruned the
+# dense genomes straight back to sparse (re-diamonding them). This is a user
+# decision (2026-07-07): rich morphology over solve speed, no random/ontogeny
+# switch. Size is bounded by ONTOGENY_CAP + telomeres instead of parsimony.
 ONTOGENY_CAP  = 350               # max genes kept from an ontogeny biomorph
 
 
+# Growing one sim6 ontogeny seed is expensive (measured ~0.3 s: up to 60
+# biomorph growths per accepted genome), and make_seed_genome is called for
+# EVERY immigrant EVERY generation — that alone was a large share of ontogeny
+# mode's ~50x slowdown. So the factory grows only the first _ONTO_POOL_SIZE
+# genomes per chromosome count and caches them; later calls return a mutated
+# variant of a random pool member (still fresh genetic material, ~free).
+_ONTO_POOL      = {}     # n_chroms -> [cached seed genomes]
+_ONTO_POOL_SIZE = 24
+
+
 def make_seed_genome(n_chroms=2):
-    """The population/immigrant factory, honouring SEED_MODE."""
-    if SEED_MODE == 'ontogeny':
-        from .ontogeny import random_ontogeny_genome
-        return random_ontogeny_genome(n_chroms, cap_genes=ONTOGENY_CAP)
-    return random_lut_genome(n_chroms)
+    """The population/immigrant factory: a dense sim6-style biomorph genome
+    (the rich-morphology seeds — see the ONTOGENY_CAP note above)."""
+    from .ontogeny import random_ontogeny_genome
+    pool = _ONTO_POOL.setdefault(n_chroms, [])
+    if len(pool) < _ONTO_POOL_SIZE:
+        g = random_ontogeny_genome(n_chroms, cap_genes=ONTOGENY_CAP)
+        pool.append(g)
+        return clone_genome(g)     # the pool master stays pristine
+    return mutate_lut(random.choice(pool))
 
 
 def _tiebreak(genome):
-    """Tie-break term for equal fitness: prefer fewer genes when PARSIMONY, else
-    neutral (ontogeny genomes must not be pruned back to sparse)."""
-    return -n_genes(genome) if PARSIMONY else 0
+    """Tie-break term for equal fitness: NEUTRAL — the smaller-genome parsimony
+    pressure was what pruned dense ontogeny genomes back to sparse diamonds
+    (re-diamonding). Size is bounded by ONTOGENY_CAP + telomeres instead."""
+    return 0
 
 
 def _gene_cap():
-    """Per-chromosome gene cap for add/duplicate mutations — relaxed to
-    ONTOGENY_CAP in ontogeny mode so dense genomes can still grow, kept tight
-    (MAX_GENES) for the sparse random path."""
-    return ONTOGENY_CAP if SEED_MODE == 'ontogeny' else MAX_GENES
+    """Per-chromosome gene cap for add/duplicate mutations — sized for dense
+    ontogeny genomes (MAX_GENES was the sparse random path's tight cap)."""
+    return ONTOGENY_CAP
 
 
 def tournament_lut(population, fitnesses):
@@ -471,7 +488,10 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                      reverse=True)
     # Elites = recombination parent pool, NOT verbatim survivors (see nv_evo.ga).
     new_pop = [make_genome() for _ in range(min(n_imm, pop))]      # random immigrants
-    if n_elite > 0:
+    import nv_evo.ga as _nga           # lut shares the nervous SELECTION switch
+    use_lexicase = (_nga.SELECTION == 'lexicase' and case_vecs is not None
+                    and case_vecs[0] is not None)
+    if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
         k = min(TOURNAMENT_K, len(elite))
         parent = lambda: population[max(random.sample(elite, k),
@@ -487,7 +507,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 
 
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
-    make_genome = lambda: make_seed_genome(n_chroms)     # honours SEED_MODE
+    make_genome = lambda: make_seed_genome(n_chroms)     # ontogeny biomorph seeds
     cache       = {}
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
     try:
@@ -518,7 +538,7 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
 
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
-              cache=None):
+              cache=None, executor=None):
     """Fill a population with genomes that are BOTH valid (>= `valid`) and
     genotypically unique, by walking the neutral network via neutral mutation
     with rejection. See nv_evo.ga.diversify — same idea on the LUT substrate."""
@@ -526,8 +546,9 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
         cache = {}
     if batch is None:
         batch = max(48, pop_size)
+    _eval = lambda gs: eval_batch_cases(gs, target, cache, executor)[0]   # reuse pool
     pool, seen = [], set()
-    for g, f in zip(seeds, eval_batch_lut(list(seeds), target, cache)):
+    for g, f in zip(seeds, _eval(list(seeds))):
         s = genome_signature(g)
         if f >= valid and s not in seen:
             pool.append(g); seen.add(s)
@@ -543,7 +564,7 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
             if s not in seen:
                 seen.add(s)
                 cands.append(c)
-        for c, f in zip(cands, eval_batch_lut(cands, target, cache)):
+        for c, f in zip(cands, _eval(cands)):
             if f >= valid and len(pool) < pop_size:
                 pool.append(c)
     return pool[:pop_size]
@@ -560,7 +581,10 @@ def lut_report(ttarget, genome=None):
     lines += ['',
               'Square grid; each cell is a 16-bit lookup table over its 4',
               'neighbours\' bits, latched and synchronous (paper Architecture 2).',
-              "'.' = unscored tick; stored-1 holds are phase-tolerant."]
+              "'.' = unscored tick. Scored by the shared spike-event F1 (the",
+              'metric the GA optimises): an expected 1 is hit if the cell fires',
+              'on it or an adjacent tick (±1 ring tolerance — holds may ring),',
+              'and every pulse on an expected-0 tick costs precision exactly.']
     traces = None
     if genome is not None:
         prep = prepare_lut(genome, ttarget)
@@ -582,8 +606,14 @@ def lut_report(ttarget, genome=None):
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []
-                lines.append('  actual %s (score %.3f)' % (
-                    ''.join(str(v) for v in tr_i), _role_trace_score(tr_i, exp)))
+                # per-trial F1 (the selection metric) with components, matching
+                # nv temporal_report — not the old 'balanced' diagnostic
+                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp)
+                s = _f1(tp_rec, n_exp, tp_prec, n_act)
+                lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
+                             % (''.join(str(v) for v in tr_i), s,
+                                'PASS' if s >= 0.999 else 'FAIL',
+                                tp_rec, n_exp, tp_prec, n_act))
     if traces is not None:
         s = windowed_score(traces, ttarget)
         lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'

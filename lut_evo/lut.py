@@ -24,6 +24,8 @@ input cells' outputs (the perimeter sensory lines).
 """
 from __future__ import annotations
 
+import numpy as np
+
 LUT_BITS  = 16
 # Seed cells are pinned to a fixed live state during growth. 0xFFFE = the "any
 # neighbour high" LUT (output 1 for every index except all-zero): a neutral
@@ -33,44 +35,74 @@ SEED_STATE = (SEED_LUT, SEED_LUT, SEED_LUT, SEED_LUT)
 
 _N4 = ((0, 1), (1, 0), (0, -1), (-1, 0))
 _PC16 = bytes(bin(i).count('1') for i in range(1 << 16))
+_PC16_ARR = np.frombuffer(_PC16, dtype=np.uint8)   # vectorised popcount table
+_EXPIRE = 1000                                     # > max Hamming (5*16): excludes a gene
 
 
 def _live(state):
     return state[0] or state[1] or state[2] or state[3]
 
 
-def _lookup(genome, front, back, right, left, self_lut, iteration):
-    """Minimum-Hamming gene lookup for one output direction. Args are already
-    rotated so `front` is the neighbour in the output direction. Returns the
-    new 16-bit LUT (0 = that direction goes dead).
+def _genome_lut_arrays(genome):
+    """Pack a genome's genes into column arrays (chromosome-major order) for the
+    vectorised min-Hamming lookup: the five context fields, the outputs, a
+    growth-rule mask (self_in == 0) and each gene's chromosome telomere. Built
+    once per grow_lut call."""
+    n, cn, ce, cs, cw, si, so, tel = 0, [], [], [], [], [], [], []
+    big = 1 << 30
+    for c in genome.chromosomes:
+        ct = getattr(c, 'telomere', big)
+        for g in c.genes:
+            cn.append(g.ctx_n); ce.append(g.ctx_e); cs.append(g.ctx_s)
+            cw.append(g.ctx_w); si.append(g.self_in); so.append(g.self_out)
+            tel.append(ct); n += 1
+    a = lambda xs: np.array(xs, dtype=np.int64) if xs else np.zeros(0, np.int64)
+    Ain = a(si)
+    return (a(cn), a(cs), a(ce), a(cw), Ain, so, (Ain == 0), a(tel))
+
+
+def _lookup_vec(garr, front, back, right, left, self_lut, iteration):
+    """Vectorised minimum-Hamming gene lookup for one output direction (args
+    already rotated so `front` is the output direction). Behaviour is identical
+    to the scalar reference `_lookup`: same 80-bit Hamming metric, FIRST gene
+    wins at equal distance (argmin), expired growth rules excluded, and the
+    empty-context / empty-cell guards. Returns the new 16-bit LUT (0 = dead).
 
     sim6-faithful size limits: a chromosome's growth rules (self_in == 0) only
     apply while iteration < its telomere, and a dead direction (self_lut == 0)
-    can only be brought to life by a growth rule ("if self is zero and not an
-    exact match, return zero") — so expansion provably stops once every
-    telomere has expired, and maintenance settles the attractor."""
+    can only be brought to life by a growth rule — so expansion provably stops
+    once every telomere has expired, and maintenance settles the attractor."""
+    An, As, Ae, Aw, Ain, Aout, Agrow, Atel = garr
+    if An.shape[0] == 0:
+        return 0
     if front == 0 and back == 0 and right == 0 and left == 0 and self_lut == 0:
         return 0
-    pc = _PC16
-    best_gene, best_dist = None, 1 << 30
-    for chrom in genome.chromosomes:
-        expired = iteration >= getattr(chrom, 'telomere', 1 << 30)
-        for g in chrom.genes:
-            if expired and g.self_in == 0:
-                continue
-            d = (pc[(g.ctx_n ^ front) & 0xFFFF] + pc[(g.ctx_s ^ back) & 0xFFFF] +
-                 pc[(g.ctx_e ^ right) & 0xFFFF] + pc[(g.ctx_w ^ left) & 0xFFFF] +
-                 pc[(g.self_in ^ self_lut) & 0xFFFF])
-            if d < best_dist:
-                best_dist, best_gene = d, g
-    if best_gene is None:
+    PC = _PC16_ARR
+    d = (PC[An ^ front].astype(np.int32) + PC[As ^ back] + PC[Ae ^ right]
+         + PC[Aw ^ left] + PC[Ain ^ self_lut])
+    if iteration:                              # telomere expiry only bites once t>0
+        expired = Agrow & (Atel <= iteration)
+        if expired.any():
+            d[expired] += _EXPIRE
+            j = int(d.argmin())
+            if expired[j]:                     # only expired genes left -> no match
+                return 0
+        else:
+            j = int(d.argmin())
+    else:
+        j = int(d.argmin())
+    if self_lut == 0 and Ain[j] != 0:          # empty-cell guard (sim6)
         return 0
-    if self_lut == 0 and best_gene.self_in != 0:
-        return 0
-    return best_gene.self_out
+    return Aout[j]
 
 
-def _grow_step(genome, grid, seeds, iteration, cache):
+# scalar reference kept for clarity / tests (growth uses the vectorised path)
+def _lookup(genome, front, back, right, left, self_lut, iteration):
+    return _lookup_vec(_genome_lut_arrays(genome), front, back, right, left,
+                       self_lut, iteration)
+
+
+def _grow_step(genome, garr, grid, seeds, iteration, cache):
     # expand the frontier: every empty 4-neighbour of a live cell — the field
     # is unbounded; telomeres + the empty-cell guard bound the organism.
     frontier = {}
@@ -91,7 +123,7 @@ def _grow_step(genome, grid, seeds, iteration, cache):
         key = (f, b, r, l, s, mask)
         v = cache.get(key)
         if v is None:
-            v = _lookup(genome, f, b, r, l, s, iteration)
+            v = _lookup_vec(garr, f, b, r, l, s, iteration)
             cache[key] = v
         return v
 
@@ -119,10 +151,11 @@ def grow_lut(genome, seeds, grid_size, iters):
     """Grow on the unbounded field to the attractor (fixed point or 2-cycle);
     `grid_size` is only the target's I/O layout scale; `iters` is a safety cap.
     Returns {(x,y): (Ln, Ls, Le, Lw)}."""
+    garr = _genome_lut_arrays(genome)
     grid = {pos: SEED_STATE for pos in seeds}
     prev, cache = None, {}
     for it in range(iters):
-        nxt = _grow_step(genome, grid, seeds, it, cache)
+        nxt = _grow_step(genome, garr, grid, seeds, it, cache)
         if nxt == grid or nxt == prev:
             return nxt
         prev, grid = grid, nxt
@@ -130,10 +163,11 @@ def grow_lut(genome, seeds, grid_size, iters):
 
 
 def grow_lut_snapshots(genome, seeds, grid_size, iters):
+    garr = _genome_lut_arrays(genome)
     snaps = [{pos: SEED_STATE for pos in seeds}]
     grid, prev, cache = dict(snaps[0]), None, {}
     for it in range(iters):
-        nxt = _grow_step(genome, grid, seeds, it, cache)
+        nxt = _grow_step(genome, garr, grid, seeds, it, cache)
         snaps.append(dict(nxt))
         if nxt == grid or nxt == prev:
             break
@@ -144,31 +178,100 @@ def grow_lut_snapshots(genome, seeds, grid_size, iters):
 # ── synchronous latched dynamics (sim6 step_network) ────────────────────────────
 
 class LutSim:
-    """Synchronous simulation of a grown LUT array. sim.step({cell: bit})
-    advances one tick and returns {cell: 0/1} (1 = the cell emits on any
-    direction). sim.ever marks cells that have ever emitted."""
+    """Synchronous simulation of a grown LUT array, VECTORISED with numpy.
 
-    # per-cell output nibble bit positions: N=8, S=4, E=2, W=1
+    The dynamics are a pure array update — each cell's next 4-bit output is a
+    lookup in its four LUTs at the 4-bit index formed from its neighbours'
+    facing bits — so the whole grid advances in one set of numpy ops instead of
+    a per-cell Python loop with four dict lookups each (that loop was ~85% of
+    LUT evaluation time; dense biomorph organisms are 500-900 cells). Behaviour
+    is identical: same nibble layout (N=8 S=4 E=2 W=1), same wired-OR input
+    injection, same fixed-point/2-cycle attractor.
+
+    API is unchanged: ``sim.step({cell: bit})`` advances one tick and returns
+    {cell: 0/1}; ``sim.out`` is the {cell: nibble} map; ``sim.ever`` marks cells
+    that have ever emitted. ``sim.run_bits(streams, in_pos, T)`` is a fast bulk
+    runner (T ticks with no per-tick dict) returning a [T, ncells] bit matrix
+    for scoring — see lut_evo.ga.place_outputs_by_trace.
+    """
+
     def __init__(self, grid, _unused=None):
-        self.grid = grid
-        self.out  = {c: 0 for c in grid}        # 4-bit output: N S E W
-        self.ever = {c: 0 for c in grid}
+        self.grid  = grid
+        cells      = list(grid)
+        self._cells = cells
+        self.n     = n = len(cells)
+        self._cidx = {c: i for i, c in enumerate(cells)}
+        # four LUT columns as int arrays (index n is a zero-padding sentinel so
+        # an absent neighbour reads 0 without a branch)
+        self._Ln = np.fromiter((grid[c][0] for c in cells), dtype=np.int64, count=n)
+        self._Ls = np.fromiter((grid[c][1] for c in cells), dtype=np.int64, count=n)
+        self._Le = np.fromiter((grid[c][2] for c in cells), dtype=np.int64, count=n)
+        self._Lw = np.fromiter((grid[c][3] for c in cells), dtype=np.int64, count=n)
+
+        def col(dx, dy):     # column of each cell's (dx,dy) neighbour (n = none)
+            ci = self._cidx
+            return np.fromiter((ci.get((c[0] + dx, c[1] + dy), n) for c in cells),
+                               dtype=np.intp, count=n)
+        self._nN, self._nS = col(0, 1), col(0, -1)
+        self._nE, self._nW = col(1, 0), col(-1, 0)
+        self._out  = np.zeros(n, dtype=np.int64)      # current nibble per cell
+        self._pe   = np.zeros(n + 1, dtype=np.int64)  # padded prev (index n = 0)
+        self._ever = np.zeros(n, dtype=bool)
+        self._out_dict = None                         # lazy {cell: nibble} cache
+
+    def _advance(self, inject_cols):
+        """One tick in numpy. inject_cols: iterable of column indices forced high
+        (wired-OR sensory injection) this tick. Returns the new nibble array."""
+        pe = self._pe
+        pe[:self.n] = self._out
+        idx = (((pe[self._nN] & 0x4) >> 2)         # from N -> bit0
+               | ((pe[self._nS] & 0x8) >> 2)       # from S -> bit1
+               | ((pe[self._nE] & 0x1) << 2)       # from E -> bit2
+               | ((pe[self._nW] & 0x2) << 2))      # from W -> bit3
+        o = ((((self._Ln >> idx) & 1) << 3) | (((self._Ls >> idx) & 1) << 2)
+             | (((self._Le >> idx) & 1) << 1) | ((self._Lw >> idx) & 1))
+        if inject_cols is not None and len(inject_cols):
+            o[inject_cols] = 0xF
+        self._out = o
+        self._ever |= o.astype(bool)
+        self._out_dict = None
+        return o
+
+    def _inject_cols(self, input_vals):
+        ci = self._cidx
+        return [ci[c] for c, b in input_vals.items() if b and c in ci]
 
     def step(self, input_vals):
-        prev, nxt = self.out, {}
-        grid = self.grid
-        for (x, y), (ln, ls, le, lw) in grid.items():
-            # index bits: from-north = N-neighbour's S-output, etc.
-            idx = (((prev.get((x, y + 1), 0) & 0x4) >> 2)        # from N -> bit0
-                   | ((prev.get((x, y - 1), 0) & 0x8) >> 2)      # from S -> bit1
-                   | ((prev.get((x + 1, y), 0) & 0x1) << 2)      # from E -> bit2
-                   | ((prev.get((x - 1, y), 0) & 0x2) << 2))     # from W -> bit3
-            o = (((ln >> idx) & 1) << 3 | ((ls >> idx) & 1) << 2
-                 | ((le >> idx) & 1) << 1 | ((lw >> idx) & 1))
-            if input_vals.get((x, y)):          # OR-injected sensory line
-                o |= 0xF
-            nxt[(x, y)] = o
-            if o:
-                self.ever[(x, y)] = 1
-        self.out = nxt
-        return {c: (1 if o else 0) for c, o in nxt.items()}
+        o = self._advance(self._inject_cols(input_vals))
+        cells = self._cells
+        return {cells[i]: (1 if o[i] else 0) for i in range(self.n)}
+
+    def run_bits(self, streams, in_pos, T):
+        """Run T ticks driven by `streams` (streams[t] = input bits for in_pos)
+        with NO per-tick dict; return a [T, ncells] uint8 emit-bit matrix. Cell
+        i's column is self._cidx[cell]. The scoring hot path (no dict churn)."""
+        in_cols = [self._cidx.get(p) for p in in_pos]
+        B = np.zeros((T, self.n), dtype=np.uint8)
+        for t in range(T):
+            row = streams[t]
+            inj = [in_cols[i] for i in range(len(in_cols))
+                   if row[i] and in_cols[i] is not None]
+            B[t] = self._advance(inj) != 0
+        return B
+
+    def reset(self):
+        self._out[:] = 0
+        self._ever[:] = False
+        self._out_dict = None
+
+    @property
+    def out(self):
+        if self._out_dict is None:
+            o = self._out
+            self._out_dict = {self._cells[i]: int(o[i]) for i in range(self.n)}
+        return self._out_dict
+
+    @property
+    def ever(self):
+        e = self._ever
+        return {self._cells[i]: (1 if e[i] else 0) for i in range(self.n)}

@@ -218,15 +218,19 @@ def to_lut_genome(genes: List[Gene], n_chroms: int = 1) -> Genome:
 
 
 def _cap_genes(lg: List[LutGene], cap: int, rng: random.Random) -> List[LutGene]:
-    """Trim a gene list to `cap`, keeping EVERY growth gene (self_in == 0 — the
-    only kind that can bring a cell to life, so growth structure is preserved)
-    and filling the rest with a random sample of maintenance genes."""
+    """Trim a gene list to `cap`, preserving growth structure (self_in == 0
+    genes, the only kind that can bring a cell to life) but ALWAYS reserving a
+    share of the cap for maintenance genes: growth rules stop applying once the
+    telomere expires, and a capped genome left with zero maintainers grows
+    hundreds of cells and then dies back to nothing at maturity (measured:
+    921 cells @iter20 -> 2 @iter30 when growth genes alone filled the cap)."""
     if len(lg) <= cap:
         return lg
     grow  = [g for g in lg if g.self_in == 0]
     maint = [g for g in lg if g.self_in != 0]
     rng.shuffle(maint)
-    keep = grow[:cap] + maint[:max(0, cap - len(grow[:cap]))]
+    n_maint = min(len(maint), max(cap // 4, cap - len(grow)))
+    keep = grow[:cap - n_maint] + maint[:n_maint]
     rng.shuffle(keep)
     return keep[:cap]
 

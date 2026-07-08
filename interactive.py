@@ -240,7 +240,6 @@ class InteractiveTab:
     def _eval_snn(self):
         c = self._circuit
         target, arch = c['target'], c['arch']
-        from snn_evo import CURRENT_HIGH
         grid = grow_snn(c['genome'], seeds=tuple(target.inputs),
                         grid_size=target.grid_size, iters=target.iters)
         ns, ss = interpret_grid(grid, target=target, arch=arch)
@@ -249,7 +248,10 @@ class InteractiveTab:
             n = next((nn for nn in ns if (nn.x, nn.y) == p and nn.is_input), None)
             in_ids.append(n.id if n else None)
         bits = self._in_bits()
-        currents = {in_ids[i]: (CURRENT_HIGH if bits[i] else 0.0)
+        # drive with THIS target's high current (matches the Voltage/Truth-table
+        # tabs, which use target.high) — not the module default CURRENT_HIGH, which
+        # would disagree whenever "Input I" was tuned or a saved run used another.
+        currents = {in_ids[i]: (target.high if bits[i] else 0.0)
                     for i in range(len(in_ids)) if in_ids[i] is not None}
         sp = simulate(ns, ss, currents)
 
