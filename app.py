@@ -54,7 +54,7 @@ from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
-from designer import DesignerTab
+from designer import DesignerTab, read_saved_file
 import ui_compat
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
@@ -208,26 +208,6 @@ def grid_to_rgba(grid, grid_size, seed_set, output_pos):
                 img[row, col] = [0.15, 0.35, 0.85, alpha]   # blue — excitatory
             else:
                 img[row, col] = [0.90, 0.50, 0.10, alpha]   # orange — inhibitory
-    return img
-
-
-def grid_to_rgba_nervous(grid, grid_size, seed_set, output_pos):
-    """RGBA image of a nervous net: nodes coloured by routing type."""
-    img = np.ones((grid_size, grid_size, 4), dtype=float)
-    for (x, y), state in grid.items():
-        row, col = grid_size - 1 - y, x
-        if (x, y) in seed_set:
-            img[row, col] = [0.9, 0.1, 0.1, 1.0]             # red — input seed
-        elif (x, y) in output_pos:
-            img[row, col] = [0.1, 0.8, 0.2, 1.0]             # green — output
-        else:
-            e1, e2, i1 = ROUTING[state & 0xF]
-            if i1 is not None:
-                img[row, col] = [0.90, 0.50, 0.10, 0.95]     # orange — inhibited / veto
-            elif e1 == e2:
-                img[row, col] = [0.55, 0.75, 0.95, 0.9]      # light blue — buffer
-            else:
-                img[row, col] = [0.15, 0.35, 0.85, 0.95]     # blue — coincidence (AND)
     return img
 
 
@@ -783,8 +763,8 @@ class App:
             self._graded_chk.state(['disabled'])
             if backend == 'nervous':
                 note = ('Nervous net — HEX array (each cell wired to 3 neighbours L/R/D); '
-                        'coincidence (AND) + inhibition, loops circulate injected pulses '
-                        '(memory). Substrate (Vth/Syn/Input) and Graded do not apply.')
+                        'coincidence (AND) or OR + inhibition, loops circulate injected '
+                        'pulses (memory). Substrate (Vth/Syn/Input) and Graded do not apply.')
             else:
                 note = ('LUT array — SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
                         '4 directional 16-bit lookup tables per cell, latched & synchronous '
@@ -1168,8 +1148,7 @@ class App:
         if not os.path.exists(CKPT):
             self._status.set('No saved genome at %s — run the GA first.' % CKPT)
             return
-        with open(CKPT, 'rb') as f:
-            state = pickle.load(f)
+        state = read_saved_file(CKPT)     # text JSON design OR pickle
         if state.get('hand_built') and state.get('best_genome') is None:
             # a Designer phenotype with no genome: the main tabs all regrow from
             # DNA, so there is nothing to show here — open it in the Designer.
@@ -1430,23 +1409,14 @@ class App:
         leg_ax = flat[n_panels]
         leg_ax.set_visible(True)
         leg_ax.axis('off')
-        if self._disp_backend == 'nervous':
-            patches = [
-                mpatches.Patch(color=(0.9, 0.1, 0.1),    label='Input seed'),
-                mpatches.Patch(color=(0.1, 0.8, 0.2),    label='Output'),
-                mpatches.Patch(color=(0.55, 0.75, 0.95), label='Buffer (relay)'),
-                mpatches.Patch(color=(0.15, 0.35, 0.85), label='Coincidence (AND)'),
-                mpatches.Patch(color=(0.90, 0.50, 0.10), label='Inhibited (veto)'),
-                mpatches.Patch(color=(1.0, 1.0, 1.0),    label='Empty', edgecolor='#aaa'),
-            ]
-        else:
-            patches = [
-                mpatches.Patch(color=(0.9, 0.1, 0.1),    label='Input seed'),
-                mpatches.Patch(color=(0.1, 0.8, 0.2),    label='Output neuron'),
-                mpatches.Patch(color=(0.15, 0.35, 0.85), label='Excitatory'),
-                mpatches.Patch(color=(0.90, 0.50, 0.10), label='Inhibitory'),
-                mpatches.Patch(color=(1.0, 1.0, 1.0),    label='Empty', edgecolor='#aaa'),
-            ]
+        # only the SNN backend reaches here (nervous/lut return early above)
+        patches = [
+            mpatches.Patch(color=(0.9, 0.1, 0.1),    label='Input seed'),
+            mpatches.Patch(color=(0.1, 0.8, 0.2),    label='Output neuron'),
+            mpatches.Patch(color=(0.15, 0.35, 0.85), label='Excitatory'),
+            mpatches.Patch(color=(0.90, 0.50, 0.10), label='Inhibitory'),
+            mpatches.Patch(color=(1.0, 1.0, 1.0),    label='Empty', edgecolor='#aaa'),
+        ]
         leg_ax.legend(handles=patches, loc='center', fontsize=7.5,
                       frameon=False, title='Node type', title_fontsize=8)
         self._growth_canvas.draw_idle()
@@ -1475,7 +1445,7 @@ class App:
         axes  = fig.subplots(nrows, ncols, squeeze=False)
         flat  = [a for row in axes for a in row]
         for idx, snap in enumerate(snaps):
-            rt   = {p: ROUTING[s & 0xF] for p, s in snap.items()}
+            rt   = {p: ROUTING[s & 0x1F] for p, s in snap.items()}
             last = (idx == n - 1)
             draw_hex_net(flat[idx], snap, gs, routing=rt, in_pos=in_pos,
                          out_pos=(out_pos if last else {}), show_edges=last,

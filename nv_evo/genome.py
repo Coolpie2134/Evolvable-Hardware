@@ -25,7 +25,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
-MAX_STATE    = 16
+MAX_STATE    = 32       # 5-bit cell state: 0-15 = paper AND routing, 16-31 = OR
 MAX_GENES    = 24
 MAX_CHROMS   = 6
 MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
@@ -84,7 +84,7 @@ def random_hex_gene() -> HexGene:
         ctx_r    = random.randrange(MAX_STATE),
         ctx_d    = random.randrange(MAX_STATE),
         self_in  = 0 if random.random() < 0.25 else random.randrange(MAX_STATE),
-        self_out = random.randrange(MAX_STATE),      # 0..15, 0 = death
+        self_out = random.randrange(MAX_STATE),      # 0..31, 0 = death
     )
 
 

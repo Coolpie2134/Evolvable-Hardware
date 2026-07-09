@@ -11,9 +11,9 @@ that every node touches exactly THREE others (not six):
   * routed signals are ARROWS from the source cell to the reader — green for
     excitatory inputs, red for the inhibitory veto — so loops and their
     direction of circulation can be followed by eye;
-  * each cell is coloured by its routing kind and labelled with its 4-bit
-    STATE NUMBER, so the colour/type can be mapped back to the genome's
-    states.
+  * each cell is coloured by its routing kind and labelled with its 5-bit
+    STATE NUMBER (0-31: 0-15 AND, 16-31 OR), so the colour/type can be mapped
+    back to the genome's states.
 
 Used by the GUI's growth / activity / interactive views.
 """
@@ -24,7 +24,7 @@ from matplotlib.patches import Circle, FancyArrowPatch
 
 from .hexgrid import hex_dirs, hex_pixel, routing_kind, ROUTING_HEX
 
-_KIND_FC = {'buffer': '#8fb3e0', 'coincidence': '#2f6fc0',
+_KIND_FC = {'buffer': '#8fb3e0', 'coincidence': '#2f6fc0', 'or': '#7b52c4',
             'inhibited': '#e0902e', 'off': '#e8e8e8'}
 _EXC     = '#2e8b57'      # excitatory wire
 _INH     = '#d0332e'      # inhibitory wire
@@ -54,7 +54,7 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
                  activity=None, show_edges=True, title=None):
     """
     grid       : {(x,y): state}
-    routing    : {(x,y): (e1,e2,i1)} (for arrows / node-type colour)
+    routing    : {(x,y): (e1,e2,i1[,op])} (for arrows / node-type colour)
     in_pos     : list of input positions (labelled A, B, …)
     out_pos    : {role: (x,y)}  outputs (labelled)
     activity   : {(x,y): 0/1}   if given, nodes coloured by activity not type
@@ -79,7 +79,8 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
 
     # routed signals as direction arrows (source -> reader)
     if show_edges and routing:
-        for (x, y), (e1, e2, i1) in routing.items():
+        for (x, y), entry in routing.items():
+            e1, e2, i1 = entry[0], entry[1], entry[2]
             px, py = hex_pixel(x, y); nb = hex_dirs(x, y)
             wires = {(e1, _EXC), (e2, _EXC)}       # set: a buffer's e1==e2 once
             wires.add((i1, _INH))
@@ -95,15 +96,15 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
         if activity is not None:
             fc = '#18b34a' if activity.get((x, y), 0) else '#e6e9ee'
         elif routing is not None:
-            fc = _KIND_FC[routing_kind(ROUTING_HEX[state & 0xF])]
+            fc = _KIND_FC[routing_kind(ROUTING_HEX[state & 0x1F])]
         else:
             fc = '#8fb3e0'
         inp = (x, y) in in_set
         ax.add_patch(Circle((px, py), radius=_R, facecolor=fc, alpha=0.95,
                             edgecolor='#b02020' if inp else '#5b6b7d',
                             lw=2.0 if inp else 0.7, zorder=2))
-        # state number: maps the colour/type back to the genome's 0-15 states
-        ax.text(px, py - 0.13, str(state & 0xF), ha='center', va='center',
+        # state number: maps the colour/type back to the genome's 0-31 states
+        ax.text(px, py - 0.13, str(state & 0x1F), ha='center', va='center',
                 fontsize=4.5, color='#3a4450', zorder=4)
 
     for i, (x, y) in enumerate(in_pos):

@@ -249,7 +249,11 @@ def mutate_nv(genome, mean_mutations=None):
         elif op == "add_chrom" and len(g.chromosomes) < MAX_CHROMS:
             g.chromosomes.append(random_hex_chromosome())
         elif op == "del_chrom" and len(g.chromosomes) > 1:
-            g.chromosomes.remove(random.choice(g.chromosomes))
+            # remove the SMALLEST chromosome (least growth program) — deleting a
+            # random one could wipe a large functional module wholesale, which is
+            # what makes chromosome loss hurt; pruning the least-carrying one is a
+            # gentle, minimally-destructive deletion.
+            g.chromosomes.remove(min(g.chromosomes, key=lambda c: len(c.genes)))
         elif op == "split" and len(chrom.genes) > 1:
             chrom.split = random.randint(1, len(chrom.genes) - 1)
     return g

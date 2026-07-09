@@ -2,11 +2,13 @@
 nv_evo/nervous.py — hexagonal nervous-network growth, interpretation, scoring.
 
 The array is a honeycomb (each node has 3 neighbours: L, R, D — see hexgrid.py).
-A grown cell's 4-bit state is decoded (ROUTING_HEX, the paper's Fig. 3) into a
-routing config (e1, e2, i1): which of the 3 directions feed the two excitatory
-and the one inhibitory input of a nervous-net node. Output:
+A grown cell's 5-bit state is decoded (ROUTING_HEX) into a routing config
+(e1, e2, i1, op): which of the 3 directions feed the two excitatory and the one
+inhibitory input of a nervous-net node, and how the two excitatory inputs combine
+(op = 'and' for states 0-15, the paper's Fig. 3; 'or' for the 16-31 OR twins).
+Output:
 
-        out = (val(e1) AND val(e2)) AND NOT val(i1)       # coincidence + veto
+        out = (val(e1) op val(e2)) AND NOT val(i1)        # coincidence/OR + veto
 
 Inputs are held at the seed cells and the array is relaxed; outputs are read at
 the target's terminals. No LIF — pure pulse logic, and the degree-3 topology is
@@ -20,12 +22,13 @@ from .genome import germline_telomere
 ROUTING    = ROUTING_HEX       # back-compat name (used by the GUI colourer)
 SEED_STATE = 1
 
-# 4-bit popcount for the Hamming-distance gene lookup.
-_PC4 = [bin(i).count("1") for i in range(16)]
+# 5-bit popcount for the Hamming-distance gene lookup (state is 0..31: 0-15 AND
+# routing, 16-31 OR — the growth match must see the 5th bit to tell them apart).
+_PC4 = [bin(i).count("1") for i in range(32)]
 
 
 def _h4(a, b):
-    return _PC4[(a ^ b) & 0xF]
+    return _PC4[(a ^ b) & 0x1F]
 
 
 # ── hex growth (native hex genome: self_out == 0 means the cell dies) ──────────
@@ -56,8 +59,8 @@ def _lookup_nv(genome, sL, sR, sD, si):
     best_gene, best_dist = None, 1 << 30   # ~3.4M times/200 evals — the _h4 call
     for chrom in genome.chromosomes:       # overhead was ~15% of eval (sim6 did
         for gene in chrom.genes:           # the same inlining in table_lookup).
-            d = (pc[(gene.ctx_l ^ sL) & 0xF] + pc[(gene.ctx_r ^ sR) & 0xF] +
-                 pc[(gene.ctx_d ^ sD) & 0xF] + pc[(gene.self_in ^ si) & 0xF])
+            d = (pc[(gene.ctx_l ^ sL) & 0x1F] + pc[(gene.ctx_r ^ sR) & 0x1F] +
+                 pc[(gene.ctx_d ^ sD) & 0x1F] + pc[(gene.self_in ^ si) & 0x1F])
             if d < best_dist:
                 best_dist, best_gene = d, gene
     if best_gene is None:
@@ -202,8 +205,8 @@ def _place_outputs(grid, target):
 
 
 def interpret_nervous(grid, target=None):
-    """Return (routing {pos:(e1,e2,i1)}, input_pos, output_pos {role:(x,y)|None})."""
-    routing = {pos: ROUTING_HEX[state & 0xF] for pos, state in grid.items()}
+    """Return (routing {pos:(e1,e2,i1,op)}, input_pos, output_pos {role:(x,y)|None})."""
+    routing = {pos: ROUTING_HEX[state & 0x1F] for pos, state in grid.items()}
     if target is not None:
         input_pos  = list(target.inputs)
         output_pos = _place_outputs(grid, target)
@@ -269,11 +272,11 @@ def nervous_case_outputs(genome, target):
 
 
 def circuit_summary_nervous(grid):
-    kinds = {'off': 0, 'buffer': 0, 'coincidence': 0, 'inhibited': 0}
+    kinds = {'off': 0, 'buffer': 0, 'coincidence': 0, 'or': 0, 'inhibited': 0}
     for state in grid.values():
-        kinds[routing_kind(ROUTING_HEX[state & 0xF])] += 1
-    return ('%d nodes  (%d buffer, %d coincidence, %d inhibited, %d off)'
-            % (len(grid), kinds['buffer'], kinds['coincidence'],
+        kinds[routing_kind(ROUTING_HEX[state & 0x1F])] += 1
+    return ('%d nodes  (%d buffer, %d coincidence, %d OR, %d inhibited, %d off)'
+            % (len(grid), kinds['buffer'], kinds['coincidence'], kinds['or'],
                kinds['inhibited'], kinds['off']))
 
 

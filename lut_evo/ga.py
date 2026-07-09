@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 from nv_evo.temporal import (_role_trace_score, _pr_counts, _f1, _pr_score,
-                             _best_shift, _placement_score,
+                             _best_shift, _placement_score, _obs_len,
                              windowed_score, exact_tick_accuracy)
 from .genome import (LUT_STATES, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
@@ -63,10 +63,11 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         return out_pos, traces
     sim = LutSim(grid)                       # one sim, reset between trials
     cidx = sim._cidx
-    trial_B = []                             # [T, ncells] emit-bit matrix per trial
+    obs = _obs_len(ttarget)                  # observe past T to catch delayed events
+    trial_B = []                             # [obs, ncells] emit-bit matrix per trial
     for tr in ttarget.trials:
         sim.reset()
-        trial_B.append(sim.run_bits(tr.streams, in_pos, ttarget.T))
+        trial_B.append(sim.run_bits(tr.streams, in_pos, obs))
     used = set()
     for term in ttarget.outputs:
         tx, ty = term.pos
@@ -380,7 +381,9 @@ def mutate_lut(genome, mean_mutations=None):
         elif op == "add_chrom" and len(g.chromosomes) < MAX_CHROMS:
             g.chromosomes.append(random_lut_chromosome())
         elif op == "del_chrom" and len(g.chromosomes) > 1:
-            g.chromosomes.remove(random.choice(g.chromosomes))
+            # remove the SMALLEST chromosome (least growth program) — deleting a
+            # random one could wipe a large functional module wholesale.
+            g.chromosomes.remove(min(g.chromosomes, key=lambda c: len(c.genes)))
         elif op == "split" and len(chrom.genes) > 1:
             chrom.split = random.randint(1, len(chrom.genes) - 1)
     return g

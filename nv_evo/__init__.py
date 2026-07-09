@@ -7,9 +7,10 @@ its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
 
   * each grown cell is a nervous-net node whose state routes its neighbours to
     two excitatory inputs (E1, E2) and one inhibitory input (I1);
-  * a node fires when  (E1 AND E2) AND NOT I1  — genuine coincidence detection
-    (the paper's Fig. 3 table; every state is a buffer or an AND, optionally
-    vetoed — there is no disjunction);
+  * a node fires when  (E1 op E2) AND NOT I1  — coincidence detection with an
+    optional inhibitory veto. States 0-15 are the paper's Fig. 3 table (op = AND;
+    each a buffer or an AND, the paper has no disjunction); states 16-31 are OR
+    twins (op = OR, fire on either excitatory input) — a non-paper extension;
   * dynamics are asynchronous edge-triggered pulses (pulse.py): a triggered
     node emits a fixed-width pulse after a fixed delay; inputs are injected
     onto the perimeter nets (wired-OR). Nothing happens without an input, and

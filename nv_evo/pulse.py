@@ -65,8 +65,11 @@ class PulseSim:
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
         # watch[u] = cells that read u on an excitatory input.
         self.src   = {}
+        self.op    = {}                               # v -> 'and' | 'or'
         self.watch = {c: [] for c in grid}
-        for v, (e1, e2, i1) in routing.items():
+        for v, entry in routing.items():
+            e1, e2, i1 = entry[0], entry[1], entry[2]
+            self.op[v] = entry[3] if len(entry) > 3 else 'and'
             nb = hex_dirs(*v)
             s1 = nb[e1] if e1 is not None else None
             s2 = nb[e2] if e2 is not None else None
@@ -129,6 +132,8 @@ class PulseSim:
             return
         if s1 == s2:                                          # buffer: one edge
             trig = (u == s1)
+        elif self.op[v] == 'or':                              # OR: either edge
+            trig = (u == s1 or u == s2)                       # activates the node
         else:                                                 # coincidence: both
             self.last_edge[v][u] = t                          # edges within COINC
             other = s2 if u == s1 else s1

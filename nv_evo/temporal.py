@@ -68,7 +68,11 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True):
     states = []
     traces = {role: [] for role in out_pos}
     for t in range(T):
-        state = sim.step({in_pos[i]: streams[t][i] for i in range(len(in_pos))})
+        # run past the end of the input streams with zero input (padding), so a
+        # circuit that responds at a DELAY is still observed — its late events
+        # fall in [len(streams), T) instead of off the end (see _obs_len).
+        row = streams[t] if t < len(streams) else (0,) * len(in_pos)
+        state = sim.step({in_pos[i]: row[i] for i in range(len(in_pos))})
         states.append(state)
         for role, p in out_pos.items():
             traces[role].append(state.get(p, 0) if p else 0)
@@ -154,27 +158,37 @@ def _role_trace_score(trace, exp):
 # is a false positive) — without that, a dense oscillator target would let an
 # always-high output through. Unscored (settle) ticks count for neither.
 
+# Observe the output for longer than the expected window so a DELAYED circuit's
+# late events are actually seen (else a positive shift pushes them off the end and
+# they read as misses — the "delayed Q counted false" the user hit). The expected
+# trace stays length T; the trace is run to _obs_len. Crucially, recall still
+# counts ALL expected highs (never excludes any) — that is what stops a silent
+# output from escaping via a huge shift that would slide every high out of view.
+def _obs_len(ttarget):
+    return 2 * ttarget.T
+
+
 def _pr_counts(trace, exp, shift=0, tol=1):
     """Spike-event counts of an output trace vs an expected trace, under a latency
     `shift`: an expected event at tick e corresponds to an output event at e+shift
     (shift=0 is the identity — the ordinary aligned scoring).
 
     recall (±tol): each expected-1 is hit if the output fires within tol of e+shift
-      (the ±1 ring tolerance — a stored bit rings every other tick).
-    precision (EXACT): output pulses in the ORIGINAL scored region; a pulse at a is
-      good iff a-shift is exactly an expected-1. The denominator is the scored
-      region of the OUTPUT (independent of shift), so a shift can never hide
-      spurious pulses on a silent trial by sliding them off the scored window —
-      false positives always cost. Unscored (settle) ticks count for neither.
-    See _best_shift for why the shift is chosen globally (one value per genome)."""
+      (the ±1 ring tolerance — a stored bit rings every other tick). ALL expected
+      highs are in the denominator (none excluded), so silence can't be shifted
+      away — a delayed circuit is captured because the trace is observed past T.
+    precision (shift-consistent): a pulse at tick a is scored iff its shift-mapped
+      position a-shift lands in the expected trace's scored region, and it's good
+      iff exp[a-shift]==1. So spurious pulses always cost; pulses past the window
+      that map to no expected tick are unscored (beyond the target)."""
     n = len(exp)
     fires = set(t for t in range(len(trace)) if trace[t])
     exp_high = [t for t in range(n) if exp[t] == 1]
-    exp_high_set = set(exp_high)
     tp_rec = sum(1 for e in exp_high
                  if any((e + shift + d) in fires for d in range(-tol, tol + 1)))
-    scored_fires = [a for a in fires if a < n and exp[a] is not None]
-    tp_prec = sum(1 for a in scored_fires if (a - shift) in exp_high_set)
+    scored_fires = [a for a in fires
+                    if 0 <= a - shift < n and exp[a - shift] is not None]
+    tp_prec = sum(1 for a in scored_fires if exp[a - shift] == 1)
     return tp_rec, len(exp_high), tp_prec, len(scored_fires)
 
 
@@ -219,7 +233,10 @@ def _cand_shifts(pairs, T, tol=1):
     maximum is attained at some (pulse_tick - expected_tick) offset (± the ring
     tolerance), plus 0. For sparse spike targets this is far fewer than the whole
     range; for dense ones it dedups to at most the range (2T-1) anyway."""
-    lo, hi = -(T - 1), T - 1
+    # positive shifts may run to the observed trace length (delayed events live
+    # past T); negative shifts (faster than nominal) are bounded by T.
+    max_len = max((len(tr) for tr, _ in pairs), default=T)
+    lo, hi = -(T - 1), max(T - 1, max_len - 1)
     shifts = {0}
     for trace, exp in pairs:
         fires = [a for a in range(len(trace)) if trace[a]]
@@ -328,8 +345,10 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     traces  = {}
     if len(grid) <= len(in_set):
         return out_pos, traces
-    # one dynamics run per trial; every cell's trace falls out of the states
-    trial_states = [run_nervous(grid, routing, in_pos, {}, tr.streams, ttarget.T)[0]
+    # one dynamics run per trial, observed to _obs_len (past T) so a delayed
+    # output's late events are captured; every cell's trace falls out of the states
+    obs = _obs_len(ttarget)
+    trial_states = [run_nervous(grid, routing, in_pos, {}, tr.streams, obs)[0]
                     for tr in ttarget.trials]
     used = set()
     for term in ttarget.outputs:
@@ -342,7 +361,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                ctr.append([trial_states[ti][t].get(c, 0) for t in range(ttarget.T)])
+                ctr.append([trial_states[ti][t].get(c, 0) for t in range(obs)])
                 cexp.append(exp)
             s   = _placement_score(ctr, cexp, ttarget) if ctr else 0.0
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
@@ -353,7 +372,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
         used.add(best)
         out_pos[term.role] = best
         traces[term.role]  = [[trial_states[ti][t].get(best, 0)
-                               for t in range(ttarget.T)]
+                               for t in range(obs)]
                               for ti in range(len(ttarget.trials))]
     return out_pos, traces
 
@@ -525,7 +544,8 @@ def signal_graph(grid, routing):
     """Directed signal graph as {node: set(readers)}: u -> v iff node v's
     routing reads neighbour u (excitatory or inhibitory)."""
     edges = {c: set() for c in grid}
-    for v, (e1, e2, i1) in routing.items():
+    for v, entry in routing.items():
+        e1, e2, i1 = entry[0], entry[1], entry[2]
         nb = hex_dirs(*v)
         for d in (e1, e2, i1):
             if d is None:

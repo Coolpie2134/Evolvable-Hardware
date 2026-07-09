@@ -57,25 +57,25 @@ def hex_pixel(x, y):
             y * 1.5 + (0.25 if (x + y) % 2 == 0 else -0.25))
 
 
-# ── the paper's 16 useful routing combinations (Edwards EH'02, Fig. 3) ──────────
-# Each entry is (E1, E2, I1): the two excitatory input directions and one
-# inhibitory direction (None = unused). A node fires when
-#       (E1 AND E2) AND NOT I1
-# — genuine coincidence detection: "Excitatory inputs E1 and E2 are coupled such
-# that neither input alone can trigger a response. The inhibitory input I1, if
-# active, will prevent a response even if both excitatory inputs are active."
-# Buffer = E1==E2 (single connection, relays one line); coincidence = AND of two
-# different lines. There is NO disjunction in the paper — every state is a
-# buffer or an AND, optionally vetoed. The table is exactly Figure 3, in order.
+# ── routing table: the paper's 16 AND states + 16 OR twins (Edwards EH'02) ───────
+# Each entry is (E1, E2, I1, OP): two excitatory input directions, one inhibitory
+# (None = unused), and the excitatory combining rule. A node fires when
+#       (E1 op E2) AND NOT I1
+# The paper's Fig. 3 is pure coincidence (op = 'and'): "neither input alone can
+# trigger a response." States 0-15 are exactly that table. States 16-31 are the
+# same wiring with op = 'or' — fire if EITHER excitatory input is active — a
+# deliberate, user-requested extension beyond the paper. For a buffer (E1==E2) or
+# an off state OR-mode is identical to AND, so those twins are benign aliases; the
+# genuinely new capability is the OR of the coincidence states (either of two
+# different lines activates the node). Keeping 0-15 unchanged means every existing
+# genome grows and behaves bit-identically (the extra state bit is 0 for them).
 #
 # Every input comes from a neighbour — no internal source — so with no external
 # input the array stays all-zeros ("All switches start with value zero, which
-# prevents any signals from propagating"). Sustained activity / memory comes
-# from a pulse injected by an input circulating around a loop of buffers, "until
-# stopped by application of an inhibitory input" (§3). NB: that circulation is a
-# property of the paper's asynchronous, edge-triggered PULSE dynamics; the
-# synchronous level relaxation used here is a discretisation of it.
-ROUTING_HEX = [
+# prevents any signals from propagating"). Memory is a pulse injected by an input
+# circulating a loop of buffers "until stopped by an inhibitory input" (§3), on
+# the asynchronous edge-triggered PULSE dynamics (pulse.py).
+_ROUTING_BASE = [
     (None, None, None),   # 0  off
     ('D', 'D', None),     # 1  single connection (buffer D)
     ('R', 'R', None),     # 2  buffer R
@@ -93,28 +93,42 @@ ROUTING_HEX = [
     ('L', 'D', 'R'),      # 14 coincidence L & D, vetoed by R
     ('L', 'R', 'D'),      # 15 coincidence L & R, vetoed by D
 ]
+# 0-15 = AND (the paper's Fig. 3); 16-31 = OR twins (fire on EITHER excitatory).
+ROUTING_HEX = ([(e1, e2, i1, 'and') for (e1, e2, i1) in _ROUTING_BASE] +
+               [(e1, e2, i1, 'or')  for (e1, e2, i1) in _ROUTING_BASE])
+
+
+def _entry_op(entry):
+    return entry[3] if len(entry) > 3 else 'and'      # tolerate legacy 3-tuples
 
 
 def node_fires(entry, value):
-    """Boolean output of a routed node (out = (E1 AND E2) AND NOT I1).
-    entry = (e1, e2, i1); value(d) gives the 0/1 on direction d. A buffer has
-    e1 == e2, so it simply relays that one line."""
-    e1, e2, i1 = entry
+    """Boolean output of a routed node: out = (E1 op E2) AND NOT I1, where op is
+    'and' (coincidence, states 0-15) or 'or' (either input, states 16-31).
+    value(d) gives the 0/1 on direction d; a buffer has e1==e2, so AND and OR both
+    just relay that one line."""
+    e1, e2, i1 = entry[0], entry[1], entry[2]
     if e1 is None or e2 is None:
         return 0
-    fired = bool(value(e1) and value(e2))
+    if _entry_op(entry) == 'or':
+        fired = bool(value(e1) or value(e2))
+    else:
+        fired = bool(value(e1) and value(e2))
     if fired and i1 is not None and value(i1):
         fired = False
     return 1 if fired else 0
 
 
 def routing_kind(entry):
-    """Classify a routing entry (e1, e2, i1) for colouring / summaries."""
-    e1, e2, i1 = entry
+    """Classify a routing entry for colouring / summaries: off / buffer /
+    coincidence (AND) / or (either input) / inhibited (vetoed AND)."""
+    e1, e2, i1 = entry[0], entry[1], entry[2]
     if e1 is None:
         return 'off'
+    if e1 == e2:
+        return 'buffer'                    # single line — OR and AND coincide
+    if _entry_op(entry) == 'or':
+        return 'or'                        # fires on EITHER of two lines
     if i1 is not None:
         return 'inhibited'
-    if e1 == e2:
-        return 'buffer'
     return 'coincidence'

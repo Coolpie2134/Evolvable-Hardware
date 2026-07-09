@@ -296,13 +296,19 @@ class LutSim:
     def run_bits(self, streams, in_pos, T):
         """Run T ticks driven by `streams` (streams[t] = input bits for in_pos)
         with NO per-tick dict; return a [T, ncells] uint8 emit-bit matrix. Cell
-        i's column is self._cidx[cell]. The scoring hot path (no dict churn)."""
+        i's column is self._cidx[cell]. The scoring hot path (no dict churn).
+        T may exceed len(streams): the extra ticks run with zero input (padding),
+        so a delayed output's late events are still observed."""
         in_cols = [self._cidx.get(p) for p in in_pos]
+        ns = len(streams)
         B = np.zeros((T, self.n), dtype=np.uint8)
         for t in range(T):
-            row = streams[t]
-            inj = [in_cols[i] for i in range(len(in_cols))
-                   if row[i] and in_cols[i] is not None]
+            if t < ns:
+                row = streams[t]
+                inj = [in_cols[i] for i in range(len(in_cols))
+                       if row[i] and in_cols[i] is not None]
+            else:
+                inj = []
             B[t] = self._advance(inj) != 0
         return B
 

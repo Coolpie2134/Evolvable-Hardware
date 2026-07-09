@@ -9,7 +9,8 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     is exact and deterministic.
   * the CIRCUIT (the organism): the working grid itself is a first-class,
     directly editable artifact — place/delete cells, set each nv cell's
-    routing state (the 16-entry ROUTING_HEX vocabulary, neighbours resolved
+    routing state (the 32-entry ROUTING_HEX vocabulary: 0-15 AND, 16-31 OR;
+    neighbours resolved
     through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
     output roles. Both PulseSim and LutSim run on a bare grid, so a
@@ -34,7 +35,7 @@ round-trip even without a genome.
 Run standalone:  py designer.py
 """
 from __future__ import annotations
-import os, sys, math, pickle, dataclasses
+import os, sys, math, json, pickle, dataclasses
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -59,7 +60,7 @@ from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
 from nv_evo.pulse import PulseSim
 from nv_evo.temporal import (run_nervous, place_outputs_by_trace,
                              windowed_score, exact_tick_accuracy,
-                             _pr_counts, _f1, _best_shift)
+                             _pr_counts, _f1, _best_shift, _obs_len)
 from nv_evo.targets import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 
@@ -111,11 +112,91 @@ class _Tip:
             self.tip = None
 
 
+DESIGN_FORMAT = 'evohw-design-v1'
+
+
+# ── text (JSON) design serialisation — human-editable, replaces the pickle ───────
+# A design is genome + working grid + I/O + target name, all as plain
+# numbers/strings so the file can be opened and hand-edited in any text editor.
+# The genome is one row per gene ([ctx…, self_in, self_out]); grid keys are
+# "x,y". Targets are stored by NAME and re-resolved from the registry on load.
+
+def _genome_to_dict(genome, backend):
+    fields = _NV_GENE_FIELDS if backend == 'nervous' else _LUT_GENE_FIELDS
+    return {'tag': genome.tag,
+            'gene_fields': list(fields),
+            'chromosomes': [{'tag': c.tag, 'split': c.split,
+                             'telomere': getattr(c, 'telomere', None),
+                             'genes': [[getattr(g, f) for f in fields] for g in c.genes]}
+                            for c in genome.chromosomes]}
+
+
+def _genome_from_dict(d, backend):
+    if backend == 'nervous':
+        Gene, Chrom, Gen, fields = HexGene, NvChromosome, NvGenome, _NV_GENE_FIELDS
+    else:
+        Gene, Chrom, Gen, fields = LutGene, LutChromosome, LutGenome, _LUT_GENE_FIELDS
+    fields = tuple(d.get('gene_fields') or fields)
+    chroms = []
+    for c in d['chromosomes']:
+        genes = [Gene(**{f: int(v) for f, v in zip(fields, row)}) for row in c['genes']]
+        kw = {'genes': genes, 'split': int(c.get('split', 0)), 'tag': int(c.get('tag', 0))}
+        if c.get('telomere') is not None:
+            kw['telomere'] = int(c['telomere'])
+        chroms.append(Chrom(**kw))
+    return Gen(chromosomes=chroms, tag=int(d.get('tag', 0)))
+
+
+def _grid_to_dict(grid, backend):
+    if backend == 'nervous':
+        return {'%d,%d' % p: int(s) for p, s in grid.items()}
+    return {'%d,%d' % p: [int(v) for v in s] for p, s in grid.items()}
+
+
+def _grid_from_dict(d, backend):
+    out = {}
+    for k, v in d.items():
+        x, y = (int(n) for n in k.split(','))
+        out[(x, y)] = int(v) if backend == 'nervous' else tuple(int(n) for n in v)
+    return out
+
+
+def read_saved_file(path):
+    """Return an app-style state dict from EITHER a text JSON design or a pickle
+    (evolver output / legacy design). Shared by the main app's Load Saved so the
+    editable JSON format works everywhere. Reconstructs the genome from JSON and
+    resolves the target by name; raises on unreadable/omit-both files."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            doc = json.load(f)
+    except (UnicodeDecodeError, ValueError, OSError):
+        doc = None
+    if isinstance(doc, dict) and str(doc.get('format', '')).startswith('evohw-design'):
+        backend = doc.get('backend', 'nervous')
+        genome = _genome_from_dict(doc['genome'], backend) if doc.get('genome') else None
+        name = doc.get('target') or ''
+        target = TEMPORAL_TARGETS.get(name)
+        if target is None and backend == 'nervous':
+            target = COMB_TARGETS.get(name)
+        return {'best_genome': genome, 'best_fitness': doc.get('fitness', 0.0),
+                'target': target, 'target_name': name, 'arch': None, 'seed': None,
+                'backend': backend, 'hand_built': True,
+                'grid': _grid_from_dict(doc.get('grid', {}), backend),
+                'in_pos': [tuple(p) for p in doc.get('inputs', [])],
+                'out_pos': {r: tuple(p) for r, p in (doc.get('outputs') or {}).items()},
+                'grid_edited': doc.get('grid_edited', True)}
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
 def _route_text(idx, x, y):
-    """One Fig.-3 routing state AT cell (x,y), in the paper's E1/E2/I1 form with
-    every direction label resolved to the actual parity-dependent neighbour via
-    hex_dirs — never show a bare L/R/D."""
-    e1, e2, i1 = ROUTING_HEX[idx]
+    """One routing state AT cell (x,y), in E1/E2/I1 form with every direction
+    label resolved to the actual parity-dependent neighbour via hex_dirs — never
+    show a bare L/R/D. States 0-15 are the paper's AND (coincidence) table; 16-31
+    are the OR twins (fire on EITHER excitatory input)."""
+    entry = ROUTING_HEX[idx]
+    e1, e2, i1 = entry[0], entry[1], entry[2]
+    op = entry[3] if len(entry) > 3 else 'and'
     nb = hex_dirs(x, y)
 
     def cell(d):
@@ -125,11 +206,14 @@ def _route_text(idx, x, y):
     i1s = i1 if i1 is not None else '-'
     if e1 == e2:
         desc = 'buffer: relays %s' % cell(e1)
+    elif op == 'or':
+        desc = 'OR: %s OR %s (either fires)' % (cell(e1), cell(e2))
     else:
         desc = 'coincidence: %s AND %s' % (cell(e1), cell(e2))
     if i1 is not None:
         desc += ', veto %s' % cell(i1)
-    return '%2d  E1=%s E2=%s I1=%s  %s' % (idx, e1, e2, i1s, desc)
+    return '%2d  E1=%s E2=%s I1=%s %s  %s' % (idx, e1, e2, i1s,
+                                              'OR ' if op == 'or' else '   ', desc)
 
 
 _GUIDE_NERVOUS = """\
@@ -144,12 +228,15 @@ tab always shows which real cell each label reaches.
 
 A node has two excitatory inputs and one inhibitory:
 
-        out = (E1 AND E2) AND NOT I1
+        out = (E1 op E2) AND NOT I1
 
-"Neither input alone can trigger a response." A BUFFER
-is the E1=E2 special case (relays one line); I1, if
-active, vetoes the response. The 16 states offered in
-the Cell tab are the paper's Fig. 3 table, in order.
+"Neither input alone can trigger a response" for op=AND
+(coincidence). A BUFFER is the E1=E2 special case
+(relays one line); I1, if active, vetoes the response.
+Cell-tab states 0-15 are the paper's Fig. 3 AND table.
+States 16-31 are OR twins (op=OR): fire if EITHER
+excitatory input is active — a non-paper extension you
+asked for (purple on the canvas).
 
 MEMORY: a pulse injected by an input circulates a loop
 of buffers "until stopped by application of an
@@ -224,7 +311,7 @@ WORKFLOW
 
 def _routed_neighbours(idx, x, y):
     """Cells wired into a node with ROUTING_HEX[idx] at (x,y): (excitatory, veto)."""
-    e1, e2, i1 = ROUTING_HEX[idx]
+    e1, e2, i1 = ROUTING_HEX[idx][:3]
     nb = hex_dirs(x, y)
     exc = {nb[d] for d in (e1, e2) if d is not None}
     veto = nb[i1] if i1 is not None else None
@@ -287,7 +374,8 @@ class DesignerTab:
         self._nibbles    = {}
         self._traces     = {}
         self._running    = False
-        self._input_vars = []
+        self._stream_vars = []           # per-input tick-numbered bit-stream entries
+        self._trial_idx  = tk.IntVar(value=1)
         self._lut_bind   = None          # (get, set, describe) for the table editor
         self._mono       = ui_compat.mono_family(parent)
         self._build_ui()
@@ -409,16 +497,24 @@ class DesignerTab:
                                                  font=(self._mono, 8), wrap='none')
         self._report.pack(fill='both', expand=True)
 
-        # scrollable genome frame
-        canvas = tk.Canvas(self._genome_tab, highlightthickness=0)
-        scroll = ttk.Scrollbar(self._genome_tab, orient='vertical', command=canvas.yview)
+        # scrollable genome frame — BOTH axes. A gene row (esp. LUT hex fields, or
+        # a chromosome header ending in +gene) is wider than the 430px left panel,
+        # so a horizontal scrollbar keeps the rightmost fields reachable instead of
+        # clipping them off the edge.
+        gt = self._genome_tab
+        canvas = tk.Canvas(gt, highlightthickness=0)
+        vscroll = ttk.Scrollbar(gt, orient='vertical',   command=canvas.yview)
+        hscroll = ttk.Scrollbar(gt, orient='horizontal', command=canvas.xview)
         self._genome_frame = ttk.Frame(canvas)
         self._genome_frame.bind('<Configure>',
                                 lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
         canvas.create_window((0, 0), window=self._genome_frame, anchor='nw')
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side='left', fill='both', expand=True)
-        scroll.pack(side='right', fill='y')
+        canvas.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
+        canvas.grid(row=0, column=0, sticky='nsew')
+        vscroll.grid(row=0, column=1, sticky='ns')
+        hscroll.grid(row=1, column=0, sticky='ew')
+        gt.rowconfigure(0, weight=1)
+        gt.columnconfigure(0, weight=1)
 
         self._insp_body = ttk.Frame(self._insp_tab, padding=4)
         self._insp_body.pack(fill='both', expand=True)
@@ -440,15 +536,18 @@ class DesignerTab:
         right.pack(side='left', fill='both', expand=True, padx=4, pady=4)
         sim = ttk.Frame(right)
         sim.pack(fill='x')
-        ttk.Label(sim, text='Inputs:').pack(side='left')
-        self._inbar = ttk.Frame(sim)
-        self._inbar.pack(side='left', padx=(2, 8))
         ttk.Button(sim, text='Step', command=self._step).pack(side='left', padx=2)
         self._run_btn = ttk.Button(sim, text='Run', command=self._toggle_run)
         self._run_btn.pack(side='left', padx=2)
         ttk.Button(sim, text='Reset', command=self._reset_sim_ui).pack(side='left', padx=2)
         self._tick_lbl = ttk.Label(sim, text='tick 0', font=(self._mono, 9))
         self._tick_lbl.pack(side='left', padx=8)
+        # input streams get their own row (they can be wide)
+        srow = ttk.Frame(right)
+        srow.pack(fill='x', pady=(2, 0))
+        ttk.Label(srow, text='Input streams (tick 0→):').pack(side='left')
+        self._inbar = ttk.Frame(srow)
+        self._inbar.pack(side='left', fill='x')
 
         self.fig = plt.Figure(figsize=(7.5, 5.4))
         gs = self.fig.add_gridspec(1, 2, width_ratios=[1.5, 1.0], wspace=0.22)
@@ -951,7 +1050,7 @@ class DesignerTab:
 
     def _nv_inspector(self, pos):
         x, y = pos
-        state = self.grid[pos] & 0xF
+        state = self.grid[pos] & 0x1F
         nb = hex_dirs(x, y)
         orient = 'up-oriented' if (x + y) % 2 == 0 else 'down-oriented'
         ttk.Label(self._insp_body,
@@ -960,12 +1059,12 @@ class DesignerTab:
                        % (orient, nb['L'], nb['R'], nb['D']),
                   font=(self._mono, 8), justify='left').pack(anchor='w', pady=(2, 4))
         ttk.Label(self._insp_body,
-                  text='out = (E1 AND E2) AND NOT I1 — pick a Fig. 3 state\n'
-                       '(hover previews the wiring on the canvas):',
+                  text='out = (E1 op E2) AND NOT I1 — pick a state (hover previews\n'
+                       'the wiring). 0-15 = AND (coincidence), 16-31 = OR (either):',
                   font=(self._mono, 8), justify='left').pack(anchor='w')
         lb = tk.Listbox(self._insp_body, height=16, font=(self._mono, 8),
                         exportselection=False)
-        for i in range(16):
+        for i in range(len(ROUTING_HEX)):        # 32: 0-15 AND, 16-31 OR
             lb.insert('end', _route_text(i, x, y))
         lb.selection_set(state)
         lb.see(state)
@@ -982,7 +1081,7 @@ class DesignerTab:
 
         def on_hover(evt):
             i = lb.nearest(evt.y)
-            if 0 <= i < 16:
+            if 0 <= i < len(ROUTING_HEX):
                 self._refresh_canvas(preview=(pos, i))
         lb.bind('<<ListboxSelect>>', on_pick)
         lb.bind('<Motion>', on_hover)
@@ -1050,7 +1149,7 @@ class DesignerTab:
                  circuit_summary_nervous(self.grid) if self.backend == 'nervous'
                  else '%d cells' % len(self.grid)))
         if self.backend == 'nervous':
-            routing = {p: ROUTING_HEX[s & 0xF] for p, s in self.grid.items()}
+            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
             if preview:
                 routing[preview[0]] = ROUTING_HEX[preview[1]]
             draw_hex_net(ax, self.grid, 7, routing=routing, in_pos=self.in_pos,
@@ -1114,6 +1213,7 @@ class DesignerTab:
             else:
                 nodes = [Patch(color='#8fb3e0', label='buffer (E1=E2)'),
                          Patch(color='#2f6fc0', label='coincidence (E1·E2)'),
+                         Patch(color='#7b52c4', label='OR (E1+E2, either)'),
                          Patch(color='#e0902e', label='inhibited (has I1)')]
             return nodes + [
                 Line2D([0], [0], color='#2e8b57', lw=1.7, label='excitatory wire'),
@@ -1171,14 +1271,105 @@ class DesignerTab:
     # ── simulation (mirrors interactive.py) ─────────────────────────────────────
 
     def _rebuild_input_bar(self):
+        # Each input is driven by an editable tick-numbered bit STREAM (e.g.
+        # "00010"): at tick t the input injects stream[t] (0 once the stream ends,
+        # so loops keep ringing). Far easier than toggling a checkbox every tick;
+        # 'From trial' fills the streams from the target's own trials (same tick
+        # numbering), and Load/Save round-trip a plain text file.
+        old = [v.get() for v in getattr(self, '_stream_vars', [])]
         for w in self._inbar.winfo_children():
             w.destroy()
-        self._input_vars = []
+        self._stream_vars = []
         for i, _p in enumerate(self.in_pos):
-            v = tk.BooleanVar(value=False)
             lbl = chr(65 + i) if i < 26 else 'i%d' % i
-            ttk.Checkbutton(self._inbar, text=lbl, variable=v).pack(side='left')
-            self._input_vars.append(v)
+            ttk.Label(self._inbar, text=lbl, font=(self._mono, 9)).pack(side='left', padx=(4, 1))
+            v = tk.StringVar(value=old[i] if i < len(old) else '')
+            ttk.Entry(self._inbar, textvariable=v, width=16,
+                      font=(self._mono, 9)).pack(side='left')
+            self._stream_vars.append(v)
+        if self.in_pos:
+            ttk.Label(self._inbar, text='trial', font=(self._mono, 8),
+                      foreground='#888').pack(side='left', padx=(6, 1))
+            ttk.Spinbox(self._inbar, from_=1, to=99, width=3,
+                        textvariable=self._trial_idx).pack(side='left')
+            ttk.Button(self._inbar, text='From trial', width=9,
+                       command=self._streams_from_trial).pack(side='left', padx=(2, 1))
+            ttk.Button(self._inbar, text='Load', width=5,
+                       command=self._load_streams).pack(side='left')
+            ttk.Button(self._inbar, text='Save', width=5,
+                       command=self._save_streams).pack(side='left')
+
+    def _stream_bit(self, i, tick):
+        if i >= len(self._stream_vars):
+            return 0
+        s = self._stream_vars[i].get()
+        j = 0
+        for ch in s:                       # ignore spaces/separators; count 0/1 only
+            if ch in '01':
+                if j == tick:
+                    return int(ch)
+                j += 1
+        return 0
+
+    def _streams_from_trial(self):
+        t = self._current_target()
+        if t is None or not getattr(t, 'trials', None):
+            self._status.set('Pick a temporal target first — it supplies the input trials.')
+            return
+        if len(self.in_pos) != t.n_inputs:
+            self._adopt_target_io()          # align inputs to the target (rebuilds bar)
+        ti = max(1, min(self._trial_idx.get(), len(t.trials))) - 1
+        trial = t.trials[ti]
+        for i in range(min(len(self._stream_vars), t.n_inputs)):
+            self._stream_vars[i].set(''.join(str(trial.streams[k][i]) for k in range(t.T)))
+        self._reset_sim_ui()
+        self._status.set('Loaded trial %d/%d input streams (%d ticks) — press Run.'
+                         % (ti + 1, len(t.trials), t.T))
+
+    def _load_streams(self):
+        path = filedialog.askopenfilename(
+            title='Load input streams (one 0/1 line per input)',
+            filetypes=[('text', '*.txt *.csv'), ('all files', '*.*')])
+        if not path:
+            return
+        try:
+            with open(path, encoding='utf-8') as f:
+                lines = [ln.strip() for ln in f
+                         if ln.strip() and not ln.strip().startswith('#')]
+        except Exception as exc:
+            messagebox.showerror('Load streams', str(exc))
+            return
+        def clean(ln):                       # accept "A: 0010" or bare "0010"
+            body = ln.split(':', 1)[1] if ':' in ln else ln
+            return ''.join(ch for ch in body if ch in '01')
+        streams = [clean(ln) for ln in lines]
+        for i, v in enumerate(self._stream_vars):
+            v.set(streams[i] if i < len(streams) else '')
+        self._reset_sim_ui()
+        self._status.set('Loaded %d input stream(s) from %s.'
+                         % (len(streams), os.path.basename(path)))
+
+    def _save_streams(self):
+        if not self._stream_vars:
+            self._status.set('No inputs to save streams for.')
+            return
+        path = filedialog.asksaveasfilename(
+            title='Save input streams', defaultextension='.txt',
+            initialfile='streams.txt', filetypes=[('text', '*.txt'), ('all files', '*.*')])
+        if not path:
+            return
+        lines = ['# one 0/1 input stream per line, tick 0 first (label is a comment)']
+        for i, v in enumerate(self._stream_vars):
+            lbl = chr(65 + i) if i < 26 else 'i%d' % i
+            lines.append('%s: %s' % (lbl, ''.join(ch for ch in v.get() if ch in '01')))
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except Exception as exc:
+            messagebox.showerror('Save streams', str(exc))
+            return
+        self._status.set('Saved %d input stream(s) → %s'
+                         % (len(self._stream_vars), path))
 
     def _reset_sim(self):
         self._running = False
@@ -1201,13 +1392,13 @@ class DesignerTab:
             return
         if self._sim is None:
             if self.backend == 'nervous':
-                routing = {p: ROUTING_HEX[s & 0xF] for p, s in self.grid.items()}
+                routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
                 self._sim = PulseSim(self.grid, routing)
             else:
                 self._sim = LutSim(self.grid)
             self._traces = {r: [] for r in self.out_pos}
-        bits = [1 if v.get() else 0 for v in self._input_vars]
-        invals = {p: bits[i] for i, p in enumerate(self.in_pos)}
+        invals = {p: self._stream_bit(i, self._tick)
+                  for i, p in enumerate(self.in_pos)}
         self._state = self._sim.step(invals)
         if self.backend == 'lut':
             self._nibbles = dict(self._sim.out)
@@ -1262,14 +1453,15 @@ class DesignerTab:
         manual = {r: self.out_pos.get(r) for r in roles}
         use_manual = all(manual[r] in self.grid for r in roles if manual[r])
         use_manual = use_manual and all(manual[r] for r in roles)
+        obs = _obs_len(t)                    # observe past T so a delayed Q is seen
         if self.backend == 'nervous':
-            routing = {p: ROUTING_HEX[s & 0xF] for p, s in self.grid.items()}
+            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
             if use_manual:
                 out_pos = manual
                 traces = {r: [] for r in roles}
                 for trial in t.trials:
                     _, trs = run_nervous(self.grid, routing, list(self.in_pos),
-                                         out_pos, trial.streams, t.T)
+                                         out_pos, trial.streams, obs)
                     for r in roles:
                         traces[r].append(trs[r])
             else:
@@ -1282,8 +1474,10 @@ class DesignerTab:
                 for trial in t.trials:
                     sim = LutSim(self.grid)
                     per = {r: [] for r in roles}
-                    for tick in range(t.T):
-                        st = sim.step({self.in_pos[i]: trial.streams[tick][i]
+                    ns = len(trial.streams)
+                    for tick in range(obs):
+                        row = trial.streams[tick] if tick < ns else None
+                        st = sim.step({self.in_pos[i]: (row[i] if row else 0)
                                        for i in range(len(self.in_pos))})
                         for r in roles:
                             per[r].append(st.get(out_pos[r], 0))
@@ -1307,7 +1501,7 @@ class DesignerTab:
             self._status.set('Target needs %d input(s); the grid has %d designated.'
                              % (len(t.inputs), len(self.in_pos)))
             return
-        routing = {p: ROUTING_HEX[s & 0xF] for p, s in self.grid.items()}
+        routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
         roles = [o.role for o in t.outputs]
         out_pos = {r: self.out_pos.get(r) for r in roles}
         if not all(out_pos[r] in self.grid for r in roles if out_pos[r]) \
@@ -1358,9 +1552,20 @@ class DesignerTab:
     def _load_evolved(self):
         path = filedialog.askopenfilename(
             initialdir=RESULTS_DIR if os.path.isdir(RESULTS_DIR) else ROOT,
-            title='Load evolved solution or design',
-            filetypes=[('pickles', '*.pkl'), ('all files', '*.*')])
+            title='Load design or evolved solution',
+            filetypes=[('design or solution', '*.json *.pkl'),
+                       ('text design', '*.json'), ('evolved pickle', '*.pkl'),
+                       ('all files', '*.*')])
         if not path:
+            return
+        # text (JSON) design? try to parse before falling back to pickle
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                doc = json.load(f)
+        except (UnicodeDecodeError, ValueError, OSError):
+            doc = None
+        if isinstance(doc, dict) and str(doc.get('format', '')).startswith('evohw-design'):
+            self._load_json_design(doc, path)
             return
         try:
             with open(path, 'rb') as f:
@@ -1507,43 +1712,62 @@ class DesignerTab:
             return
         os.makedirs(RESULTS_DIR, exist_ok=True)
         path = filedialog.asksaveasfilename(
-            initialdir=RESULTS_DIR, title='Save design', defaultextension='.pkl',
-            initialfile='design.pkl', filetypes=[('pickles', '*.pkl')])
+            initialdir=RESULTS_DIR, title='Save design (text/JSON)',
+            defaultextension='.json', initialfile='design.json',
+            filetypes=[('design (text)', '*.json'), ('all files', '*.*')])
         if not path:
             return
         t = self._current_target_obj()
-        state = {
-            # app Load Saved schema (genome may be None for pure hand-builds)
-            'best_genome':  self.genome,
-            'best_fitness': self._last_score if self._last_score is not None else 0.0,
-            'target':       t,
-            'target_name':  t.name if t is not None else '',
-            'arch':         None,
-            'seed':         None,
-            'backend':      self.backend,
-            # designer extensions: the working phenotype always round-trips.
-            # hand_built marks a designer file that carries a grid; grid_edited
-            # says the grid diverges from what the genome would regrow (so the
-            # main app, which is DNA-based, can't reproduce it exactly).
-            'hand_built':   True,
-            'grid':         dict(self.grid),
-            'in_pos':       list(self.in_pos),
-            'out_pos':      dict(self.out_pos),
-            'grid_edited':  bool(self._grid_edited or self.genome is None),
+        grid_edited = bool(self._grid_edited or self.genome is None)
+        doc = {
+            'format':      DESIGN_FORMAT,
+            'backend':     self.backend,
+            'target':      t.name if t is not None else '',
+            'fitness':     self._last_score if self._last_score is not None else 0.0,
+            'hand_built':  True,
+            'grid_edited': grid_edited,
+            'genome':      _genome_to_dict(self.genome, self.backend) if self.genome else None,
+            'grid':        _grid_to_dict(self.grid, self.backend),
+            'inputs':      [list(p) for p in self.in_pos],
+            'outputs':     {r: list(p) for r, p in self.out_pos.items() if p},
         }
         try:
-            with open(path, 'wb') as f:
-                pickle.dump(state, f)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(doc, f, indent=1)
         except Exception as exc:
             messagebox.showerror('Save design', 'Could not write %s:\n%s' % (path, exc))
             return
-        kind = ('genome + hand-edited grid' if state['grid_edited'] and self.genome
+        kind = ('genome + hand-edited grid' if grid_edited and self.genome
                 else 'grid only (no genome)' if self.genome is None
                 else 'genome + grown grid')
-        self._status.set('Saved design (%s) → %s' % (kind, path))
+        self._status.set('Saved editable design (%s) → %s' % (kind, path))
+
+    def _load_json_design(self, doc, path):
+        backend = doc.get('backend', 'nervous')
+        if backend not in ('nervous', 'lut'):
+            messagebox.showinfo('Load', 'Design is for the %s backend, not supported.'
+                                % str(backend).upper())
+            return
+        try:
+            genome = _genome_from_dict(doc['genome'], backend) if doc.get('genome') else None
+            grid = _grid_from_dict(doc.get('grid', {}), backend)
+            in_pos = [tuple(p) for p in doc.get('inputs', [])]
+            out_pos = {r: tuple(p) for r, p in (doc.get('outputs') or {}).items()}
+        except (KeyError, ValueError, TypeError) as exc:
+            messagebox.showerror('Load', 'Malformed design file %s:\n%s'
+                                 % (os.path.basename(path), exc))
+            return
+        name = doc.get('target') or ''
+        target = TEMPORAL_TARGETS.get(name)
+        if target is None and backend == 'nervous':
+            target = COMB_TARGETS.get(name)
+        self._adopt_state(genome=genome, target=target, backend=backend,
+                          grid=grid or None, in_pos=in_pos, out_pos=out_pos,
+                          grid_edited=doc.get('grid_edited', True),
+                          note='text design %s' % os.path.basename(path))
 
     def _load_design(self):
-        self._load_evolved()          # same reader: designs carry grid/in/out keys
+        self._load_evolved()          # one reader auto-detects JSON design vs pickle
 
 
 def main():
