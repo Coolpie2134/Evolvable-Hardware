@@ -72,11 +72,21 @@ def _lookup_vec(garr, front, back, right, left, self_lut, iteration):
     apply while iteration < its telomere, and a dead direction (self_lut == 0)
     can only be brought to life by a growth rule — so expansion provably stops
     once every telomere has expired, and maintenance settles the attractor."""
+    return _lookup_vec_idx(garr, front, back, right, left, self_lut, iteration)[0]
+
+
+def _lookup_vec_idx(garr, front, back, right, left, self_lut, iteration):
+    """As _lookup_vec, but also returns the WINNING flat gene index (chromosome-
+    major), or -1 when no gene shaped the output (all-zero context, or only
+    expired growth rules remained). The empty-cell guard still returns the
+    winner's index: that gene WON the argmin and its identity caused the 0, so
+    it counts as expressed — removing it would change the argmin (not neutral).
+    Used for expression tracking / neutral compaction; see lut_evo.ga."""
     An, As, Ae, Aw, Ain, Aout, Agrow, Atel = garr
     if An.shape[0] == 0:
-        return 0
+        return 0, -1
     if front == 0 and back == 0 and right == 0 and left == 0 and self_lut == 0:
-        return 0
+        return 0, -1
     PC = _PC16_ARR
     d = (PC[An ^ front].astype(np.int32) + PC[As ^ back] + PC[Ae ^ right]
          + PC[Aw ^ left] + PC[Ain ^ self_lut])
@@ -86,14 +96,14 @@ def _lookup_vec(garr, front, back, right, left, self_lut, iteration):
             d[expired] += _EXPIRE
             j = int(d.argmin())
             if expired[j]:                     # only expired genes left -> no match
-                return 0
+                return 0, -1
         else:
             j = int(d.argmin())
     else:
         j = int(d.argmin())
     if self_lut == 0 and Ain[j] != 0:          # empty-cell guard (sim6)
-        return 0
-    return Aout[j]
+        return 0, j                            # gene j won; its identity mattered
+    return Aout[j], j
 
 
 # scalar reference kept for clarity / tests (growth uses the vectorised path)
@@ -102,9 +112,11 @@ def _lookup(genome, front, back, right, left, self_lut, iteration):
                        self_lut, iteration)
 
 
-def _grow_step(genome, garr, grid, seeds, iteration, cache):
+def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None):
     # expand the frontier: every empty 4-neighbour of a live cell — the field
     # is unbounded; telomeres + the empty-cell guard bound the organism.
+    # `counts` (list per flat gene, chromosome-major) tallies gene EXPRESSION
+    # when tracking (see grow_lut_tracked); None = the zero-overhead fast path.
     frontier = {}
     for (x, y) in list(grid):
         for dx, dy in _N4:
@@ -119,29 +131,46 @@ def _grow_step(genome, garr, grid, seeds, iteration, cache):
     mask = tuple(iteration >= getattr(c, 'telomere', 1 << 30)
                  for c in genome.chromosomes)
 
-    def look(f, b, r, l, s):
-        key = (f, b, r, l, s, mask)
-        v = cache.get(key)
-        if v is None:
-            v = _lookup_vec(garr, f, b, r, l, s, iteration)
-            cache[key] = v
-        return v
-
-    for (x, y), st in working.items():
-        # LUTs each neighbour presents toward this cell: north neighbour's
-        # south-LUT (index 1), south neighbour's north-LUT (0), east's west (3),
-        # west's east (2).  Absent neighbour -> 0.
-        n = working.get((x, y + 1), (0, 0, 0, 0))[1]
-        s = working.get((x, y - 1), (0, 0, 0, 0))[0]
-        e = working.get((x + 1, y), (0, 0, 0, 0))[3]
-        w = working.get((x - 1, y), (0, 0, 0, 0))[2]
-        # each output direction: (front, back, right, left, self_d)
-        ln = look(n, s, e, w, st[0])
-        ls = look(s, n, w, e, st[1])
-        le = look(e, w, s, n, st[2])
-        lw = look(w, e, n, s, st[3])
-        if ln or ls or le or lw:
-            nxt[(x, y)] = (ln, ls, le, lw)
+    if counts is None:                          # fast path (unchanged)
+        def look(f, b, r, l, s):
+            key = (f, b, r, l, s, mask)
+            v = cache.get(key)
+            if v is None:
+                v = _lookup_vec(garr, f, b, r, l, s, iteration)
+                cache[key] = v
+            return v
+        for (x, y), st in working.items():
+            n = working.get((x, y + 1), (0, 0, 0, 0))[1]
+            s = working.get((x, y - 1), (0, 0, 0, 0))[0]
+            e = working.get((x + 1, y), (0, 0, 0, 0))[3]
+            w = working.get((x - 1, y), (0, 0, 0, 0))[2]
+            ln = look(n, s, e, w, st[0]); ls = look(s, n, w, e, st[1])
+            le = look(e, w, s, n, st[2]); lw = look(w, e, n, s, st[3])
+            if ln or ls or le or lw:
+                nxt[(x, y)] = (ln, ls, le, lw)
+    else:                                       # tracking path (expression tally)
+        def look(f, b, r, l, s):
+            key = (f, b, r, l, s, mask)
+            vj = cache.get(key)
+            if vj is None:
+                vj = _lookup_vec_idx(garr, f, b, r, l, s, iteration)
+                cache[key] = vj
+            return vj
+        for (x, y), st in working.items():
+            n = working.get((x, y + 1), (0, 0, 0, 0))[1]
+            s = working.get((x, y - 1), (0, 0, 0, 0))[0]
+            e = working.get((x + 1, y), (0, 0, 0, 0))[3]
+            w = working.get((x - 1, y), (0, 0, 0, 0))[2]
+            (ln, jn) = look(n, s, e, w, st[0]); (ls, js) = look(s, n, w, e, st[1])
+            (le, je) = look(e, w, s, n, st[2]); (lw, jw) = look(w, e, n, s, st[3])
+            # count EVERY argmin winner, even for a cell that stays dead: that
+            # gene's identity is what produced the 0, so removing it could change
+            # the argmin and bring the cell to life — it is NOT neutral to drop.
+            for j in (jn, js, je, jw):
+                if j >= 0:
+                    counts[j] += 1
+            if ln or ls or le or lw:
+                nxt[(x, y)] = (ln, ls, le, lw)
     for pos in seeds:
         nxt[pos] = SEED_STATE
     return nxt
@@ -160,6 +189,24 @@ def grow_lut(genome, seeds, grid_size, iters):
             return nxt
         prev, grid = grid, nxt
     return grid
+
+
+def grow_lut_tracked(genome, seeds, grid_size, iters):
+    """Grow exactly like grow_lut, but also return a per-gene EXPRESSION count
+    (chromosome-major, one entry per gene) tallying how many cell-directions each
+    gene builds across the whole developmental trajectory. A gene with count 0
+    won no growth lookup and so is phenotype-neutral — see lut_evo.ga.compact.
+    Returns (grid, counts)."""
+    garr = _genome_lut_arrays(genome)
+    counts = [0] * garr[0].shape[0]
+    grid = {pos: SEED_STATE for pos in seeds}
+    prev, cache = None, {}
+    for it in range(iters):
+        nxt = _grow_step(genome, garr, grid, seeds, it, cache, counts)
+        if nxt == grid or nxt == prev:
+            return nxt, counts
+        prev, grid = grid, nxt
+    return grid, counts
 
 
 def grow_lut_snapshots(genome, seeds, grid_size, iters):

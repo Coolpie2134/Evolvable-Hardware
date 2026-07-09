@@ -106,6 +106,12 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
     penalised for every extra one (the spike-event F1 metric). The first
     `latency` ticks are unscored startup grace.
 
+    `latency` is now just a nominal minimum-causal offset (default 1), NOT a delay
+    the circuit must match: scoring is latency-invariant (nv_evo.temporal, best
+    global shift), so a circuit that produces the right spikes at ANY consistent
+    delay scores the same. Describe the RELATIVE spike structure; the absolute
+    input->output delay is free.
+
     Example — a coincidence detector (fires one tick after A and B coincide)::
 
         spike_target('Coincidence', [
@@ -240,7 +246,22 @@ def pattern_generator(grid_size=5, pattern=(1, 0, 0)):
     """Kicked pattern generator (paper §3: "simple pattern generation circuits
     can be built from these circuits, connected in loops"): one kick pulse must
     start the output repeating `pattern` indefinitely — a loop whose length and
-    loading encode the bit sequence."""
+    loading encode the bit sequence.
+
+    Period 3 is deliberately KEPT though it is a hard, DECEPTIVE target. The
+    lattice is bipartite, so a single pulse only circulates an even-length loop
+    (period = loop length); an odd period is achievable only via the harder route
+    output_period = loop_length / n_pulses — a length-6 loop carrying TWO pulses
+    spaced 3 apart. The cheap one-pulse route parity forbids, so the GA gets stuck
+    on strong LOCAL OPTIMA and never crosses to the real solution (measured, and
+    neither a bigger grid nor 200 generations moves it):
+      * a one-pulse period-6 loop  -> output 100000, F1 ~0.67
+      * a transient 3-spike burst that then dies -> F1 ~0.76
+    Reaching period 3 needs a fork that injects a SECOND pulse half a loop later
+    into a sustaining loop — a conjunction the path to which dips through lower
+    fitness. The fix is search-side (behavioural diversity / quality-diversity to
+    keep the period-6 stepping stone AND explore off it), NOT a target change. The
+    kick tick and absolute phase are free (phase/latency-invariant scoring)."""
     T = 24
     In  = (0, 2)
     out = OutputTerminal('Q', (2, 2))
@@ -255,10 +276,10 @@ def pattern_generator(grid_size=5, pattern=(1, 0, 0)):
     return TemporalTarget('Pattern (%s)' % pat, [In], [out], T, trials,
                           grid_size=grid_size, iters=30, description=(
         'Like the oscillator, but richer: after a single kick pulse the output\n'
-        'must repeat the bit pattern %s forever (period %d). The pattern is a\n'
-        'pulse circulating a loop of length %d read at one cell — loop length\n'
-        'and loading encode the sequence. Nothing may happen before the kick;\n'
-        'trials kick at different ticks.' % (pat, len(pattern), len(pattern))))
+        'must repeat the bit pattern %s forever (period %d) — a pulse circulating\n'
+        'a loop of length %d read at one cell. The absolute phase/latency is free;\n'
+        'only the repeating structure is scored. Nothing may happen before the\n'
+        'kick; trials kick at different ticks.' % (pat, len(pattern), len(pattern))))
 
 
 def echo(grid_size=5, delay=3):
@@ -281,7 +302,7 @@ def echo(grid_size=5, delay=3):
         'trials use varied spacings including back-to-back pulses.' % (delay, delay)))
 
 
-def coincidence_detector(grid_size=5, latency=3):
+def coincidence_detector(grid_size=5, latency=1):
     """Two-input coincidence detector — the paper's marquee node capability
     lifted to a circuit: output pulses iff BOTH inputs pulse at the same tick.
     Trials mix simultaneous pairs (fire), pulses staggered by 1-2 ticks (must
@@ -381,7 +402,7 @@ def pair_detector(grid_size=5, gap=2, latency=3):
 # memorising one schedule. Scored by the spike-event F1 metric like everything
 # else (silence and spurious firing both cost).
 
-def temporal_xor(grid_size=5, latency=2):
+def temporal_xor(grid_size=5, latency=1):
     """Temporal XOR — the complement of coincidence: fire iff EXACTLY ONE of the
     two inputs pulses on a tick (both-or-neither -> silent). Needs each input to
     excite the output while the pair mutually inhibits."""
@@ -400,7 +421,7 @@ def temporal_xor(grid_size=5, latency=2):
         % latency))
 
 
-def ordered_sequence(grid_size=5, gap=3, latency=2):
+def ordered_sequence(grid_size=5, gap=3, latency=1):
     """Ordered two-input sequence detector: fire only when A pulses and THEN B
     pulses exactly `gap` ticks later (B-before-A, wrong gaps and lone pulses stay
     silent). Order matters — a delay line on A must meet B at a coincidence node,
@@ -420,7 +441,7 @@ def ordered_sequence(grid_size=5, gap=3, latency=2):
         'reverse ordering never lines up.' % gap))
 
 
-def veto_gate(grid_size=5, latency=2):
+def veto_gate(grid_size=5, latency=1):
     """Inhibited echo: output echoes input A after `latency` ticks UNLESS input B
     pulses on the same tick, which vetoes that echo. The inhibitory routing used
     as a real gate — 'pass A, but B can suppress it'."""
@@ -437,7 +458,7 @@ def veto_gate(grid_size=5, latency=2):
         'suppresses A. The inhibitory (NOT) input used as a real gate.' % latency))
 
 
-def burst_generator(grid_size=5, n=3, spacing=2, latency=2):
+def burst_generator(grid_size=5, n=3, spacing=2, latency=1):
     """Fan-out / burst: a single input kick produces a fixed BURST of `n` evenly
     spaced output spikes, then silence until the next kick. One edge in, several
     edges out — a delay-line tap or a short re-triggerable ring."""

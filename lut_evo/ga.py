@@ -13,12 +13,13 @@ import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
-from nv_evo.temporal import (_role_trace_score, _pr_counts, _f1,
+from nv_evo.temporal import (_role_trace_score, _pr_counts, _f1, _pr_score,
+                             _best_shift, _placement_score,
                              windowed_score, exact_tick_accuracy)
 from .genome import (LUT_STATES, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome, random_lut_genome)
-from .lut import grow_lut, LutSim
+from .lut import grow_lut, grow_lut_tracked, LutSim
 
 
 def clone_genome(genome):
@@ -76,14 +77,14 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
             if c in used:
                 continue
             col = cidx[c]
-            scores = []
+            ctr, cexp = [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                tr = trial_B[ti][:, col].tolist()
-                scores.append(_role_trace_score(tr, exp))
-            s   = sum(scores) / len(scores) if scores else 0.0
+                ctr.append(trial_B[ti][:, col].tolist())
+                cexp.append(exp)
+            s   = _placement_score(ctr, cexp, ttarget) if ctr else 0.0
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
             if best_key is None or key < best_key:
                 best_key, best = key, c
@@ -263,13 +264,13 @@ def evaluate_lut_full(genome, target):
     if prep is None:
         return 0.0, (0.0,) * n_cases
     _, _, traces = prep
-    from nv_evo.temporal import _trace_metric
+    best_s, _ = _best_shift(traces, target)     # one global latency shift
     cases = []
     for ti, trial in enumerate(target.trials):
         for role, exp in trial.expected.items():
             tr = traces.get(role, [])
-            cases.append(_trace_metric(tr[ti], exp) if ti < len(tr) else 0.0)
-    return windowed_score(traces, target), tuple(cases)
+            cases.append(_pr_score(tr[ti], exp, best_s) if ti < len(tr) else 0.0)
+    return windowed_score(traces, target, shift=best_s), tuple(cases)
 
 
 def evaluate_lut(genome, target):
@@ -408,6 +409,37 @@ def crossover_lut(pa, pb):
 
 def n_genes(genome):
     return sum(len(c.genes) for c in genome.chromosomes)
+
+
+# ── neutral compaction (gene expression) ─────────────────────────────────────────
+# A dense ontogeny genome carries genes that win NO growth lookup — they are
+# unexpressed, and (proven) removing a never-winning gene cannot change any argmin,
+# so the grown organism is bit-identical and the fitness is unchanged. Compaction
+# drops exactly those: the threshold is zero expression (a neutrality boundary, not
+# a tuned cutoff), leaving the genome's functional core with behaviour untouched.
+# Biologically: pseudogene loss. NB measured only a modest shrink on fresh ontogeny
+# seeds (~7-14% unexpressed — the density is mostly FUNCTIONAL morphology, not junk),
+# so this is a human-facing cleanup for inspecting/refining an evolved genome
+# (the Designer), NOT an evolution driver — it did not improve solving in tests.
+def compact_genome(genome, seeds, grid_size=7, iters=30):
+    """Return a copy of `genome` with all never-expressed genes removed (neutral:
+    same grown organism, same fitness). `seeds` must be the SAME seeds the genome
+    is grown with, or the expression tally is for a different organism."""
+    _, counts = grow_lut_tracked(genome, seeds=tuple(seeds),
+                                 grid_size=grid_size, iters=iters)
+    new_chroms, k = [], 0
+    for c in genome.chromosomes:
+        kept = [g for gi, g in enumerate(c.genes) if counts[k + gi] > 0]
+        k += len(c.genes)
+        if kept:
+            new_chroms.append(Chromosome(
+                genes=kept, split=min(c.split, max(0, len(kept) - 1)),
+                tag=c.tag, telomere=getattr(c, 'telomere', MAX_TELOMERE)))
+    if not new_chroms:                     # everything unexpressed -> keep 1 gene
+        c0 = genome.chromosomes[0]
+        new_chroms = [Chromosome(genes=c0.genes[:1], split=0, tag=c0.tag,
+                                 telomere=getattr(c0, 'telomere', MAX_TELOMERE))]
+    return Genome(chromosomes=new_chroms, tag=genome.tag)
 
 
 # ── ontogeny seeding is THE seed path (see lut_evo/ontogeny.py) ──────────────────
@@ -584,16 +616,21 @@ def lut_report(ttarget, genome=None):
               "'.' = unscored tick. Scored by the shared spike-event F1 (the",
               'metric the GA optimises): an expected 1 is hit if the cell fires',
               'on it or an adjacent tick (±1 ring tolerance — holds may ring),',
-              'and every pulse on an expected-0 tick costs precision exactly.']
+              'and every pulse on an expected-0 tick costs precision exactly.',
+              'LATENCY-INVARIANT: scored at the best input->output delay (one',
+              'shift for all trials), so the absolute delay is free.']
     traces = None
+    best_s = 0
     if genome is not None:
         prep = prepare_lut(genome, ttarget)
         if prep is None:
             lines += ['', '(circuit incomplete — grew too little or inputs dead)']
         else:
             _, out_pos, traces = prep
+            best_s = _best_shift(traces, ttarget)[0]
             for t in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
+            lines.append('measured output latency offset: %+d tick(s)' % best_s)
     names = [chr(65 + i) for i in range(ttarget.n_inputs)]
     for ti, trial in enumerate(ttarget.trials):
         pulses = {n: [t for t in range(len(trial.streams)) if trial.streams[t][i]]
@@ -606,16 +643,16 @@ def lut_report(ttarget, genome=None):
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []
-                # per-trial F1 (the selection metric) with components, matching
-                # nv temporal_report — not the old 'balanced' diagnostic
-                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp)
+                # per-trial F1 at the genome's global latency shift (matches the
+                # latency-invariant score; mirrors nv temporal_report)
+                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
                 s = _f1(tp_rec, n_exp, tp_prec, n_act)
                 lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
                              % (''.join(str(v) for v in tr_i), s,
                                 'PASS' if s >= 0.999 else 'FAIL',
                                 tp_rec, n_exp, tp_prec, n_act))
     if traces is not None:
-        s = windowed_score(traces, ttarget)
+        s = windowed_score(traces, ttarget, shift=best_s)
         lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
                   % (s, '   SOLVED' if s >= 0.999 else '',
                      exact_tick_accuracy(traces, ttarget))]

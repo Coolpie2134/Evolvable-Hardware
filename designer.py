@@ -59,7 +59,7 @@ from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
 from nv_evo.pulse import PulseSim
 from nv_evo.temporal import (run_nervous, place_outputs_by_trace,
                              windowed_score, exact_tick_accuracy,
-                             _pr_counts, _f1)
+                             _pr_counts, _f1, _best_shift)
 from nv_evo.targets import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 
@@ -67,7 +67,8 @@ from lut_evo.genome import (LutGene, Chromosome as LutChromosome, Genome as LutG
                             random_lut_gene, MAX_TELOMERE as LUT_MAX_TEL)
 from lut_evo.lut import grow_lut, LutSim, SEED_STATE as LUT_SEED_STATE
 from lut_evo.ga import (place_outputs_by_trace as lut_place_by_trace,
-                        make_seed_genome as make_lut_seed_genome)
+                        make_seed_genome as make_lut_seed_genome,
+                        compact_genome as lut_compact_genome)
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from lut_evo.boolfn import lut_sop
 
@@ -235,8 +236,10 @@ def _traces_report(ttarget, traces, out_pos, label):
     format as nv_evo.temporal.temporal_report / lut_evo.ga.lut_report, reusing
     the project's metric primitives (never a hand-rolled per-tick equality)."""
     lines = ['Target: %s   [%s — designer working grid]' % (ttarget.name, label)]
+    best_s = _best_shift(traces, ttarget)[0]    # latency-invariant: one global shift
     for term in ttarget.outputs:
         lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
+    lines.append('measured output latency offset: %+d tick(s)' % best_s)
     names = [chr(65 + i) for i in range(ttarget.n_inputs)]
     for ti, trial in enumerate(ttarget.trials):
         pulses = {n: [t for t in range(len(trial.streams)) if trial.streams[t][i]]
@@ -249,13 +252,13 @@ def _traces_report(ttarget, traces, out_pos, label):
                 role if len(trial.expected) > 1 else ''))
             tr = traces.get(role, [])
             tr_i = tr[ti] if ti < len(tr) else []
-            tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp)
+            tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
             s = _f1(tp_rec, n_exp, tp_prec, n_act)
             lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
                          % (''.join(str(v) for v in tr_i), s,
                             'PASS' if s >= 0.999 else 'FAIL',
                             tp_rec, n_exp, tp_prec, n_act))
-    total = windowed_score(traces, ttarget)
+    total = windowed_score(traces, ttarget, shift=best_s)
     lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
               % (total, '   SOLVED' if total >= 0.999 else '',
                  exact_tick_accuracy(traces, ttarget))]
@@ -365,6 +368,13 @@ class DesignerTab:
                 'inputs. ONE-WAY: replaces the working grid; growth is not '
                 'invertible, so hand edits never flow back into the DNA.')
         ttk.Button(row2, text='Random genome', command=self._random_genome).pack(side='left', padx=2)
+        self._compact_btn = ttk.Button(row2, text='Compact genome', command=self._compact)
+        self._compact_btn.pack(side='left', padx=2)
+        _Tip(self._compact_btn,
+             'LUT only: drop never-expressed genes (win no growth lookup). Provably '
+             'behaviour-preserving — the grown organism is bit-identical — so it '
+             'reveals the genome’s functional core for inspection/editing. '
+             'Biologically, pseudogene loss.')
         ttk.Button(row2, text='Clear grid', command=self._clear_grid).pack(side='left', padx=2)
         ttk.Separator(row2, orient='vertical').pack(side='left', fill='y', padx=6)
         b = ttk.Button(row2, text='Score', command=self._score)
@@ -576,6 +586,32 @@ class DesignerTab:
         self._refresh_all()
         self._status.set('Grew %d cells from the genome (seeds pinned at the inputs).'
                          % len(self.grid))
+
+    def _compact(self):
+        """Drop never-expressed genes from the LUT genome (neutral: the grown
+        organism is unchanged). Uses the designated inputs as growth seeds so the
+        expression tally matches how this genome actually develops here."""
+        if self.backend != 'lut':
+            self._status.set('Compaction applies to the LUT array (dense genomes).')
+            return
+        if self.genome is None:
+            self._status.set('No genome to compact — load or randomize one first.')
+            return
+        if not self.in_pos:
+            self._status.set('Designate the input cell(s) first — they are the '
+                             'growth seeds compaction develops from.')
+            return
+        t = self._current_target_obj()
+        n0 = sum(len(c.genes) for c in self.genome.chromosomes)
+        self.genome = lut_compact_genome(
+            self.genome, seeds=tuple(self.in_pos),
+            grid_size=getattr(t, 'grid_size', 7), iters=getattr(t, 'iters', 30))
+        n1 = sum(len(c.genes) for c in self.genome.chromosomes)
+        self._genome_edited = True             # genome changed (grid regrows identical)
+        self._rebuild_genome_panel()
+        self._refresh_sync()
+        self._status.set('Compacted %d -> %d genes (%d unexpressed removed; the grown '
+                         'circuit is identical).' % (n0, n1, n0 - n1))
 
     def _clear_grid(self):
         self.grid, self.out_pos = {}, {}
@@ -1121,6 +1157,9 @@ class DesignerTab:
         self._sync_lbl.config(text=txt, foreground=col)
 
     def _refresh_all(self):
+        if hasattr(self, '_compact_btn'):      # compaction is LUT-only
+            self._compact_btn.configure(state='normal' if self.backend == 'lut'
+                                        else 'disabled')
         self._set_guide()
         self._rebuild_genome_panel()
         self._rebuild_inspector()

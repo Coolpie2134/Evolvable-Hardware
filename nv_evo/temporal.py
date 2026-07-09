@@ -154,14 +154,27 @@ def _role_trace_score(trace, exp):
 # is a false positive) — without that, a dense oscillator target would let an
 # always-high output through. Unscored (settle) ticks count for neither.
 
-def _pr_counts(trace, exp, tol=1):
-    n = min(len(exp), len(trace))
-    fires = set(t for t in range(n) if trace[t])
-    exp_high = [t for t in range(len(exp)) if exp[t] == 1]
-    tp_rec = sum(1 for t in exp_high
-                 if any((t + d) in fires for d in range(-tol, tol + 1)))
-    scored_fires = [t for t in fires if exp[t] is not None]
-    tp_prec = sum(1 for t in scored_fires if exp[t] == 1)
+def _pr_counts(trace, exp, shift=0, tol=1):
+    """Spike-event counts of an output trace vs an expected trace, under a latency
+    `shift`: an expected event at tick e corresponds to an output event at e+shift
+    (shift=0 is the identity — the ordinary aligned scoring).
+
+    recall (±tol): each expected-1 is hit if the output fires within tol of e+shift
+      (the ±1 ring tolerance — a stored bit rings every other tick).
+    precision (EXACT): output pulses in the ORIGINAL scored region; a pulse at a is
+      good iff a-shift is exactly an expected-1. The denominator is the scored
+      region of the OUTPUT (independent of shift), so a shift can never hide
+      spurious pulses on a silent trial by sliding them off the scored window —
+      false positives always cost. Unscored (settle) ticks count for neither.
+    See _best_shift for why the shift is chosen globally (one value per genome)."""
+    n = len(exp)
+    fires = set(t for t in range(len(trace)) if trace[t])
+    exp_high = [t for t in range(n) if exp[t] == 1]
+    exp_high_set = set(exp_high)
+    tp_rec = sum(1 for e in exp_high
+                 if any((e + shift + d) in fires for d in range(-tol, tol + 1)))
+    scored_fires = [a for a in fires if a < n and exp[a] is not None]
+    tp_prec = sum(1 for a in scored_fires if (a - shift) in exp_high_set)
     return tp_rec, len(exp_high), tp_prec, len(scored_fires)
 
 
@@ -171,10 +184,92 @@ def _f1(tp_rec, n_exp, tp_prec, n_act):
     return (2 * rec * prec / (rec + prec)) if (rec + prec) else 0.0
 
 
-def _pr_score(trace, exp):
+def _pr_score(trace, exp, shift=0):
     """Per-trace F1 of the highs (see _pr_counts). Silent -> 0 when anything is
     expected; always-high -> low; a correct ringing/quiet output -> 1."""
-    return _f1(*_pr_counts(trace, exp))
+    return _f1(*_pr_counts(trace, exp, shift))
+
+
+# ── latency-invariant scoring ────────────────────────────────────────────────────
+# The ABSOLUTE input->output latency must NOT drive fitness: a circuit that
+# produces the right spike pattern at a consistent but different delay than the
+# target's arbitrarily-chosen one has captured the idea and should score the same.
+# So the score is taken at the single best latency SHIFT — one value shared across
+# every trial and role (a real circuit has one fixed propagation delay), found by
+# maximising the pooled F1. This frees the absolute delay while still requiring
+# CONSISTENT timing (one shift must fit all trials) and still penalising spurious
+# firing (precision is anchored to the output's scored region — see _pr_counts).
+# shift=0 is included, so the aligned score is a lower bound: nothing regresses.
+
+def _pooled_f1(traces, ttarget, shift):
+    tr = ne = tp = na = 0
+    for ti, trial in enumerate(ttarget.trials):
+        for role, exp in trial.expected.items():
+            seq = traces.get(role, [])
+            if ti >= len(seq):
+                continue
+            a, b, c, d = _pr_counts(seq[ti], exp, shift)
+            tr += a; ne += b; tp += c; na += d
+    return _f1(tr, ne, tp, na)
+
+
+def _cand_shifts(pairs, T, tol=1):
+    """The only shifts worth trying: F1 is piecewise-constant in the shift and
+    changes only where an output pulse aligns with an expected event, so the
+    maximum is attained at some (pulse_tick - expected_tick) offset (± the ring
+    tolerance), plus 0. For sparse spike targets this is far fewer than the whole
+    range; for dense ones it dedups to at most the range (2T-1) anyway."""
+    lo, hi = -(T - 1), T - 1
+    shifts = {0}
+    for trace, exp in pairs:
+        fires = [a for a in range(len(trace)) if trace[a]]
+        highs = [e for e in range(len(exp)) if exp[e] == 1]
+        for a in fires:
+            for e in highs:
+                for d in (-tol, 0, tol):
+                    s = a - e + d
+                    if lo <= s <= hi:
+                        shifts.add(s)
+    return shifts
+
+
+def _target_pairs(traces, ttarget):
+    pairs = []
+    for ti, trial in enumerate(ttarget.trials):
+        for role, exp in trial.expected.items():
+            seq = traces.get(role, [])
+            if ti < len(seq):
+                pairs.append((seq[ti], exp))
+    return pairs
+
+
+def _best_shift(traces, ttarget):
+    """(best_shift, best_f1): the global latency offset maximising pooled F1."""
+    best_s, best_f = 0, -1.0
+    for s in _cand_shifts(_target_pairs(traces, ttarget), ttarget.T):
+        f = _pooled_f1(traces, ttarget, s)
+        if f > best_f:
+            best_f, best_s = f, s
+    return best_s, best_f
+
+
+def _placement_score(cell_traces, exps, ttarget):
+    """Best-shift pooled F1 for ONE candidate output cell (a single latency shift
+    over its own traces) — the per-cell ranking used when PLACING outputs. This
+    MUST be latency-invariant too: if placement ranked at a fixed alignment, which
+    cell gets chosen would depend on the target's nominal latency, quietly
+    reintroducing the timing-dependence the score removes (measured: it did).
+    Same _cand_shifts trick as _best_shift keeps it cheap."""
+    best = 0.0
+    for s in _cand_shifts(list(zip(cell_traces, exps)), ttarget.T):
+        tr = ne = tp = na = 0
+        for trace, exp in zip(cell_traces, exps):
+            a, b, c, d = _pr_counts(trace, exp, s)
+            tr += a; ne += b; tp += c; na += d
+        f = _f1(tr, ne, tp, na)
+        if f > best:
+            best = f
+    return best
 
 
 # Selection metric. The fitness question is "did the network produce the correct
@@ -242,14 +337,14 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
         for c in _output_candidates(grid, in_set, term):
             if c in used:
                 continue
-            scores = []
+            ctr, cexp = [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                tr = [trial_states[ti][t].get(c, 0) for t in range(ttarget.T)]
-                scores.append(_trace_metric(tr, exp))
-            s   = sum(scores) / len(scores) if scores else 0.0
+                ctr.append([trial_states[ti][t].get(c, 0) for t in range(ttarget.T)])
+                cexp.append(exp)
+            s   = _placement_score(ctr, cexp, ttarget) if ctr else 0.0
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
             if best_key is None or key < best_key:
                 best_key, best = key, c
@@ -281,16 +376,25 @@ def prepare_net(genome, ttarget):
     return grid, routing, in_pos, out_pos, traces
 
 
-def windowed_score(traces, ttarget, metric=None):
+def windowed_score(traces, ttarget, metric=None, shift=None):
     """Selection fitness core, pooled globally over every (trial, role) under
     METRIC (or an explicit `metric`):
       f1       — spike-event precision/recall (default; silent = 0, always-high low)
       balanced — pooled expected-0 vs expected-1 window scores, averaged (diagnostic)
       blend    — mean of the two (diagnostic)
-    1.0 iff every expected spike is produced (ringing allowed) and nothing fires
-    where it shouldn't."""
+    The f1 score is LATENCY-INVARIANT: taken at the best global input->output shift
+    (see _best_shift), so the absolute delay doesn't matter, only consistent timing
+    and no spurious firing. `shift` skips the search (pass the value from
+    _best_shift when it's already known). 1.0 iff every expected spike is produced
+    (ringing allowed, any consistent latency) and nothing fires where it shouldn't."""
     m = metric or METRIC
-    tp_rec = n_exp = tp_prec = n_act = 0
+    if m in ('f1', 'blend'):
+        f1 = (_pooled_f1(traces, ttarget, shift) if shift is not None
+              else _best_shift(traces, ttarget)[1])
+    else:
+        f1 = 0.0
+    if m == 'f1':
+        return f1
     per_level = {0: [], 1: []}
     for ti, trial in enumerate(ttarget.trials):
         for role, exp in trial.expected.items():
@@ -298,19 +402,12 @@ def windowed_score(traces, ttarget, metric=None):
             if ti >= len(tr):
                 continue
             trace = tr[ti]
-            if m in ('f1', 'blend'):
-                a, b, c, d = _pr_counts(trace, exp)
-                tp_rec += a; n_exp += b; tp_prec += c; n_act += d
-            if m in ('balanced', 'blend'):
-                for lvl, ticks in _expected_windows(exp):
-                    ticks = [t for t in ticks if t < len(trace)]
-                    if ticks:
-                        per_level[lvl].append(_window_score(trace, lvl, ticks))
-    f1 = _f1(tp_rec, n_exp, tp_prec, n_act)
+            for lvl, ticks in _expected_windows(exp):
+                ticks = [t for t in ticks if t < len(trace)]
+                if ticks:
+                    per_level[lvl].append(_window_score(trace, lvl, ticks))
     parts = [sum(v) / len(v) for v in per_level.values() if v]
     bal = sum(parts) / len(parts) if parts else 0.0
-    if m == 'f1':
-        return f1
     if m == 'balanced':
         return bal
     return 0.5 * (bal + f1)
@@ -371,18 +468,24 @@ def temporal_report(ttarget, genome=None):
               'landing on an expected-0 tick costs precision exactly:',
               '    highs hit  — expected 1s the output reaches (misses cost)',
               '    pulses ok  — its own pulses that belong (extras cost)',
+              'Scoring is LATENCY-INVARIANT: taken at the best input->output delay',
+              '(one shift for all trials), so the ABSOLUTE delay is free — only',
+              'consistent timing and no spurious firing matter.',
               '(The "exact per-tick" number at the bottom ignores ring tolerance;',
               'a perfect circulating-pulse latch reads ~0.75 there by physics.)']
 
     prep = traces = None
+    best_s = 0
     if genome is not None:
         prep = prepare_net(genome, ttarget)
         if prep is None:
             lines += ['', '(circuit incomplete — grew too little or inputs dead)']
         else:
             _, _, _, out_pos, traces = prep
+            best_s = _best_shift(traces, ttarget)[0]
             for t in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
+            lines.append('measured output latency offset: %+d tick(s)' % best_s)
 
     names = [chr(65 + i) for i in range(ttarget.n_inputs)]
     for ti, trial in enumerate(ttarget.trials):
@@ -397,17 +500,16 @@ def temporal_report(ttarget, genome=None):
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []
-                # show the SELECTION metric (F1) with its components, not the old
-                # 'balanced' diagnostic — that one under-counted spurious pulses
-                # and made failing trials read deceptively high.
-                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp)
+                # per-trial F1 at the genome's GLOBAL latency shift (so the display
+                # matches the latency-invariant score, not a fixed alignment)
+                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
                 s = _f1(tp_rec, n_exp, tp_prec, n_act)
                 lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
                              % (''.join(str(v) for v in tr_i), s,
                                 'PASS' if s >= 0.999 else 'FAIL',
                                 tp_rec, n_exp, tp_prec, n_act))
     if traces is not None:
-        total = windowed_score(traces, ttarget)
+        total = windowed_score(traces, ttarget, shift=best_s)
         lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
                   % (total, '   SOLVED' if total >= 0.999 else '',
                      exact_tick_accuracy(traces, ttarget))]
