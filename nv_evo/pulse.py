@@ -24,8 +24,9 @@ This module is an event-driven simulation of exactly that:
 Hardware mapping is 1:1 with the paper's circuit: DELAY is the node's fixed
 propagation delay, WIDTH the pulse width set by the leak transistor (the
 "time constant"), COINC the integration window of the capacitively-coupled
-excitatory inputs. Targets and fitness sample the wires once per TICK, so the
-scoring layer is unchanged.
+excitatory inputs. Every leading edge is retained in ``rise_times`` for
+continuous-time fitness; wires are also sampled once per TICK for playback and
+legacy persistence-window targets.
 
 With the default constants (DELAY = WIDTH = TICK, COINC < TICK) behaviour on
 the integer tick lattice matches the earlier synchronous engine — that engine
@@ -59,7 +60,7 @@ class PulseSim:
     their wire has pulsed at all (the combinational "did it fire" read-out).
     """
 
-    def __init__(self, grid, routing):
+    def __init__(self, grid, routing, max_events=None):
         self.grid    = grid
         self.routing = routing
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
@@ -68,6 +69,8 @@ class PulseSim:
         self.op    = {}                               # v -> 'and' | 'or'
         self.watch = {c: [] for c in grid}
         for v, entry in routing.items():
+            if v not in grid:
+                continue
             e1, e2, i1 = entry[0], entry[1], entry[2]
             self.op[v] = entry[3] if len(entry) > 3 else 'and'
             nb = hex_dirs(*v)
@@ -83,6 +86,13 @@ class PulseSim:
         self.refr_until  = {c: _NEG for c in grid}
         self.last_edge   = {c: {} for c in grid}      # v -> {source: edge time}
         self.ever        = {c: 0 for c in grid}
+        # Raw leading-edge timestamps are the substrate's behavioural output.
+        # Tick samples remain a playback convenience, not the source of truth
+        # for event-based fitness.
+        self.rise_times  = {c: [] for c in grid}
+        self.max_events  = None if max_events is None else max(1, int(max_events))
+        self.event_count = 0
+        self.overflow    = False
         self._heap = []                               # (time, seq, cell, pulse_end)
         self._seq  = 0
         self._tick = 0                                # next tick index
@@ -115,13 +125,48 @@ class PulseSim:
                     if end > self.pulse_until[cell]:          # already high ->
                         self.pulse_until[cell] = end          # extend, no edge
                 else:
+                    if (self.max_events is not None
+                            and self.event_count >= self.max_events):
+                        # A pathological oscillator must not make one genome
+                        # monopolise evaluation.  Mark the run invalid and stop
+                        # deterministically; scorers turn overflow into zero.
+                        self.overflow = True
+                        self._heap.clear()
+                        return
                     self.pulse_start[cell] = t
                     self.pulse_until[cell] = end
                     self.ever[cell] = 1
+                    self.rise_times[cell].append(float(t))
+                    self.event_count += 1
                     new_edges.append(cell)
             for u in new_edges:
                 for v in self.watch[u]:
                     self._consider(v, u, t)
+
+    def advance_to(self, when):
+        """Process queued events through an absolute physical time.
+
+        ``step`` intentionally stops at the mid-tick display sample.  Temporal
+        evaluation calls this once at the end of a run so late half-tick edges
+        are retained in ``rise_times`` instead of being silently discarded.
+        """
+        self._run_until(float(when))
+
+    def activity_at(self, when):
+        """Return the wire levels at an already-processed physical time."""
+        when = float(when)
+        return {cell: (1 if self._high(cell, when) else 0)
+                for cell in self.grid}
+
+    def inject_pulse(self, cell, t, width=None):
+        """Inject one input pulse of ``width`` (default WIDTH) onto ``cell``'s net
+        at absolute time ``t``, wired-OR with any existing pulse. This is the
+        continuous-time analogue of ``step``'s per-tick input injection, used by
+        the async Interactive/Designer playback to place edges at real (possibly
+        sub-tick) times. Events are queued; call ``advance_to`` to process them."""
+        if cell in self.grid:
+            w = WIDTH if width is None else float(width)
+            self._push(float(t), cell, float(t) + w)
 
     def _consider(self, v, u, t):
         """Cell v sees a pulse edge from neighbour u at time t."""

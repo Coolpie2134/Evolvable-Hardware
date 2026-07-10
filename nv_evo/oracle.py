@@ -24,7 +24,8 @@ here.
 from __future__ import annotations
 import random
 
-from .targets import TemporalTarget, Trial, OutputTerminal, SETTLE
+from .targets import (TemporalTarget, Trial, OutputTerminal, describe_target,
+                      EVENT_SCORING, PERSISTENCE_SCORING)
 
 
 # ── reference oracles (in_bits, state) -> (out_bits, new_state) ──────────────────
@@ -148,7 +149,10 @@ def sample_streams(rng, T, n_inputs, min_gap=4, jitter=4, align_prob=0.0):
         t = rng.randint(1, min_gap)
         while t < T:
             ons[i].add(t)
-            t += min_gap + rng.randint(0, jitter)
+            # The hardware sees a leading edge, not a logical sample.  Leave at
+            # least one low tick between events; consecutive 1 samples would be
+            # one extended pulse and must not be labelled as two stimuli.
+            t += max(2, min_gap + rng.randint(0, jitter))
     if align_prob:
         for i in range(1, n_inputs):
             aligned = set()
@@ -179,16 +183,22 @@ def label_trace(oracle, streams, T, latency):
 
 def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
                   seed=20260702, latency=2, min_gap=5, align_prob=0.0,
-                  out_pos=(2, 2), grid_size=5, description=''):
+                  out_pos=(2, 2), grid_size=5, description='',
+                  score_mode='trace'):
     rng = random.Random(seed)
     out = OutputTerminal(output_role, out_pos)
     n_in = len(inputs)
     trials = []
     for _ in range(n_trials):
         streams = sample_streams(rng, T, n_in, min_gap=min_gap, align_prob=align_prob)
-        trials.append(Trial(streams, {output_role: label_trace(oracle, streams, T, latency)}))
+        exp = label_trace(oracle, streams, T, latency)
+        events = ([float(t) for t, value in enumerate(exp) if value == 1]
+                  if score_mode == 'events' else [])
+        trials.append(Trial(streams, {output_role: exp},
+                            {output_role: events} if score_mode == 'events' else {}))
     return TemporalTarget(name, list(inputs), [out], T, trials,
-                          grid_size=grid_size, iters=30, description=description)
+                          grid_size=grid_size, iters=30, description=description,
+                          score_mode=score_mode)
 
 
 def holdout_score(genome, spec, backend='nervous', seed=999):
@@ -206,43 +216,76 @@ def holdout_score(genome, spec, backend='nervous', seed=999):
 # ── preset oracle targets (input-driven relations) ──────────────────────────────
 
 def sr_latch_oracle(seed=20260702):
-    return oracle_target('SR latch (oracle)', orc_sr_latch, [(0, 1), (0, 3)], 'Q',
+    target = oracle_target('SR latch (oracle)', orc_sr_latch, [(0, 1), (0, 3)], 'Q',
                          T=24, n_trials=12, seed=seed, latency=2, min_gap=6,
-                         description=(
-        'SR latch specified by a reference bit of memory (q = set ? 1 :\n'
-        'reset ? 0 : q), tested on 12 RANDOM Set/Reset schedules — not a few\n'
-        'hand-picked timings. The circuit must implement the relation for any\n'
-        'timing, so it cannot pass by phase-luck; held-out schedules certify it.'))
+                         description=describe_target(
+        'Input A sets one stored bit; input B resets it; otherwise Q retains its '
+        'previous state.', PERSISTENCE_SCORING,
+        'Twelve seeded random schedules plus explicit never-set and '
+        'Set→Reset→Set tests exercise storage, clearing, and reloading.'))
+    # Persistence guardrails: silence without Set, and a Set->Reset->Set trial
+    # that requires the same circuit to store, clear, and store again.  A
+    # one-shot response to Set or an unconditional ring fails these contrasts.
+    silent = [(0, 0)] * target.T
+    cycle = [(0, 0)] * target.T
+    cycle[3] = (1, 0)
+    cycle[11] = (0, 1)
+    cycle[18] = (1, 0)
+    target.trials.extend([
+        Trial(silent, {'Q': label_trace(orc_sr_latch, silent, target.T, 2)}),
+        Trial(cycle, {'Q': label_trace(orc_sr_latch, cycle, target.T, 2)}),
+    ])
+    return target
 
 
 def toggle_oracle(seed=20260702):
     return oracle_target('Toggle (oracle)', orc_toggle, [(0, 2)], 'Q',
                          T=24, n_trials=12, seed=seed, latency=2, min_gap=5,
-                         description='T flip-flop vs a reference (each pulse flips q), on random pulse trains.')
+                         description=describe_target(
+        'Each input edge flips the stored output state.', PERSISTENCE_SCORING,
+        'Twelve seeded random pulse trains vary phase and spacing.'))
 
 
 def echo_oracle(seed=20260702, delay=3):
     return oracle_target('Echo (oracle)', make_echo(delay), [(0, 2)], 'Q',
                          T=22, n_trials=10, seed=seed, latency=delay, min_gap=3,
-                         description='Delay line vs reference (out = in delayed %d), random pulse trains.' % delay)
+                         score_mode='events',
+                         description=describe_target(
+        'Reproduce the input-edge train while preserving its intervals.',
+        EVENT_SCORING,
+        'Ten seeded random schedules use a nominal %d-tick reference delay; '
+        'absolute evolved latency is free.' % delay))
 
 
 def coincidence_oracle(seed=20260702):
     return oracle_target('Coincidence (oracle)', orc_coincidence, [(0, 1), (0, 3)], 'Q',
                          T=24, n_trials=12, seed=seed, latency=3, min_gap=4, align_prob=0.5,
-                         description='out = A AND B on the same tick; random schedules, ~half the pulses aligned.')
+                         score_mode='events',
+                         description=describe_target(
+        'Emit Q only when A and B arrive together.', EVENT_SCORING,
+        'Twelve seeded schedules contain approximately equal coincident and '
+        'offset input events.'))
 
 
 def one_shot_oracle(seed=20260702, width=3):
     return oracle_target('One-shot (oracle)', make_one_shot(width), [(0, 2)], 'Q',
                          T=24, n_trials=10, seed=seed, latency=2, min_gap=width + 4,
-                         description='Monostable vs reference (%d-tick burst per pulse, self-terminating), random pulses.' % width)
+                         description=describe_target(
+        'Each input edge starts a %d-tick active interval that self-terminates.'
+        % width, PERSISTENCE_SCORING,
+        'Ten seeded random schedules space triggers far enough to verify '
+        'termination and re-arming.'))
 
 
 def pair_oracle(seed=20260702, gap=2):
     return oracle_target('Pair detector (oracle)', make_pair(gap), [(0, 2)], 'Q',
                          T=24, n_trials=12, seed=seed, latency=3, min_gap=1,
-                         description='Fires iff two input pulses arrive %d ticks apart; random pulse trains.' % gap)
+                         score_mode='events',
+                         description=describe_target(
+        'Emit Q when two input edges are separated by exactly %d ticks.' % gap,
+        EVENT_SCORING,
+        'Twelve seeded random trains mix valid pairs, wrong gaps, and isolated '
+        'events.'))
 
 
 def period_stepper_oracle(seed=20260702, base=2):
@@ -274,11 +317,13 @@ def period_stepper_oracle(seed=20260702, base=2):
     return TemporalTarget(
         'Period stepper (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
         T, trials, grid_size=5, iters=30,
-        description=(
-            'Cadence stepper: the first command starts a period-2 oscillator;\n'
-            'each later command restarts it one step slower (period 4, then 6).\n'
-            'The fitness measures sustained cadence stepping, not an arbitrary\n'
-            'pulse phase at the control transition.'),
+        description=describe_target(
+            'The first command starts period 2; later commands step the '
+            'sustained cadence to periods 4 and 6.',
+            'Score regular coverage within each command-delimited dwell and '
+            'require every later period to be strictly longer; phase is free.',
+            'Five long schedules cover start-only, one-step, and two-step '
+            'operation with enough time to observe each settled cadence.'),
         score_mode='period_stepper', stepper_min_period=2,
         # A command can meet a circulating pulse at any phase.  Its short
         # switchover is intentionally unscored; only the settled cadence matters.
@@ -290,20 +335,22 @@ def gated_oscillator_oracle(seed=20260702):
     return oracle_target('Gated oscillator (oracle)', make_gated_oscillator(),
                          [(0, 1), (0, 3)], 'Q',
                          T=32, n_trials=12, seed=seed, latency=2, min_gap=8,
-                         description=(
-        'Run/stop memory: input A starts a free-running period-2 oscillation,\n'
-        'input B stops it (an inhibitory drain). Between an A and the next B the\n'
-        'output toggles; elsewhere it is silent. The paper\'s circulating-pulse\n'
-        'memory turned into a controllable relation, on random A/B schedules.'))
+                         description=describe_target(
+        'Input A starts a period-2 output cadence; input B stops it. Q is quiet '
+        'outside the commanded run interval.', PERSISTENCE_SCORING,
+        'Twelve seeded random A/B schedules verify start, sustained running, '
+        'stop, and later restart.'))
 
 
 def resettable_toggle_oracle(seed=20260702):
     return oracle_target('Resettable toggle (oracle)', make_resettable_toggle(),
                          [(0, 1), (0, 3)], 'Q',
                          T=26, n_trials=12, seed=seed, latency=2, min_gap=5,
-                         description=(
-        'T flip-flop with clear: input A flips the stored bit, input B forces it\n'
-        'to 0. Toggle memory guarded by an inhibitory reset, on random schedules.'))
+                         description=describe_target(
+        'Input A flips the stored bit; input B clears it to 0 and dominates a '
+        'simultaneous A+B event.', PERSISTENCE_SCORING,
+        'Twelve seeded random schedules exercise toggling, clearing, and '
+        'post-clear recovery.'))
 
 
 ORACLE_SPECS = {

@@ -65,3 +65,34 @@ def apply_theme(root):
     except tk.TclError:
         pass
     return style
+
+
+def fit_window(root, min_width=900, min_height=640, margin=72):
+    """Size a Tk window to its content without exceeding the visible screen.
+
+    Large matplotlib canvases otherwise make Tk request a window taller than a
+    typical laptop display.  The returned ``(width, height)`` is useful in GUI
+    layout tests and the explicit geometry prevents notebook tab changes from
+    resizing the toplevel.
+    """
+    root.update_idletasks()
+    max_width = max(640, root.winfo_screenwidth() - margin)
+    max_height = max(480, root.winfo_screenheight() - margin)
+    width = min(max(root.winfo_reqwidth(), min_width), max_width)
+    height = min(max(root.winfo_reqheight(), min_height), max_height)
+    root.minsize(min(min_width, max_width), min(min_height, max_height))
+    root.geometry('%dx%d' % (width, height))
+    return width, height
+
+
+def cancel_after_callbacks(root):
+    """Cancel pending Tk/Matplotlib idle jobs before destroying a window."""
+    try:
+        jobs = root.tk.splitlist(root.tk.call('after', 'info'))
+    except tk.TclError:
+        return
+    for job in jobs:
+        try:
+            root.after_cancel(job)
+        except tk.TclError:
+            pass

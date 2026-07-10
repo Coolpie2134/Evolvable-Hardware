@@ -14,17 +14,19 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
     output roles. Both PulseSim and LutSim run on a bare grid, so a
-    hand-built circuit needs NO genome to be simulated or scored.
+    hand-built circuit needs NO genome to be simulated or scored. The nervous
+    net is driven ASYNCHRONOUSLY — input pulses placed on a clickable timeline,
+    played in continuous time via PulseSim.advance_to (the engine the fitness
+    reads) — while the clocked LUT keeps its tick-numbered bit streams.
 
 The two views are linked ONE-WAY (genome -> grid via Grow). Growth is
 many-to-one and not invertible, so the tool never pretends a hand-edited grid
 came from the current genome: a visible sync indicator tracks
 in-sync / grid-edited / genome-edited / no-genome.
 
-Simulation mirrors interactive.py (input toggles + Step/Run/Reset + a trace
-strip); scoring reuses the project's spike-event F1 machinery
-(place_outputs_by_trace, windowed_score, _pr_counts/_f1) so a designed
-circuit is judged by exactly the metric the evolver optimises.
+Simulation mirrors interactive.py (input schedules + Step/Run/Reset + a trace
+strip). Scoring uses the target's declared event, cadence, or persistence
+metric, exactly as the evolver does.
 
 Imports evolved solutions (results/best_genome.pkl, solver_generation.pkl,
 or the running app's current_circuit() hand-off) so a user can start from an
@@ -51,16 +53,22 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Circle, Rectangle, Patch
 from matplotlib.lines import Line2D
 
-from nv_evo.hexgrid import hex_dirs, hex_pixel, ROUTING_HEX, routing_kind
+from nv_evo.hexgrid import hex_dirs, hex_pixel, ROUTING_HEX
 from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGenome,
                            random_hex_gene, random_hex_genome,
                            MAX_STATE, MAX_TELOMERE as NV_MAX_TEL)
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, SEED_STATE as NV_SEED_STATE)
-from nv_evo.pulse import PulseSim
-from nv_evo.temporal import (run_nervous, place_outputs_by_trace,
+from nv_async_ui import NervousPlayer, PulseLaneEditor, pulses_from_trial
+from nv_evo.temporal import (run_nervous_events,
+                             place_outputs_by_trace, TemporalTraces,
                              windowed_score, exact_tick_accuracy,
-                             _pr_counts, _f1, _best_shift, _obs_len)
+                             _pr_counts, _f1, _best_shift, _obs_len,
+                             _best_event_shift, _event_case_score,
+                             _expected_events, _role_events,
+                             cadence_score, sampled_events,
+                             trial_input_summary, expected_window_summary,
+                             event_list_summary, period_stepper_score)
 from nv_evo.targets import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 
@@ -74,6 +82,7 @@ from lut_evo.viz import draw_lut_net, draw_lut_table
 from lut_evo.boolfn import lut_sop
 
 from snn_evo.targets import TARGETS as COMB_TARGETS
+from target_ui import TargetPicker
 
 import ui_compat
 
@@ -258,8 +267,8 @@ WORKFLOW
     One-way: editing the circuit never alters the DNA.
  3. Or skip DNA entirely: Place/Delete cells, then set
     each node's Fig. 3 state in the Cell tab.
- 4. Step/Run injects pulses at the inputs; Score judges
-    the grid against the target (spike-event F1)."""
+ 4. Step/Run injects pulses at the inputs; Score uses
+    the target's event, cadence, or persistence metric."""
 
 _GUIDE_LUT = """\
 ARCHITECTURE 2 — LUT array (paper §5-7, sim6)
@@ -305,8 +314,8 @@ WORKFLOW
  2. Grow (ontogeny), or hand-build: Place cells and
     edit their four tables in the Cell tab.
  3. Step/Run drives the latched array one tick at a
-    time (Fig. 14 view); Score uses the same
-    spike-event F1 as the evolver."""
+    time (Fig. 14 view); Score uses the target's
+    declared metric, exactly as the evolver does."""
 
 
 def _routed_neighbours(idx, x, y):
@@ -319,24 +328,62 @@ def _routed_neighbours(idx, x, y):
 
 
 def _traces_report(ttarget, traces, out_pos, label):
-    """Per-trial F1 report for a WORKING GRID's traces — the same trial-block
-    format as nv_evo.temporal.temporal_report / lut_evo.ga.lut_report, reusing
-    the project's metric primitives (never a hand-rolled per-tick equality)."""
+    """Semantic score report for a manually edited working grid."""
     lines = ['Target: %s   [%s — designer working grid]' % (ttarget.name, label)]
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    if mode == 'period_stepper':
+        total, cases = period_stepper_score(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
+        for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
+            lines.append('Test %d: %s  cadence-step score %.3f %s' % (
+                ti, trial_input_summary(trial, ttarget.n_inputs), score,
+                'PASS' if score >= 0.999 else 'FAIL'))
+        lines += ['', '=> cadence-stepper score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else '')]
+        return total, '\n'.join(lines)
+    if mode == 'cadence':
+        total, cases = cadence_score(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
+        for ti, score in enumerate(cases):
+            role = ttarget.outputs[0].role
+            lines.append('Test %d: %s  output edges@%s  cadence %.3f %s' % (
+                ti + 1, trial_input_summary(ttarget.trials[ti], ttarget.n_inputs),
+                event_list_summary(_role_events(traces, role, ti)), score,
+                'PASS' if score >= 0.999 else 'FAIL'))
+        lines += ['', '=> cadence score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else '')]
+        return total, '\n'.join(lines)
+    if mode == 'events':
+        best_s, total = _best_event_shift(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
+        lines.append('measured output latency offset: %+.3f' % best_s)
+        for ti, trial in enumerate(ttarget.trials):
+            for role in trial.expected:
+                score = _event_case_score(traces, ttarget, ti, role, best_s)
+                lines += ['', 'Test %d: %s' % (
+                    ti + 1, trial_input_summary(trial, ttarget.n_inputs)),
+                    '  expect %s edges@%s' % (
+                        role, event_list_summary(_expected_events(trial, role))),
+                    '  actual edges@%s  F1 %.3f %s' % (
+                        event_list_summary(_role_events(traces, role, ti)), score,
+                        'PASS' if score >= 0.999 else 'FAIL')]
+        lines += ['', '=> event score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else '')]
+        return total, '\n'.join(lines)
     best_s = _best_shift(traces, ttarget)[0]    # latency-invariant: one global shift
     for term in ttarget.outputs:
         lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
     lines.append('measured output latency offset: %+d tick(s)' % best_s)
-    names = [chr(65 + i) for i in range(ttarget.n_inputs)]
     for ti, trial in enumerate(ttarget.trials):
-        pulses = {n: [t for t in range(len(trial.streams)) if trial.streams[t][i]]
-                  for i, n in enumerate(names)}
-        lines += ['', 'Trial %d:  %s' % (ti + 1, '   '.join(
-            '%s pulses@%s' % (n, p if p else '(none)') for n, p in pulses.items()))]
+        lines += ['', 'Test %d: %s' % (
+            ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
         for role, exp in trial.expected.items():
-            lines.append('  expect %s %s' % (
-                ''.join('.' if e is None else str(e) for e in exp),
-                role if len(trial.expected) > 1 else ''))
+            lines.append('  expect %s%s' % (
+                expected_window_summary(exp),
+                ' (%s)' % role if len(trial.expected) > 1 else ''))
             tr = traces.get(role, [])
             tr_i = tr[ti] if ti < len(tr) else []
             tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
@@ -399,26 +446,31 @@ class DesignerTab:
 
         ttk.Label(top, text='Target:').pack(side='left')
         self._target_var = tk.StringVar(value='(none)')
-        self._target_cb = ttk.Combobox(top, textvariable=self._target_var, width=20,
-                                       state='readonly')
-        self._target_cb.pack(side='left', padx=(2, 4))
+        self._target_picker = TargetPicker(
+            top, {}, variable=self._target_var, command=self._on_target_selected,
+            include_none=True, target_width=20)
+        self._target_picker.pack(side='left', padx=(2, 4))
+        self._target_cb = self._target_picker.target_cb
         b = ttk.Button(top, text='Adopt target I/O', command=self._adopt_target_io)
         b.pack(side='left', padx=2)
         _Tip(b, "Copy the target's input terminals onto the grid as the growth "
                 "seeds, and free its output roles for assignment (or auto-"
                 "placement at scoring).")
-        ttk.Separator(top, orient='vertical').pack(side='left', fill='y', padx=6)
-        b = ttk.Button(top, text='Load evolved…', command=self._load_evolved)
+
+        files = ttk.Frame(self.parent, padding=(6, 0))
+        files.pack(fill='x')
+        ttk.Label(files, text='Files:').pack(side='left')
+        b = ttk.Button(files, text='Load evolved…', command=self._load_evolved)
         b.pack(side='left', padx=2)
         _Tip(b, 'Import results/best_genome.pkl or solver_generation.pkl: the '
                 'evolved genome opens in the Genome tab, is grown, and its '
                 'target is adopted — then refine it by hand.')
         if self.get_circuit is not None:
-            b = ttk.Button(top, text='From app', command=self._from_app)
+            b = ttk.Button(files, text='From app', command=self._from_app)
             b.pack(side='left', padx=2)
             _Tip(b, "Pull the main window's current best solution into the designer.")
-        ttk.Button(top, text='Load design…', command=self._load_design).pack(side='left', padx=2)
-        b = ttk.Button(top, text='Save design…', command=self._save_design)
+        ttk.Button(files, text='Load design…', command=self._load_design).pack(side='left', padx=2)
+        b = ttk.Button(files, text='Save design…', command=self._save_design)
         b.pack(side='left', padx=2)
         _Tip(b, 'Saves the genome (when one exists) AND always the working grid '
                 '+ inputs/outputs + target, so a hand-built phenotype round-trips '
@@ -440,51 +492,55 @@ class DesignerTab:
                  'relay seed table (FFFE x4), delete zeroes all four tables.'),
                 ('Input', 'input',
                  'Toggle cells as inputs (A, B, …). Inputs are the growth SEEDS '
-                 '(pinned during Grow) and the cells the toggles drive when '
-                 'simulating.'),
+                 '(pinned during Grow) and receive the scheduled pulses/clocked '
+                 'streams during simulation.'),
                 ('Output', 'output',
                  'Assign the next unfilled output role to a live cell; click an '
                  'assigned cell to clear it.')):
             r = ttk.Radiobutton(row2, text=label, value=val, variable=self._mode)
             r.pack(side='left', padx=2)
             _Tip(r, tip)
-        ttk.Separator(row2, orient='vertical').pack(side='left', fill='y', padx=6)
-        b = ttk.Button(row2, text='Grow (ontogeny)', command=self._grow)
+
+        actions = ttk.Frame(self.parent, padding=(6, 2, 6, 0))
+        actions.pack(fill='x')
+        ttk.Label(actions, text='Circuit:').pack(side='left')
+        b = ttk.Button(actions, text='Grow (ontogeny)', command=self._grow)
         b.pack(side='left', padx=2)
         _Tip(b, 'Develop the genome into a circuit with the associative-memory '
                 'ontogeny (min-Hamming gene lookup), seeds = the designated '
                 'inputs. ONE-WAY: replaces the working grid; growth is not '
                 'invertible, so hand edits never flow back into the DNA.')
-        ttk.Button(row2, text='Random genome', command=self._random_genome).pack(side='left', padx=2)
-        self._compact_btn = ttk.Button(row2, text='Compact genome', command=self._compact)
+        ttk.Button(actions, text='Random genome', command=self._random_genome).pack(side='left', padx=2)
+        self._compact_btn = ttk.Button(actions, text='Compact genome', command=self._compact)
         self._compact_btn.pack(side='left', padx=2)
         _Tip(self._compact_btn,
              'LUT only: drop never-expressed genes (win no growth lookup). Provably '
              'behaviour-preserving — the grown organism is bit-identical — so it '
              'reveals the genome’s functional core for inspection/editing. '
              'Biologically, pseudogene loss.')
-        ttk.Button(row2, text='Clear grid', command=self._clear_grid).pack(side='left', padx=2)
-        ttk.Separator(row2, orient='vertical').pack(side='left', fill='y', padx=6)
-        b = ttk.Button(row2, text='Score', command=self._score)
+        ttk.Button(actions, text='Clear grid', command=self._clear_grid).pack(side='left', padx=2)
+        ttk.Separator(actions, orient='vertical').pack(side='left', fill='y', padx=6)
+        b = ttk.Button(actions, text='Score', command=self._score)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Judge the working grid against the target with the spike-event '
-                'F1 metric the evolver uses. No genome required. NB a stored 1 '
-                'reads as ringing (1010…) — that is correct behaviour, not noise.')
-        self._sync_lbl = ttk.Label(row2, text='', font=(self._mono, 9))
-        self._sync_lbl.pack(side='left', padx=10)
+        _Tip(b, 'Judge the working grid with the target’s actual semantic metric: '
+                'raw events, cadence, persistence windows, or settled logic. No '
+                'genome is required; circulating pulses are valid stored state.')
+        self._sync_lbl = ttk.Label(actions, text='', font=(self._mono, 9))
+        self._sync_lbl.pack(side='left', padx=10, fill='x', expand=True)
 
-        main = ttk.Frame(self.parent)
+        # A weighted splitter lets the inspector grow on wide/fullscreen windows
+        # and remains user-adjustable.  The old fixed 360 px column clipped the
+        # nervous-cell routing descriptions even when ample space was available.
+        main = ttk.Panedwindow(self.parent, orient='horizontal')
         main.pack(fill='both', expand=True)
 
         # left: genome / inspector / report notebook + shared LUT table editor
-        left = ttk.Frame(main, width=430)
-        left.pack(side='left', fill='y', padx=(4, 0), pady=4)
-        left.pack_propagate(False)
+        left = ttk.Frame(main, padding=(4, 4, 2, 4))
         self._nb = ttk.Notebook(left)
         self._nb.pack(fill='both', expand=True)
         guide_tab = ttk.Frame(self._nb)
         self._nb.add(guide_tab, text='Guide')
-        self._guide = scrolledtext.ScrolledText(guide_tab, width=52, height=20,
+        self._guide = scrolledtext.ScrolledText(guide_tab, width=60, height=20,
                                                 font=(self._mono, 8), wrap='word')
         self._guide.pack(fill='both', expand=True)
         self._genome_tab = ttk.Frame(self._nb)
@@ -493,12 +549,12 @@ class DesignerTab:
         self._nb.add(self._insp_tab, text='Cell')
         self._report_tab = ttk.Frame(self._nb)
         self._nb.add(self._report_tab, text='Report')
-        self._report = scrolledtext.ScrolledText(self._report_tab, width=52, height=20,
-                                                 font=(self._mono, 8), wrap='none')
+        self._report = scrolledtext.ScrolledText(self._report_tab, width=60, height=20,
+                                                 font=(self._mono, 8), wrap='word')
         self._report.pack(fill='both', expand=True)
 
         # scrollable genome frame — BOTH axes. A gene row (esp. LUT hex fields, or
-        # a chromosome header ending in +gene) is wider than the 430px left panel,
+        # a chromosome header ending in +gene) is wider than the left panel,
         # so a horizontal scrollbar keeps the rightmost fields reachable instead of
         # clipping them off the edge.
         gt = self._genome_tab
@@ -532,24 +588,31 @@ class DesignerTab:
         self._lut_fig.tight_layout()
 
         # right: circuit canvas + sim controls + trace strip
-        right = ttk.Frame(main)
-        right.pack(side='left', fill='both', expand=True, padx=4, pady=4)
+        right = ttk.Frame(main, padding=(2, 4, 4, 4))
+        main.add(left, weight=3)
+        main.add(right, weight=5)
+        self._main_pane = main
         sim = ttk.Frame(right)
         sim.pack(fill='x')
         ttk.Button(sim, text='Step', command=self._step).pack(side='left', padx=2)
         self._run_btn = ttk.Button(sim, text='Run', command=self._toggle_run)
         self._run_btn.pack(side='left', padx=2)
         ttk.Button(sim, text='Reset', command=self._reset_sim_ui).pack(side='left', padx=2)
-        self._tick_lbl = ttk.Label(sim, text='tick 0', font=(self._mono, 9))
+        self._tick_lbl = ttk.Label(sim, text='t = 0.0', font=(self._mono, 9))
         self._tick_lbl.pack(side='left', padx=8)
         # input streams get their own row (they can be wide)
         srow = ttk.Frame(right)
         srow.pack(fill='x', pady=(2, 0))
-        ttk.Label(srow, text='Input streams (tick 0→):').pack(side='left')
+        self._input_heading = tk.StringVar(value='Input pulses (continuous time):')
+        input_header = ttk.Frame(srow)
+        input_header.pack(fill='x')
+        ttk.Label(input_header, textvariable=self._input_heading).pack(side='left')
+        self._input_actions = ttk.Frame(input_header)
+        self._input_actions.pack(side='right')
         self._inbar = ttk.Frame(srow)
-        self._inbar.pack(side='left', fill='x')
+        self._inbar.pack(fill='both', expand=True)
 
-        self.fig = plt.Figure(figsize=(7.5, 5.4))
+        self.fig = plt.Figure(figsize=(6.4, 4.8))
         gs = self.fig.add_gridspec(1, 2, width_ratios=[1.5, 1.0], wspace=0.22)
         self._ax_grid = self.fig.add_subplot(gs[0, 0])
         self._ax_trace = self.fig.add_subplot(gs[0, 1])
@@ -559,8 +622,12 @@ class DesignerTab:
 
         self._status = tk.StringVar(
             value='Design by hand or Load evolved…  (Grow replaces the grid from the genome)')
-        ttk.Label(right, textvariable=self._status, anchor='w', relief='sunken',
-                  padding=(6, 2)).pack(fill='x', pady=(2, 0))
+        self._status_label = ttk.Label(
+            right, textvariable=self._status, anchor='w', relief='sunken',
+            padding=(6, 2), wraplength=650, justify='left')
+        self._status_label.pack(fill='x', pady=(2, 0))
+        right.bind('<Configure>', lambda event: self._status_label.configure(
+            wraplength=max(360, event.width - 20)), add='+')
 
         self._refresh_target_list()
 
@@ -603,12 +670,22 @@ class DesignerTab:
         self._refresh_all()
 
     def _refresh_target_list(self):
-        names = ['(none)'] + list(TEMPORAL_TARGETS)
+        targets = dict(TEMPORAL_TARGETS)
         if self.backend == 'nervous':
-            names += list(COMB_TARGETS)
-        self._target_cb['values'] = names
-        if self._target_var.get() not in names:
-            self._target_var.set('(none)')
+            targets.update(COMB_TARGETS)
+        loaded = getattr(self, '_loaded_target', None)
+        if loaded is not None and loaded.name not in targets:
+            targets[loaded.name] = loaded
+        self._target_picker.set_targets(targets)
+
+    def _on_target_selected(self):
+        target = self._current_target()
+        if target is None:
+            self._status.set('No scoring target selected.')
+        else:
+            self._status.set('Selected %s — click Adopt target I/O to place its inputs.'
+                             % target.name)
+        self._rebuild_input_bar()
 
     def _current_target(self):
         name = self._target_var.get()
@@ -1062,13 +1139,22 @@ class DesignerTab:
                   text='out = (E1 op E2) AND NOT I1 — pick a state (hover previews\n'
                        'the wiring). 0-15 = AND (coincidence), 16-31 = OR (either):',
                   font=(self._mono, 8), justify='left').pack(anchor='w')
-        lb = tk.Listbox(self._insp_body, height=16, font=(self._mono, 8),
+        routes = ttk.Frame(self._insp_body)
+        routes.pack(fill='both', expand=True)
+        lb = tk.Listbox(routes, height=16, font=(self._mono, 8),
                         exportselection=False)
+        vscroll = ttk.Scrollbar(routes, orient='vertical', command=lb.yview)
+        hscroll = ttk.Scrollbar(routes, orient='horizontal', command=lb.xview)
+        lb.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
         for i in range(len(ROUTING_HEX)):        # 32: 0-15 AND, 16-31 OR
             lb.insert('end', _route_text(i, x, y))
         lb.selection_set(state)
         lb.see(state)
-        lb.pack(fill='x')
+        lb.grid(row=0, column=0, sticky='nsew')
+        vscroll.grid(row=0, column=1, sticky='ns')
+        hscroll.grid(row=1, column=0, sticky='ew')
+        routes.rowconfigure(0, weight=1)
+        routes.columnconfigure(0, weight=1)
 
         def on_pick(_evt=None):
             sel = lb.curselection()
@@ -1232,8 +1318,24 @@ class DesignerTab:
     def _draw_trace_strip(self):
         axt = self._ax_trace
         axt.clear()
-        axt.set_title('output traces', fontsize=9)
         roles = list(self.out_pos)
+        # nervous playback: output pulse EDGES on a real-time axis
+        if (self.backend == 'nervous' and getattr(self, '_player', None) is not None
+                and getattr(self, '_nv_playing', False)):
+            axt.set_title('output pulse edges (real time)', fontsize=9)
+            for k, role in enumerate(roles):
+                cell = self.out_pos.get(role)
+                evs = self._player.events_upto(cell) if cell else []
+                if evs:
+                    axt.vlines(evs, k - 0.4, k + 0.4, color='#1a6fd0', lw=1.6)
+            axt.axvline(self._player.cursor, color='#e8a33d', lw=1.4, alpha=0.9)
+            axt.set_xlim(0, self._player.horizon)
+            axt.set_ylim(-0.6, max(1, len(roles)) - 0.4)
+            axt.set_yticks(range(len(roles)))
+            axt.set_yticklabels([r[:6] for r in roles], fontsize=8)
+            axt.set_xlabel('continuous time (tick units)', fontsize=8)
+            return
+        axt.set_title('output traces', fontsize=9)
         for k, role in enumerate(roles):
             tr = self._traces.get(role, [])
             if tr:
@@ -1271,15 +1373,23 @@ class DesignerTab:
     # ── simulation (mirrors interactive.py) ─────────────────────────────────────
 
     def _rebuild_input_bar(self):
-        # Each input is driven by an editable tick-numbered bit STREAM (e.g.
-        # "00010"): at tick t the input injects stream[t] (0 once the stream ends,
-        # so loops keep ringing). Far easier than toggling a checkbox every tick;
-        # 'From trial' fills the streams from the target's own trials (same tick
-        # numbering), and Load/Save round-trip a plain text file.
+        # The nervous net is asynchronous: drive it with a clickable pulse
+        # TIMELINE (real, possibly sub-tick times). The LUT is clocked, so it
+        # keeps the tick-numbered bit STREAM editor.
         old = [v.get() for v in getattr(self, '_stream_vars', [])]
+        if getattr(self, '_editor', None) is not None:
+            self._editor.disconnect()
+            self._editor = None
         for w in self._inbar.winfo_children():
             w.destroy()
+        for w in self._input_actions.winfo_children():
+            w.destroy()
         self._stream_vars = []
+        if self.backend == 'nervous':
+            self._input_heading.set('Input pulses (continuous time):')
+            self._build_pulse_timeline()
+            return
+        self._input_heading.set('Input streams (clock ticks):')
         for i, _p in enumerate(self.in_pos):
             lbl = chr(65 + i) if i < 26 else 'i%d' % i
             ttk.Label(self._inbar, text=lbl, font=(self._mono, 9)).pack(side='left', padx=(4, 1))
@@ -1288,16 +1398,70 @@ class DesignerTab:
                       font=(self._mono, 9)).pack(side='left')
             self._stream_vars.append(v)
         if self.in_pos:
-            ttk.Label(self._inbar, text='trial', font=(self._mono, 8),
+            ttk.Label(self._inbar, text='test', font=(self._mono, 8),
                       foreground='#888').pack(side='left', padx=(6, 1))
             ttk.Spinbox(self._inbar, from_=1, to=99, width=3,
                         textvariable=self._trial_idx).pack(side='left')
-            ttk.Button(self._inbar, text='From trial', width=9,
+            ttk.Button(self._inbar, text='From test', width=9,
                        command=self._streams_from_trial).pack(side='left', padx=(2, 1))
             ttk.Button(self._inbar, text='Load', width=5,
                        command=self._load_streams).pack(side='left')
             ttk.Button(self._inbar, text='Save', width=5,
                        command=self._save_streams).pack(side='left')
+
+    # ── nervous net: asynchronous pulse timeline + continuous-time playback ───────
+
+    def _sim_horizon(self):
+        t = self._current_target()
+        return float(max(24, getattr(t, 'T', 24) or 24))
+
+    def _build_pulse_timeline(self):
+        labels = [chr(65 + i) if i < 26 else 'i%d' % i for i in range(len(self.in_pos))]
+        # Keep the timeline legible when the surrounding Designer pane expands.
+        # Width follows the pane; height reserves enough room for lane labels,
+        # title, ticks, and click targets instead of collapsing to an 80 px strip.
+        height = max(1.45, 0.85 + 0.34 * max(1, len(labels)))
+        self._tl_fig = plt.Figure(figsize=(8.0, height))
+        self._tl_ax = self._tl_fig.add_subplot(111)
+        self._tl_canvas = FigureCanvasTkAgg(self._tl_fig, master=self._inbar)
+        self._tl_canvas.get_tk_widget().pack(fill='both', expand=True)
+        self._editor = PulseLaneEditor(self._tl_ax, self._tl_canvas,
+                                       labels or ['(no inputs)'],
+                                       horizon=self._sim_horizon(), snap=0.5,
+                                       on_change=self._nv_schedule_changed)
+        t = self._current_target()
+        if t is not None and self.in_pos:
+            self._editor.set_pulses(pulses_from_trial(t, len(self.in_pos)))
+        else:
+            self._editor.draw()
+        ttk.Button(self._input_actions, text='Clear pulses',
+                   command=lambda: self._editor.clear()).pack(side='right', padx=3)
+        try:
+            self._tl_fig.subplots_adjust(left=0.055, right=0.99,
+                                         top=0.78, bottom=0.30)
+        except Exception:
+            pass
+
+    def _build_nv_player(self):
+        routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+        self._player = NervousPlayer(self.grid, routing, horizon=self._sim_horizon())
+        sched = (self._editor.schedule(self.in_pos)
+                 if getattr(self, '_editor', None) is not None else {})
+        self._player.set_schedule(sched)
+        self._traces = {r: [] for r in self.out_pos}
+
+    def _nv_schedule_changed(self):
+        # a pulse edit invalidates the running playback; rebuild from t=0
+        self._running = False
+        if hasattr(self, '_run_btn'):
+            self._run_btn.config(text='Run')
+        self._player = None
+        self._nv_playing = False
+        self._tick = 0
+        if hasattr(self, '_tick_lbl'):
+            self._tick_lbl.config(text='t = 0.0')
+        self._state = {}
+        self._refresh_canvas()
 
     def _stream_bit(self, i, tick):
         if i >= len(self._stream_vars):
@@ -1314,7 +1478,7 @@ class DesignerTab:
     def _streams_from_trial(self):
         t = self._current_target()
         if t is None or not getattr(t, 'trials', None):
-            self._status.set('Pick a temporal target first — it supplies the input trials.')
+            self._status.set('Pick a temporal target first — it supplies the input tests.')
             return
         if len(self.in_pos) != t.n_inputs:
             self._adopt_target_io()          # align inputs to the target (rebuilds bar)
@@ -1323,7 +1487,7 @@ class DesignerTab:
         for i in range(min(len(self._stream_vars), t.n_inputs)):
             self._stream_vars[i].set(''.join(str(trial.streams[k][i]) for k in range(t.T)))
         self._reset_sim_ui()
-        self._status.set('Loaded trial %d/%d input streams (%d ticks) — press Run.'
+        self._status.set('Loaded test %d/%d input streams (%d ticks) — press Run.'
                          % (ti + 1, len(t.trials), t.T))
 
     def _load_streams(self):
@@ -1374,13 +1538,18 @@ class DesignerTab:
     def _reset_sim(self):
         self._running = False
         self._sim = None
+        self._player = None
+        self._nv_playing = False
         self._tick = 0
         self._state, self._nibbles = {}, {}
         self._traces = {r: [] for r in self.out_pos}
+        if self.backend == 'nervous' and getattr(self, '_editor', None) is not None:
+            self._editor.set_cursor(0.0)
         if hasattr(self, '_run_btn'):
             self._run_btn.config(text='Run')
         if hasattr(self, '_tick_lbl'):
-            self._tick_lbl.config(text='tick 0')
+            self._tick_lbl.config(
+                text='t = 0.0' if self.backend == 'nervous' else 'tick 0')
 
     def _reset_sim_ui(self):
         self._reset_sim()
@@ -1390,24 +1559,38 @@ class DesignerTab:
         if not self.grid:
             self._status.set('Empty grid — nothing to simulate.')
             return
-        if self._sim is None:
-            if self.backend == 'nervous':
-                routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
-                self._sim = PulseSim(self.grid, routing)
-            else:
-                self._sim = LutSim(self.grid)
+        if self.backend == 'nervous':
+            self._step_nervous_async()
+            return
+        if self._sim is None:                    # LUT — synchronous, clocked
+            self._sim = LutSim(self.grid)
             self._traces = {r: [] for r in self.out_pos}
         invals = {p: self._stream_bit(i, self._tick)
                   for i, p in enumerate(self.in_pos)}
         self._state = self._sim.step(invals)
-        if self.backend == 'lut':
-            self._nibbles = dict(self._sim.out)
+        self._nibbles = dict(self._sim.out)
         self._tick += 1
         for role, p in self.out_pos.items():
             self._traces.setdefault(role, []).append(self._state.get(p, 0))
             if len(self._traces[role]) > 60:
                 self._traces[role] = self._traces[role][-60:]
         self._tick_lbl.config(text='tick %d' % self._tick)
+        self._refresh_canvas()
+
+    def _step_nervous_async(self):
+        if getattr(self, '_player', None) is None:
+            self._build_nv_player()
+        if self._running and self._player.at_end():
+            self._player.reset()                 # loop while Playing
+        else:
+            self._player.step()
+        self._nv_playing = True
+        self._tick = 1                            # marks "simulating" for _refresh_canvas
+        self._state = self._player.activity()
+        if getattr(self, '_editor', None) is not None:
+            self._editor.set_cursor(self._player.cursor)
+        self._tick_lbl.config(text='t = %.1f%s' % (
+            self._player.cursor, '  (event cap)' if self._player.overflow else ''))
         self._refresh_canvas()
 
     def _toggle_run(self):
@@ -1423,7 +1606,14 @@ class DesignerTab:
         if not self._running:
             return
         self._step()
-        self.parent.after(180, self._tick_loop)
+        self.parent.after(70 if self.backend == 'nervous' else 180, self._tick_loop)
+
+    def close(self):
+        """Release playback callbacks and matplotlib event bindings."""
+        self._running = False
+        if getattr(self, '_editor', None) is not None:
+            self._editor.disconnect()
+            self._editor = None
 
     # ── scoring ─────────────────────────────────────────────────────────────────
 
@@ -1458,19 +1648,25 @@ class DesignerTab:
             routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
             if use_manual:
                 out_pos = manual
-                traces = {r: [] for r in roles}
+                traces = TemporalTraces({r: [] for r in roles},
+                                        events={r: [] for r in roles})
                 for trial in t.trials:
-                    _, trs = run_nervous(self.grid, routing, list(self.in_pos),
-                                         out_pos, trial.streams, obs)
+                    _, trs, raw, overflow = run_nervous_events(
+                        self.grid, routing, list(self.in_pos), out_pos,
+                        trial.streams, obs,
+                        max_events=getattr(t, 'max_events', 2048))
+                    traces.overflow = traces.overflow or overflow
                     for r in roles:
                         traces[r].append(trs[r])
+                        traces.events[r].append(list(raw.get(out_pos[r], ())))
             else:
                 out_pos, traces = place_outputs_by_trace(self.grid, routing,
                                                          list(self.in_pos), t)
         else:
             if use_manual:
                 out_pos = manual
-                traces = {r: [] for r in roles}
+                traces = TemporalTraces({r: [] for r in roles},
+                                        events={r: [] for r in roles})
                 for trial in t.trials:
                     sim = LutSim(self.grid)
                     per = {r: [] for r in roles}
@@ -1483,6 +1679,7 @@ class DesignerTab:
                             per[r].append(st.get(out_pos[r], 0))
                     for r in roles:
                         traces[r].append(per[r])
+                        traces.events[r].append(sampled_events(per[r]))
             else:
                 out_pos, traces = lut_place_by_trace(self.grid, list(self.in_pos), t)
         if any(out_pos.get(r) is None for r in roles):
@@ -1670,10 +1867,8 @@ class DesignerTab:
                 regs.update(COMB_TARGETS)
             key = next((k for k, v in regs.items() if v.name == target.name), None)
             if key is None:
-                vals = list(self._target_cb['values'])
-                if target.name not in vals:
-                    self._target_cb['values'] = vals + [target.name]
-            self._target_var.set(key or target.name)
+                self._refresh_target_list()
+            self._target_picker.select(key or target.name)
         self._genome_edited = False
         if grid:
             # a saved design: restore the GRID as-is — a hand-edited phenotype
@@ -1775,11 +1970,18 @@ def main():
     multiprocessing.freeze_support()
     root = tk.Tk()
     root.title('Evolvable Hardware — Manual Designer')
-    root.minsize(1100, 640)
     ui_compat.apply_theme(root)
     frame = ttk.Frame(root)
     frame.pack(fill='both', expand=True)
-    DesignerTab(frame)
+    designer = DesignerTab(frame)
+
+    def close():
+        designer.close()
+        ui_compat.cancel_after_callbacks(root)
+        root.destroy()
+
+    root.protocol('WM_DELETE_WINDOW', close)
+    ui_compat.fit_window(root, min_width=960, min_height=640)
     root.mainloop()
 
 

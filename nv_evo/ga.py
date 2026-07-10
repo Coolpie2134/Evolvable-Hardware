@@ -72,7 +72,7 @@ def clone_genome(genome):
                                 telomere=getattr(c, 'telomere', MAX_TELOMERE))
                      for c in genome.chromosomes],
         tag=genome.tag)
-from .temporal import prepare_net, windowed_score, loop_profile
+from .temporal import prepare_net, score_temporal_bundle, loop_profile
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT set
@@ -129,31 +129,12 @@ def evaluate_nv_full(genome, target):
     if prep is None:
         return 0.0, (0.0,) * n_cases
     grid, routing, in_pos, out_pos, traces = prep
-    from .temporal import (_best_shift, _pr_score, _trace_metric, METRIC,
-                           period_stepper_score)
-    if getattr(target, 'score_mode', 'trace') == 'period_stepper':
-        s, cases = period_stepper_score(traces, target)
-        if s < 1.0:
-            s = s + (1.0 - s) * LOOP_WEIGHT * _loop_bonus(
-                grid, routing, in_pos, out_pos)
-        return s, cases
-    # one global latency shift for the whole genome (latency-invariant scoring);
-    # the per-case vector is reported at that same shift so lexicase and the
-    # scalar agree on timing
-    best_s, _ = _best_shift(traces, target)
-    cases = []
-    for ti, trial in enumerate(target.trials):
-        for role, exp in trial.expected.items():
-            tr = traces.get(role, [])
-            if ti < len(tr):
-                cases.append(_pr_score(tr[ti], exp, best_s)
-                             if METRIC == 'f1' else _trace_metric(tr[ti], exp))
-            else:
-                cases.append(0.0)
-    s = windowed_score(traces, target, shift=best_s)
+    if getattr(traces, 'overflow', False):
+        return 0.0, (0.0,) * n_cases
+    s, cases, _ = score_temporal_bundle(traces, target)
     if s < 1.0:
         s = s + (1.0 - s) * LOOP_WEIGHT * _loop_bonus(grid, routing, in_pos, out_pos)
-    return s, tuple(cases)
+    return s, cases
 
 
 def evaluate_nv(genome, target):

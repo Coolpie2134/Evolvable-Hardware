@@ -4,8 +4,9 @@ nv_evo/temporal.py — temporal scoring and loop analysis over the pulse engine.
 The nervous net is a temporal system: a pulse injected by an input circulates
 around a loop of buffers (a stored bit = a circulating pulse) until inhibition
 stops it. The dynamics themselves are the asynchronous edge-triggered pulse
-simulation in nv_evo/pulse.py (PulseSim); this module drives it tick-by-tick
-for scoring and gives the interactive "pulse playback" its engine.
+simulation in nv_evo/pulse.py (PulseSim). Event/cadence fitness schedules input
+edges directly in continuous time; only playback and persistence targets request
+sampled tick states.
 
 Core (shared by interactive playback and temporal scoring):
     run_nervous(grid, routing, in_pos, out_pos, streams, T) -> (states, traces)
@@ -16,21 +17,46 @@ Loop analysis feeds the GA's fitness shaping (nv_evo/ga.py): memory needs a
 directed cycle in the signal graph, and a cycle only matters if the inputs can
 write into it and it can drive an output.
 
+Point-event targets consume the raw leading-edge timestamps without sampling.
+Cadence and period-stepper targets score behavioral invariants; sampled traces
+remain for GUI playback and state/persistence regimes where a circulating pulse
+represents a stored level rather than one prescribed spike train.
+
 The target types (Trial, TemporalTarget, presets) live in nv_evo/targets.py;
 they are re-exported here for back-compat with older imports and pickles.
 """
 from __future__ import annotations
+from bisect import bisect_left
+import math
 
 from .nervous import grow_nervous, interpret_nervous
 from .hexgrid import hex_dirs
-from .pulse import PulseSim
+from . import pulse as pulse_engine
+from .pulse import PulseSim, TICK
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
                       sr_latch, toggle_ff, oscillator, echo)
 
 
+class TemporalTraces(dict):
+    """Sampled role traces plus the raw point events that produced them.
+
+    It deliberately remains a ``dict`` so existing GUI/report/LUT callers keep
+    working.  Event-aware scorers read ``events[role][trial]``; old scorers read
+    the ordinary sampled lists.  ``overflow`` invalidates a genome whose event
+    count exceeded the target's deterministic safety cap.
+    """
+
+    def __init__(self, *args, events=None, overflow=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.events = events or {}
+        self.overflow = bool(overflow)
+        self._event_result = None
+        self._cadence_result = None
+
+
 # ── dynamics (asynchronous pulse engine, sampled per tick) ──────────────────────
-# The actual dynamics are event-driven edge-triggered pulses (see pulse.py);
-# scoring and playback observe them by sampling every wire once per tick.
+# The actual dynamics are event-driven edge-triggered pulses (see pulse.py).
+# Playback samples once per tick; event-semantic scoring reads raw timestamps.
 
 def input_cone(grid, routing, in_pos):
     """The cells whose value can be influenced by an input — everything forward-
@@ -48,7 +74,26 @@ def input_cone(grid, routing, in_pos):
     return seen
 
 
-def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True):
+def _inject_stream_edges(sim, in_pos, streams, T):
+    """Queue each contiguous high run as one physical wired-OR pulse."""
+    stop = min(int(T), len(streams))
+    for input_index, cell in enumerate(in_pos):
+        tick = 0
+        while tick < stop:
+            if input_index >= len(streams[tick]) or not streams[tick][input_index]:
+                tick += 1
+                continue
+            start = tick
+            tick += 1
+            while (tick < stop and input_index < len(streams[tick])
+                   and streams[tick][input_index]):
+                tick += 1
+            duration = max(pulse_engine.WIDTH, (tick - start) * TICK)
+            sim.inject_pulse(cell, start * TICK, duration)
+
+
+def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
+                 max_events=None, sample=True):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -64,7 +109,12 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True):
         cone = input_cone(grid, routing, in_pos)
         if len(cone) < len(grid):
             sub = {c: grid[c] for c in cone}
-    sim    = PulseSim(sub, routing)
+    sim    = PulseSim(sub, routing, max_events=max_events)
+    if not sample:
+        # Event/cadence fitness needs edges, not O(T*cells) display snapshots.
+        _inject_stream_edges(sim, in_pos, streams, T)
+        sim.advance_to(T * TICK)
+        return [], {role: [] for role in out_pos}, sim.rise_times, sim.overflow
     states = []
     traces = {role: [] for role in out_pos}
     for t in range(T):
@@ -76,7 +126,35 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True):
         states.append(state)
         for role, p in out_pos.items():
             traces[role].append(state.get(p, 0) if p else 0)
+        if sim.overflow:
+            break
+    # ``step`` stops at the midpoint used for display.  Flush the remaining
+    # physical half-tick so scoring retains every edge in the requested horizon.
+    if not sim.overflow:
+        sim.advance_to(T * TICK)
+    return states, traces, sim.rise_times, sim.overflow
+
+
+def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True):
+    """Backward-compatible sampled playback API.
+
+    Dynamics remain asynchronous; these tick samples are for display and legacy
+    state-window targets.  Use :func:`run_nervous_events` for behavioral timing.
+    """
+    states, traces, _, _ = _run_nervous(
+        grid, routing, in_pos, out_pos, streams, T, prune=prune)
     return states, traces
+
+
+def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
+                       max_events=None, sample=True):
+    """Run once and return ``(states, traces, rise_times, overflow)``.
+
+    ``rise_times`` maps every simulated cell to its continuous leading-edge
+    timestamps.  No tick quantisation is applied to this event record.
+    """
+    return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
+                        prune=prune, max_events=max_events, sample=sample)
 
 
 # ── temporal scoring ───────────────────────────────────────────────────────────
@@ -289,6 +367,275 @@ def _placement_score(cell_traces, exps, ttarget):
     return best
 
 
+# ── raw point-event scoring ───────────────────────────────────────────────────
+
+def sampled_events(trace):
+    """Leading-edge times recovered from a clocked/sample trace.
+
+    This is the LUT adapter.  The nervous backend supplies physical timestamps
+    directly and therefore never needs this quantising fallback.
+    """
+    return [float(t) for t, value in enumerate(trace)
+            if value and (t == 0 or not trace[t - 1])]
+
+
+def _role_events(traces, role, trial_index):
+    event_map = getattr(traces, 'events', {})
+    seqs = event_map.get(role, ())
+    if trial_index < len(seqs):
+        return list(seqs[trial_index])
+    dense = traces.get(role, ())
+    return sampled_events(dense[trial_index]) if trial_index < len(dense) else []
+
+
+def _expected_events(trial, role):
+    explicit = getattr(trial, 'expected_events', {}).get(role)
+    if explicit is not None:
+        return [float(t) for t in explicit]
+    # Legacy event targets used isolated expected-high samples.  Treat each one
+    # as a point; state/cadence targets never enter this scorer.
+    return [float(t) for t, value in enumerate(trial.expected.get(role, ()))
+            if value == 1]
+
+
+def _scored_ranges(exp):
+    """Half-open tick ranges whose expectation is not ``None``."""
+    ranges = []
+    start = None
+    for tick, value in enumerate(exp):
+        if value is not None and start is None:
+            start = tick
+        elif value is None and start is not None:
+            ranges.append((float(start), float(tick)))
+            start = None
+    if start is not None:
+        ranges.append((float(start), float(len(exp))))
+    return tuple(ranges)
+
+
+def _event_counts(actual, expected, exp, shift=0.0, tolerance=0.5,
+                  presorted=False, scored_ranges=None):
+    """One-to-one ordered event matches under one global latency offset.
+
+    The hot path receives pre-sorted tuples and performs a zero-allocation
+    two-pointer scan.  ``presorted=False`` keeps the helper safe for diagnostics
+    and external callers.
+    """
+    if not presorted:
+        actual = tuple(sorted(float(a) for a in actual))
+        expected = tuple(sorted(float(e) for e in expected))
+    if scored_ranges is None:
+        scored_ranges = _scored_ranges(exp)
+    # Precision's denominator is a range count in C rather than a Python scan
+    # over every produced edge for every candidate shift.
+    tick_eps = 1e-9
+    n_actual = sum(
+        (bisect_left(actual, hi + shift - tick_eps)
+         - bisect_left(actual, lo + shift - tick_eps))
+        for lo, hi in scored_ranges)
+    cursor = matches = 0
+    limit = tolerance + 1e-9
+    for wanted in expected:
+        lo = wanted + shift - limit
+        hi = wanted + shift + limit
+        index = bisect_left(actual, lo, cursor)
+        while index < len(actual) and actual[index] <= hi:
+            mapped = actual[index] - shift
+            tick = int(math.floor(mapped + 1e-9))
+            if 0 <= tick < len(exp) and exp[tick] is not None:
+                matches += 1
+                cursor = index + 1
+                break
+            index += 1
+        else:
+            # Later expected events cannot use an earlier actual edge.
+            cursor = max(cursor, index)
+    return matches, len(expected), matches, n_actual
+
+
+def _event_pairs(traces, ttarget):
+    pairs = []
+    for ti, trial in enumerate(ttarget.trials):
+        for role, exp in trial.expected.items():
+            frozen_exp = tuple(exp)
+            pairs.append((tuple(sorted(_role_events(traces, role, ti))),
+                          tuple(sorted(_expected_events(trial, role))),
+                          frozen_exp, _scored_ranges(frozen_exp)))
+    return pairs
+
+
+def _event_candidate_shifts(pairs, ttarget):
+    """All exact/boundary alignments that can change tolerant matching."""
+    tol = float(getattr(ttarget, 'event_tolerance', 0.5))
+    limit = float(getattr(ttarget, 'event_max_shift', ttarget.T))
+    shifts = {0.0}
+    for actual, expected, _, _ in pairs:
+        for a in actual:
+            for e in expected:
+                centre = float(a) - float(e)
+                for value in (centre - tol, centre, centre + tol):
+                    if -limit <= value <= limit:
+                        shifts.add(round(value, 9))
+    # Deterministic ties: smallest magnitude, with causal/non-negative first.
+    return sorted(shifts, key=lambda s: (abs(s), s < 0.0, s))
+
+
+def _pooled_event_f1(pairs, tolerance, shift):
+    tr = ne = tp = na = 0
+    for actual, expected, exp, ranges in pairs:
+        a, b, c, d = _event_counts(
+            actual, expected, exp, shift, tolerance, presorted=True,
+            scored_ranges=ranges)
+        tr += a; ne += b; tp += c; na += d
+    return _f1(tr, ne, tp, na)
+
+
+def _best_event_shift(traces, ttarget):
+    cached = getattr(traces, '_event_result', None)
+    if cached is not None:
+        return cached
+    if getattr(traces, 'overflow', False):
+        return 0.0, 0.0
+    pairs = _event_pairs(traces, ttarget)
+    tolerance = float(getattr(ttarget, 'event_tolerance', 0.5))
+    best_shift, best_score = 0.0, -1.0
+    for shift in _event_candidate_shifts(pairs, ttarget):
+        score = _pooled_event_f1(pairs, tolerance, shift)
+        if score > best_score + 1e-12:
+            best_shift, best_score = shift, score
+    return best_shift, max(0.0, best_score)
+
+
+def _event_case_score(traces, ttarget, trial_index, role, shift):
+    if getattr(traces, 'overflow', False):
+        return 0.0
+    trial = ttarget.trials[trial_index]
+    exp = trial.expected[role]
+    counts = _event_counts(
+        _role_events(traces, role, trial_index),
+        _expected_events(trial, role), exp, shift,
+        float(getattr(ttarget, 'event_tolerance', 0.5)))
+    return _f1(*counts)
+
+
+def event_score(traces, ttarget, shift=None):
+    """Exact sparse point-event F1 under one shared continuous-time latency."""
+    if getattr(traces, 'overflow', False):
+        return 0.0
+    if shift is None:
+        return _best_event_shift(traces, ttarget)[1]
+    cached = getattr(traces, '_event_result', None)
+    if cached is not None and abs(float(shift) - cached[0]) <= 1e-12:
+        return cached[1]
+    pairs = _event_pairs(traces, ttarget)
+    return _pooled_event_f1(
+        pairs, float(getattr(ttarget, 'event_tolerance', 0.5)), shift)
+
+
+# ── cadence semantics for autonomous oscillators/patterns ────────────────────
+
+def _input_edges(streams, input_index=0):
+    return [float(t) for t, row in enumerate(streams)
+            if input_index < len(row) and row[input_index]
+            and (t == 0 or input_index >= len(streams[t - 1])
+                 or not streams[t - 1][input_index])]
+
+
+def _display_time(value):
+    """Compact, stable timestamp text for reports (3 instead of 3.0)."""
+    value = float(value)
+    return str(int(value)) if value.is_integer() else ('%.3f' % value).rstrip('0').rstrip('.')
+
+
+def event_list_summary(events):
+    """Readable timestamp list without Python string quotes around each value."""
+    return '[%s]' % ', '.join(_display_time(event) for event in events)
+
+
+def trial_input_summary(trial, n_inputs, names=None):
+    """Describe stimulus edges, not every sampled high in a held pulse."""
+    names = list(names or [chr(65 + i) for i in range(n_inputs)])
+    parts = []
+    for i in range(n_inputs):
+        label = names[i] if i < len(names) else 'I%d' % i
+        edges = ', '.join(_display_time(t) for t in _input_edges(trial.streams, i))
+        parts.append('%s@[%s]' % (label, edges))
+    return '  '.join(parts)
+
+
+def expected_window_summary(expected):
+    """Compress a sampled expectation into readable half-open time ranges."""
+    if not expected:
+        return '(empty)'
+    labels = {None: 'ignore', 0: 'quiet', 1: 'active'}
+    parts = []
+    start = 0
+    current = expected[0]
+    sentinel = object()
+    for end in range(1, len(expected) + 1):
+        value = expected[end] if end < len(expected) else sentinel
+        if value != current:
+            parts.append('%s[%d:%d)' % (labels.get(current, str(current)), start, end))
+            start, current = end, value
+    return ', '.join(parts)
+
+
+def _cadence_trial_score(events, trial, target, latency):
+    kicks = _input_edges(trial.streams)
+    if not kicks:
+        return 0.0
+    kick = kicks[0]
+    start = kick + latency + float(getattr(target, 'cadence_settle', 5.0))
+    end = float(target.T) + latency
+    before = [e for e in events if e < kick - 1e-9]
+    steady = [e for e in events if start <= e < end]
+    minimum = int(getattr(target, 'cadence_min_events', 4))
+    if len(steady) < 2:
+        return 0.0
+    gaps = [b - a for a, b in zip(steady, steady[1:])]
+    period = float(getattr(target, 'cadence_period', 0.0))
+    tol = float(getattr(target, 'cadence_tolerance', 0.5))
+    regular = sum(1 for gap in gaps if abs(gap - period) <= tol + 1e-9) / len(gaps)
+    count = min(1.0, len(steady) / max(1, minimum))
+    required_span = max(period, end - start - period)
+    coverage = min(1.0, (steady[-1] - steady[0]) / required_span)
+    quiet = 1.0 / (1.0 + len(before))
+    return quiet * regular * count * coverage
+
+
+def cadence_score(traces, ttarget):
+    """Score a sustained rhythm independent of absolute output phase."""
+    cached = getattr(traces, '_cadence_result', None)
+    if cached is not None:
+        return cached
+    if getattr(traces, 'overflow', False):
+        return 0.0, tuple(0.0 for _ in ttarget.trials)
+    limit = float(getattr(ttarget, 'event_max_shift', 12.0))
+    candidates = {0.0}
+    for ti, trial in enumerate(ttarget.trials):
+        kicks = _input_edges(trial.streams)
+        if not kicks:
+            continue
+        for role in trial.expected:
+            for event in _role_events(traces, role, ti):
+                latency = (event - kicks[0]
+                           - float(getattr(ttarget, 'cadence_settle', 5.0)))
+                if 0.0 <= latency <= limit:
+                    candidates.add(round(latency, 9))
+    best_score, best_cases = -1.0, ()
+    for latency in sorted(candidates):
+        cases = []
+        for ti, trial in enumerate(ttarget.trials):
+            role_scores = [_cadence_trial_score(
+                _role_events(traces, role, ti), trial, ttarget, latency)
+                for role in trial.expected]
+            cases.append(sum(role_scores) / len(role_scores) if role_scores else 0.0)
+        score = sum(cases) / len(cases) if cases else 0.0
+        if score > best_score + 1e-12:
+            best_score, best_cases = score, tuple(cases)
+    return max(0.0, best_score), best_cases
+
+
 # ── semantic period-stepper scoring ───────────────────────────────────────────
 
 def _pulse_events(trace, lo, hi):
@@ -413,6 +760,25 @@ def _trace_metric(trace, exp, metric=None):
 OUT_RADIUS = 12
 
 
+def _score_output_candidate(sampled, events, expected, role, target,
+                            overflow=False):
+    """Score one prospective output and return ``(score, reusable result)``."""
+    if not sampled:
+        return 0.0, None
+    mode = getattr(target, 'score_mode', 'trace')
+    if mode == 'period_stepper':
+        return period_stepper_score({role: sampled}, target)[0], None
+    bundle = TemporalTraces({role: sampled}, events={role: events},
+                            overflow=overflow)
+    if mode == 'events':
+        result = _best_event_shift(bundle, target)
+        return result[1], result
+    if mode == 'cadence':
+        result = cadence_score(bundle, target)
+        return result[0], result
+    return _placement_score(sampled, expected, target), None
+
+
 def _output_candidates(grid, in_set, term):
     tx, ty = term.pos
     cands = [c for c in grid if c not in in_set]
@@ -430,45 +796,71 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     """
     in_set = set(in_pos)
     out_pos = {term.role: None for term in ttarget.outputs}
-    traces  = {}
+    traces  = TemporalTraces()
     if len(grid) <= len(in_set):
         return out_pos, traces
     # one dynamics run per trial, observed to _obs_len (past T) so a delayed
     # output's late events are captured; every cell's trace falls out of the states
     obs = _obs_len(ttarget)
-    trial_states = [run_nervous(grid, routing, in_pos, {}, tr.streams, obs)[0]
-                    for tr in ttarget.trials]
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    need_samples = mode not in ('events', 'cadence')
+    # Topology is identical across trials.  Computing the exact reachable cone
+    # once avoids rebuilding the signal graph for every stimulus schedule.
+    cone = input_cone(grid, routing, in_pos)
+    sub = grid if len(cone) == len(grid) else {c: grid[c] for c in cone}
+    runs = [run_nervous_events(
+                sub, routing, in_pos, {}, tr.streams, obs, prune=False,
+                max_events=getattr(ttarget, 'max_events', 2048),
+                sample=need_samples)
+            for tr in ttarget.trials]
+    trial_states = [run[0] for run in runs]
+    trial_events = [run[2] for run in runs]
+    traces.overflow = any(run[3] for run in runs)
     used = set()
     for term in ttarget.outputs:
-        best, best_key = None, None
+        best, best_key, best_aux = None, None, None
+        score_cache = {}
         for c in _output_candidates(grid, in_set, term):
             if c in used:
                 continue
-            ctr, cexp = [], []
+            ctr, cevents, cexp = [], [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                ctr.append([trial_states[ti][t].get(c, 0) for t in range(obs)])
+                ctr.append([trial_states[ti][t].get(c, 0) for t in range(obs)]
+                           if need_samples else [])
+                cevents.append(list(trial_events[ti].get(c, ())))
                 cexp.append(exp)
             if not ctr:
-                s = 0.0
-            elif getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-                # Placement must optimise the same semantic objective as the
-                # GA; raw trace F1 would otherwise choose a fixed-rate cell.
-                s = period_stepper_score({term.role: ctr}, ttarget)[0]
+                s, aux = 0.0, None
             else:
-                s = _placement_score(ctr, cexp, ttarget)
+                source = cevents if mode in ('events', 'cadence') else ctr
+                signature = tuple(tuple(seq) for seq in source)
+                cached = score_cache.get(signature)
+                s, aux = cached if cached is not None else (None, None)
+            if ctr and s is None:
+                s, aux = _score_output_candidate(
+                    ctr, cevents, cexp, term.role, ttarget, traces.overflow)
+            if ctr:
+                score_cache[signature] = (s, aux)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
             if best_key is None or key < best_key:
-                best_key, best = key, c
+                best_key, best, best_aux = key, c, aux
         if best is None:
             break
         used.add(best)
         out_pos[term.role] = best
-        traces[term.role]  = [[trial_states[ti][t].get(best, 0)
-                               for t in range(obs)]
-                              for ti in range(len(ttarget.trials))]
+        traces[term.role] = [
+            [trial_states[ti][t].get(best, 0) for t in range(obs)]
+            if need_samples else []
+            for ti in range(len(ttarget.trials))]
+        traces.events[term.role] = [list(trial_events[ti].get(best, ()))
+                                    for ti in range(len(ttarget.trials))]
+        if len(ttarget.outputs) == 1 and mode == 'events':
+            traces._event_result = best_aux
+        elif len(ttarget.outputs) == 1 and mode == 'cadence':
+            traces._cadence_result = best_aux
     return out_pos, traces
 
 
@@ -501,7 +893,12 @@ def windowed_score(traces, ttarget, metric=None, shift=None):
     and no spurious firing. `shift` skips the search (pass the value from
     _best_shift when it's already known). 1.0 iff every expected spike is produced
     (ringing allowed, any consistent latency) and nothing fires where it shouldn't."""
-    if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    if mode == 'events':
+        return event_score(traces, ttarget, shift=shift)
+    if mode == 'cadence':
+        return cadence_score(traces, ttarget)[0]
+    if mode == 'period_stepper':
         return period_stepper_score(traces, ttarget)[0]
     m = metric or METRIC
     if m in ('f1', 'blend'):
@@ -529,6 +926,46 @@ def windowed_score(traces, ttarget, metric=None, shift=None):
     return 0.5 * (bal + f1)
 
 
+def score_temporal_bundle(traces, ttarget):
+    """Return ``(scalar, per-trial-role cases, alignment)`` for any score mode.
+
+    Nervous and LUT evolution share this dispatcher so scalar fitness and
+    lexicase case vectors cannot drift into subtly different semantics.
+    ``alignment`` is the selected global event/trace shift, or ``None`` for
+    invariant scorers that do not use one.
+    """
+    n_cases = sum(len(trial.expected) for trial in ttarget.trials)
+    if getattr(traces, 'overflow', False):
+        return 0.0, (0.0,) * n_cases, None
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    if mode == 'period_stepper':
+        score, cases = period_stepper_score(traces, ttarget)
+        return score, tuple(cases), None
+    if mode == 'cadence':
+        score, cases = cadence_score(traces, ttarget)
+        return score, tuple(cases), None
+    if mode == 'events':
+        shift, score = _best_event_shift(traces, ttarget)
+        cases = tuple(
+            _event_case_score(traces, ttarget, ti, role, shift)
+            for ti, trial in enumerate(ttarget.trials)
+            for role in trial.expected)
+        return score, cases, shift
+
+    shift, _ = _best_shift(traces, ttarget)
+    cases = []
+    for ti, trial in enumerate(ttarget.trials):
+        for role, exp in trial.expected.items():
+            role_traces = traces.get(role, ())
+            if ti >= len(role_traces):
+                cases.append(0.0)
+            elif METRIC == 'f1':
+                cases.append(_pr_score(role_traces[ti], exp, shift))
+            else:
+                cases.append(_trace_metric(role_traces[ti], exp))
+    return windowed_score(traces, ttarget, shift=shift), tuple(cases), shift
+
+
 def exact_tick_accuracy(traces, ttarget):
     """Plain fraction of scored ticks matched exactly (no phase tolerance).
     Diagnostic only — a working circulating-pulse latch ripples, so this reads
@@ -548,31 +985,24 @@ def exact_tick_accuracy(traces, ttarget):
 
 
 def score_temporal(genome, ttarget):
-    """Behavioural fitness in [0,1]: the spike-event F1 (see METRIC) at the
-    trace-matched output cells (no loop shaping — see nv_evo/ga.py). This is the
-    ground-truth 'does it produce the right spikes' metric; 1.0 == solved."""
+    """Behavioural fitness in [0,1] using the target's declared score mode."""
     prep = prepare_net(genome, ttarget)
     if prep is None:
         return 0.0
     _, _, _, _, traces = prep
-    return windowed_score(traces, ttarget)
+    return score_temporal_bundle(traces, ttarget)[0]
 
 
 def temporal_report(ttarget, genome=None):
     """Human-readable explanation of a temporal target for the GUI: what the
-    circuit must do, the trial bank (input pulses vs expected trace), and —
-    when a genome is given — the evolved net's actual traces with per-trial
-    scores. '.' marks unscored ticks (latency / settle windows)."""
+    circuit must do, its stimulus tests, and — when a genome is given — the
+    evolved net's actual behaviour with a score for each test."""
     lines = ['Target: %s   [temporal nervous net]' % ttarget.name]
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
     if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-        lines += ['',
-                  'Scored semantically: every command-delimited dwell must show',
-                  'a sustained regular output cadence, and each later command',
-                  'must make that cadence slower. Phase during the transition',
-                  'is deliberately free; a fixed-rate oscillator cannot pass.']
+        lines += ['', 'Backend detail: nervous-net transition phase may be sub-tick.']
         if genome is None:
             return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
         prep = prepare_net(genome, ttarget)
@@ -583,35 +1013,69 @@ def temporal_report(ttarget, genome=None):
         for term in ttarget.outputs:
             lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
         for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
-            commands = [t for t, row in enumerate(trial.streams) if row and row[0]]
-            lines.append('Trial %d: commands@%s  cadence score %.3f %s' % (
-                ti, commands, score, 'PASS' if score >= 0.999 else 'FAIL'))
+            lines.append('Test %d: %s  cadence score %.3f %s' % (
+                ti, trial_input_summary(trial, ttarget.n_inputs), score,
+                'PASS' if score >= 0.999 else 'FAIL'))
         lines.append('')
         lines.append('=> cadence-stepper score %.4f%s' % (
             total, '   SOLVED' if total >= 0.999 else ''))
         return '\n'.join(lines)
+    if getattr(ttarget, 'score_mode', 'trace') == 'cadence':
+        lines += ['', 'Backend detail: cadence uses raw nervous-net edge timestamps.']
+        if genome is None:
+            return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
+        prep = prepare_net(genome, ttarget)
+        if prep is None:
+            return '\n'.join(lines + ['', '(circuit incomplete - grew too little or inputs dead)'])
+        _, _, _, out_pos, traces = prep
+        total, cases = cadence_score(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
+        for ti, score in enumerate(cases):
+            events = _role_events(traces, ttarget.outputs[0].role, ti)
+            lines.append('Test %d: %s  output edges@%s  cadence score %.3f %s' % (
+                ti + 1, trial_input_summary(ttarget.trials[ti], ttarget.n_inputs),
+                event_list_summary(events), score,
+                'PASS' if score >= 0.999 else 'FAIL'))
+        lines += ['', '=> cadence score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else '')]
+        return '\n'.join(lines)
+    if getattr(ttarget, 'score_mode', 'trace') == 'events':
+        lines += ['', 'Backend detail: raw nervous-net timestamps retain sub-tick edges.']
+        prep = None if genome is None else prepare_net(genome, ttarget)
+        traces = prep[4] if prep is not None else None
+        best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0
+        if prep is not None:
+            for term in ttarget.outputs:
+                lines.append("out '%s' read at %s" % (term.role, prep[3][term.role]))
+            lines.append('measured output latency offset: %+.3f' % best_s)
+        for ti, trial in enumerate(ttarget.trials):
+            lines.append('')
+            for role in trial.expected:
+                expected = _expected_events(trial, role)
+                lines.append('Test %d: %s' % (
+                    ti + 1, trial_input_summary(trial, ttarget.n_inputs)))
+                lines.append('  expect %s edges@%s' % (
+                    role, event_list_summary(expected)))
+                if traces is not None:
+                    actual = _role_events(traces, role, ti)
+                    score = _event_case_score(traces, ttarget, ti, role, best_s)
+                    lines.append('        actual edges@%s  F1 %.3f %s' % (
+                        event_list_summary(actual), score,
+                        'PASS' if score >= 0.999 else 'FAIL'))
+        if traces is not None:
+            total = event_score(traces, ttarget, shift=best_s)
+            lines += ['', '=> event score %.4f%s' % (
+                total, '   SOLVED' if total >= 0.999 else '')]
+        else:
+            lines += ['', '(run the GA or Load Saved to inspect raw events)']
+        return '\n'.join(lines)
     lines += ['',
-              '%d input%s, output %s read wherever the behaviour appears '
-              '(trace-matched),' % (ttarget.n_inputs,
-                                    '' if ttarget.n_inputs == 1 else 's',
-                                    '/'.join(t.role for t in ttarget.outputs)),
-              "%d ticks per trial, %d trials. '.' = unscored tick."
-              % (ttarget.T, len(ttarget.trials)),
-              '',
-              'WHY a 1111 hold is satisfied by 1010: a node is refractory for',
-              'DELAY+WIDTH after each firing, so NO wire can stay high — max duty',
-              'is 50%. A stored 1 is a pulse circulating a loop, read as ringing',
-              '(1010...) at any one cell. The F1 metric below (the SAME one the GA',
-              'optimises) therefore counts an expected 1 as hit if the cell fires',
-              'on it or an adjacent tick (±1 ring tolerance), while every pulse',
-              'landing on an expected-0 tick costs precision exactly:',
-              '    highs hit  — expected 1s the output reaches (misses cost)',
-              '    pulses ok  — its own pulses that belong (extras cost)',
-              'Scoring is LATENCY-INVARIANT: taken at the best input->output delay',
-              '(one shift for all trials), so the ABSOLUTE delay is free — only',
-              'consistent timing and no spurious firing matter.',
-              '(The "exact per-tick" number at the bottom ignores ring tolerance;',
-              'a perfect circulating-pulse latch reads ~0.75 there by physics.)']
+              'Scored as persistent behaviour in active and quiet windows.',
+              'A stored 1 may ring (1010...) because a nervous node is refractory;',
+              'the scorer therefore tolerates one tick of ring phase.',
+              'One shared input-to-output latency is used across every test/output.',
+              'The exact per-tick value is diagnostic only and ignores ring tolerance.']
 
     prep = traces = None
     best_s = 0
@@ -626,16 +1090,13 @@ def temporal_report(ttarget, genome=None):
                 lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
             lines.append('measured output latency offset: %+d tick(s)' % best_s)
 
-    names = [chr(65 + i) for i in range(ttarget.n_inputs)]
     for ti, trial in enumerate(ttarget.trials):
-        pulses = {n: [t for t in range(len(trial.streams)) if trial.streams[t][i]]
-                  for i, n in enumerate(names)}
-        lines += ['', 'Trial %d:  %s' % (ti + 1, '   '.join(
-            '%s pulses@%s' % (n, p if p else '(none)') for n, p in pulses.items()))]
+        lines += ['', 'Test %d: %s' % (
+            ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
         for role, exp in trial.expected.items():
-            lines.append('  expect %s %s' % (
-                ''.join('.' if e is None else str(e) for e in exp),
-                role if len(trial.expected) > 1 else ''))
+            lines.append('  expect %s%s' % (
+                expected_window_summary(exp),
+                ' (%s)' % role if len(trial.expected) > 1 else ''))
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []

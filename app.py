@@ -56,6 +56,7 @@ from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
 from designer import DesignerTab, read_saved_file
+from target_ui import TargetPicker
 import ui_compat
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
@@ -109,6 +110,12 @@ def build_truth_table(genome, target, arch):
         out_ids.append(nrn.id if nrn else None)
 
     lines = ['Target: ' + target.name,
+             '',
+             'Goal: Produce the specified logical outputs for each input combination.',
+             'Scoring: Each output is an exact expected-versus-observed check; all checks weigh equally.',
+             'Tests: %d defined input combination%s.' % (
+                 len(target.cases), '' if len(target.cases) == 1 else 's'),
+             '',
              'Circuit: ' + circuit_summary(ns, ss)]
     for term, oid in zip(target.outputs, out_ids):
         if oid is not None:
@@ -128,7 +135,7 @@ def build_truth_table(genome, target, arch):
         return '\n'.join(lines)
 
     in_hdr  = ' '.join('i%d' % i for i in range(len(target.inputs)))
-    out_hdr = ' '.join('%s:e/a' % t.role for t in target.outputs)
+    out_hdr = ' '.join('%s expected/actual' % t.role for t in target.outputs)
     lines.append('')
     lines.append('  %s | %s | result' % (in_hdr, out_hdr))
     lines.append('  ' + '-' * (len(in_hdr) + len(out_hdr) + 14))
@@ -150,7 +157,7 @@ def build_truth_table(genome, target, arch):
             correct += 1 if ok else 0
             cells.append('%d/%d' % (out_bits[i], act))
         in_str  = ' '.join(str(b) for b in in_bits).ljust(len(in_hdr))
-        out_str = ' '.join(c.ljust(len('%s:e/a' % t.role))
+        out_str = ' '.join(c.ljust(len('%s expected/actual' % t.role))
                            for c, t in zip(cells, target.outputs))
         lines.append('  %s | %s | %s' % (in_str, out_str, 'PASS' if row_ok else 'FAIL'))
 
@@ -435,6 +442,9 @@ class CustomTargetDialog(tk.Toplevel):
         self._rows   = []   # list of (in_bits, [out StringVars])
         self.transient(parent)
         self.grab_set()
+        self.resizable(True, True)
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+        self.bind('<Escape>', lambda _event: self.destroy())
 
         top = ttk.Frame(self, padding=8)
         top.pack(fill='x')
@@ -458,6 +468,7 @@ class CustomTargetDialog(tk.Toplevel):
         ttk.Button(btns, text='Cancel', command=self.destroy).pack(side='right')
 
         self._build()
+        ui_compat.fit_window(self, min_width=560, min_height=420)
 
     def _build(self):
         for w in self._table_frame.winfo_children():
@@ -468,6 +479,9 @@ class CustomTargetDialog(tk.Toplevel):
             n_out = max(1, min(6, int(self._nout.get())))
         except (tk.TclError, ValueError):
             return
+        self._nin.set(n_in)
+        self._nout.set(n_out)
+        self._shape = (n_in, n_out)
         hdr = ttk.Frame(self._table_frame); hdr.pack(anchor='w')
         for i in range(n_in):
             ttk.Label(hdr, text='i%d' % i, width=3).pack(side='left')
@@ -503,6 +517,11 @@ class CustomTargetDialog(tk.Toplevel):
             n_out = int(self._nout.get())
         except (tk.TclError, ValueError):
             return
+        if getattr(self, '_shape', None) != (n_in, n_out):
+            messagebox.showinfo('Custom truth table',
+                                'Click Build table after changing Inputs or Outputs.',
+                                parent=self)
+            return
         rows = []
         for in_bits, outs in self._rows:
             try:
@@ -525,10 +544,10 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('Evolvable Hardware — Edwards Indirect Encoding')
-        root.minsize(1040, 720)
         self.q            = queue.Queue()
         self._worker      = None
         self._stop_event  = threading.Event()
+        self._poll_job    = None
         self.best_genome  = None
         self.best_fitness = 0.0
         self._gen_history = []
@@ -547,10 +566,8 @@ class App:
         # with a programmatic geometry keeps that size instead of auto-resizing
         # to its content, so switching notebook tabs no longer resizes the window
         # (an X11-visible bug; Windows tolerated the content-driven sizing).
-        root.update_idletasks()
-        w = max(root.winfo_reqwidth(), 1040)
-        h = max(root.winfo_reqheight(), 720)
-        root.geometry('%dx%d' % (w, h))
+        ui_compat.fit_window(root, min_width=960, min_height=680)
+        root.protocol('WM_DELETE_WINDOW', self.close)
         self._poll()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -571,31 +588,12 @@ class App:
 
         ttk.Label(ctrl, text='Target:').pack(side='left', padx=(2, 2))
         self._target_var = tk.StringVar(value=DEFAULT_TARGET)
-        self._target_cb  = ttk.Combobox(ctrl, textvariable=self._target_var,
-                                        values=list(self._all_targets()), width=16, state='readonly')
-        self._target_cb.pack(side='left')
-        self._target_cb.bind('<<ComboboxSelected>>', self._on_target_change)
+        self._target_picker = TargetPicker(
+            ctrl, self._all_targets(), variable=self._target_var,
+            command=self._on_target_change, target_width=19)
+        self._target_picker.pack(side='left')
+        self._target_cb = self._target_picker.target_cb
         ttk.Button(ctrl, text='Custom…', command=self._open_custom).pack(side='left', padx=3)
-
-        ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=8)
-
-        def lentry(label, default, width=6):
-            ttk.Label(ctrl, text=label).pack(side='left', padx=(6, 2))
-            v = tk.StringVar(value=str(default))
-            ttk.Entry(ctrl, textvariable=v, width=width).pack(side='left')
-            return v
-
-        self._pop_var   = lentry('Pop:',   50)
-        # long single run instead of many short restarts, so slow steady progress
-        # is visible (user-preferred; was Gens=30, Tries=20 which restarted every
-        # 30 generations before any trend showed).
-        self._gens_var  = lentry('Gens:',  500)
-        self._tries_var = lentry('Tries:', 1)
-        self._seed_var  = lentry('Seed:',  'random', width=7)
-
-        self._graded_var = tk.BooleanVar(value=False)
-        self._graded_chk = ttk.Checkbutton(ctrl, text='Graded', variable=self._graded_var)
-        self._graded_chk.pack(side='left', padx=(8, 0))
 
         ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=8)
 
@@ -605,6 +603,31 @@ class App:
         self._save_btn = ttk.Button(ctrl, text='Save PNGs',  command=self._save_pngs, state='disabled')
         for b in (self._run_btn, self._stop_btn, self._load_btn, self._save_btn):
             b.pack(side='left', padx=3)
+
+        # Run settings get their own row so controls remain reachable on laptop
+        # screens instead of forcing a >1200 px top bar.
+        run_ctrl = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        run_ctrl.pack(fill='x', side='top')
+        ttk.Label(run_ctrl, text='Run settings:').pack(side='left', padx=(2, 4))
+
+        def lentry(parent, label, default, width=6):
+            ttk.Label(parent, text=label).pack(side='left', padx=(6, 2))
+            v = tk.StringVar(value=str(default))
+            ttk.Entry(parent, textvariable=v, width=width).pack(side='left')
+            return v
+
+        self._pop_var   = lentry(run_ctrl, 'Population:', 50)
+        # long single run instead of many short restarts, so slow steady progress
+        # is visible (user-preferred; was Gens=30, Tries=20 which restarted every
+        # 30 generations before any trend showed).
+        self._gens_var  = lentry(run_ctrl, 'Generations:', 500)
+        self._tries_var = lentry(run_ctrl, 'Restarts:', 1)
+        self._seed_var  = lentry(run_ctrl, 'Seed:', 'random', width=7)
+
+        self._graded_var = tk.BooleanVar(value=False)
+        self._graded_chk = ttk.Checkbutton(run_ctrl, text='Graded logic fitness',
+                                           variable=self._graded_var)
+        self._graded_chk.pack(side='left', padx=(10, 0))
 
         # ── second row: model-specific parameters ──
         ctrl2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
@@ -649,8 +672,11 @@ class App:
                                              command=self._reset_arch)
         self._layout_reset_btn.pack(side='left', padx=8)
 
-        self._model_note = ttk.Label(ctrl2, text='', foreground='#888888')
-        self._model_note.pack(side='left', padx=6)
+        self._model_note = ttk.Label(ctrl2, text='', foreground='#888888',
+                                     wraplength=500, justify='left')
+        self._model_note.pack(side='left', padx=6, fill='x', expand=True)
+        self._model_note.bind('<Configure>', lambda event: self._model_note.configure(
+            wraplength=max(140, event.width - 8)), add='+')
 
         # ── third row: GA + substrate-physics tuning (applied on Run) ──
         from nv_evo.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
@@ -704,7 +730,7 @@ class App:
         # tab requests its figsize*dpi in pixels, and without this the whole
         # window would jump size every time you switched tabs. width/height give
         # the notebook a fixed request; the tab frames fill it via expand.
-        self._nb = nb = ttk.Notebook(self.root, width=1120, height=680)
+        self._nb = nb = ttk.Notebook(self.root, width=1020, height=540)
         nb.pack(fill='both', expand=True, padx=4, pady=(0, 2))
         self._build_evolve_tab(nb)
         self._build_growth_tab(nb)
@@ -717,11 +743,23 @@ class App:
 
         self._status = tk.StringVar(
             value='Ready — pick a model and target, set parameters, click Run (or Load Saved).')
-        ttk.Label(self.root, textvariable=self._status, anchor='w',
-                  relief='sunken', padding=(6, 2)).pack(
+        self._status_label = ttk.Label(
+            self.root, textvariable=self._status, anchor='w',
+            relief='sunken', padding=(6, 2), wraplength=1000, justify='left')
+        self._status_label.pack(
             fill='x', side='bottom', padx=4, pady=(0, 4))
 
+        # Text-bearing header/status widgets follow the actual window width.
+        # Fixed wrap lengths left the model note in a narrow block at fullscreen.
+        self.root.bind('<Configure>', self._resize_text_regions, add='+')
+
         self._reconfigure_for_backend()      # set initial model-specific layout
+
+    def _resize_text_regions(self, event):
+        """Use available fullscreen width without forcing a larger base window."""
+        if event.widget is not self.root:
+            return
+        self._status_label.configure(wraplength=max(600, event.width - 24))
 
     def _reconfigure_for_backend(self):
         """Show only the controls / tab labels relevant to the selected model."""
@@ -883,11 +921,11 @@ class App:
     def _refresh_target_list(self):
         """Repopulate the dropdown for the current backend; if the current
         selection is no longer valid there, switch to the first available."""
-        names = list(self._targets_for_backend(self._backend()))
-        self._target_cb['values'] = names
+        targets = self._targets_for_backend(self._backend())
+        names = list(targets)
+        self._target_picker.set_targets(targets)
         if names and self._target_var.get() not in names:
-            self._target_var.set(names[0])
-            self._on_target_change()
+            self._target_picker.select(names[0], notify=True)
 
     def _on_target_change(self, _evt=None):
         name = self._target_var.get()
@@ -902,14 +940,16 @@ class App:
                 self._set_tt(temporal_report(self.target))
             except Exception:
                 pass
-            self._status.set('Target: %s — temporal nervous net (loops / memory); '
-                             '%d in, %d out, %d ticks. See the Evolution tab for '
-                             'what it must do; test it in the Interactive tab.'
-                             % (self.target.name, self.target.n_inputs,
-                                self.target.n_outputs, self.target.T))
+            model = 'clocked LUT array' if self._backend() == 'lut' else 'continuous-time nervous net'
+            self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test ticks. '
+                             'See Evolution for scoring details and Interactive for playback.'
+                             % (self.target.name, model, self.target.n_inputs,
+                                '' if self.target.n_inputs == 1 else 's',
+                                self.target.n_outputs,
+                                '' if self.target.n_outputs == 1 else 's', self.target.T))
             return
         n_cases = len(self.target.cases)
-        self._status.set('Target: %s — %d inputs, %d outputs, %d cases%s' % (
+        self._status.set('Target: %s — %d inputs, %d outputs, %d truth-table tests%s' % (
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
             '   (large — evolution will be slow)' if n_cases > 32 else ''))
 
@@ -1017,13 +1057,20 @@ class App:
 
     def _on_custom_built(self, target):
         self._custom[target.name] = target
-        self._target_cb['values'] = list(self._all_targets())
-        self._target_var.set(target.name)
-        self._on_target_change()
+        self._target_picker.set_targets(self._targets_for_backend(self._backend()))
+        self._target_picker.select(target.name, notify=True)
 
     # ── GA control ────────────────────────────────────────────────────────────
 
     def _start_ga(self):
+        selected = self._targets_for_backend(self._backend()).get(
+            self._target_var.get().strip())
+        if selected is None:
+            self._status.set('Choose a target from the filtered list before running.')
+            self._target_cb.focus_set()
+            return
+        if selected is not self.target:
+            self._on_target_change()
         try:
             pop   = int(self._pop_var.get())
             gens  = int(self._gens_var.get())
@@ -1094,7 +1141,7 @@ class App:
         self._stop_btn.config(state='normal')
         self._load_btn.config(state='disabled')
         self._save_btn.config(state='disabled')
-        self._target_cb.config(state='disabled')
+        self._target_picker.set_state('disabled')
         self._backend_cb.config(state='disabled')
 
         self._stop_event = threading.Event()
@@ -1155,7 +1202,7 @@ class App:
         self._reconfigure_for_backend()      # filters the dropdown for the backend
         self._refresh_target_list()          # keep the backend filter (don't re-broaden;
                                              # LUT deliberately hides combinational targets)
-        self._target_var.set(saved_target.name)
+        self._target_picker.select(saved_target.name)
         warn = ('   — hand-edited design: this view is REGROWN from the genome; '
                 'open the Designer tab to see the exact edited circuit'
                 if hand_edited else '')
@@ -1250,7 +1297,7 @@ class App:
                     self._run_btn.config(state='normal')
                     self._stop_btn.config(state='disabled')
                     self._load_btn.config(state='normal')
-                    self._target_cb.config(state='readonly')
+                    self._target_picker.set_state('normal')
                     self._backend_cb.config(state='readonly')
                     self._save_btn.config(state='normal' if genome else 'disabled')
                     if getattr(self, '_ga_error', None):
@@ -1279,7 +1326,24 @@ class App:
                 self._pending_best = None
                 self._last_full_draw = now
                 self._update_all(*pend)
-        self.root.after(60, self._poll)
+        if self.root.winfo_exists():
+            self._poll_job = self.root.after(60, self._poll)
+
+    def close(self):
+        """Stop background work and scheduled callbacks before closing Tk."""
+        self._stop_event.set()
+        for tab in (getattr(self, '_interactive', None),
+                    getattr(self, '_designer', None)):
+            if tab is not None:
+                tab.close()
+        if self._poll_job is not None:
+            try:
+                self.root.after_cancel(self._poll_job)
+            except tk.TclError:
+                pass
+            self._poll_job = None
+        ui_compat.cancel_after_callbacks(self.root)
+        self.root.destroy()
 
     # ── display updates ───────────────────────────────────────────────────────
 

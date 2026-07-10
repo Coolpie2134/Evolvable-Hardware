@@ -1,0 +1,194 @@
+"""
+nv_async_ui.py — asynchronous (continuous-time) pulse playback and a clickable
+pulse-timeline, shared by the Interactive and Designer nervous-net views.
+
+The nervous net is a continuous-time, asynchronous element (nv_evo/pulse.py) and
+its fitness now reads real edge timestamps.  These helpers let the GUI DRIVE and
+SHOW it in that same continuous time instead of a synchronous tick lattice:
+
+  * NervousPlayer wraps a PulseSim, injects a schedule of input pulses at their
+    real times, and advances a physical-time cursor via ``advance_to`` — exactly
+    the engine the scorer uses.  It reports which wires are high at the cursor
+    and the real leading-edge times of any cell.  This class has no GUI
+    dependency and is unit-tested.
+  * PulseLaneEditor binds a matplotlib axis to an editable set of input pulses:
+    click a lane to add a pulse (snapped), click a pulse to remove it.  It draws
+    the lanes and a moving playback cursor.  Both tabs reuse it, so the fiddly
+    event wiring lives in one place.
+
+The LUT array is genuinely clocked, so it keeps its synchronous tick playback;
+only the nervous net uses this.
+"""
+from __future__ import annotations
+
+from nv_evo import pulse as pulse_engine
+from nv_evo.pulse import PulseSim
+
+DEFAULT_DT      = 0.5     # playback resolution (sub-tick; WIDTH defaults to 1 TICK)
+DEFAULT_HORIZON = 40.0    # physical-time window shown / played
+PLAY_MAX_EVENTS = 20000   # runaway guard for a pathological oscillator
+
+
+class NervousPlayer:
+    """Continuous-time playback of one grown nervous net (GUI-free, testable)."""
+
+    def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
+                 pulse_width=None, max_events=PLAY_MAX_EVENTS):
+        self.grid    = grid
+        self.routing = routing
+        self.horizon = float(horizon)
+        self.dt      = float(dt)
+        self.pulse_width = (float(pulse_engine.WIDTH) if pulse_width is None
+                            else float(pulse_width))
+        self.max_events  = max_events
+        self.schedule = {}                    # {input_cell: [times]}
+        self.reset()
+
+    def set_schedule(self, schedule):
+        """schedule: {input_cell: iterable of pulse times}. Rebuilds the run."""
+        self.schedule = {c: sorted(float(t) for t in ts)
+                         for c, ts in schedule.items()}
+        self.reset()
+
+    def reset(self):
+        self.sim = PulseSim(self.grid, self.routing, max_events=self.max_events)
+        for cell, times in self.schedule.items():
+            for t in times:
+                self.sim.inject_pulse(cell, t, self.pulse_width)
+        self.cursor = 0.0
+        self.sim.advance_to(0.0)
+
+    def step(self):
+        """Advance the playback cursor by one dt of real time."""
+        self.cursor = min(self.horizon, round(self.cursor + self.dt, 6))
+        self.sim.advance_to(self.cursor)
+        return self.cursor
+
+    def at_end(self):
+        return self.cursor >= self.horizon - 1e-9
+
+    def activity(self):
+        """{cell: 0/1} — which wires are pulsing at the current cursor time."""
+        return self.sim.activity_at(self.cursor)
+
+    def events_upto(self, cell):
+        """Real leading-edge times of ``cell`` seen so far (<= cursor)."""
+        # Edges are recorded only when ``advance_to`` processes them, and the
+        # player never advances beyond cursor. Avoid filtering/allocation here.
+        return self.sim.rise_times.get(cell, ())
+
+    @property
+    def overflow(self):
+        return self.sim.overflow
+
+
+def pulses_from_trial(target, n_inputs):
+    """Leading-edge times of each input in the target's first trial — a sensible
+    default schedule to prefill the pulse timeline with. Returns n_inputs lists."""
+    out = [[] for _ in range(n_inputs)]
+    trials = getattr(target, 'trials', None) if target is not None else None
+    if not trials:
+        return out
+    streams = trials[0].streams
+    for i in range(n_inputs):
+        out[i] = [float(t) for t in range(len(streams))
+                  if i < len(streams[t]) and streams[t][i]
+                  and (t == 0 or not streams[t - 1][i])]
+    return out
+
+
+def toggle_pulse(times, t, snap):
+    """Add ``t`` to a sorted pulse list, or remove the nearby one if present.
+    Pure helper so the click behaviour is testable without a canvas."""
+    near = [p for p in times if abs(p - t) < snap * 0.75]
+    if near:
+        for p in near:
+            times.remove(p)
+    else:
+        times.append(t)
+        times.sort()
+    return times
+
+
+class PulseLaneEditor:
+    """A clickable per-input pulse timeline drawn on a matplotlib axis."""
+
+    def __init__(self, ax, canvas, labels, horizon=DEFAULT_HORIZON, snap=0.5,
+                 on_change=None):
+        self.ax        = ax
+        self.canvas    = canvas
+        self.labels    = list(labels)
+        self.horizon   = float(horizon)
+        self.snap      = float(snap)
+        self.on_change = on_change
+        self.pulses    = [[] for _ in self.labels]   # per-input sorted time lists
+        self.cursor    = 0.0
+        self._cursor_artist = None
+        self.cid = canvas.mpl_connect('button_press_event', self._on_click)
+
+    def schedule(self, in_cells):
+        """Map lane pulses onto their grid cells: {cell: [times]}."""
+        return {in_cells[i]: list(self.pulses[i])
+                for i in range(min(len(in_cells), len(self.pulses)))}
+
+    def set_pulses(self, pulses):
+        self.pulses = [sorted(float(t) for t in row) for row in pulses]
+        while len(self.pulses) < len(self.labels):
+            self.pulses.append([])
+        self.draw()
+
+    def clear(self):
+        self.pulses = [[] for _ in self.labels]
+        self.draw()
+        if self.on_change:
+            self.on_change()
+
+    def set_cursor(self, t, redraw=True):
+        self.cursor = float(t)
+        if self._cursor_artist is None:
+            self.draw()
+            return
+        self._cursor_artist.set_xdata([self.cursor, self.cursor])
+        if redraw:
+            self.canvas.draw_idle()
+
+    def _on_click(self, ev):
+        if ev.inaxes is not self.ax or ev.xdata is None or ev.ydata is None:
+            return
+        lane = int(round(ev.ydata))
+        if not (0 <= lane < len(self.labels)):
+            return
+        t = max(0.0, round(ev.xdata / self.snap) * self.snap)
+        if t > self.horizon:
+            return
+        toggle_pulse(self.pulses[lane], t, self.snap)
+        self.draw()
+        if self.on_change:
+            self.on_change()
+
+    def draw(self):
+        ax = self.ax
+        ax.clear()
+        n = max(1, len(self.labels))
+        ax.set_xlim(0, self.horizon)
+        ax.set_ylim(-0.6, n - 0.4)
+        ax.set_yticks(range(len(self.labels)))
+        ax.set_yticklabels(self.labels, fontsize=8)
+        ax.set_xlabel('continuous time (tick units)', fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.set_title('input pulses — click a lane to add / remove an edge',
+                     fontsize=8)
+        for lane in range(len(self.labels)):
+            ax.axhline(lane, color='#e6e6e6', lw=0.6, zorder=0)
+            for p in self.pulses[lane]:
+                ax.plot([p], [lane], marker='|', ms=15, mew=2.4,
+                        color='#b02020', zorder=3)
+        self._cursor_artist = ax.axvline(
+            self.cursor, color='#e8a33d', lw=1.5, alpha=0.9, zorder=2)
+        self.canvas.draw_idle()
+
+    def disconnect(self):
+        try:
+            self.canvas.mpl_disconnect(self.cid)
+        except Exception:
+            pass

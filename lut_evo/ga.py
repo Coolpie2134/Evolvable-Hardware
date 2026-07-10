@@ -13,13 +13,18 @@ import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
-from nv_evo.temporal import (_role_trace_score, _pr_counts, _f1, _pr_score,
-                             _best_shift, _placement_score, _obs_len,
+from nv_evo.temporal import (_pr_counts, _f1,
+                             _best_shift, _obs_len,
                              windowed_score, exact_tick_accuracy,
-                             period_stepper_score)
-from .genome import (LUT_STATES, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
+                             period_stepper_score, TemporalTraces,
+                             sampled_events, event_score, _best_event_shift,
+                             _event_case_score, _expected_events, _role_events,
+                             cadence_score, score_temporal_bundle,
+                             _score_output_candidate, trial_input_summary,
+                             expected_window_summary, event_list_summary)
+from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
-                     random_lut_gene, random_lut_chromosome, random_lut_genome)
+                     random_lut_gene, random_lut_chromosome)
 from .lut import grow_lut, grow_lut_tracked, LutSim
 
 
@@ -75,12 +80,13 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     slice — no per-tick dicts (that dict churn dominated LUT scoring)."""
     in_set = set(in_pos)
     out_pos = {t.role: None for t in ttarget.outputs}
-    traces  = {}
+    traces  = TemporalTraces()
     if len(grid) <= len(in_set):
         return out_pos, traces
     sim = LutSim(grid)                       # one sim, reset between trials
     cidx = sim._cidx
     obs = _obs_len(ttarget)                  # observe past T to catch delayed events
+    mode = getattr(ttarget, 'score_mode', 'trace')
     trial_B = []                             # [obs, ncells] emit-bit matrix per trial
     for tr in ttarget.trials:
         sim.reset()
@@ -90,27 +96,36 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         tx, ty = term.pos
         cands = sorted((c for c in grid if c not in in_set),
                        key=lambda c: (abs(c[0] - tx) + abs(c[1] - ty), c))[:OUT_RADIUS]
-        best, best_key = None, None
+        best, best_key, best_aux = None, None, None
+        score_cache = {}
         for c in cands:
             if c in used:
                 continue
             col = cidx[c]
-            ctr, cexp = [], []
+            ctr, cevents, cexp = [], [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                ctr.append(trial_B[ti][:, col].tolist())
+                dense = trial_B[ti][:, col].tolist()
+                ctr.append(dense)
+                cevents.append(sampled_events(dense))
                 cexp.append(exp)
             if not ctr:
-                s = 0.0
-            elif getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-                s = period_stepper_score({term.role: ctr}, ttarget)[0]
+                s, aux = 0.0, None
             else:
-                s = _placement_score(ctr, cexp, ttarget)
+                source = cevents if mode in ('events', 'cadence') else ctr
+                signature = tuple(tuple(seq) for seq in source)
+                cached = score_cache.get(signature)
+                s, aux = cached if cached is not None else (None, None)
+            if ctr and s is None:
+                s, aux = _score_output_candidate(
+                    ctr, cevents, cexp, term.role, ttarget)
+            if ctr:
+                score_cache[signature] = (s, aux)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
             if best_key is None or key < best_key:
-                best_key, best = key, c
+                best_key, best, best_aux = key, c, aux
         if best is None:
             break
         used.add(best)
@@ -118,6 +133,12 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         col = cidx[best]
         traces[term.role]  = [trial_B[ti][:, col].tolist()
                               for ti in range(len(ttarget.trials))]
+        traces.events[term.role] = [sampled_events(seq)
+                                    for seq in traces[term.role]]
+        if len(ttarget.outputs) == 1 and mode == 'events':
+            traces._event_result = best_aux
+        elif len(ttarget.outputs) == 1 and mode == 'cadence':
+            traces._cadence_result = best_aux
     return out_pos, traces
 
 
@@ -138,7 +159,7 @@ def score_lut_temporal(genome, ttarget):
     prep = prepare_lut(genome, ttarget)
     if prep is None:
         return 0.0
-    return windowed_score(prep[2], ttarget)
+    return score_temporal_bundle(prep[2], ttarget)[0]
 
 
 def _place_outputs_combinational(grid, target):
@@ -287,15 +308,8 @@ def evaluate_lut_full(genome, target):
     if prep is None:
         return 0.0, (0.0,) * n_cases
     _, _, traces = prep
-    if getattr(target, 'score_mode', 'trace') == 'period_stepper':
-        return period_stepper_score(traces, target)
-    best_s, _ = _best_shift(traces, target)     # one global latency shift
-    cases = []
-    for ti, trial in enumerate(target.trials):
-        for role, exp in trial.expected.items():
-            tr = traces.get(role, [])
-            cases.append(_pr_score(tr[ti], exp, best_s) if ti < len(tr) else 0.0)
-    return windowed_score(traces, target, shift=best_s), tuple(cases)
+    score, cases, _ = score_temporal_bundle(traces, target)
+    return score, cases
 
 
 def evaluate_lut(genome, target):
@@ -658,9 +672,7 @@ def lut_report(ttarget, genome=None):
     if desc:
         lines += [''] + desc.splitlines()
     if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-        lines += ['',
-                  'Scored semantically: each dwell must sustain a regular pulse',
-                  'cadence, and a later command must make that cadence slower.']
+        lines += ['', 'Backend detail: LUT cadence changes occur on clock boundaries.']
         if genome is None:
             return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
         prep = prepare_lut(genome, ttarget)
@@ -671,22 +683,63 @@ def lut_report(ttarget, genome=None):
         for term in ttarget.outputs:
             lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
         for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
-            commands = [t for t, row in enumerate(trial.streams) if row and row[0]]
-            lines.append('Trial %d: commands@%s  cadence score %.3f %s' % (
-                ti, commands, score, 'PASS' if score >= 0.999 else 'FAIL'))
+            lines.append('Test %d: %s  cadence score %.3f %s' % (
+                ti, trial_input_summary(trial, ttarget.n_inputs), score,
+                'PASS' if score >= 0.999 else 'FAIL'))
         lines.append('')
         lines.append('=> cadence-stepper score %.4f%s' % (
             total, '   SOLVED' if total >= 0.999 else ''))
         return '\n'.join(lines)
+    if getattr(ttarget, 'score_mode', 'trace') == 'cadence':
+        lines += ['', 'Backend detail: LUT output cadence is measured in clock cycles.']
+        if genome is None:
+            return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
+        prep = prepare_lut(genome, ttarget)
+        if prep is None:
+            return '\n'.join(lines + ['', '(circuit incomplete - grew too little or inputs dead)'])
+        _, out_pos, traces = prep
+        total, cases = cadence_score(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
+        for ti, score in enumerate(cases):
+            events = _role_events(traces, ttarget.outputs[0].role, ti)
+            lines.append('Test %d: %s  output edges@%s  cadence score %.3f %s' % (
+                ti + 1, trial_input_summary(ttarget.trials[ti], ttarget.n_inputs),
+                event_list_summary(events), score,
+                'PASS' if score >= 0.999 else 'FAIL'))
+        lines += ['', '=> cadence score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else '')]
+        return '\n'.join(lines)
+    if getattr(ttarget, 'score_mode', 'trace') == 'events':
+        lines += ['', 'Backend detail: LUT edges and latency are measured in whole clock cycles.']
+        prep = None if genome is None else prepare_lut(genome, ttarget)
+        traces = prep[2] if prep is not None else None
+        best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0
+        if prep is not None:
+            for term in ttarget.outputs:
+                lines.append("out '%s' read at %s" % (term.role, prep[1][term.role]))
+            lines.append('measured output latency offset: %+.3f cycle(s)' % best_s)
+        for ti, trial in enumerate(ttarget.trials):
+            for role in trial.expected:
+                lines.append('Test %d: %s' % (
+                    ti + 1, trial_input_summary(trial, ttarget.n_inputs)))
+                lines.append('  expect %s edges@%s' % (
+                    role, event_list_summary(_expected_events(trial, role))))
+                if traces is not None:
+                    score = _event_case_score(traces, ttarget, ti, role, best_s)
+                    lines.append('        actual edges@%s  F1 %.3f %s' % (
+                        event_list_summary(_role_events(traces, role, ti)), score,
+                        'PASS' if score >= 0.999 else 'FAIL'))
+        if traces is not None:
+            total = event_score(traces, ttarget, shift=best_s)
+            lines += ['', '=> event score %.4f%s' % (
+                total, '   SOLVED' if total >= 0.999 else '')]
+        return '\n'.join(lines)
     lines += ['',
-              'Square grid; each cell is a 16-bit lookup table over its 4',
-              'neighbours\' bits, latched and synchronous (paper Architecture 2).',
-              "'.' = unscored tick. Scored by the shared spike-event F1 (the",
-              'metric the GA optimises): an expected 1 is hit if the cell fires',
-              'on it or an adjacent tick (±1 ring tolerance — holds may ring),',
-              'and every pulse on an expected-0 tick costs precision exactly.',
-              'LATENCY-INVARIANT: scored at the best input->output delay (one',
-              'shift for all trials), so the absolute delay is free.']
+              'Scored as persistent behaviour in active and quiet windows.',
+              'A one-tick phase tolerance allows recurrent outputs to ring.',
+              'One shared input-to-output latency is used across every test/output.',
+              'The exact per-tick value is diagnostic only and ignores tolerance.']
     traces = None
     best_s = 0
     if genome is not None:
@@ -699,15 +752,13 @@ def lut_report(ttarget, genome=None):
             for t in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
             lines.append('measured output latency offset: %+d tick(s)' % best_s)
-    names = [chr(65 + i) for i in range(ttarget.n_inputs)]
     for ti, trial in enumerate(ttarget.trials):
-        pulses = {n: [t for t in range(len(trial.streams)) if trial.streams[t][i]]
-                  for i, n in enumerate(names)}
-        lines += ['', 'Trial %d:  %s' % (ti + 1, '   '.join(
-            '%s pulses@%s' % (n, p if p else '(none)') for n, p in pulses.items()))]
+        lines += ['', 'Test %d: %s' % (
+            ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
         for role, exp in trial.expected.items():
-            lines.append('  expect %s' % ''.join('.' if e is None else str(e)
-                                                 for e in exp))
+            lines.append('  expect %s%s' % (
+                expected_window_summary(exp),
+                ' (%s)' % role if len(trial.expected) > 1 else ''))
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []

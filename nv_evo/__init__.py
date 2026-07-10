@@ -16,10 +16,10 @@ its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
     onto the perimeter nets (wired-OR). Nothing happens without an input, and
     memory / oscillation are a pulse circulating around a loop of buffers
     "until stopped by application of an inhibitory input" (delay-line memory);
-  * scoring samples the wires once per tick: combinational targets read
-    whether the output cell ever pulses; temporal targets score the sampled
-    trace, and the GA's fitness shaping favours nets whose signal graph can
-    actually hold state.
+  * temporal scoring retains raw continuous edge timestamps for point-event
+    relations, uses cadence invariants for autonomous rhythms, and keeps sampled
+    active/quiet windows only where they express persistence. The GA's fitness
+    shaping favours nets whose signal graph can actually hold state.
 
 Quick start
 -----------
@@ -40,10 +40,11 @@ from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
                       burst_generator, divide_by_3)
 from .oracle import (oracle_target, holdout_score, ORACLE_TARGETS, ORACLE_SPECS,
                      sample_streams, label_trace)
-from .temporal import (run_nervous, score_temporal, temporal_report,
+from .temporal import (run_nervous, run_nervous_events, score_temporal, temporal_report,
                        prepare_net, windowed_score, exact_tick_accuracy,
                        place_outputs_by_trace, signal_graph, cycle_nodes,
-                       loop_profile)
+                       loop_profile, TemporalTraces, event_score, cadence_score,
+                       score_temporal_bundle)
 from .ga import (evaluate_nv, evaluate_nv_full, eval_batch_nv, eval_batch_cases,
                  mutate_nv, mutate_hex, crossover_nv, tournament_nv,
                  select_parent, next_population, evolve_nervous,

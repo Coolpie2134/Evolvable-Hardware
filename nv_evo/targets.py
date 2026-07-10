@@ -1,9 +1,9 @@
 """
 nv_evo/targets.py — temporal targets for the hex nervous net.
 
-A TemporalTarget scores an output *trace* over time instead of a truth table:
-each Trial drives the inputs with a tick-by-tick stream and scores the output
-against an expected trace (None = don't score that tick, e.g. settle windows).
+A TemporalTarget scores behavior over time instead of a truth table.  Each
+Trial drives a stimulus stream and may define raw expected point events,
+sampled state/persistence windows, or a target-specific cadence invariant.
 
 Every preset carries SEVERAL trials with different pulse timings. A net that
 merely matches one fixed schedule (a lucky delay chain) fails the shifted
@@ -31,6 +31,9 @@ class OutputTerminal:
 class Trial:
     streams:  List[Tuple[int, ...]]                 # streams[t] = input bits at tick t
     expected: Dict[str, List[Optional[int]]]        # role -> expected bit per tick (None = don't score)
+    # Optional ground-truth point events.  Event-semantic targets populate this
+    # directly so consecutive events are not confused with one held-high run.
+    expected_events: Dict[str, List[float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -45,9 +48,17 @@ class TemporalTarget:
     output_strategy: str = "terminals"
     temporal:        bool = True          # marker so the GUI/GA can dispatch
     description:     str = ''             # human explanation, shown in the GUI
-    # Most targets score an exact spike trace.  A period stepper instead scores
-    # its invariant: a sustained output cadence becomes slower after a command.
+    # Scoring is semantic: ``events`` matches point events, ``cadence`` measures
+    # a free-running rhythm, legacy ``trace`` retains persistence-window
+    # semantics, and ``period_stepper`` measures its command/cadence invariant.
     score_mode:      str = 'trace'
+    event_tolerance: float = 0.5
+    event_max_shift: float = 12.0
+    max_events:      int = 2048
+    cadence_period:  float = 0.0
+    cadence_tolerance: float = 0.5
+    cadence_settle:  float = 5.0
+    cadence_min_events: int = 4
     stepper_min_period: int = 2
     stepper_max_period: int = 6
     stepper_settle: int = 2
@@ -74,6 +85,23 @@ class TemporalTarget:
 # by no longer marking slightly-slow resets wrong); too large leaves too few
 # scored ticks. 5 is the balance for the T=20..24 traces here.
 SETTLE = 5
+
+
+def describe_target(goal, scoring, tests):
+    """Consistent three-part description shown by every GUI/report."""
+    return 'Goal: %s\nScoring: %s\nTests: %s' % (
+        goal.strip(), scoring.strip(), tests.strip())
+
+
+EVENT_SCORING = (
+    'Match output edges one-to-one. One latency offset is shared '
+    'by every test; missing and extra edges both reduce fitness.')
+CADENCE_SCORING = (
+    'Measure sustained inter-edge cadence and coverage. Startup latency and '
+    'absolute phase are free; pre-trigger activity is penalized.')
+PERSISTENCE_SCORING = (
+    'Compare active and quiet persistence windows after a settling interval. '
+    'Recurrent ringing is a valid stored 1.')
 
 
 def _pulse_streams(T, n_inputs, pulses):
@@ -108,17 +136,16 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
                         list per input), giving the ticks each input pulses on.
         output_spikes — the list of ticks the output should fire on.
 
-    Every tick from `latency` onward is scored: a spike is expected exactly at
-    the output ticks and silence everywhere else. So a net that stays silent is
-    penalised for every missing spike and a net that fires spuriously is
-    penalised for every extra one (the spike-event F1 metric). The first
-    `latency` ticks are unscored startup grace.
+    Expected outputs are stored as point-event timestamps. A net that stays
+    silent is penalised for every missing event and a net that fires spuriously
+    is penalised for every extra one (one-to-one event F1). The first `latency`
+    ticks remain unscored startup grace for compatibility with the trace view.
 
     `latency` is now just a nominal minimum-causal offset (default 1), NOT a delay
     the circuit must match: scoring is latency-invariant (nv_evo.temporal, best
-    global shift), so a circuit that produces the right spikes at ANY consistent
-    delay scores the same. Describe the RELATIVE spike structure; the absolute
-    input->output delay is free.
+    global continuous-time shift), so a circuit that produces the right spikes
+    at ANY consistent delay scores the same. Describe the RELATIVE event
+    structure; the absolute input->output delay is free.
 
     Example — a coincidence detector (fires one tick after A and B coincide)::
 
@@ -145,12 +172,15 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
         streams = _pulse_streams(T, n_inputs, pulse_dict)
         exp = [1 if t in out_set else (None if t < latency else 0)
                for t in range(T)]
-        trials.append(Trial(streams, {output_role: exp}))
+        trials.append(Trial(streams, {output_role: exp},
+                            {output_role: sorted(float(t) for t in out_set)}))
     return TemporalTarget(name, list(inputs), [out], T, trials,
                           grid_size=grid_size, iters=iters,
-                          description=description or (
-        'Custom spike-event target: fire at the specified output ticks and stay\n'
-        'silent otherwise. Scored by spike-event precision/recall (F1).'))
+                          score_mode='events', event_tolerance=0.5,
+                          description=description or describe_target(
+        'Produce exactly the requested output-edge pattern.', EVENT_SCORING,
+        'Each supplied case contributes its input schedule, required edges, and '
+        'the surrounding silence window.'))
 
 
 # ── preset temporal targets ─────────────────────────────────────────────────────
@@ -179,13 +209,12 @@ def sr_latch(grid_size=5):
         trials.append(Trial(_pulse_streams(T, 2, pulses),
                             {'Q': _hold_trace(T, events)}))
     return TemporalTarget('SR latch', [Set, Reset], [out], T, trials,
-                          grid_size=grid_size, iters=30, description=(
-        'One bit of memory. A pulse on Set (input A) drives Q high and it must\n'
-        'HOLD with no further input — the bit is stored as a pulse circulating\n'
-        'in a loop, so sustained ringing counts as holding. A pulse on Reset\n'
-        '(input B) must break the circulation and leave Q silent.\n'
-        'Trials shift the Set/Reset timing (one has no Reset at all: hold\n'
-        'forever), so only a real, timing-independent latch scores 1.0.'))
+                          grid_size=grid_size, iters=30,
+                          description=describe_target(
+        'Input A sets one stored bit; input B resets it. Q must remain in the '
+        'selected state without continued input.', PERSISTENCE_SCORING,
+        'Five Set/Reset schedules vary event phase and hold length, including a '
+        'Set-only test that must retain the bit through the horizon.'))
 
 
 def _toggle_trial(T, pulses):
@@ -206,12 +235,12 @@ def toggle_ff(grid_size=5):
     banks = ([3, 9, 14], [4, 12], [2, 7, 12], [3, 10, 15], [5, 11], [2, 8, 15])
     return TemporalTarget('Toggle flip-flop', [In], [out], T,
                           [_toggle_trial(T, p) for p in banks],
-                          grid_size=grid_size, iters=30, description=(
-        'Each input pulse FLIPS the stored bit: pulse -> Q rings, next pulse ->\n'
-        'Q silent, and so on (a frequency divider). Needs a loop the input can\n'
-        'both load and clear, depending on its current state.\n'
-        'Six schedules with odd AND even pulse gaps at varied phases — a\n'
-        'phase-locked ring that only toggles for one spacing fails.'))
+                          grid_size=grid_size, iters=30,
+                          description=describe_target(
+        'Each input edge flips the stored bit: quiet to active, then active to '
+        'quiet.', PERSISTENCE_SCORING,
+        'Six pulse trains vary phase, count, and odd/even spacing so a '
+        'phase-locked shortcut cannot pass.'))
 
 
 def oscillator(grid_size=5, period=2):
@@ -243,11 +272,14 @@ def oscillator(grid_size=5, period=2):
             phase += 1
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('Oscillator (period %d)' % period, [In], [out], T,
-                          trials, grid_size=grid_size, iters=30, description=(
-        'A single kick pulse must start a free-running alternation: the pulse\n'
-        'circulates a loop of buffers forever, read as Q toggling every tick.\n'
-        'Correctly, NOTHING may happen before the kick (no input -> no output);\n'
-        'trials kick at different ticks so a one-shot blip chain cannot pass.'))
+                          trials, grid_size=grid_size, iters=30,
+                          score_mode='cadence', cadence_period=float(period),
+                          cadence_settle=float(SETTLE),
+                          description=describe_target(
+        'One input edge starts a free-running output cadence with period %d.'
+        % period, CADENCE_SCORING,
+        'Three kick times require silence before the trigger and sustained '
+        'oscillation through the end; a finite burst fails.'))
 
 
 def pattern_generator(grid_size=5, pattern=(1, 0, 0, 0)):
@@ -279,33 +311,49 @@ def pattern_generator(grid_size=5, pattern=(1, 0, 0, 0)):
             exp[t] = pattern[i % len(pattern)]
         trials.append(Trial(streams, {'Q': exp}))
     pat = ''.join(map(str, pattern))
+    cyclic_rises = [i for i, bit in enumerate(pattern)
+                    if bit and not pattern[i - 1]]
+    # One pulse per cycle is a pure cadence invariant.  Patterns with several
+    # uneven pulse offsets still need their richer phase-relative trace scorer.
+    mode = 'cadence' if len(cyclic_rises) == 1 else 'trace'
     return TemporalTarget('Pattern (%s)' % pat, [In], [out], T, trials,
-                          grid_size=grid_size, iters=30, description=(
-        'Like the oscillator, but richer: after a single kick pulse the output\n'
-        'must repeat the bit pattern %s forever (period %d) — a pulse circulating\n'
-        'a loop of length %d read at one cell. The absolute phase/latency is free;\n'
-        'only the repeating structure is scored. Nothing may happen before the\n'
-        'kick; trials kick at different ticks.' % (pat, len(pattern), len(pattern))))
+                          grid_size=grid_size, iters=30,
+                          score_mode=mode, cadence_period=float(len(pattern)),
+                          cadence_settle=float(SETTLE),
+                          description=describe_target(
+        'One input edge starts the repeating output pattern %s (period %d).'
+        % (pat, len(pattern)),
+        CADENCE_SCORING if mode == 'cadence' else
+        'Compare the repeating relative pattern after startup; absolute phase '
+        'and latency are free.',
+        'Three kick times require pre-trigger silence and repetition through the '
+        'full observation window.'))
 
 
 def echo(grid_size=5, delay=3):
     """Echo: output reproduces the input pulse train `delay` ticks later — the
     simplest temporal target (a delay line), a stepping stone to real memory.
-    Four pulse trains with varied spacing (incl. adjacent pulses)."""
+    Four pulse trains with varied spacing.  Distinct pulse edges are separated
+    by at least one low tick; adjacent high samples would be one held pulse in
+    the physical input model, not two events."""
     T = 20
     In  = (0, 2)
     out = OutputTerminal('Q', (2, 2))
     trials = []
-    for pulses in ([2, 7, 8, 13], [4, 10, 16], [3, 5, 9, 14], [6, 12, 13]):
+    for pulses in ([2, 7, 9, 13], [4, 10, 16], [3, 5, 9, 14], [6, 12, 14]):
         streams = _pulse_streams(T, 1, {0: pulses})
         exp = [None] * delay + [streams[t - delay][0] for t in range(delay, T)]
-        trials.append(Trial(streams, {'Q': exp}))
+        trials.append(Trial(streams, {'Q': exp},
+                            {'Q': [float(p + delay) for p in pulses
+                                   if p + delay < T]}))
     return TemporalTarget('Echo (delay %d)' % delay, [In], [out], T, trials,
-                          grid_size=grid_size, iters=30, description=(
-        'Output must reproduce the input pulse train EXACTLY %d ticks later —\n'
-        'a pure delay line (each hop through a node costs one tick, so the\n'
-        'signal path must be exactly %d hops). The simplest temporal target;\n'
-        'trials use varied spacings including back-to-back pulses.' % (delay, delay)))
+                          grid_size=grid_size, iters=30, score_mode='events',
+                          description=describe_target(
+        'Reproduce the input-edge train at Q while preserving every inter-edge '
+        'interval.', EVENT_SCORING,
+        'Four schedules vary pulse count and spacing. The nominal %d-tick '
+        'label sets the reference trace; absolute circuit latency remains free.'
+        % delay))
 
 
 def coincidence_detector(grid_size=5, latency=1):
@@ -332,13 +380,17 @@ def coincidence_detector(grid_size=5, latency=1):
         exp = [None] * latency + [
             1 if (streams[t - latency][0] and streams[t - latency][1]) else 0
             for t in range(latency, T)]
-        trials.append(Trial(streams, {'Q': exp}))
+        trials.append(Trial(streams, {'Q': exp},
+                            {'Q': [float(t + latency)
+                                   for t in range(T - latency)
+                                   if streams[t][0] and streams[t][1]]}))
     return TemporalTarget('Coincidence (2-in)', [A, B], [out], T, trials,
-                          grid_size=grid_size, iters=30, description=(
-        'Output pulses if and only if BOTH inputs pulse on the same tick —\n'
-        'the nervous node\'s marquee capability (E1 AND E2 edge coincidence).\n'
-        'Pulses staggered by 1-2 ticks and lone single-input pulses must stay\n'
-        'silent: the async coincidence window enforces this physically.'))
+                          grid_size=grid_size, iters=30, score_mode='events',
+                          description=describe_target(
+        'Emit one Q edge only when inputs A and B arrive together.',
+        EVENT_SCORING,
+        'Six schedules mix coincident pairs, one- and two-tick offsets, and '
+        'single-input events. Offset and lone events must remain silent.'))
 
 
 def one_shot(grid_size=5, width=3, latency=3):
@@ -361,13 +413,13 @@ def one_shot(grid_size=5, width=3, latency=3):
                 exp[p + latency + width] = None            # turn-off transient
         trials.append(Trial(streams, {'Q': exp}))
     return TemporalTarget('One-shot (%d ticks)' % width, [In], [out], T, trials,
-                          grid_size=grid_size, iters=30, description=(
-        'A monostable: each input pulse triggers a burst of activity at Q that\n'
-        'lasts %d ticks and must then SHUT ITSELF OFF — a loop that loads\n'
-        'itself and, after a delay, inhibits itself. The first target where the\n'
-        'inhibitory veto is constructive rather than just a reset line.\n'
-        'Bursts count phase-tolerantly (ringing is fine); the silence after\n'
-        'each burst must be real, and it must re-trigger for later pulses.' % width))
+                          grid_size=grid_size, iters=30,
+                          description=describe_target(
+        'Each input edge starts a self-terminating active interval lasting %d '
+        'ticks, after which Q must return quiet.' % width,
+        PERSISTENCE_SCORING,
+        'Four schedules include isolated and repeated triggers. Every interval '
+        'must terminate and the circuit must re-arm for later input.'))
 
 
 def pair_detector(grid_size=5, gap=2, latency=3):
@@ -391,22 +443,25 @@ def pair_detector(grid_size=5, gap=2, latency=3):
         exp = [None] * (latency + gap) + [
             1 if (streams[t - latency][0] and streams[t - latency - gap][0]) else 0
             for t in range(latency + gap, T)]
-        trials.append(Trial(streams, {'Q': exp}))
+        trials.append(Trial(streams, {'Q': exp},
+                            {'Q': [float(t + latency)
+                                   for t in range(gap, T - latency)
+                                   if streams[t][0] and streams[t - gap][0]]}))
     return TemporalTarget('Pair detector (gap %d)' % gap, [In], [out], T, trials,
-                          grid_size=grid_size, iters=30, description=(
-        'Fires only when two input pulses arrive EXACTLY %d ticks apart: a\n'
-        'delay line feeds one arm of a coincidence node and the direct path\n'
-        'feeds the other, so the second pulse of a correctly-spaced pair meets\n'
-        'the delayed first pulse — timing used as computation. Wrong gaps and\n'
-        'lone pulses must stay silent.' % gap))
+                          grid_size=grid_size, iters=30, score_mode='events',
+                          description=describe_target(
+        'Emit Q when two input edges are separated by exactly %d ticks.' % gap,
+        EVENT_SCORING,
+        'Five schedules include valid pairs, wrong gaps, multiple pairs, and a '
+        'single edge. Only correctly spaced pairs may produce output.'))
 
 
-# ── more complex temporal functions (spike-event described; Nervous + LUT) ──────
+# ── more complex temporal functions (point-event targets; Nervous + LUT) ────────
 # Built straight from spike_target: each is a handful of (input_spikes,
 # output_spikes) cases, so the behaviour is transparent and easy to tweak. Cases
 # mix positive and negative examples at varied timings so a net can't pass by
-# memorising one schedule. Scored by the spike-event F1 metric like everything
-# else (silence and spurious firing both cost).
+# memorising one schedule. These point-event targets penalise both missing and
+# spurious output edges.
 
 def temporal_xor(grid_size=5, latency=1):
     """Temporal XOR — the complement of coincidence: fire iff EXACTLY ONE of the
@@ -419,12 +474,12 @@ def temporal_xor(grid_size=5, latency=1):
         ({0: [11],       1: [11]},      []),                     # both    -> silent
         ({0: [3, 15],    1: [8, 15]},   [3 + latency, 8 + latency]),  # A,B,then both
         ({0: [5, 9],     1: [9, 18]},   [5 + latency, 18 + latency]), # overlap @9 -> silent
-    ], T=T, n_inputs=2, latency=latency, grid_size=grid_size, description=(
-        'Fire iff EXACTLY ONE input pulses on a tick — temporal XOR, the mirror\n'
-        'of the coincidence detector. A lone pulse on either input produces one\n'
-        'output spike %d ticks later; two pulses on the SAME tick must cancel\n'
-        '(silent). Each input excites the output while the two veto each other.'
-        % latency))
+    ], T=T, n_inputs=2, latency=latency, grid_size=grid_size,
+       description=describe_target(
+        'Emit one Q edge when exactly one of A or B arrives; simultaneous A+B '
+        'must cancel.', EVENT_SCORING,
+        'Five schedules cover A-only, B-only, simultaneous inputs, and mixed '
+        'trains with both positive and suppressed events.'))
 
 
 def ordered_sequence(grid_size=5, gap=3, latency=1):
@@ -440,11 +495,12 @@ def ordered_sequence(grid_size=5, gap=3, latency=1):
         ({0: [3, 14],    1: [3 + gap, 14 + gap]},
                                        [3 + gap + latency, 14 + gap + latency]),
         ({0: [8],        1: []},            []),                    # lone A    -> silent
-    ], T=T, n_inputs=2, latency=latency, grid_size=grid_size, description=(
-        'Fire only when input A pulses and THEN input B pulses exactly %d ticks\n'
-        'later. ORDER matters: B-before-A, wrong gaps and lone pulses stay\n'
-        'silent. A delay line on A must coincide with the direct B path — the\n'
-        'reverse ordering never lines up.' % gap))
+    ], T=T, n_inputs=2, latency=latency, grid_size=grid_size,
+       description=describe_target(
+        'Emit Q only for the ordered sequence A then B, separated by %d ticks.'
+        % gap, EVENT_SCORING,
+        'Five schedules include correct order, reverse order, wrong spacing, '
+        'repeated valid sequences, and an incomplete sequence.'))
 
 
 def veto_gate(grid_size=5, latency=1):
@@ -458,10 +514,11 @@ def veto_gate(grid_size=5, latency=1):
         ({0: [6],         1: [6]},       []),                     # B blocks the only A
         ({0: [5, 12, 18], 1: [12]},      [5 + latency, 18 + latency]),
         ({0: [],          1: [7, 14]},   []),                     # B alone -> nothing
-    ], T=T, n_inputs=2, latency=latency, grid_size=grid_size, description=(
-        'Echo input A %d ticks later, UNLESS input B pulses on the same tick —\n'
-        'then that echo is vetoed. B carries no signal of its own; it only\n'
-        'suppresses A. The inhibitory (NOT) input used as a real gate.' % latency))
+    ], T=T, n_inputs=2, latency=latency, grid_size=grid_size,
+       description=describe_target(
+        'Pass each A edge to Q unless B arrives simultaneously; B alone must '
+        'produce nothing.', EVENT_SCORING,
+        'Five schedules mix unopposed A, vetoed A+B, and B-only events.'))
 
 
 def burst_generator(grid_size=5, n=3, spacing=2, latency=1):
@@ -476,12 +533,12 @@ def burst_generator(grid_size=5, n=3, spacing=2, latency=1):
         ({0: [5]},         burst(5)),
         ({0: [2, 13]},     burst(2) + burst(13)),   # re-triggers
         ({0: [4]},         burst(4)),
-    ], T=T, n_inputs=1, latency=latency, grid_size=grid_size, description=(
-        'A single input kick fans out into a BURST of %d output spikes spaced %d\n'
-        'ticks apart, then silence until the next kick (which re-triggers it).\n'
-        'One edge in, several out — a tapped delay line or short re-triggerable\n'
-        'ring. Extra or missing spikes in the burst are both penalised.'
-        % (n, spacing)))
+    ], T=T, n_inputs=1, latency=latency, grid_size=grid_size,
+       description=describe_target(
+        'Convert each input edge into %d Q edges separated by %d ticks, then '
+        'return to silence.' % (n, spacing), EVENT_SCORING,
+        'Four schedules vary trigger time and include a two-trigger test that '
+        'requires the generator to re-arm.'))
 
 
 def divide_by_3(grid_size=5, latency=1):
@@ -494,11 +551,11 @@ def divide_by_3(grid_size=5, latency=1):
     trains = [[3, 6, 9, 12, 15, 18], [2, 5, 8, 11, 14, 17, 20], [4, 8, 12, 16, 20]]
     return spike_target('Divide-by-3', [({0: tr}, every3(tr)) for tr in trains],
                         T=T, n_inputs=1, latency=latency, grid_size=grid_size,
-                        description=(
-        'Frequency divider: the output fires on every THIRD input pulse and\n'
-        'stays silent on the other two (a modulo-3 counter). Harder than the\n'
-        'toggle flip-flop (which is divide-by-2) — it needs two bits of state to\n'
-        'count 0,1,2,0,1,2. Random-length trains stop it memorising one cadence.'))
+                        description=describe_target(
+        'Emit Q on every third input edge and remain silent on the other two.',
+        EVENT_SCORING,
+        'Three trains vary phase, spacing, and length so the circuit must retain '
+        'the modulo-3 count rather than memorize one schedule.'))
 
 
 # ── registry: one entry per function, best-measuring style (metric shootout) ───

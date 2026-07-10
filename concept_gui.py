@@ -34,21 +34,25 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 
 from concept.engines import available_engines, make_engine, CONFIGS, DEFAULT_SIM
+import ui_compat
 
 
 class ConceptGUI:
     def __init__(self, root):
         self.root = root
         root.title('Concept GA Playground')
-        root.minsize(1000, 640)
+        ui_compat.apply_theme(root)
 
         self.avail      = available_engines()
         self.engine     = None
         self._step_mode = False
+        self._poll_job  = None
         self._best_hist = []
         self._mean_hist = []
 
         self._build_ui()
+        ui_compat.fit_window(root, min_width=860, min_height=600)
+        root.protocol('WM_DELETE_WINDOW', self._close)
         self._poll()
 
     # ── UI ────────────────────────────────────────────────────────────────────
@@ -57,14 +61,14 @@ class ConceptGUI:
         ctrl = ttk.Frame(self.root, padding=(6, 4))
         ctrl.pack(fill='x', side='top')
 
-        ttk.Label(ctrl, text='Sim:').pack(side='left', padx=(2, 2))
+        ttk.Label(ctrl, text='Simulation:').pack(side='left', padx=(2, 2))
         self._sim_var = tk.StringVar(value=DEFAULT_SIM)
         self._sim_cb  = ttk.Combobox(ctrl, textvariable=self._sim_var,
                                      values=list(CONFIGS), width=11, state='readonly')
         self._sim_cb.pack(side='left')
         self._sim_cb.bind('<<ComboboxSelected>>', self._on_sim_change)
 
-        ttk.Label(ctrl, text='Pop:').pack(side='left', padx=(8, 2))
+        ttk.Label(ctrl, text='Population:').pack(side='left', padx=(8, 2))
         self._pop_var = tk.StringVar(value='150')
         ttk.Entry(ctrl, textvariable=self._pop_var, width=7).pack(side='left')
 
@@ -77,7 +81,7 @@ class ConceptGUI:
         for b in (self._run_btn, self._pause_btn, self._step_btn, self._reset_btn):
             b.pack(side='left', padx=3)
 
-        self.fig = plt.figure(figsize=(11, 6))
+        self.fig = plt.figure(figsize=(9.4, 5.2))
         self.fig.patch.set_facecolor('#f5f5f5')
         gs = self.fig.add_gridspec(2, 3, hspace=0.35, wspace=0.35,
                                    left=0.07, right=0.97, top=0.92, bottom=0.10)
@@ -90,7 +94,8 @@ class ConceptGUI:
 
         self._status = tk.StringVar()
         ttk.Label(self.root, textvariable=self._status, anchor='w',
-                  relief='sunken', padding=(6, 2)).pack(fill='x', side='bottom',
+                  relief='sunken', padding=(6, 2), wraplength=840,
+                  justify='left').pack(fill='x', side='bottom',
                                                         padx=4, pady=(0, 4))
         self._on_sim_change()
 
@@ -100,7 +105,7 @@ class ConceptGUI:
         self.ax_grid.set_title('Best organism', fontsize=9)
         self.ax_grid.set_xticks([]); self.ax_grid.set_yticks([])
         self.ax_line.set_title('Fitness over time', fontsize=9)
-        self.ax_line.set_xlabel('Gen'); self.ax_line.grid(True, alpha=0.3)
+        self.ax_line.set_xlabel('Generation'); self.ax_line.grid(True, alpha=0.3)
 
     # ── sim selection ─────────────────────────────────────────────────────────
 
@@ -114,7 +119,7 @@ class ConceptGUI:
         for b in (self._run_btn, self._step_btn):
             b.config(state='normal' if ok else 'disabled')
         self._status.set('%s — %s%s' % (name, status,
-                         '. Set Pop and click Run or Step.' if ok else ''))
+                         '. Set Population and click Run or Step.' if ok else ''))
 
     # ── controls ──────────────────────────────────────────────────────────────
 
@@ -165,6 +170,19 @@ class ConceptGUI:
         self._clear_displays()
         self._set_running(False)
 
+    def _close(self):
+        """Stop the worker before destroying Tk so no background thread leaks."""
+        if self.engine:
+            self.engine.stop()
+        if self._poll_job is not None:
+            try:
+                self.root.after_cancel(self._poll_job)
+            except tk.TclError:
+                pass
+            self._poll_job = None
+        ui_compat.cancel_after_callbacks(self.root)
+        self.root.destroy()
+
     def _set_running(self, running):
         self._run_btn.config(state='disabled' if running else 'normal')
         self._pause_btn.config(state='normal' if running else 'disabled')
@@ -199,7 +217,8 @@ class ConceptGUI:
                 if self.engine:
                     self.engine.pause()
                 self._set_running(False)
-        self.root.after(50, self._poll)
+        if self.root.winfo_exists():
+            self._poll_job = self.root.after(50, self._poll)
 
     def _board_image(self, s):
         best = np.array(s['best_grid'], dtype=float)
@@ -244,7 +263,7 @@ class ConceptGUI:
     def _redraw_line(self):
         self.ax_line.clear()
         self.ax_line.set_title('Fitness over time', fontsize=9)
-        self.ax_line.set_xlabel('Gen'); self.ax_line.grid(True, alpha=0.3)
+        self.ax_line.set_xlabel('Generation'); self.ax_line.grid(True, alpha=0.3)
         if self._best_hist:
             bx, by = zip(*self._best_hist)
             mx, my = zip(*self._mean_hist)
