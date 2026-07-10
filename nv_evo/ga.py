@@ -43,7 +43,7 @@ differs from snn_evo's in seven ways:
      bound). This never distorts the fitness value, so a solved run still reads
      exactly 1.0 while both genome and body shrink when the task allows.
 
-  7. Stress-induced mutagenesis (stress_multiplier): the bacterial SOS response —
+  7. Stress-induced mutagenesis (adaptive_mutation_rate): the bacterial SOS response —
      hold the mutation rate at baseline until the run stalls, then ramp it up the
      longer it stays stuck and relax the instant progress resumes. Aimed squarely
      at the deceptive temporal plateaus where only a burst of variation reaches
@@ -79,16 +79,23 @@ ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT
 ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELITE_FRAC
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
+# Preserve specialist lineages: small elite pools otherwise produce nearly
+# exclusive champion × champion reproduction.
+EXPLORATION_PARENT_FRAC = 0.30
 MEAN_MUTATIONS = 4.0         # HOT-START mutation rate for simulated annealing:
                             # broad early exploration, cooled each generation by
                             # MUT_DECAY toward ~0 as the genes self-organise.
                             # (Was 1.2; annealing wants a high start — see below.)
-MUT_DECAY      = 0.99        # simulated-annealing α: mutation rate *= α every
-                             # generation. 0.99 cools 4.0 -> ~0.03 by gen 500
-                             # (aggressive). α is PER-GENERATION, so tie it to run
-                             # length — for very long runs use α close to 1
-                             # (e.g. 0.9999); α = 1.0 disables annealing.
+MUT_DECAY      = 0.997       # slow cooldown: hard recurrent tasks need late
+                             # variation — 0.997 cools 4.0 -> ~0.89 by gen 500,
+                             # where the old 0.99 crashed it to ~0.03. α is
+                             # PER-GENERATION, so tie it to run length — for very
+                             # long runs use α close to 1 (e.g. 0.9999); α = 1.0
+                             # disables annealing.
 LOOP_WEIGHT    = 0.05          # max shaping bonus, as a fraction of (1 - score)
+# A counter-like mechanism needs extra structure.  Do not prune that structure
+# merely because it ties a smaller shortcut before the behavioral task is solved.
+PARSIMONY_START_FITNESS = 0.999
 N_WORKERS      = min(os.cpu_count() or 2, 8)
 
 # Very long runs (10k–100k generations) accumulate one fitness-cache entry per
@@ -122,7 +129,14 @@ def evaluate_nv_full(genome, target):
     if prep is None:
         return 0.0, (0.0,) * n_cases
     grid, routing, in_pos, out_pos, traces = prep
-    from .temporal import _best_shift, _pr_score, _trace_metric, METRIC
+    from .temporal import (_best_shift, _pr_score, _trace_metric, METRIC,
+                           period_stepper_score)
+    if getattr(target, 'score_mode', 'trace') == 'period_stepper':
+        s, cases = period_stepper_score(traces, target)
+        if s < 1.0:
+            s = s + (1.0 - s) * LOOP_WEIGHT * _loop_bonus(
+                grid, routing, in_pos, out_pos)
+        return s, cases
     # one global latency shift for the whole genome (latency-invariant scoring);
     # the per-case vector is reported at that same shift so lexicase and the
     # scalar agree on timing
@@ -205,13 +219,18 @@ def _poisson(lam):
 _GENE_FIELDS = ["ctx_l", "ctx_r", "ctx_d", "self_in", "self_out"]
 
 
+def _other_state(value):
+    """Choose a genuinely different routing state."""
+    return (value + random.randrange(1, MAX_STATE)) % MAX_STATE
+
+
 def _tweak_gene(gene):
     g   = copy.copy(gene)
     fld = random.choice(_GENE_FIELDS)
-    if fld == 'self_in' and random.random() < 0.2:
+    if fld == 'self_in' and g.self_in != 0 and random.random() < 0.2:
         g.self_in = 0                     # keep growth rules reachable
     else:
-        setattr(g, fld, random.randrange(MAX_STATE))
+        setattr(g, fld, _other_state(getattr(g, fld)))
     return g
 
 
@@ -220,42 +239,79 @@ _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 
 
+def _mutate_once_nv(genome):
+    """Apply one feasible, state-changing mutation to a nervous-net genome."""
+    if not genome.chromosomes:
+        genome.chromosomes.append(random_hex_chromosome())
+        return
+
+    chroms = genome.chromosomes
+    with_genes = [c for c in chroms if c.genes]
+    options = []
+    if with_genes:
+        options.append('tweak')
+    if any(c.genes and len(c.genes) < MAX_GENES for c in chroms):
+        options.append('duplicate')
+    if any(len(c.genes) < MAX_GENES for c in chroms):
+        options.append('add_gene')
+    if any(len(c.genes) > 1 for c in chroms):
+        options.append('del_gene')
+    if len(chroms) < MAX_CHROMS:
+        options.append('add_chrom')
+    if len(chroms) > 1:
+        options.append('del_chrom')
+    if any(len(c.genes) > 2 for c in chroms):
+        options.append('split')
+    telomeres = []
+    for c in chroms:
+        base = getattr(c, 'telomere', 10)
+        values = [base + d for d in (-3, -2, -1, 1, 2, 3)
+                  if 1 <= base + d <= MAX_TELOMERE]
+        if values:
+            telomeres.append((c, values))
+    if telomeres:
+        options.append('telomere')
+
+    weights = [_MUT_WEIGHTS[_MUT_OPS.index(op)] for op in options]
+    op = random.choices(options, weights=weights)[0]
+    if op == 'tweak':
+        chrom = random.choice(with_genes)
+        idx = random.randrange(len(chrom.genes))
+        chrom.genes[idx] = _tweak_gene(chrom.genes[idx])
+    elif op == 'duplicate':
+        chrom = random.choice([c for c in chroms
+                               if c.genes and len(c.genes) < MAX_GENES])
+        chrom.genes.insert(random.randrange(len(chrom.genes) + 1),
+                           _tweak_gene(random.choice(chrom.genes)))
+    elif op == 'add_gene':
+        random.choice([c for c in chroms if len(c.genes) < MAX_GENES]).genes.append(
+            random_hex_gene())
+    elif op == 'del_gene':
+        chrom = random.choice([c for c in chroms if len(c.genes) > 1])
+        chrom.genes.pop(random.randrange(len(chrom.genes)))
+    elif op == 'add_chrom':
+        chroms.append(random_hex_chromosome())
+    elif op == 'del_chrom':
+        chroms.remove(min(chroms, key=lambda c: len(c.genes)))
+    elif op == 'split':
+        chrom = random.choice([c for c in chroms if len(c.genes) > 2])
+        values = [s for s in range(1, len(chrom.genes)) if s != chrom.split]
+        chrom.split = random.choice(values)
+    else:  # telomere
+        chrom, values = random.choice(telomeres)
+        chrom.telomere = random.choice(values)
+
+
 def mutate_nv(genome, mean_mutations=None):
     g = clone_genome(genome)
     lam = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
-    for _ in range(_poisson(lam)):
-        if not g.chromosomes:
-            g.chromosomes.append(random_hex_chromosome())
-            continue
-        op    = random.choices(_MUT_OPS, weights=_MUT_WEIGHTS)[0]
-        chrom = random.choice(g.chromosomes)
-        if op == "telomere":
-            # lengthen / shorten the chromosome's growth phase
-            base = getattr(chrom, 'telomere', 10)
-            chrom.telomere = max(1, min(MAX_TELOMERE,
-                                        base + random.randint(-3, 3)))
-        elif op == "tweak" and chrom.genes:
-            idx = random.randrange(len(chrom.genes))
-            chrom.genes[idx] = _tweak_gene(chrom.genes[idx])
-        elif op == "duplicate" and chrom.genes and len(chrom.genes) < MAX_GENES:
+    for _ in range(max(1, _poisson(lam))):
+        _mutate_once_nv(g)
             # copy a working rule and vary it — how repeated loop motifs arise
-            src = random.choice(chrom.genes)
-            chrom.genes.insert(random.randrange(len(chrom.genes) + 1),
-                               _tweak_gene(src))
-        elif op == "add_gene" and len(chrom.genes) < MAX_GENES:
-            chrom.genes.append(random_hex_gene())
-        elif op == "del_gene" and len(chrom.genes) > 1:
-            chrom.genes.pop(random.randrange(len(chrom.genes)))
-        elif op == "add_chrom" and len(g.chromosomes) < MAX_CHROMS:
-            g.chromosomes.append(random_hex_chromosome())
-        elif op == "del_chrom" and len(g.chromosomes) > 1:
             # remove the SMALLEST chromosome (least growth program) — deleting a
             # random one could wipe a large functional module wholesale, which is
             # what makes chromosome loss hurt; pruning the least-carrying one is a
             # gentle, minimally-destructive deletion.
-            g.chromosomes.remove(min(g.chromosomes, key=lambda c: len(c.genes)))
-        elif op == "split" and len(chrom.genes) > 1:
-            chrom.split = random.randint(1, len(chrom.genes) - 1)
     return g
 
 
@@ -305,6 +361,8 @@ def rank_key(genome, fitness):
     chromosome was small — whereas the germline reflects actual organism size and
     leaves chromosome count to gene-parsimony alone. Neither tie-break distorts
     the fitness value, so a solved run still reads exactly 1.0."""
+    if fitness < PARSIMONY_START_FITNESS:
+        return (fitness, 0, 0)
     return (fitness, -n_genes(genome), -germline_telomere(genome))
 
 
@@ -361,14 +419,17 @@ def select_parent(population, fitnesses, case_vecs=None):
 # plateaus (latch/toggle/stepper) are exactly the deceptive landscapes this is
 # meant for: flat regions where only a burst of variation reaches the next rung.
 STRESS_PATIENCE = 12
-STRESS_MAX_MULT = 4.0
+STRESS_MAX_MULT = 8.0
 
 
-def stress_multiplier(stagnation):
-    """Mutation-rate multiplier as a function of generations-without-improvement."""
+def adaptive_mutation_rate(annealed_rate, stagnation):
+    """Actual mutation rate with a plateau reheat independent of annealing."""
+    base = max(1.0, annealed_rate)
     if stagnation < STRESS_PATIENCE:
-        return 1.0
-    return min(STRESS_MAX_MULT, 1.0 + (stagnation - STRESS_PATIENCE) / STRESS_PATIENCE)
+        return base
+    ramp = 1.0 + ((stagnation - STRESS_PATIENCE)
+                  / max(1.0, STRESS_PATIENCE / 2.0))
+    return max(base, min(STRESS_MAX_MULT, ramp))
 
 
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
@@ -389,7 +450,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         make_genome = random_hex_genome
     n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
-    n_imm   = int(round(pop * IMMIGRANT_FRAC))
+    n_imm   = min(int(round(pop * IMMIGRANT_FRAC)), pop)
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]),
                      reverse=True)
@@ -399,7 +460,10 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     # is tracked separately, so the final answer is never lost). Parents are drawn by
     # tournament WITHIN that pool (TOURNAMENT_K=1 → uniform among elites). n_elite==0
     # falls back to normal selection over the whole population.
-    new_pop = [make_genome() for _ in range(min(n_imm, pop))]      # random immigrants
+    # Elites are breeding material only.  The all-time champion is tracked by
+    # the caller; copying it here would make the generation-best chart appear
+    # artificially monotonic and suppress the exploratory regime.
+    new_pop = [make_genome() for _ in range(n_imm)]                  # immigrants
     # ε-lexicase (when selected) must stream over the WHOLE population; the elite-only
     # breeding pool would otherwise mask it whenever elites>0, so bypass the pool then.
     use_lexicase = (SELECTION == 'lexicase' and case_vecs is not None
@@ -407,12 +471,49 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
         k = min(TOURNAMENT_K, len(elite))
-        parent = lambda: population[max(random.sample(elite, k),
-                                        key=lambda i: rank_key(population[i], fitnesses[i]))]
+        elite_parent = lambda: population[max(
+            random.sample(elite, k),
+            key=lambda i: rank_key(population[i], fitnesses[i]))]
     else:
-        parent = lambda: select_parent(population, fitnesses, case_vecs)
+        elite_parent = lambda: select_parent(population, fitnesses, case_vecs)
+    residual = order[n_elite:] if n_elite < pop else order
+
+    def parent():
+        # A low-scoring specialist can carry the missing later-period behavior;
+        # let it occasionally recombine with an elite instead of disappearing.
+        if residual and random.random() < EXPLORATION_PARENT_FRAC:
+            return population[random.choice(residual)]
+        return elite_parent()
+
+    elite_pool = order[:n_elite] if n_elite else order
+
+    def pick_index(candidates):
+        if use_lexicase:
+            local_pop = [population[i] for i in candidates]
+            local_cases = [case_vecs[i] for i in candidates]
+            chosen = _lexicase_parent(local_pop, local_cases)
+            return candidates[next(i for i, genome in enumerate(local_pop)
+                                   if genome is chosen)]
+        k = min(TOURNAMENT_K, len(candidates))
+        return max(random.sample(candidates, k),
+                   key=lambda i: rank_key(population[i], fitnesses[i]))
+
+    def parent_pair():
+        def choose(exclude=None):
+            candidates = [i for i in elite_pool if i != exclude]
+            exploratory = [i for i in residual if i != exclude]
+            if exploratory and random.random() < EXPLORATION_PARENT_FRAC:
+                candidates = exploratory
+            if not candidates:
+                candidates = [i for i in range(pop) if i != exclude]
+            return pick_index(candidates)
+
+        first = choose()
+        second = choose(first)
+        return population[first], population[second]
+
     while len(new_pop) < pop:
-        ca, cb = crossover_nv(parent(), parent())
+        ca, cb = crossover_nv(*parent_pair())
         new_pop.append(mutate_nv(ca, mean_mutations))
         if len(new_pop) < pop:
             new_pop.append(mutate_nv(cb, mean_mutations))
@@ -444,7 +545,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         # contracts only as far as selection naturally drives it (see next_population).
         for gen in range(generations):
             mut_rate *= MUT_DECAY                                  # anneal: cool down
-            mm = mut_rate * stress_multiplier(stagnation)          # SOS reheats plateaus
+            mm = adaptive_mutation_rate(mut_rate, stagnation)
             population = next_population(population, fitnesses, make_genome, cases, mm)
             fitnesses, cases = eval_batch_cases(population, target, cache, ex)
             gi = max(range(pop),

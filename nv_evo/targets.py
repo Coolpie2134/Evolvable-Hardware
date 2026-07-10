@@ -45,6 +45,14 @@ class TemporalTarget:
     output_strategy: str = "terminals"
     temporal:        bool = True          # marker so the GUI/GA can dispatch
     description:     str = ''             # human explanation, shown in the GUI
+    # Most targets score an exact spike trace.  A period stepper instead scores
+    # its invariant: a sustained output cadence becomes slower after a command.
+    score_mode:      str = 'trace'
+    stepper_min_period: int = 2
+    stepper_max_period: int = 6
+    stepper_settle: int = 2
+    stepper_min_events: int = 4
+    stepper_max_delay: int = 8
 
     @property
     def n_inputs(self):  return len(self.inputs)
@@ -242,27 +250,25 @@ def oscillator(grid_size=5, period=2):
         'trials kick at different ticks so a one-shot blip chain cannot pass.'))
 
 
-def pattern_generator(grid_size=5, pattern=(1, 0, 0)):
+def pattern_generator(grid_size=5, pattern=(1, 0, 0, 0)):
     """Kicked pattern generator (paper §3: "simple pattern generation circuits
     can be built from these circuits, connected in loops"): one kick pulse must
     start the output repeating `pattern` indefinitely — a loop whose length and
     loading encode the bit sequence.
 
-    Period 3 is deliberately KEPT though it is a hard, DECEPTIVE target. The
-    lattice is bipartite, so a single pulse only circulates an even-length loop
-    (period = loop length); an odd period is achievable only via the harder route
-    output_period = loop_length / n_pulses — a length-6 loop carrying TWO pulses
-    spaced 3 apart. The cheap one-pulse route parity forbids, so the GA gets stuck
-    on strong LOCAL OPTIMA and never crosses to the real solution (measured, and
-    neither a bigger grid nor 200 generations moves it):
-      * a one-pulse period-6 loop  -> output 100000, F1 ~0.67
-      * a transient 3-spike burst that then dies -> F1 ~0.76
-    Reaching period 3 needs a fork that injects a SECOND pulse half a loop later
-    into a sustaining loop — a conjunction the path to which dips through lower
-    fitness. The fix is search-side (behavioural diversity / quality-diversity to
-    keep the period-6 stepping stone AND explore off it), NOT a target change. The
+    The honeycomb is BIPARTITE — every edge joins an (x+y)-even node to an odd
+    one (see hexgrid.hex_dirs), so every cycle has even length and a single
+    circulating pulse can only produce an EVEN period. An ODD-period pattern
+    like 100 is therefore geometrically out of reach on the cheap one-pulse
+    route: it would need a SECOND pulse injected half a loop away (output_period
+    = loop_length / n_pulses), a conjunction the GA path dips through lower
+    fitness to reach and empirically never crosses — neither a bigger grid nor
+    200 generations moved it, it just parked on local optima (a one-pulse
+    period-6 loop, F1 ~0.67; a 3-spike burst that then dies, F1 ~0.76). So the
+    default pattern is 1000: period 4, a single pulse circulating a length-4
+    loop read at one cell, which the parity-legal route reaches directly. The
     kick tick and absolute phase are free (phase/latency-invariant scoring)."""
-    T = 24
+    T = 28
     In  = (0, 2)
     out = OutputTerminal('Q', (2, 2))
     trials = []
@@ -504,7 +510,7 @@ def divide_by_3(grid_size=5, latency=1):
 # input->output relation to sample) and stay hand-built by necessity.
 TEMPORAL_TARGETS = {
     'Oscillator':            oscillator(),
-    'Pattern (100)':         pattern_generator(),
+    'Pattern (1000)':        pattern_generator(),
     'Coincidence (2-in)':    coincidence_detector(),
     'Temporal XOR (2-in)':   temporal_xor(),
     'Sequence A->B':         ordered_sequence(),
@@ -521,7 +527,9 @@ def _register_oracle_targets():
                            ('Echo (delay 3)',        'Echo (oracle)'),
                            ('One-shot (3 ticks)',    'One-shot (oracle)'),
                            ('Pair detector (gap 2)', 'Pair detector (oracle)'),
-                           ('Period stepper',        'Period stepper (oracle)')):
+                           ('Period stepper',        'Period stepper (oracle)'),
+                           ('Gated oscillator',      'Gated oscillator (oracle)'),
+                           ('Resettable toggle',     'Resettable toggle (oracle)')):
         t = ORACLE_SPECS[spec_name]()
         TEMPORAL_TARGETS[key] = dataclasses.replace(t, name=key)
 

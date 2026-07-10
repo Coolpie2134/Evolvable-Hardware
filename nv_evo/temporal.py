@@ -289,6 +289,94 @@ def _placement_score(cell_traces, exps, ttarget):
     return best
 
 
+# ── semantic period-stepper scoring ───────────────────────────────────────────
+
+def _pulse_events(trace, lo, hi):
+    """Leading edges of high runs in [lo, hi).  A LUT can hold a bit high for
+    several samples; that is still one pulse event for cadence measurement."""
+    lo, hi = max(0, lo), min(len(trace), hi)
+    return [t for t in range(lo, hi)
+            if trace[t] and (t == 0 or not trace[t - 1])]
+
+
+def _stepper_epoch(trace, lo, hi, target):
+    """Return (quality, measured_period) for one stable command epoch.
+
+    Quality requires enough pulses, regular gaps, and coverage across the
+    dwell.  The phase is deliberately free: a cadence is a relation between
+    pulses, not a requirement that a control edge arrive at one magic phase.
+    """
+    events = _pulse_events(trace, lo, hi)
+    if len(events) < getattr(target, 'stepper_min_events', 4):
+        return 0.0, None
+    gaps = [b - a for a, b in zip(events, events[1:])]
+    if not gaps:
+        return 0.0, None
+    p = int(round(sorted(gaps)[len(gaps) // 2]))
+    if not (getattr(target, 'stepper_min_period', 2)
+            <= p <= getattr(target, 'stepper_max_period', 6)):
+        return 0.0, None
+    # ±1 tick absorbs sampling/ringing phase without allowing a fundamentally
+    # different cadence to masquerade as regular.
+    regular = sum(1 for gap in gaps if abs(gap - p) <= 1) / len(gaps)
+    dwell = hi - lo
+    required_span = max(1, dwell - 2 * p)
+    coverage = min(1.0, (events[-1] - events[0]) / required_span)
+    return regular * coverage, p
+
+
+def _stepper_trial_score(trace, streams, target, shift):
+    """Score one command stream at a fixed causal input→output latency."""
+    commands = [t for t, row in enumerate(streams)
+                if row and row[0] and (t == 0 or not streams[t - 1][0])]
+    if not commands:
+        return 0.0
+    # Starting before the first command is not a controlled oscillator.
+    pre = _pulse_events(trace, 0, commands[0] + shift)
+    pre_score = 1.0 / (1.0 + len(pre))
+    epochs, periods = [], []
+    settle = getattr(target, 'stepper_settle', 2)
+    for i, command in enumerate(commands):
+        lo = command + shift + settle
+        hi = ((commands[i + 1] + shift) if i + 1 < len(commands)
+              else target.T + shift)
+        quality, period = _stepper_epoch(trace, lo, hi, target)
+        epochs.append(quality)
+        periods.append(period)
+    cadence = sum(epochs) / len(epochs) if epochs else 0.0
+    # Every subsequent command must make the sustained cadence slower.  A
+    # period-2 oscillator that ignores commands therefore gets zero relation
+    # credit even though it matches some of the slower epoch's raw pulses.
+    relations = [1.0 if a is not None and b is not None and b > a else 0.0
+                 for a, b in zip(periods, periods[1:])]
+    relation = sum(relations) / len(relations) if relations else 1.0
+    return pre_score * cadence * relation
+
+
+def period_stepper_score(traces, target):
+    """(score, per-trial scores) for the cadence-stepper target.
+
+    A single bounded, causal latency is selected for all trials.  This retains
+    the useful latency freedom of temporal scoring without allowing a giant
+    negative shift to hide an early command epoch.
+    """
+    best_score, best_cases = -1.0, ()
+    for shift in range(getattr(target, 'stepper_max_delay', 8) + 1):
+        cases = []
+        for ti, trial in enumerate(target.trials):
+            role_scores = []
+            for role in trial.expected:
+                seq = traces.get(role, [])
+                role_scores.append(_stepper_trial_score(
+                    seq[ti] if ti < len(seq) else [], trial.streams,
+                    target, shift))
+            cases.append(sum(role_scores) / len(role_scores) if role_scores else 0.0)
+        score = sum(cases) / len(cases) if cases else 0.0
+        if score > best_score:
+            best_score, best_cases = score, tuple(cases)
+    return best_score, best_cases
+
+
 # Selection metric. The fitness question is "did the network produce the correct
 # SPIKE EVENTS?", not "was the output level right at every tick?" — so the metric
 # is the precision/recall (F1) of the output spikes above:
@@ -363,7 +451,14 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
                     continue
                 ctr.append([trial_states[ti][t].get(c, 0) for t in range(obs)])
                 cexp.append(exp)
-            s   = _placement_score(ctr, cexp, ttarget) if ctr else 0.0
+            if not ctr:
+                s = 0.0
+            elif getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
+                # Placement must optimise the same semantic objective as the
+                # GA; raw trace F1 would otherwise choose a fixed-rate cell.
+                s = period_stepper_score({term.role: ctr}, ttarget)[0]
+            else:
+                s = _placement_score(ctr, cexp, ttarget)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
             if best_key is None or key < best_key:
                 best_key, best = key, c
@@ -406,6 +501,8 @@ def windowed_score(traces, ttarget, metric=None, shift=None):
     and no spurious firing. `shift` skips the search (pass the value from
     _best_shift when it's already known). 1.0 iff every expected spike is produced
     (ringing allowed, any consistent latency) and nothing fires where it shouldn't."""
+    if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
+        return period_stepper_score(traces, ttarget)[0]
     m = metric or METRIC
     if m in ('f1', 'blend'):
         f1 = (_pooled_f1(traces, ttarget, shift) if shift is not None
@@ -470,6 +567,29 @@ def temporal_report(ttarget, genome=None):
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
+    if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
+        lines += ['',
+                  'Scored semantically: every command-delimited dwell must show',
+                  'a sustained regular output cadence, and each later command',
+                  'must make that cadence slower. Phase during the transition',
+                  'is deliberately free; a fixed-rate oscillator cannot pass.']
+        if genome is None:
+            return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
+        prep = prepare_net(genome, ttarget)
+        if prep is None:
+            return '\n'.join(lines + ['', '(circuit incomplete - grew too little or inputs dead)'])
+        _, _, _, out_pos, traces = prep
+        total, cases = period_stepper_score(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
+        for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
+            commands = [t for t, row in enumerate(trial.streams) if row and row[0]]
+            lines.append('Trial %d: commands@%s  cadence score %.3f %s' % (
+                ti, commands, score, 'PASS' if score >= 0.999 else 'FAIL'))
+        lines.append('')
+        lines.append('=> cadence-stepper score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else ''))
+        return '\n'.join(lines)
     lines += ['',
               '%d input%s, output %s read wherever the behaviour appears '
               '(trace-matched),' % (ttarget.n_inputs,

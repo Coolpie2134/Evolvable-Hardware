@@ -33,8 +33,10 @@ class Arch:
     Tunable substrate parameters (the electrical model), kept separate from the
     Target (the problem). Threaded through interpretation so it survives the
     process pool. NB: whether a coincidence/AND detector is buildable hinges on
-    syn_weight vs max(vth_levels): if one synapse (syn_weight) already exceeds
-    the highest threshold, every neuron is an OR and XOR is unrepresentable.
+    the one-EPSC voltage excursion ``syn_weight * (1 - exp(-EPSC_DUR / tau))``
+    relative to ``vth``.  A usable coincidence cell has one pulse below its
+    threshold and two overlapping pulses above it; if every available cell
+    crosses on a single EPSC, the network is effectively OR-only.
     """
     syn_weight: float = SYN_WEIGHT
     vth_levels: Tuple[float, float, float, float] = (0.3, 0.5, 0.7, 0.9)

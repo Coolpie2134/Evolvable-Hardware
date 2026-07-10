@@ -73,20 +73,63 @@ def make_pair(gap):
     return f
 
 
-def make_period_stepper(base=2):
-    """A controllable oscillator. The FIRST input pulse kicks it into a
-    period-`base` oscillation (a 1 every `base` ticks — the natural circulating
-    pulse); every SUBSEQUENT pulse lengthens the period by 1 (slower and slower).
-    Anchoring the oscillation to the first kick fixes the absolute phase, so the
-    reference and a real (kick-started) circuit stay phase-aligned."""
+def make_gated_oscillator():
+    """Run/stop memory: input A (START) injects a pulse into a period-2 loop so
+    the output oscillates; input B (STOP) is an inhibitory input that drains it.
+    This is the paper's core memory image made input-driven — "a pulse circulates
+    a loop of buffers until stopped by an inhibitory input" (§3). Period 2 is even,
+    so the bipartite honeycomb reaches it on the cheap one-pulse route; the LUT
+    recurrent CA holds the same two-state cycle. START fixes the phase, so the
+    ordinary latency-invariant F1 scores it — no special mode needed. STOP wins a
+    tie so a simultaneous START/STOP leaves it drained, matching an inhibitory
+    veto overriding excitation on the same tick."""
+    def f(inb, st):
+        running, phase = st if st is not None else (False, 0)
+        if inb[0]:                     # START: kick the loop
+            running, phase = True, 0
+        if inb[1]:                     # STOP: inhibitory drain (dominant)
+            running = False
+        out = 1 if (running and phase == 0) else 0
+        if running:
+            phase ^= 1
+        return (out,), (running, phase)
+    return f
+
+
+def make_resettable_toggle():
+    """T flip-flop with an asynchronous clear: input A flips the stored bit, input
+    B forces it to 0. A toggle loop guarded by an inhibitory reset line — memory
+    plus a veto, both primitives the substrate already has. B wins a tie so a
+    simultaneous flip+clear clears."""
+    def f(inb, st):
+        q = st or 0
+        if inb[0]:
+            q ^= 1
+        if inb[1]:
+            q = 0
+        return (q,), q
+    return f
+
+
+def make_period_stepper(base=2, step=2, max_period=6):
+    """Build a bounded, re-phased cadence controller.
+
+    The first command starts a period-``base`` oscillator.  Every later command
+    advances it by ``step`` (up to ``max_period``) and restarts phase.  This is
+    a finite, physically meaningful version of period stepping: it asks for a
+    slower sustained cadence without pretending an in-flight pulse instantly
+    had the new cadence all along.
+    """
     def f(inb, st):
         period, phase, started = st if st is not None else (base, 0, False)
         if inb[0]:
             if not started:
-                started, phase = True, 0          # first pulse: start oscillating
+                started = True
+                period = base
             else:
-                period += 1                        # each later pulse: period + 1
-        out = 1 if (started and phase == 0) else 0
+                period = min(max_period, period + step)
+            phase = 0
+        out = 1 if started and phase == 0 else 0
         if started:
             phase = (phase + 1) % period
         return (out,), (period, phase, started)
@@ -203,26 +246,76 @@ def pair_oracle(seed=20260702, gap=2):
 
 
 def period_stepper_oracle(seed=20260702, base=2):
-    return oracle_target('Period stepper (oracle)', make_period_stepper(base), [(0, 2)], 'Q',
-                         T=30, n_trials=12, seed=seed, latency=2, min_gap=7,
+    """Finite period-stepper trials with long, independently scored dwells.
+
+    The stepper is bounded (2 -> 4 -> 6) and re-phased at each command: it asks
+    the circuit to make its cadence slower in steps, rather than to reproduce
+    one arbitrary transient phase from an unbounded abstract counter.
+    """
+    T, rng = 108, random.Random(seed)
+    oracle = make_period_stepper(base=base, step=2, max_period=6)
+    # One start-only trial establishes the base cadence.  Single-step trials add
+    # one command (2 -> 4); double-step trials add two (2 -> 4 -> 6).  Every
+    # dwell gets >= ~26 ticks so several complete cycles stay visible at each
+    # cadence, including the slow period-6 tail.
+    pulse_sets = [[rng.randint(3, 8)]]
+    for _ in range(2):
+        start = rng.randint(3, 8)
+        pulse_sets.append([start, start + rng.randint(26, 31)])
+    for _ in range(2):
+        start = rng.randint(3, 8)
+        g1 = rng.randint(26, 31)
+        g2 = rng.randint(32, 37)
+        pulse_sets.append([start, start + g1, start + g1 + g2])
+    trials = []
+    for commands in pulse_sets:
+        streams = [(1 if t in commands else 0,) for t in range(T)]
+        trials.append(Trial(streams, {'Q': label_trace(oracle, streams, T, 2)}))
+    return TemporalTarget(
+        'Period stepper (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
+        T, trials, grid_size=5, iters=30,
+        description=(
+            'Cadence stepper: the first command starts a period-2 oscillator;\n'
+            'each later command restarts it one step slower (period 4, then 6).\n'
+            'The fitness measures sustained cadence stepping, not an arbitrary\n'
+            'pulse phase at the control transition.'),
+        score_mode='period_stepper', stepper_min_period=2,
+        # A command can meet a circulating pulse at any phase.  Its short
+        # switchover is intentionally unscored; only the settled cadence matters.
+        stepper_max_period=6, stepper_settle=6, stepper_min_events=4,
+        stepper_max_delay=8)
+
+
+def gated_oscillator_oracle(seed=20260702):
+    return oracle_target('Gated oscillator (oracle)', make_gated_oscillator(),
+                         [(0, 1), (0, 3)], 'Q',
+                         T=32, n_trials=12, seed=seed, latency=2, min_gap=8,
                          description=(
-        'A controllable oscillator: the first input pulse starts the output\n'
-        'oscillating with period %d (a 1 every %d ticks), and EVERY further pulse\n'
-        'increases the period by 1 (the oscillation slows: %d, %d, %d, ...). The\n'
-        'output must therefore be a counter driving a variable-length loop —\n'
-        'genuinely hard, since the period grows unbounded with more inputs; the\n'
-        'phase is anchored to the first pulse so it stays comparable.'
-        % (base, base, base, base + 1, base + 2)))
+        'Run/stop memory: input A starts a free-running period-2 oscillation,\n'
+        'input B stops it (an inhibitory drain). Between an A and the next B the\n'
+        'output toggles; elsewhere it is silent. The paper\'s circulating-pulse\n'
+        'memory turned into a controllable relation, on random A/B schedules.'))
+
+
+def resettable_toggle_oracle(seed=20260702):
+    return oracle_target('Resettable toggle (oracle)', make_resettable_toggle(),
+                         [(0, 1), (0, 3)], 'Q',
+                         T=26, n_trials=12, seed=seed, latency=2, min_gap=5,
+                         description=(
+        'T flip-flop with clear: input A flips the stored bit, input B forces it\n'
+        'to 0. Toggle memory guarded by an inhibitory reset, on random schedules.'))
 
 
 ORACLE_SPECS = {
-    'SR latch (oracle)':        sr_latch_oracle,
-    'Toggle (oracle)':          toggle_oracle,
-    'Echo (oracle)':            echo_oracle,
-    'Coincidence (oracle)':     coincidence_oracle,
-    'One-shot (oracle)':        one_shot_oracle,
-    'Pair detector (oracle)':   pair_oracle,
-    'Period stepper (oracle)':  period_stepper_oracle,
+    'SR latch (oracle)':          sr_latch_oracle,
+    'Toggle (oracle)':            toggle_oracle,
+    'Echo (oracle)':              echo_oracle,
+    'Coincidence (oracle)':       coincidence_oracle,
+    'One-shot (oracle)':          one_shot_oracle,
+    'Pair detector (oracle)':     pair_oracle,
+    'Period stepper (oracle)':    period_stepper_oracle,
+    'Gated oscillator (oracle)':  gated_oscillator_oracle,
+    'Resettable toggle (oracle)': resettable_toggle_oracle,
 }
 
 ORACLE_TARGETS = {name: spec() for name, spec in ORACLE_SPECS.items()}

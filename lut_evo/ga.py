@@ -15,7 +15,8 @@ from functools import partial
 
 from nv_evo.temporal import (_role_trace_score, _pr_counts, _f1, _pr_score,
                              _best_shift, _placement_score, _obs_len,
-                             windowed_score, exact_tick_accuracy)
+                             windowed_score, exact_tick_accuracy,
+                             period_stepper_score)
 from .genome import (LUT_STATES, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome, random_lut_genome)
@@ -37,10 +38,26 @@ ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT
 ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELITE_FRAC
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
+EXPLORATION_PARENT_FRAC = 0.30
 MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see nv_evo.ga)
-MUT_DECAY      = 0.99        # simulated-annealing α; 4.0 -> ~0.03 by gen 500
+MUT_DECAY      = 0.997       # slow cooldown: 4.0 -> ~0.89 by gen 500
 N_WORKERS      = min(os.cpu_count() or 2, 8)
 FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
+
+# LUT temporal search has the same flat recurrent landscapes as the nervous
+# net; reheat after a plateau instead of cooling indefinitely.
+STRESS_PATIENCE = 12
+STRESS_MAX_MULT = 8.0
+
+
+def adaptive_mutation_rate(annealed_rate, stagnation):
+    """Reheat a plateau to a real mutation rate, not a tiny annealed product."""
+    base = max(1.0, annealed_rate)
+    if stagnation < STRESS_PATIENCE:
+        return base
+    ramp = 1.0 + ((stagnation - STRESS_PATIENCE)
+                  / max(1.0, STRESS_PATIENCE / 2.0))
+    return max(base, min(STRESS_MAX_MULT, ramp))
 
 
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
@@ -85,7 +102,12 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
                     continue
                 ctr.append(trial_B[ti][:, col].tolist())
                 cexp.append(exp)
-            s   = _placement_score(ctr, cexp, ttarget) if ctr else 0.0
+            if not ctr:
+                s = 0.0
+            elif getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
+                s = period_stepper_score({term.role: ctr}, ttarget)[0]
+            else:
+                s = _placement_score(ctr, cexp, ttarget)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
             if best_key is None or key < best_key:
                 best_key, best = key, c
@@ -265,6 +287,8 @@ def evaluate_lut_full(genome, target):
     if prep is None:
         return 0.0, (0.0,) * n_cases
     _, _, traces = prep
+    if getattr(target, 'score_mode', 'trace') == 'period_stepper':
+        return period_stepper_score(traces, target)
     best_s, _ = _best_shift(traces, target)     # one global latency shift
     cases = []
     for ti, trial in enumerate(target.trials):
@@ -331,21 +355,26 @@ def _poisson(lam):
 _GENE_FIELDS = ["ctx_n", "ctx_e", "ctx_s", "ctx_w", "self_in", "self_out"]
 
 
+def _other_lut(value):
+    """Choose a genuinely different 16-bit LUT value."""
+    return (value + random.randrange(1, LUT_STATES)) % LUT_STATES
+
+
 def _tweak_gene(gene):
     """Soft mutation: usually flip 1-3 bits of one 16-bit field (a nearby
     boolean function), sometimes replace the field entirely. self_in has an
     extra chance of snapping to 0 — growth rules must stay reachable."""
     g   = copy.copy(gene)
     fld = random.choice(_GENE_FIELDS)
-    if fld == 'self_in' and random.random() < 0.2:
+    if fld == 'self_in' and g.self_in != 0 and random.random() < 0.2:
         g.self_in = 0
     elif random.random() < 0.5:
         v = getattr(g, fld)
-        for _ in range(random.randint(1, 3)):
-            v ^= 1 << random.randrange(16)
+        for bit in random.sample(range(16), random.randint(1, 3)):
+            v ^= 1 << bit
         setattr(g, fld, v)
     else:
-        setattr(g, fld, random.randrange(LUT_STATES))
+        setattr(g, fld, _other_lut(getattr(g, fld)))
     return g
 
 
@@ -517,22 +546,31 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         make_genome = make_seed_genome
     n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
-    n_imm   = int(round(pop * IMMIGRANT_FRAC))
+    n_imm   = min(int(round(pop * IMMIGRANT_FRAC)), pop)
     order   = sorted(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])),
                      reverse=True)
     # Elites = recombination parent pool, NOT verbatim survivors (see nv_evo.ga).
-    new_pop = [make_genome() for _ in range(min(n_imm, pop))]      # random immigrants
+    # As in the nervous GA, elites only choose parents; no genome survives
+    # verbatim, so the current-generation best is an honest population value.
+    new_pop = [make_genome() for _ in range(n_imm)]                  # immigrants
     import nv_evo.ga as _nga           # lut shares the nervous SELECTION switch
     use_lexicase = (_nga.SELECTION == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
     if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
         k = min(TOURNAMENT_K, len(elite))
-        parent = lambda: population[max(random.sample(elite, k),
-                                        key=lambda i: (fitnesses[i], _tiebreak(population[i])))]
+        elite_parent = lambda: population[max(
+            random.sample(elite, k),
+            key=lambda i: (fitnesses[i], _tiebreak(population[i])))]
     else:
-        parent = lambda: select_parent(population, fitnesses, case_vecs)
+        elite_parent = lambda: select_parent(population, fitnesses, case_vecs)
+    residual = order[n_elite:] if n_elite < pop else order
+
+    def parent():
+        if residual and random.random() < EXPLORATION_PARENT_FRAC:
+            return population[random.choice(residual)]
+        return elite_parent()
     while len(new_pop) < pop:
         ca, cb = crossover_lut(parent(), parent())
         new_pop.append(mutate_lut(ca, mean_mutations))
@@ -552,13 +590,19 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
                            key=lambda i: (fitnesses[i], _tiebreak(population[i])))
         best_genome  = clone_genome(population[bi])
         best_fitness = fitnesses[bi]
+        stagnation   = 0
         mut_rate     = MEAN_MUTATIONS        # annealing schedule (see MUT_DECAY)
         for gen in range(generations):
             mut_rate *= MUT_DECAY
-            population = next_population(population, fitnesses, make_genome, cases, mut_rate)
+            mm = adaptive_mutation_rate(mut_rate, stagnation)
+            population = next_population(population, fitnesses, make_genome, cases, mm)
             fitnesses, cases = eval_batch_cases(population, target, cache, ex)
             gi = max(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])))
+            if fitnesses[gi] > best_fitness + 1e-12:
+                stagnation = 0
+            else:
+                stagnation += 1
             if (fitnesses[gi] > best_fitness
                     or (fitnesses[gi] == best_fitness
                         and _tiebreak(population[gi]) > _tiebreak(best_genome))):
@@ -613,6 +657,27 @@ def lut_report(ttarget, genome=None):
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
+    if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
+        lines += ['',
+                  'Scored semantically: each dwell must sustain a regular pulse',
+                  'cadence, and a later command must make that cadence slower.']
+        if genome is None:
+            return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
+        prep = prepare_lut(genome, ttarget)
+        if prep is None:
+            return '\n'.join(lines + ['', '(circuit incomplete - grew too little or inputs dead)'])
+        _, out_pos, traces = prep
+        total, cases = period_stepper_score(traces, ttarget)
+        for term in ttarget.outputs:
+            lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
+        for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
+            commands = [t for t, row in enumerate(trial.streams) if row and row[0]]
+            lines.append('Trial %d: commands@%s  cadence score %.3f %s' % (
+                ti, commands, score, 'PASS' if score >= 0.999 else 'FAIL'))
+        lines.append('')
+        lines.append('=> cadence-stepper score %.4f%s' % (
+            total, '   SOLVED' if total >= 0.999 else ''))
+        return '\n'.join(lines)
     lines += ['',
               'Square grid; each cell is a 16-bit lookup table over its 4',
               'neighbours\' bits, latched and synchronous (paper Architecture 2).',

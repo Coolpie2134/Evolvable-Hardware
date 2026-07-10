@@ -2,9 +2,15 @@
 interactive.py — an "Interactive / Test" tab for the Evolvable-Hardware GUI.
 
 After a circuit is evolved (or loaded), this lets you drive the inputs by hand
-with toggle buttons and watch the response:
+with toggle buttons and watch the response — all three backends now share the
+same Step / Run / Reset time playback:
 
-  * SNN      — set inputs, run the LIF sim, read each output's spikes / bit.
+  * SNN      — LIF playback: the membrane potentials charge (grey → hot), neurons
+               flash as they spike, and the signal wave propagates along the
+               excitatory (green) / inhibitory (red) synapses. Alongside the
+               network: a spike raster and the output neurons' membrane traces vs
+               their fire thresholds. The 20 ms response is precomputed once
+               (`simulate_trace`) and scrubbed frame by frame.
   * Nervous  — pulse playback: toggle inputs, Step / Run / Reset through time and
                watch activity propagate, loops latch, and oscillators run (it uses
                nv_evo.temporal's stepping engine).
@@ -20,7 +26,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 
-from snn_evo import grow_snn, interpret_grid, simulate
+from snn_evo import grow_snn, interpret_grid, simulate_trace, draw_snn_net, N_STEPS, DT
 from nv_evo import (grow_nervous, interpret_nervous, PulseSim,
                     place_outputs_by_trace)
 from nv_evo.viz import draw_hex_net
@@ -28,6 +34,10 @@ from lut_evo import grow_lut, LutSim
 from lut_evo import place_outputs_by_trace as lut_place_by_trace
 from lut_evo.ga import _place_outputs_combinational as lut_place_combinational
 from lut_evo.viz import draw_lut_net
+
+# LIF playback advances this many 0.1 ms *display samples* per frame; the
+# underlying LIF response is event-driven rather than stepped.
+SNN_STRIDE = 5
 
 
 class InteractiveTab:
@@ -122,10 +132,24 @@ class InteractiveTab:
             ttk.Button(self._ctrl, text='Reset', command=self._reset).pack(side='left', padx=3)
             ttk.Label(self._ctrl, text=hint, foreground='#888').pack(side='left', padx=6)
             self._reset()
-        else:
-            ttk.Label(self._ctrl, text='(toggle inputs — the LIF circuit re-runs instantly)',
-                      foreground='#888').pack(side='left', padx=6)
-            self._eval_snn()
+        else:                                              # SNN — LIF playback
+            self._grid = grow_snn(c['genome'], seeds=tuple(target.inputs),
+                                  grid_size=target.grid_size, iters=target.iters)
+            self._neurons, self._synapses = interpret_grid(
+                self._grid, target=target, arch=c['arch'])
+            self._in_ids = []
+            for p in target.inputs:
+                nn = next((m for m in self._neurons
+                           if (m.x, m.y) == p and m.is_input), None)
+                self._in_ids.append(nn.id if nn else None)
+            ttk.Button(self._ctrl, text='Step',  command=self._step).pack(side='left', padx=3)
+            self._run_btn = ttk.Button(self._ctrl, text='Run', command=self._toggle_run)
+            self._run_btn.pack(side='left', padx=3)
+            ttk.Button(self._ctrl, text='Reset', command=self._reset).pack(side='left', padx=3)
+            ttk.Label(self._ctrl, foreground='#888',
+                      text='   (toggle an input to inject one source pulse; Step/Run watches its wave)'
+                      ).pack(side='left', padx=6)
+            self._reset()
         self._status.set('Loaded %s [%s] — drive the inputs.' % (target.name, backend))
 
     def _in_bits(self):
@@ -134,15 +158,22 @@ class InteractiveTab:
     def _on_toggle(self):
         if not self._circuit:
             return
-        if self._backend in ('nervous', 'lut'):
-            self._draw()                # show that inputs changed; takes effect next Step
+        if self._backend == 'snn':
+            self._snn_prepare()         # inputs changed → recompute the LIF run
+            self._cursor = 0
+            self._draw()
         else:
-            self._eval_snn()
+            self._draw()                # nervous/lut: show change; takes effect next Step
 
     # ── nervous / LUT playback (one tick per Step) ────────────────────────────────
 
     def _reset(self):
         self._stop()
+        if self._backend == 'snn':
+            self._snn_prepare()
+            self._cursor = 0
+            self._draw()
+            return
         if self._backend == 'lut':
             self._sim = LutSim(self._grid)
             self._nibbles = {}
@@ -154,6 +185,9 @@ class InteractiveTab:
         self._draw()
 
     def _step(self):
+        if self._backend == 'snn':
+            self._snn_step()
+            return
         bits = self._in_bits()
         invals = {self._in_pos[i]: bits[i] for i in range(len(self._in_pos))}
         self._state = self._sim.step(invals)
@@ -168,7 +202,9 @@ class InteractiveTab:
         self._draw()
 
     def _draw(self):
-        if self._backend == 'lut':
+        if self._backend == 'snn':
+            self._draw_snn()
+        elif self._backend == 'lut':
             self._draw_lut()
         else:
             self._draw_nervous()
@@ -185,7 +221,7 @@ class InteractiveTab:
         if not self._running:
             return
         self._step()
-        self.parent.after(180, self._tick_loop)
+        self.parent.after(90 if self._backend == 'snn' else 180, self._tick_loop)
 
     def _stop(self):
         self._running = False
@@ -235,38 +271,96 @@ class InteractiveTab:
         if any(self._trace.get(t.role) for t in target.outputs):
             axt.legend(fontsize=7, loc='upper right')
 
-    # ── SNN instant evaluation ─────────────────────────────────────────────────────
+    # ── SNN LIF playback (membrane charge → spikes over 20 ms) ─────────────────────
 
-    def _eval_snn(self):
-        c = self._circuit
-        target, arch = c['target'], c['arch']
-        grid = grow_snn(c['genome'], seeds=tuple(target.inputs),
-                        grid_size=target.grid_size, iters=target.iters)
-        ns, ss = interpret_grid(grid, target=target, arch=arch)
-        in_ids = []
-        for p in target.inputs:
-            n = next((nn for nn in ns if (nn.x, nn.y) == p and nn.is_input), None)
-            in_ids.append(n.id if n else None)
+    def _snn_prepare(self):
+        """Run the LIF sim for the current input bits and cache the full trace.
+        The response is deterministic, so we compute it once and just scrub a
+        playback cursor over it (like the nervous/LUT tick playback)."""
+        target = self._circuit['target']
         bits = self._in_bits()
-        # drive with THIS target's high current (matches the Voltage/Truth-table
-        # tabs, which use target.high) — not the module default CURRENT_HIGH, which
-        # would disagree whenever "Input I" was tuned or a saved run used another.
-        currents = {in_ids[i]: (target.high if bits[i] else 0.0)
-                    for i in range(len(in_ids)) if in_ids[i] is not None}
-        sp = simulate(ns, ss, currents)
+        # A logical high is interpreted by lif_sim as one source pulse.  Reusing
+        # the target's high value keeps this view consistent with fitness/plots.
+        currents = {self._in_ids[i]: (target.high if bits[i] else 0.0)
+                    for i in range(len(self._in_ids)) if self._in_ids[i] is not None}
+        (self._snn_times, self._snn_V,
+         self._snn_spikes, self._snn_fired) = simulate_trace(
+            self._neurons, self._synapses, currents)
+
+    def _snn_step(self):
+        nxt = self._cursor + SNN_STRIDE
+        if nxt >= N_STEPS:
+            nxt = 0 if self._running else N_STEPS - 1     # loop while Running
+        self._cursor = nxt
+        self._draw()
+
+    def _draw_snn(self):
+        cur   = self._cursor
+        t_ms  = self._snn_times[cur]
+        V     = self._snn_V[cur]
+        lo    = max(0, cur - SNN_STRIDE + 1)              # flash = fired this frame
+        fired = (self._snn_fired[lo:cur + 1].any(axis=0)
+                 if self._snn_fired.shape[1] else None)
 
         self.fig.clf()
-        ax = self.fig.add_subplot(111); ax.axis('off')
-        lines = ['Inputs: ' + '  '.join('%s=%d' % (lbl, v.get()) for lbl, v in self._inputs), '']
-        for term in target.outputs:
-            o = next((nn for nn in ns if nn.is_output and nn.out_role == term.role), None)
-            if o is None:
-                lines.append('%s: (output neuron not found)' % term.role); continue
-            nsp = len(sp.get(o.id, []))
-            lines.append('%-8s pos=%s   spikes=%-3d   -> %s'
-                         % (term.role, (o.x, o.y), nsp, 'FIRES (1)' if nsp >= 1 else 'silent (0)'))
-        lines += ['', '(raw response to the literal input currents; complement-encoded',
-                  ' outputs like carry read inverted — see the Voltage tab note)']
-        ax.text(0.03, 0.95, '\n'.join(lines), va='top', ha='left',
-                family='monospace', fontsize=11)
+        gs = self.fig.add_gridspec(2, 2, width_ratios=[1.2, 1.0],
+                                   height_ratios=[1.0, 0.72], wspace=0.2, hspace=0.36)
+        axg = self.fig.add_subplot(gs[:, 0])
+        axr = self.fig.add_subplot(gs[0, 1])
+        axv = self.fig.add_subplot(gs[1, 1])
+        draw_snn_net(axg, self._neurons, self._synapses, v=V, fired=fired,
+                     title='t = %4.1f ms   inputs = %s'
+                           % (t_ms, ''.join(map(str, self._in_bits()))))
+        self._draw_raster(axr, t_ms)
+        self._draw_out_traces(axv, cur)
         self.canvas.draw_idle()
+        self._status.set('t = %.1f ms    %s' % (t_ms, self._snn_outcome_text()))
+
+    def _draw_raster(self, ax, t_ms):
+        """All-neuron spike raster with a moving play cursor; inputs red, outputs blue."""
+        ax.clear()
+        ns = self._neurons
+        for i, n in enumerate(ns):
+            times = self._snn_spikes.get(n.id, [])
+            if n.is_output:
+                ax.axhspan(i - 0.5, i + 0.5, color='#1a6fd0', alpha=0.07)
+            if times:
+                col = ('#b02020' if n.is_input else
+                       '#1a6fd0' if n.is_output else '#8a94a6')
+                ax.vlines(times, i - 0.4, i + 0.4, color=col, lw=1.2)
+        ax.axvline(t_ms, color='#e8a33d', lw=1.6, alpha=0.9)
+        ax.set_xlim(0, self._snn_times[-1] + DT)
+        ax.set_ylim(-0.6, max(1, len(ns)) - 0.4)
+        ax.set_title('spike raster', fontsize=9)
+        ax.set_xlabel('ms', fontsize=8); ax.set_yticks([])
+        ax.tick_params(labelsize=7)
+
+    def _draw_out_traces(self, ax, cur):
+        """Output-neuron membrane potential up to the cursor, with the fire threshold."""
+        ax.clear()
+        outs = [n for n in self._neurons if n.is_output]
+        t = self._snn_times[:cur + 1]
+        vmax = 0.5
+        for n in outs:
+            ax.plot(t, self._snn_V[:cur + 1, n.id], lw=1.6,
+                    label=(n.out_role or 'out')[:6])
+            ax.axhline(n.vth, color='#cc4b37', lw=0.8, ls='--', alpha=0.5)
+            vmax = max(vmax, float(n.vth) * 1.25)
+        ax.set_xlim(0, self._snn_times[-1] + DT)
+        ax.set_ylim(-0.04, vmax)
+        ax.set_title('output membrane V  (— fire threshold)', fontsize=9)
+        ax.set_xlabel('ms', fontsize=8); ax.tick_params(labelsize=7)
+        if outs:
+            ax.legend(fontsize=7, loc='upper right')
+        else:
+            ax.text(0.5, 0.5, '(no output neuron)', ha='center', va='center',
+                    color='#999', transform=ax.transAxes)
+
+    def _snn_outcome_text(self):
+        parts = []
+        for n in self._neurons:
+            if n.is_output:
+                nsp = len(self._snn_spikes.get(n.id, []))
+                parts.append('%s→%s' % ((n.out_role or 'out'),
+                                        'FIRES(1)' if nsp else 'silent(0)'))
+        return '   '.join(parts) if parts else '(no output)'

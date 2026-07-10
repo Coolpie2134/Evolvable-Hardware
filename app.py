@@ -41,6 +41,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
+                     simulate_trace,
                      circuit_summary, score, random_genome,
                      TARGETS, DEFAULT_TARGET, get_target, truth_table_target,
                      Arch, DEFAULT_ARCH)
@@ -89,42 +90,10 @@ def _case_currents(target, in_bits, in_ids, complement):
 
 
 def simulate_vmem(neurons, synapses, input_currents, track_ids):
-    """Like lif_sim.simulate() but also records per-step membrane voltage."""
-    n   = len(neurons)
-    TAU = np.array([nu.tau for nu in neurons], dtype=np.float32)
-    VTH = np.array([nu.vth for nu in neurons], dtype=np.float32)
-    W   = np.zeros((n, n), dtype=np.float32)
-    for s in synapses:
-        if 0 <= s.pre < n and 0 <= s.post < n:
-            W[s.post, s.pre] += s.weight
-    I_ext = np.zeros(n, dtype=np.float32)
-    for nid, curr in input_currents.items():
-        if 0 <= nid < n:
-            I_ext[nid] = float(curr)
-    has_post   = (W != 0)
-    V          = np.zeros(n, dtype=np.float32)
-    refractory = np.zeros(n, dtype=np.int32)
-    epsc       = np.zeros((n, n), dtype=np.int32)
-    spikes     = {i: [] for i in range(n)}
-    vmem       = {i: np.zeros(N_STEPS, dtype=np.float32) for i in track_ids}
-    for step in range(N_STEPS):
-        for tid in track_ids:
-            vmem[tid][step] = V[tid]
-        I_syn  = (W * (epsc > 0)).sum(axis=1)
-        active = refractory == 0
-        dV     = (DT / TAU) * (-(V - V_REST) + R_M * (I_syn + I_ext))
-        V      = np.where(active, V + dV, V_RESET)
-        refractory = np.maximum(refractory - 1, 0)
-        fired  = active & (V >= VTH)
-        for i in np.where(fired)[0]:
-            spikes[i].append(step * DT)
-            if i in vmem:
-                vmem[i][step] = float(VTH[i]) + 0.1
-            V[i]          = V_RESET
-            refractory[i] = REFRAC_STEPS
-            epsc[has_post[:, i], i] = EPSC_STEPS
-        epsc = np.maximum(epsc - 1, 0)
-    return spikes, vmem
+    """Sample voltage traces from the same event-driven LIF run as fitness."""
+    _, v_hist, spikes, _ = simulate_trace(neurons, synapses, input_currents)
+    return spikes, {nid: v_hist[:, nid].copy()
+                    for nid in track_ids if 0 <= nid < len(neurons)}
 
 
 def build_truth_table(genome, target, arch):
@@ -323,31 +292,31 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
     #                     * stress_fn() — SOS reheat while a run is stalled
     # alpha defaults to 1.0 (no anneal); the SNN backend holds both at their
     # neutral values (stress_fn ≡ 1, no rate threading).
-    stress_fn, base_mm, alpha = (lambda s: 1.0), 1.0, 1.0
+    rate_fn, base_mm, alpha = (lambda rate, stagnation: rate), 1.0, 1.0
     _pool = None             # persistent worker pool (nervous/lut) reused across gens
     if backend == 'nervous':
         from nv_evo import random_hex_genome
         from nv_evo.ga import (eval_batch_cases, next_population as next_pop_nv,
-                               diversify as _div, stress_multiplier,
+                               diversify as _div, adaptive_mutation_rate,
                                MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
         cache       = {}     # fitness cache shared across restarts (same target)
         _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
         make_genome = lambda: random_hex_genome(n_chroms)
         eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
         step        = lambda p, fits, cv, mm: next_pop_nv(p, fits, make_genome, cv, mm)
-        stress_fn, base_mm, alpha = stress_multiplier, MEAN_MUTATIONS, MUT_DECAY
+        rate_fn, base_mm, alpha = adaptive_mutation_rate, MEAN_MUTATIONS, MUT_DECAY
         diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid,
                                                  cache=cache, executor=_pool)
     elif backend == 'lut':
         from lut_evo.ga import (eval_batch_cases, next_population as next_pop_lut,
                                 diversify as _div, make_seed_genome,
-                                MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
+                                adaptive_mutation_rate, MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
         cache       = {}
         _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
         make_genome = lambda: make_seed_genome(n_chroms)   # ontogeny biomorph seeds
         eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
         step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv, mm)
-        base_mm, alpha = MEAN_MUTATIONS, MUT_DECAY
+        rate_fn, base_mm, alpha = adaptive_mutation_rate, MEAN_MUTATIONS, MUT_DECAY
         diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid,
                                                  cache=cache, executor=_pool)
     else:
@@ -394,7 +363,7 @@ def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
                 if stop_event.is_set():
                     break
                 mut_rate *= alpha                         # anneal: cool down
-                mm = mut_rate * stress_fn(stagnation)     # SOS reheats plateaus
+                mm = rate_fn(mut_rate, stagnation)
                 population = step(population, fitnesses, cases, mm)
                 fitnesses, cases = eval_batch(population)
                 gi         = max(range(pop),
@@ -1242,7 +1211,7 @@ class App:
                     _, try_n, gen, best_f, mean_f, gen_best = msg
                     self._abs_gen += 1
                     self._gen_history.append((self._abs_gen, best_f, mean_f, gen_best))
-                    last_gen = (try_n, gen, best_f, mean_f)
+                    last_gen = (try_n, gen, best_f, mean_f, gen_best)
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
                     self._n_unique_solvers = n_unique
@@ -1298,10 +1267,10 @@ class App:
             pass
         if last_gen is not None:               # redraw the fitness chart once per poll
             self._redraw_fit_chart()
-            try_n, gen, best_f, mean_f = last_gen
-            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  mean=%.4f' %
+            try_n, gen, best_f, mean_f, gen_best = last_gen
+            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  gen-best=%.4f  mean=%.4f' %
                              (self.target.name, getattr(self, '_active_seed', 0),
-                              try_n, gen, best_f, mean_f))
+                              try_n, gen, best_f, gen_best, mean_f))
         # throttled repaint of the display panels for the latest best (≤ ~1.6/s)
         pend = getattr(self, '_pending_best', None)
         if pend is not None:
@@ -1686,8 +1655,8 @@ class App:
                                  fontsize=8.5)
                 ax.text(0.02, 0.88, 'in=%s' % ''.join(map(str, in_bits)),
                         transform=ax.transAxes, fontsize=7.5, va='top')
-                # Make the spike->logic mapping explicit so an inverted (carry)
-                # output doesn't look like the result contradicts the trace.
+                # Make the spike->logic mapping explicit for any experimental
+                # inverted output, so its result cannot look contradictory.
                 fy  = 'Y' if fired else 'N'
                 res = 'fired=%s -> %d  exp=%d  %s' % (fy, act, exp,
                                                           'OK' if act == exp else 'FAIL')

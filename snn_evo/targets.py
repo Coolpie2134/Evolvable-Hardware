@@ -10,8 +10,9 @@ new Target — no changes to the core library.
 Output encoding (per output terminal):
     complement_inputs   feed (HIGH - current) instead of current
     invert_spike        a spike counts as logic 0 (and no-spike as 1)
-The half-adder's carry uses both (the historical "complement trick" that turns
-the hard AND into an easy OR-of-complements). Plain gates use neither.
+These are available for experiments with alternate encodings.  All bundled
+arithmetic carry outputs use the ordinary direct encoding: a high source pulse
+and a spike at the carry terminal both mean logic 1.
 
 Output strategy (per target):
     "heuristic"   legacy behaviour — outputs are the grown neurons nearest the
@@ -178,13 +179,17 @@ def adder_target(n_bits: int, grid_size: int | None = None) -> Target:
 
 
 def _half_adder() -> Target:
-    """The original half-adder, preserved exactly (heuristic output strategy)."""
+    """Half-adder with sum/carry read at DISTINCT, vertically-separated terminals.
+
+    (Was the legacy heuristic, which placed both outputs in adjacent middle-right
+    columns — so sum and carry landed right on top of each other. Split them to
+    opposite ends of the output edge and use the scalable `terminals` strategy.)"""
     return Target(
         name="Half adder",
         inputs=[(0, 3), (0, 5)],
         outputs=[
-            OutputTerminal("sum",   (8, 4), complement_inputs=False, invert_spike=False),
-            OutputTerminal("carry", (8, 4), complement_inputs=True,  invert_spike=True),
+            OutputTerminal("sum",   (8, 1), complement_inputs=False, invert_spike=False),
+            OutputTerminal("carry", (8, 7), complement_inputs=False, invert_spike=False),
         ],
         cases=[
             ((0, 0), (0, 0)),
@@ -192,7 +197,7 @@ def _half_adder() -> Target:
             ((1, 0), (1, 0)),
             ((1, 1), (0, 1)),
         ],
-        output_strategy="heuristic",
+        output_strategy="terminals",
     )
 
 
