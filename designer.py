@@ -19,10 +19,10 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     played in continuous time via PulseSim.advance_to (the engine the fitness
     reads) — while the clocked LUT keeps its tick-numbered bit streams.
 
-The two views are linked ONE-WAY (genome -> grid via Grow). Growth is
-many-to-one and not invertible, so the tool never pretends a hand-edited grid
-came from the current genome: a visible sync indicator tracks
-in-sync / grid-edited / genome-edited / no-genome.
+Genome -> grid is exact via Grow. Grid -> genome is a separate best-effort
+synthesis pass: because growth is many-to-one it verifies the phenotype it can
+regrow and reports misses/extras rather than pretending to recover original DNA.
+A visible sync indicator tracks in-sync / grid-edited / genome-edited / no-genome.
 
 Simulation mirrors interactive.py (input schedules + Step/Run/Reset + a trace
 strip). Scoring uses the target's declared event, cadence, or persistence
@@ -59,6 +59,7 @@ from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGeno
                            MAX_STATE, MAX_TELOMERE as NV_MAX_TEL)
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, SEED_STATE as NV_SEED_STATE)
+from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
 from nv_async_ui import NervousPlayer, PulseLaneEditor, pulses_from_trial
 from nv_evo.temporal import (run_nervous_events,
                              place_outputs_by_trace, TemporalTraces,
@@ -75,6 +76,7 @@ from nv_evo.viz import draw_hex_net
 from lut_evo.genome import (LutGene, Chromosome as LutChromosome, Genome as LutGenome,
                             random_lut_gene, MAX_TELOMERE as LUT_MAX_TEL)
 from lut_evo.lut import grow_lut, LutSim, SEED_STATE as LUT_SEED_STATE
+from lut_evo.reverse import grid_to_genome_lut, repair_genome_lut
 from lut_evo.ga import (place_outputs_by_trace as lut_place_by_trace,
                         make_seed_genome as make_lut_seed_genome,
                         compact_genome as lut_compact_genome)
@@ -510,6 +512,17 @@ class DesignerTab:
                 'ontogeny (min-Hamming gene lookup), seeds = the designated '
                 'inputs. ONE-WAY: replaces the working grid; growth is not '
                 'invertible, so hand edits never flow back into the DNA.')
+        b = ttk.Button(actions, text='⤺ To genome', command=self._reverse_to_genome)
+        b.pack(side='left', padx=2)
+        _Tip(b, 'Best-effort INVERSE of Grow: reconstruct a genome that develops '
+                'back into the current working grid, so a hand-built circuit gets '
+                'DNA it can be saved/evolved from. If retained DNA exists, repair '
+                'only its hand-edited delta and preserve the working bulk. '
+                'Growth is many-to-one and not '
+                'truly invertible, so it replays a monotone development with the '
+                'grid as an oracle — reproducing every cell it can, with harmless '
+                'extra cells allowed. Seeds = the designated inputs. Press Grow '
+                'afterwards to realise it, Score to confirm the outputs still match.')
         ttk.Button(actions, text='Random genome', command=self._random_genome).pack(side='left', padx=2)
         self._compact_btn = ttk.Button(actions, text='Compact genome', command=self._compact)
         self._compact_btn.pack(side='left', padx=2)
@@ -762,6 +775,219 @@ class DesignerTab:
         self._refresh_all()
         self._status.set('Grew %d cells from the genome (seeds pinned at the inputs).'
                          % len(self.grid))
+
+    def _reverse_to_genome(self):
+        """Best-effort INVERSE of Grow: reconstruct a genome that develops back
+        into the current working grid (see nv_evo/reverse.py, lut_evo/reverse.py).
+        Growth is many-to-one, so the reconstruction replays a monotone
+        development with the grid as an oracle — it reproduces every cell it can,
+        allowing harmless EXTRA cells (the user's contract). The genome is loaded
+        into the Genome tab (not yet grown): the working grid is left untouched so
+        the hand-built phenotype is preserved; press Grow to realise the genome,
+        Score to confirm the outputs still match."""
+        if not self.grid:
+            self._status.set('Empty grid — build or grow a circuit before reversing '
+                             'it to a genome.')
+            return
+        if not self.in_pos:
+            self._status.set('Designate at least one input first (Input mode, or '
+                             'Adopt target I/O) — inputs are the growth seeds the '
+                             'reconstruction develops from.')
+            return
+        self._status.set('Reconstructing a genome from the working grid…')
+        self.parent.update_idletasks()
+        retained = self.genome
+        delta = retained is not None and self._grid_edited
+        t = self._current_target_obj()
+        if self.backend == 'nervous':
+            if delta:
+                genome, rep = repair_genome_nervous(
+                    retained, self.grid, seeds=tuple(self.in_pos))
+            else:
+                genome, rep = grid_to_genome_nervous(
+                    self.grid, seeds=tuple(self.in_pos))
+        elif delta:
+            genome, rep = repair_genome_lut(
+                retained, self.grid, seeds=tuple(self.in_pos),
+                grid_size=getattr(t, 'grid_size', 7),
+                iters=getattr(t, 'iters', 30))
+        else:
+            genome, rep = grid_to_genome_lut(
+                self.grid, seeds=tuple(self.in_pos),
+                grid_size=getattr(t, 'grid_size', 7), iters=getattr(t, 'iters', 30))
+        improved = genome is not retained
+        self.genome = genome
+        self._genome_edited = bool(improved or not delta)
+        if t is not None:
+            rep['working_behavior'] = self._behavioral_score_for_grid(self.grid, t)
+            rep['grown_behavior'] = self._behavioral_score_for_grid(rep['grown'], t)
+        self._selected, self._lut_bind = None, None
+        self._rebuild_genome_panel()
+        self._refresh_sync()
+        self._show_report(self._reverse_report(rep))
+        n_genes = sum(len(c.genes) for c in genome.chromosomes)
+        verb = 'Reconciled' if delta else 'Reconstructed'
+        suffix = (', %d/%d edits absorbed' %
+                  (rep.get('edits_reproduced', 0), rep.get('edits', 0))
+                  if delta else '')
+        if delta and not improved and rep.get('edits_reproduced', 0) < rep.get('edits', 0):
+            self._status.set(
+                'No safe genome delta found — retained the original DNA; %d/%d '
+                'edits reproduce without damaging unchanged cells. The hand-edited '
+                'grid is still active and can be saved directly.'
+                % (rep.get('edits_reproduced', 0), rep.get('edits', 0)))
+        else:
+            self._status.set(
+                '%s a %d-gene genome — reproduces %d/%d cells%s%s%s. '
+                'Press Grow to realise it (extra cells may appear); Score to confirm '
+                'the outputs. Your hand-built grid is kept until you Grow.'
+                % (verb, n_genes, rep['matched'], rep['target'],
+                   ', %d extra' % rep['extra'] if rep['extra'] else '',
+                   ', %d unreproducible' % (rep['target'] - rep['matched'])
+                   if rep['matched'] < rep['target'] else '', suffix))
+
+    def _reverse_report(self, rep):
+        """Human-readable account of a network→genome reconstruction."""
+        exact = rep['matched'] == rep['target'] and not rep['extra']
+        full  = rep['matched'] == rep['target']
+        L = ['Network → genome (verified reconciliation / synthesis)',
+             'Backend: %s' % ('nervous net' if rep['backend'] == 'nervous'
+                              else 'LUT array'), '']
+        if rep.get('note'):
+            L += [rep['note'], '']
+        L += ['Target cells reproduced : %d / %d' % (rep['matched'], rep['target']),
+              'Extra cells (harmless)  : %d' % rep['extra'],
+              'Unreproducible cells    : %d' % (rep['target'] - rep['matched'])]
+        if rep.get('strategy') == 'delta-repair':
+            L.append('Retained telomere      : %d' % rep['telomere'])
+        else:
+            L.append('Growth radius / telomere: %d / %d' %
+                     (rep['radius'], rep['telomere']))
+        if rep.get('strategy') == 'delta-repair':
+            L += ['Baseline target matches : %d / %d' %
+                  (rep.get('baseline_matched', 0), rep['target']),
+                  'Unchanged cells kept    : %d / %d' %
+                  (rep.get('unchanged_preserved', 0), rep.get('unchanged', 0)),
+                  'User edits reproduced   : %d / %d' %
+                  (rep.get('edits_reproduced', 0), rep.get('edits', 0)),
+                  'Repair genes added      : %d' % rep.get('added_genes', 0)]
+        if rep.get('strategy'):
+            L.append('Synthesis trajectory    : %s' % rep['strategy'])
+        if rep.get('intermediate_states'):
+            L.append('Temporary states used   : %s' % rep['intermediate_states'])
+        if rep.get('multistep_collisions'):
+            L.append('Collision groups tested : %d' % rep['multistep_collisions'])
+        if rep.get('working_behavior') is not None:
+            L.append('Edited-grid behavior    : %.4f' % rep['working_behavior'])
+        if rep.get('grown_behavior') is not None:
+            L.append('Regrown behavior        : %.4f' % rep['grown_behavior'])
+        if exact:
+            L += ['', '=> EXACT: the genome regrows this circuit cell-for-cell.']
+        elif full:
+            L += ['', '=> FULL COVER: every target cell is reproduced; the grown '
+                  'organism also has %d extra cell(s). Per the design contract '
+                  'these are fine as long as they do not change the scored '
+                  'outputs — press Grow then Score to confirm.' % rep['extra']]
+        else:
+            L += ['', '=> PARTIAL: %d cell(s) could not be reproduced by growing '
+                  'from the seeds (see below). This is an unresolved reachability '
+                  'or context collision in the direct-to-final replay. A multi-step '
+                  'developmental program may still do better. Grow + Score to see '
+                  'the verified phenotype.' % (rep['target'] - rep['matched'])]
+        if rep['conflicts']:
+            L += ['', 'Monotone replay collisions (%d): two births share an '
+                  'identical neighbourhood but request different final states. '
+                  'This direct-to-final reconstruction keeps the first value; '
+                  'it is not proof that a multi-step genome is impossible:'
+                  % len(rep['conflicts'])]
+            for ctx, states in rep['conflicts'][:8]:
+                L.append('   %s -> %s' % (ctx, states))
+            if len(rep['conflicts']) > 8:
+                L.append('   … %d more' % (len(rep['conflicts']) - 8))
+        if rep['seed_mismatch']:
+            L += ['', 'Seed states pinned (%d): a seed/input cell is always held at '
+                  'the seed state during growth, so a different state there cannot '
+                  'be reproduced: %s' % (len(rep['seed_mismatch']),
+                                         ', '.join(map(str, rep['seed_mismatch'][:12])))]
+        if rep['unreachable']:
+            L += ['', 'Unreachable from seeds (%d): no growth path connects these '
+                  'to an input, so they cannot develop: %s'
+                  % (len(rep['unreachable']),
+                     ', '.join(map(str, rep['unreachable'][:12])))]
+        return '\n'.join(L)
+
+    def _behavioral_score_for_grid(self, grid, target):
+        """Score a candidate phenotype without changing the working Designer grid."""
+        if not grid or len(self.in_pos) != len(target.inputs):
+            return None
+        roles = [output.role for output in target.outputs]
+        manual = {role: self.out_pos.get(role) for role in roles}
+        use_manual = all(manual[role] in grid for role in roles)
+        if getattr(target, 'temporal', False):
+            obs = _obs_len(target)
+            if self.backend == 'nervous':
+                routing = {p: ROUTING_HEX[state & 0x1F]
+                           for p, state in grid.items()}
+                if use_manual:
+                    out_pos = manual
+                    traces = TemporalTraces({role: [] for role in roles},
+                                            events={role: [] for role in roles})
+                    for trial in target.trials:
+                        _, sampled, raw, overflow = run_nervous_events(
+                            grid, routing, list(self.in_pos), out_pos,
+                            trial.streams, obs,
+                            max_events=getattr(target, 'max_events', 2048))
+                        traces.overflow = traces.overflow or overflow
+                        for role in roles:
+                            traces[role].append(sampled[role])
+                            traces.events[role].append(
+                                list(raw.get(out_pos[role], ())))
+                else:
+                    out_pos, traces = place_outputs_by_trace(
+                        grid, routing, list(self.in_pos), target)
+            else:
+                if use_manual:
+                    out_pos = manual
+                    traces = TemporalTraces({role: [] for role in roles},
+                                            events={role: [] for role in roles})
+                    for trial in target.trials:
+                        sim = LutSim(grid)
+                        per = {role: [] for role in roles}
+                        for tick in range(obs):
+                            row = (trial.streams[tick]
+                                   if tick < len(trial.streams) else None)
+                            state = sim.step({
+                                self.in_pos[i]: (row[i] if row else 0)
+                                for i in range(len(self.in_pos))})
+                            for role in roles:
+                                per[role].append(state.get(out_pos[role], 0))
+                        for role in roles:
+                            traces[role].append(per[role])
+                            traces.events[role].append(sampled_events(per[role]))
+                else:
+                    out_pos, traces = lut_place_by_trace(
+                        grid, list(self.in_pos), target)
+            if any(out_pos.get(role) is None for role in roles):
+                return None
+            return _traces_report(target, traces, out_pos, self.backend)[0]
+
+        if self.backend != 'nervous':
+            return None
+        routing = {p: ROUTING_HEX[state & 0x1F] for p, state in grid.items()}
+        out_pos = manual
+        if not use_manual:
+            _, _, out_pos = interpret_nervous(grid, target)
+        if any(out_pos.get(role) is None for role in roles):
+            return None
+        correct = total = 0
+        for in_bits, expected in target.cases:
+            invals = {self.in_pos[i]: in_bits[i]
+                      for i in range(len(self.in_pos))}
+            actual = evaluate_nervous(grid, routing, invals, target.grid_size)
+            for i, role in enumerate(roles):
+                total += 1
+                correct += actual.get(out_pos[role], 0) == expected[i]
+        return correct / total if total else None
 
     def _compact(self):
         """Drop never-expressed genes from the LUT genome (neutral: the grown
