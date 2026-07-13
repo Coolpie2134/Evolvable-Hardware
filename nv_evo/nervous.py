@@ -215,16 +215,17 @@ def interpret_nervous(grid, target=None):
     return routing, input_pos, output_pos
 
 
-def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None):
+def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
+                     config=None):
     """Evaluate one combinational case on the asynchronous pulse engine.
     Input levels are held for the whole horizon (one long pulse on each driven
     input net — a single edge). Returns {pos: 0/1} where 1 means the cell's
     wire PULSED at some point — the natural read-out of a pulse-based array
     (an AND gate's output is a pulse, not a held level)."""
-    from .pulse import PulseSim
+    from .simulation import create_simulator
     if steps is None:
         steps = 2 * grid_size + 4
-    sim = PulseSim(grid, routing)
+    sim = create_simulator(grid, routing, config=config)
     held = {c: int(b) for c, b in input_vals.items()}
     for _ in range(steps):
         sim.step(held)
@@ -248,7 +249,9 @@ def score_nervous(genome, target):
     correct = 0
     for in_bits, out_bits in target.cases:
         invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
-        outs   = evaluate_nervous(grid, routing, invals, target.grid_size)
+        outs   = evaluate_nervous(
+            grid, routing, invals, target.grid_size,
+            config=getattr(target, 'pulse_config', None))
         for i, term in enumerate(target.outputs):
             if outs.get(out_pos[term.role], 0) == out_bits[i]:
                 correct += 1
@@ -264,7 +267,9 @@ def nervous_case_outputs(genome, target):
         return grid, in_pos, out_pos, cases
     for in_bits, out_bits in target.cases:
         invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
-        outs   = evaluate_nervous(grid, routing, invals, target.grid_size)
+        outs   = evaluate_nervous(
+            grid, routing, invals, target.grid_size,
+            config=getattr(target, 'pulse_config', None))
         acts   = {t.role: outs.get(out_pos[t.role], 0) for t in target.outputs}
         cases.append({'in_bits': in_bits, 'out_bits': out_bits,
                       'node_outputs': outs, 'acts': acts})

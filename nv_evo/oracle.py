@@ -198,19 +198,21 @@ def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
                             {output_role: events} if score_mode == 'events' else {}))
     return TemporalTarget(name, list(inputs), [out], T, trials,
                           grid_size=grid_size, iters=30, description=description,
-                          score_mode=score_mode)
+                          score_mode=score_mode, latency=latency)
 
 
-def holdout_score(genome, spec, backend='nervous', seed=999):
-    """Re-sample fresh schedules from the same spec (a zero-arg builder) with a
-    different seed and score — certifies the circuit generalises rather than
-    fitting the training schedules. Returns behavioural score in [0,1]."""
-    target = spec(seed=seed)
-    if backend == 'lut':
-        from lut_evo import score_lut_temporal
-        return score_lut_temporal(genome, target)
-    from .temporal import score_temporal
-    return score_temporal(genome, target)
+def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None):
+    """Score fresh schedules with training readout and alignment frozen.
+    The spec's default target supplies training schedules; ``seed`` supplies
+    validation schedules. Pass ``fitted`` to reuse one training fit."""
+    from .evaluation import fit_readout, score_frozen
+    if fitted is None:
+        fitted = fit_readout(genome, spec(), backend=backend)
+    if fitted is None:
+        return 0.0
+    if fitted.backend != backend:
+        raise ValueError('fitted readout backend does not match holdout backend')
+    return score_frozen(genome, spec(seed=seed), fitted)
 
 
 # ── preset oracle targets (input-driven relations) ──────────────────────────────

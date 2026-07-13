@@ -3,6 +3,7 @@ import copy, math, random, os
 from concurrent.futures import ProcessPoolExecutor
 
 from functools import partial
+from evo_runtime.cache import LRUCache
 
 from .genome import (Genome, Chromosome, random_gene, random_chromosome,
                      random_genome, germline_telomere,
@@ -17,6 +18,7 @@ ELITE_FRAC     = 0.10
 TOURNAMENT_K   = 4
 MEAN_MUTATIONS = 1.2
 N_WORKERS      = min(os.cpu_count() or 2, 8)
+FITNESS_CACHE_MAX = 200_000
 # Below this fitness, rank on fitness alone — don't let body/gene parsimony bias
 # the search before the behaviour is solved (a counter needs its structure).
 PARSIMONY_START_FITNESS = 0.999
@@ -58,16 +60,47 @@ def evaluate_genome(genome, target=None, arch=None):
     neurons, synapses = interpret_grid(grid, target=target, arch=arch)
     return score(neurons, synapses, target)
 
-def _eval_batch(genomes, target=None, arch=None, executor=None):
+def genome_signature(genome):
+    return tuple(
+        (c.tag, c.split, getattr(c, 'telomere', 0),
+         tuple((g.state_n, g.state_s, g.state_e, g.state_w,
+                g.self_in, g.self_out) for g in c.genes))
+        for c in genome.chromosomes)
+
+
+def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None):
     """Evaluate a population -> list of fitnesses. A persistent `executor`
     (ProcessPoolExecutor) is reused instead of spawning a fresh pool every call —
     on Windows the per-generation spawn+re-import dominated runtime, so reuse is a
     large speed-up (matches nv_evo/lut_evo). Omitting it keeps the one-shot pool."""
     fn = partial(evaluate_genome, target=target, arch=arch)
+    if cache is None:
+        if executor is not None:
+            return list(executor.map(fn, genomes))
+        with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+            return list(ex.map(fn, genomes))
+    if len(cache) > FITNESS_CACHE_MAX:
+        cache.clear()
+    sigs = [genome_signature(g) for g in genomes]
+    out = [cache.get(sig) for sig in sigs]
+    unique = {}
+    for i, (sig, result) in enumerate(zip(sigs, out)):
+        if result is None:
+            unique.setdefault(sig, []).append(i)
+    representatives = [(sig, indices[0]) for sig, indices in unique.items()]
+    subset = [genomes[i] for _, i in representatives]
+    if not subset:
+        return out
     if executor is not None:
-        return list(executor.map(fn, genomes))
-    with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-        return list(ex.map(fn, genomes))
+        results = list(executor.map(fn, subset))
+    else:
+        with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
+            results = list(ex.map(fn, subset))
+    for (sig, _), result in zip(representatives, results):
+        cache[sig] = result
+        for i in unique[sig]:
+            out[i] = result
+    return out
 
 # ── genetic operators ──────────────────────────────────────────────
 
@@ -225,11 +258,12 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arc
         target = get_target(DEFAULT_TARGET)
     popsize    = pop or POPSIZE
     population = [random_genome(n_chroms) for _ in range(popsize)]
+    cache = LRUCache(FITNESS_CACHE_MAX)
     # Reuse ONE worker pool across generations (matches nv_evo/lut_evo). Spawning
     # a fresh pool every generation dominated runtime on Windows.
     ex = ProcessPoolExecutor(max_workers=N_WORKERS)
     try:
-        fitnesses  = _eval_batch(population, target, arch, ex)
+        fitnesses  = _eval_batch(population, target, arch, ex, cache)
         best_idx   = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
         best_genome  = clone_genome(population[best_idx])
         best_fitness = fitnesses[best_idx]
@@ -240,7 +274,7 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arc
 
         for gen in range(generations):
             population = next_population(population, fitnesses)
-            fitnesses  = _eval_batch(population, target, arch, ex)
+            fitnesses  = _eval_batch(population, target, arch, ex, cache)
             gi = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
             if rank_key(population[gi], fitnesses[gi]) > rank_key(best_genome, best_fitness):
                 best_fitness = fitnesses[gi]

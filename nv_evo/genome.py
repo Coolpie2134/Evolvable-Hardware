@@ -88,19 +88,20 @@ def random_hex_gene() -> HexGene:
     )
 
 
-def random_hex_chromosome(n_genes=None) -> Chromosome:
+def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE) -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
         genes = [random_hex_gene() for _ in range(n_genes)],
         split = random.randint(1, max(1, n_genes - 1)),
         tag   = random.randint(0, 999),
-        telomere = random.randint(2, min(5, MAX_TELOMERE)),
+        telomere = random.randint(2, min(5, max_telomere)),
     )
 
 
-def random_hex_genome(n_chroms=2) -> Genome:
+def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE) -> Genome:
     return Genome(
-        chromosomes = [random_hex_chromosome() for _ in range(n_chroms)],
+        chromosomes = [random_hex_chromosome(max_telomere=max_telomere)
+                       for _ in range(n_chroms)],
         tag = random.randint(0, 9999),
     )

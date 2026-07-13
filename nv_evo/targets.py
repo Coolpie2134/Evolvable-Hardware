@@ -55,6 +55,10 @@ class TemporalTarget:
     event_tolerance: float = 0.5
     event_max_shift: float = 12.0
     max_events:      int = 2048
+    # Nominal input->output latency baked into the expected traces (oracle
+    # `latency`). Kept as explicit metadata so semantic scoring does not have to
+    # rediscover it; the fitted alignment is a SEPARATE, additional offset.
+    latency:         int = 0
     cadence_period:  float = 0.0
     cadence_tolerance: float = 0.5
     cadence_settle:  float = 5.0

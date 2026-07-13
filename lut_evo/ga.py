@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+from evo_runtime.cache import LRUCache
 
 from nv_evo.temporal import (_pr_counts, _f1,
                              _best_shift, _obs_len,
@@ -140,6 +141,24 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         elif len(ttarget.outputs) == 1 and mode == 'cadence':
             traces._cadence_result = best_aux
     return out_pos, traces
+
+
+def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
+    """Run LUT trials at pre-selected output cells without validation search."""
+    if any(pos not in grid for pos in out_pos.values()):
+        return None
+    sim = LutSim(grid)
+    obs = _obs_len(ttarget)
+    trial_bits = []
+    for trial in ttarget.trials:
+        sim.reset()
+        trial_bits.append(sim.run_bits(trial.streams, in_pos, obs))
+    traces = TemporalTraces()
+    for role, pos in out_pos.items():
+        col = sim._cidx[pos]
+        traces[role] = [bits[:, col].tolist() for bits in trial_bits]
+        traces.events[role] = [sampled_events(seq) for seq in traces[role]]
+    return traces
 
 
 def prepare_lut(genome, ttarget):
@@ -340,16 +359,25 @@ def eval_batch_cases(genomes, target, cache=None, executor=None):
                 out[i] = cache[sigs[i]]
     if todo:
         fn = partial(evaluate_lut_full, target=target)
-        subset = [genomes[i] for i in todo]
+        if cache is not None:
+            unique = {}
+            for i in todo:
+                unique.setdefault(sigs[i], []).append(i)
+            representatives = [(sig, indices[0]) for sig, indices in unique.items()]
+        else:
+            representatives = [(i, i) for i in todo]
+            unique = {i: [i] for i in todo}
+        subset = [genomes[i] for _, i in representatives]
         if executor is not None:
             results = list(executor.map(fn, subset))
         else:
             with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
                 results = list(ex.map(fn, subset))
-        for i, r in zip(todo, results):
-            out[i] = r
+        for (sig, _), r in zip(representatives, results):
+            for i in unique[sig]:
+                out[i] = r
             if cache is not None:
-                cache[sigs[i]] = r
+                cache[sig] = r
     return [r[0] for r in out], [r[1] for r in out]
 
 
@@ -397,7 +425,7 @@ _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 
 
-def mutate_lut(genome, mean_mutations=None):
+def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE):
     g = clone_genome(genome)
     lam = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
     for _ in range(_poisson(lam)):
@@ -408,7 +436,7 @@ def mutate_lut(genome, mean_mutations=None):
         chrom = random.choice(g.chromosomes)
         if op == "telomere":
             base = getattr(chrom, 'telomere', 10)
-            chrom.telomere = max(1, min(MAX_TELOMERE,
+            chrom.telomere = max(1, min(max_telomere,
                                         base + random.randint(-3, 3)))
         elif op == "tweak" and chrom.genes:
             idx = random.randrange(len(chrom.genes))
@@ -548,7 +576,7 @@ def select_parent(population, fitnesses, case_vecs=None):
 
 
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
-                    mean_mutations=None):
+                    mean_mutations=None, ga_config=None):
     """One generation of a steady, exploratory GA — elitism + immigrants +
     recombination/mutation, parents via ε-lexicase when per-case vectors are
     available (temporal targets), else tournament. Convergence is NOT forced:
@@ -556,11 +584,18 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     (see nv_evo.ga.next_population). `mean_mutations` overrides the mutation rate
     for this generation (used by the annealing schedule)."""
     pop = len(population)
+    elite_count = (ELITE_COUNT if ga_config is None else ga_config.elite_count)
+    immigrant_fraction = (IMMIGRANT_FRAC if ga_config is None
+                          else ga_config.immigrant_fraction)
+    tournament_size = (TOURNAMENT_K if ga_config is None
+                       else ga_config.tournament_size)
+    import nv_evo.ga as _nga
+    selection = (_nga.SELECTION if ga_config is None else ga_config.selection)
     if make_genome is None:
         make_genome = make_seed_genome
-    n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
+    n_elite = elite_count if elite_count is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
-    n_imm   = min(int(round(pop * IMMIGRANT_FRAC)), pop)
+    n_imm   = min(int(round(pop * immigrant_fraction)), pop)
     order   = sorted(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])),
                      reverse=True)
@@ -568,17 +603,20 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     # As in the nervous GA, elites only choose parents; no genome survives
     # verbatim, so the current-generation best is an honest population value.
     new_pop = [make_genome() for _ in range(n_imm)]                  # immigrants
-    import nv_evo.ga as _nga           # lut shares the nervous SELECTION switch
-    use_lexicase = (_nga.SELECTION == 'lexicase' and case_vecs is not None
+    use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
     if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
-        k = min(TOURNAMENT_K, len(elite))
+        k = min(tournament_size, len(elite))
         elite_parent = lambda: population[max(
             random.sample(elite, k),
             key=lambda i: (fitnesses[i], _tiebreak(population[i])))]
     else:
-        elite_parent = lambda: select_parent(population, fitnesses, case_vecs)
+        elite_parent = lambda: (_nga._lexicase_parent(population, case_vecs)
+                                 if use_lexicase else population[max(
+                                     random.sample(range(pop), min(tournament_size, pop)),
+                                     key=lambda i: (fitnesses[i],
+                                                    _tiebreak(population[i])))])
     residual = order[n_elite:] if n_elite < pop else order
 
     def parent():
@@ -587,15 +625,17 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         return elite_parent()
     while len(new_pop) < pop:
         ca, cb = crossover_lut(parent(), parent())
-        new_pop.append(mutate_lut(ca, mean_mutations))
+        max_telomere = (MAX_TELOMERE if ga_config is None
+                        else ga_config.max_telomere)
+        new_pop.append(mutate_lut(ca, mean_mutations, max_telomere))
         if len(new_pop) < pop:
-            new_pop.append(mutate_lut(cb, mean_mutations))
+            new_pop.append(mutate_lut(cb, mean_mutations, max_telomere))
     return new_pop[:pop]
 
 
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
     make_genome = lambda: make_seed_genome(n_chroms)     # ontogeny biomorph seeds
-    cache       = {}
+    cache       = LRUCache(FITNESS_CACHE_MAX)
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
     try:
         population  = [make_genome() for _ in range(pop)]
@@ -631,14 +671,16 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
 
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
-              cache=None, executor=None):
+              cache=None, executor=None, should_stop=None, on_progress=None,
+              max_telomere=MAX_TELOMERE):
     """Fill a population with genomes that are BOTH valid (>= `valid`) and
     genotypically unique, by walking the neutral network via neutral mutation
     with rejection. See nv_evo.ga.diversify — same idea on the LUT substrate."""
     if cache is None:
-        cache = {}
+        cache = LRUCache(FITNESS_CACHE_MAX)
     if batch is None:
         batch = max(48, pop_size)
+    should_stop = should_stop or (lambda: False)
     _eval = lambda gs: eval_batch_cases(gs, target, cache, executor)[0]   # reuse pool
     pool, seen = [], set()
     for g, f in zip(seeds, _eval(list(seeds))):
@@ -647,16 +689,20 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
             pool.append(g); seen.add(s)
     if not pool:
         return pool
-    for _ in range(rounds):
-        if len(pool) >= pop_size:
+    for round_i in range(rounds):
+        if len(pool) >= pop_size or should_stop():
             break
+        if on_progress is not None:
+            on_progress(round_i + 1, rounds, len(pool))
         cands = []
         for _ in range(batch):
-            c = mutate_lut(random.choice(pool))
+            c = mutate_lut(random.choice(pool), max_telomere=max_telomere)
             s = genome_signature(c)
             if s not in seen:
                 seen.add(s)
                 cands.append(c)
+        if should_stop():
+            break
         for c, f in zip(cands, _eval(cands)):
             if f >= valid and len(pool) < pop_size:
                 pool.append(c)

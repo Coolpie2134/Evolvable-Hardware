@@ -20,7 +20,8 @@ from .genome import (LutGene, Chromosome, Genome, LUT_STATES,
 from .lut import SEED_STATE, grow_lut, grow_lut_snapshots, LutSim
 from .ga import (evaluate_lut, eval_batch_lut, mutate_lut, crossover_lut,
                  tournament_lut, next_population, evolve_lut, lut_report,
-                 prepare_lut, place_outputs_by_trace, score_lut_temporal,
+                 prepare_lut, place_outputs_by_trace, trace_fixed_outputs,
+                 score_lut_temporal,
                  score_lut_combinational, lut_case_outputs, lut_truth_table,
                  genome_signature, diversify, compact_genome)
 from .viz import draw_lut_net, draw_lut_table

@@ -75,7 +75,7 @@ The SNN and nervous backends share no code; the LUT backend shares only the prob
 | `app.py` | Single-window GUI: pick a model + target, evolve, inspect growth / activity / genome, drive circuits interactively |
 | `designer.py` | Manual circuit **designer** — build a circuit by hand at either encoding level: edit the genome (chromosomes/genes) and press Grow, or edit the grown grid directly (place cells, set routing states). Simulate and score it against any target; available as a GUI tab and standalone |
 | `interactive.py` | "Interactive / Test" tab — after evolving/loading a circuit, drive its inputs and watch the response play out. SNN shows live LIF playback, nervous nets use a clickable continuous-time pulse timeline, and LUT arrays retain clocked Step / Run playback |
-| `nv_async_ui.py` | Shared continuous-time nervous-net player and pulse-lane editor used by Interactive and Designer; wraps the same `PulseSim.advance_to` path as fitness |
+| `nv_evo/playback.py` | Shared continuous-time nervous-net player and pulse-lane editor used by Interactive and Designer; wraps the same paper-faithful `PulseSim` used by Nervous evolution |
 | `concept_gui.py` | GUI playground for the proof-of-concept GAs in `concept/`, with live matplotlib fitness / best-organism visuals |
 
 **Backends**
@@ -118,7 +118,7 @@ at each restart when Tries > 1), and the population mean. Defaults are a single 
 progress is visible. Growth is self-limiting via the telomere, so there are no
 grid-size or iteration controls; **Max telomere** caps how large organisms may
 grow (a chromosome's telomere is its growth *radius*, and eval cost ≈ radius²) —
-lower it (e.g. 8–10) to keep runs fast, or raise it to allow bigger nets. Use **Load Saved** to reload `results/best_genome.pkl`
+lower it (e.g. 8–10) to keep runs fast, or raise it to allow bigger nets. Use **Load Saved** to reload `results/best_genome.json`
 and **Save PNGs** to export the growth and voltage figures.
 
 Tick **Graded** for harder targets (adders, large custom tables): instead of a binary

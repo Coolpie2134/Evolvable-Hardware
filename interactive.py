@@ -14,8 +14,8 @@ uses the input and time representation appropriate to its physics:
   * Nervous  — ASYNCHRONOUS continuous-time playback: place input pulses on a
                clickable timeline, then Step / Run in real (possibly sub-tick)
                time and watch pulses propagate with their actual delays, loops
-               latch, and oscillators run. It drives PulseSim.advance_to — the
-               SAME engine the fitness reads — so the view matches the score.
+               latch, and oscillators run. It uses the paper-faithful PulseSim,
+               the same asynchronous event engine used by Nervous evolution.
   * LUT      — synchronous playback: input levels are sampled on each clock tick
                and the four directional lookup-table outputs update together.
 
@@ -31,7 +31,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from snn_evo import grow_snn, interpret_grid, simulate_trace, draw_snn_net, N_STEPS, DT
 from nv_evo import grow_nervous, interpret_nervous, place_outputs_by_trace
 from nv_evo.viz import draw_hex_net
-from nv_async_ui import NervousPlayer, PulseLaneEditor, pulses_from_trial
+from nv_evo.playback import NervousPlayer, PulseLaneEditor, pulses_from_trial
 from lut_evo import grow_lut, LutSim
 
 
@@ -185,7 +185,10 @@ class InteractiveTab:
                                        horizon=horizon, snap=0.5,
                                        on_change=self._nv_schedule_changed)
         self._editor.set_pulses(pulses_from_trial(target, len(self._in_pos)))
-        self._player = NervousPlayer(self._grid, self._routing, horizon=horizon)
+        self._player = NervousPlayer(
+            self._grid, self._routing, horizon=horizon,
+            max_events=getattr(target, 'max_events', 2048),
+            config=getattr(target, 'pulse_config', None))
         self._player.set_schedule(self._editor.schedule(self._in_pos))
 
     def _nv_schedule_changed(self):

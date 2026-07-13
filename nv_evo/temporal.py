@@ -32,7 +32,8 @@ import math
 from .nervous import grow_nervous, interpret_nervous
 from .hexgrid import hex_dirs
 from . import pulse as pulse_engine
-from .pulse import PulseSim, TICK
+from .pulse import TICK
+from .simulation import create_simulator
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
                       sr_latch, toggle_ff, oscillator, echo)
 
@@ -52,6 +53,7 @@ class TemporalTraces(dict):
         self.overflow = bool(overflow)
         self._event_result = None
         self._cadence_result = None
+        self._stepper_result = None
 
 
 # ── dynamics (asynchronous pulse engine, sampled per tick) ──────────────────────
@@ -88,12 +90,12 @@ def _inject_stream_edges(sim, in_pos, streams, T):
             while (tick < stop and input_index < len(streams[tick])
                    and streams[tick][input_index]):
                 tick += 1
-            duration = max(pulse_engine.WIDTH, (tick - start) * TICK)
+            duration = max(sim.config.width, (tick - start) * TICK)
             sim.inject_pulse(cell, start * TICK, duration)
 
 
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
-                 max_events=None, sample=True):
+                 max_events=None, sample=True, config=None):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -109,7 +111,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         cone = input_cone(grid, routing, in_pos)
         if len(cone) < len(grid):
             sub = {c: grid[c] for c in cone}
-    sim    = PulseSim(sub, routing, max_events=max_events)
+    sim    = create_simulator(sub, routing, max_events=max_events,
+                              config=config)
     if not sample:
         # Event/cadence fitness needs edges, not O(T*cells) display snapshots.
         _inject_stream_edges(sim, in_pos, streams, T)
@@ -135,26 +138,29 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
     return states, traces, sim.rise_times, sim.overflow
 
 
-def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True):
+def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
+                config=None):
     """Backward-compatible sampled playback API.
 
     Dynamics remain asynchronous; these tick samples are for display and legacy
     state-window targets.  Use :func:`run_nervous_events` for behavioral timing.
     """
     states, traces, _, _ = _run_nervous(
-        grid, routing, in_pos, out_pos, streams, T, prune=prune)
+        grid, routing, in_pos, out_pos, streams, T, prune=prune,
+        config=config)
     return states, traces
 
 
 def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
-                       max_events=None, sample=True):
+                       max_events=None, sample=True, config=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
     ``rise_times`` maps every simulated cell to its continuous leading-edge
     timestamps.  No tick quantisation is applied to this event record.
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
-                        prune=prune, max_events=max_events, sample=sample)
+                        prune=prune, max_events=max_events, sample=sample,
+                        config=config)
 
 
 # ── temporal scoring ───────────────────────────────────────────────────────────
@@ -603,13 +609,23 @@ def _cadence_trial_score(events, trial, target, latency):
     return quiet * regular * count * coverage
 
 
-def cadence_score(traces, ttarget):
-    """Score a sustained rhythm independent of absolute output phase."""
+def _cadence_at_latency(traces, ttarget, latency):
+    cases = []
+    for ti, trial in enumerate(ttarget.trials):
+        role_scores = [_cadence_trial_score(
+            _role_events(traces, role, ti), trial, ttarget, latency)
+            for role in trial.expected]
+        cases.append(sum(role_scores) / len(role_scores) if role_scores else 0.0)
+    score = sum(cases) / len(cases) if cases else 0.0
+    return score, tuple(cases)
+
+
+def _best_cadence_latency(traces, ttarget):
     cached = getattr(traces, '_cadence_result', None)
     if cached is not None:
         return cached
     if getattr(traces, 'overflow', False):
-        return 0.0, tuple(0.0 for _ in ttarget.trials)
+        return 0.0, 0.0, tuple(0.0 for _ in ttarget.trials)
     limit = float(getattr(ttarget, 'event_max_shift', 12.0))
     candidates = {0.0}
     for ti, trial in enumerate(ttarget.trials):
@@ -622,18 +638,25 @@ def cadence_score(traces, ttarget):
                            - float(getattr(ttarget, 'cadence_settle', 5.0)))
                 if 0.0 <= latency <= limit:
                     candidates.add(round(latency, 9))
-    best_score, best_cases = -1.0, ()
+    best_latency, best_score, best_cases = 0.0, -1.0, ()
     for latency in sorted(candidates):
-        cases = []
-        for ti, trial in enumerate(ttarget.trials):
-            role_scores = [_cadence_trial_score(
-                _role_events(traces, role, ti), trial, ttarget, latency)
-                for role in trial.expected]
-            cases.append(sum(role_scores) / len(role_scores) if role_scores else 0.0)
-        score = sum(cases) / len(cases) if cases else 0.0
+        score, cases = _cadence_at_latency(traces, ttarget, latency)
         if score > best_score + 1e-12:
-            best_score, best_cases = score, tuple(cases)
-    return max(0.0, best_score), best_cases
+            best_latency, best_score, best_cases = latency, score, cases
+    result = best_latency, max(0.0, best_score), best_cases
+    if hasattr(traces, '_cadence_result'):
+        traces._cadence_result = result
+    return result
+
+
+def cadence_score(traces, ttarget, latency=None):
+    """Score sustained rhythm, optionally at one pre-fitted startup latency."""
+    if getattr(traces, 'overflow', False):
+        return 0.0, tuple(0.0 for _ in ttarget.trials)
+    if latency is not None:
+        return _cadence_at_latency(traces, ttarget, float(latency))
+    _, score, cases = _best_cadence_latency(traces, ttarget)
+    return score, cases
 
 
 # ── semantic period-stepper scoring ───────────────────────────────────────────
@@ -700,28 +723,46 @@ def _stepper_trial_score(trace, streams, target, shift):
     return pre_score * cadence * relation
 
 
-def period_stepper_score(traces, target):
+def _stepper_at_shift(traces, target, shift):
+    cases = []
+    for ti, trial in enumerate(target.trials):
+        role_scores = []
+        for role in trial.expected:
+            seq = traces.get(role, [])
+            role_scores.append(_stepper_trial_score(
+                seq[ti] if ti < len(seq) else [], trial.streams,
+                target, int(shift)))
+        cases.append(sum(role_scores) / len(role_scores) if role_scores else 0.0)
+    score = sum(cases) / len(cases) if cases else 0.0
+    return score, tuple(cases)
+
+
+def _best_stepper_shift(traces, target):
+    cached = getattr(traces, '_stepper_result', None)
+    if cached is not None:
+        return cached
+    best_shift, best_score, best_cases = 0, -1.0, ()
+    for shift in range(getattr(target, 'stepper_max_delay', 8) + 1):
+        score, cases = _stepper_at_shift(traces, target, shift)
+        if score > best_score:
+            best_shift, best_score, best_cases = shift, score, cases
+    result = best_shift, best_score, best_cases
+    if hasattr(traces, '_stepper_result'):
+        traces._stepper_result = result
+    return result
+
+
+def period_stepper_score(traces, target, shift=None):
     """(score, per-trial scores) for the cadence-stepper target.
 
     A single bounded, causal latency is selected for all trials.  This retains
     the useful latency freedom of temporal scoring without allowing a giant
     negative shift to hide an early command epoch.
     """
-    best_score, best_cases = -1.0, ()
-    for shift in range(getattr(target, 'stepper_max_delay', 8) + 1):
-        cases = []
-        for ti, trial in enumerate(target.trials):
-            role_scores = []
-            for role in trial.expected:
-                seq = traces.get(role, [])
-                role_scores.append(_stepper_trial_score(
-                    seq[ti] if ti < len(seq) else [], trial.streams,
-                    target, shift))
-            cases.append(sum(role_scores) / len(role_scores) if role_scores else 0.0)
-        score = sum(cases) / len(cases) if cases else 0.0
-        if score > best_score:
-            best_score, best_cases = score, tuple(cases)
-    return best_score, best_cases
+    if shift is not None:
+        return _stepper_at_shift(traces, target, int(shift))
+    _, score, cases = _best_stepper_shift(traces, target)
+    return score, cases
 
 
 # Selection metric. The fitness question is "did the network produce the correct
@@ -774,8 +815,8 @@ def _score_output_candidate(sampled, events, expected, role, target,
         result = _best_event_shift(bundle, target)
         return result[1], result
     if mode == 'cadence':
-        result = cadence_score(bundle, target)
-        return result[0], result
+        result = _best_cadence_latency(bundle, target)
+        return result[1], result
     return _placement_score(sampled, expected, target), None
 
 
@@ -804,6 +845,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     obs = _obs_len(ttarget)
     mode = getattr(ttarget, 'score_mode', 'trace')
     need_samples = mode not in ('events', 'cadence')
+    config = getattr(ttarget, 'pulse_config', None)
     # Topology is identical across trials.  Computing the exact reachable cone
     # once avoids rebuilding the signal graph for every stimulus schedule.
     cone = input_cone(grid, routing, in_pos)
@@ -811,7 +853,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     runs = [run_nervous_events(
                 sub, routing, in_pos, {}, tr.streams, obs, prune=False,
                 max_events=getattr(ttarget, 'max_events', 2048),
-                sample=need_samples)
+                sample=need_samples, config=config)
             for tr in ttarget.trials]
     trial_states = [run[0] for run in runs]
     trial_events = [run[2] for run in runs]
@@ -828,8 +870,13 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                ctr.append([trial_states[ti][t].get(c, 0) for t in range(obs)]
-                           if need_samples else [])
+                # a trial that overflowed breaks its sampling loop early, so its
+                # state list can be shorter than obs — pad the missing ticks with
+                # 0 (overflow already forces this candidate's score to 0) instead
+                # of indexing off the end.
+                si = trial_states[ti]
+                ctr.append([si[t].get(c, 0) if t < len(si) else 0
+                            for t in range(obs)] if need_samples else [])
                 cevents.append(list(trial_events[ti].get(c, ())))
                 cexp.append(exp)
             if not ctr:
@@ -852,7 +899,8 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
         used.add(best)
         out_pos[term.role] = best
         traces[term.role] = [
-            [trial_states[ti][t].get(best, 0) for t in range(obs)]
+            [trial_states[ti][t].get(best, 0) if t < len(trial_states[ti]) else 0
+             for t in range(obs)]
             if need_samples else []
             for ti in range(len(ttarget.trials))]
         traces.events[term.role] = [list(trial_events[ti].get(best, ()))
@@ -862,6 +910,34 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
         elif len(ttarget.outputs) == 1 and mode == 'cadence':
             traces._cadence_result = best_aux
     return out_pos, traces
+
+
+def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
+    """Run target trials at already-selected nervous-net output cells.
+
+    Unlike :func:`place_outputs_by_trace`, this function performs no search.
+    It is the evaluation path for validation schedules: output identity is a
+    fitted model parameter and must remain unchanged after training.
+    """
+    if any(pos not in grid for pos in out_pos.values()):
+        return None
+    obs = _obs_len(ttarget)
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    need_samples = mode not in ('events', 'cadence')
+    config = getattr(ttarget, 'pulse_config', None)
+    cone = input_cone(grid, routing, in_pos)
+    sub = grid if len(cone) == len(grid) else {c: grid[c] for c in cone}
+    runs = [run_nervous_events(
+                sub, routing, in_pos, out_pos, trial.streams, obs,
+                prune=False, max_events=getattr(ttarget, 'max_events', 2048),
+                sample=need_samples, config=config)
+            for trial in ttarget.trials]
+    traces = TemporalTraces(
+        {role: [run[1].get(role, []) for run in runs] for role in out_pos},
+        events={role: [list(run[2].get(pos, ())) for run in runs]
+                for role, pos in out_pos.items()},
+        overflow=any(run[3] for run in runs))
+    return traces
 
 
 def prepare_net(genome, ttarget):
@@ -926,33 +1002,51 @@ def windowed_score(traces, ttarget, metric=None, shift=None):
     return 0.5 * (bal + f1)
 
 
-def score_temporal_bundle(traces, ttarget):
+_REFIT_ALIGNMENT = object()
+
+
+def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
     """Return ``(scalar, per-trial-role cases, alignment)`` for any score mode.
 
     Nervous and LUT evolution share this dispatcher so scalar fitness and
     lexicase case vectors cannot drift into subtly different semantics.
-    ``alignment`` is the selected global event/trace shift, or ``None`` for
-    invariant scorers that do not use one.
+    By default the best global alignment is fitted. Passing an explicit
+    ``alignment`` freezes that training choice for validation data. The return
+    value always includes the alignment actually used.
     """
     n_cases = sum(len(trial.expected) for trial in ttarget.trials)
     if getattr(traces, 'overflow', False):
-        return 0.0, (0.0,) * n_cases, None
+        used = None if alignment is _REFIT_ALIGNMENT else alignment
+        return 0.0, (0.0,) * n_cases, used
     mode = getattr(ttarget, 'score_mode', 'trace')
     if mode == 'period_stepper':
-        score, cases = period_stepper_score(traces, ttarget)
-        return score, tuple(cases), None
+        if alignment is _REFIT_ALIGNMENT:
+            used, score, cases = _best_stepper_shift(traces, ttarget)
+        else:
+            used = int(alignment)
+            score, cases = period_stepper_score(traces, ttarget, shift=used)
+        return score, tuple(cases), used
     if mode == 'cadence':
-        score, cases = cadence_score(traces, ttarget)
-        return score, tuple(cases), None
+        if alignment is _REFIT_ALIGNMENT:
+            used, score, cases = _best_cadence_latency(traces, ttarget)
+        else:
+            used = float(alignment)
+            score, cases = cadence_score(traces, ttarget, latency=used)
+        return score, tuple(cases), used
     if mode == 'events':
-        shift, score = _best_event_shift(traces, ttarget)
+        if alignment is _REFIT_ALIGNMENT:
+            shift, score = _best_event_shift(traces, ttarget)
+        else:
+            shift = float(alignment)
+            score = event_score(traces, ttarget, shift=shift)
         cases = tuple(
             _event_case_score(traces, ttarget, ti, role, shift)
             for ti, trial in enumerate(ttarget.trials)
             for role in trial.expected)
         return score, cases, shift
 
-    shift, _ = _best_shift(traces, ttarget)
+    shift = (_best_shift(traces, ttarget)[0]
+             if alignment is _REFIT_ALIGNMENT else int(alignment))
     cases = []
     for ti, trial in enumerate(ttarget.trials):
         for role, exp in trial.expected.items():

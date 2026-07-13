@@ -35,17 +35,30 @@ sub-tick timing (unequal delays, edge alignment, incommensurate loop periods).
 """
 from __future__ import annotations
 import heapq
-import os
+from dataclasses import dataclass
 
 from .hexgrid import hex_dirs
 
-# Physical constants of the substrate. Overridable via environment variables
-# (read at import, so ProcessPoolExecutor workers inherit them) for parameter
-# studies; the defaults are the tuned values.
-DELAY = float(os.environ.get('NV_DELAY', '1.0'))   # fixed node propagation delay
-WIDTH = float(os.environ.get('NV_WIDTH', '1.0'))   # output pulse width (leak rate)
-COINC = float(os.environ.get('NV_COINC', '0.5'))   # excitatory coincidence window
+# Backward-compatible defaults. New runs carry an immutable PulseConfig instead
+# of mutating these module values or relying on worker-process environments.
+DELAY = 1.0   # fixed node propagation delay
+WIDTH = 1.0   # output pulse width (leak rate)
+COINC = 0.5   # excitatory coincidence window
 TICK  = 1.0     # sampling period of the scoring layer (one target tick)
+
+
+@dataclass(frozen=True)
+class PulseConfig:
+    """Immutable paper-model timing parameters carried with one run."""
+    delay: float = DELAY
+    width: float = WIDTH
+    coincidence: float = COINC
+    event_cap: int = 2048
+
+    def __post_init__(self):
+        if (self.delay <= 0 or self.width <= 0 or self.coincidence < 0
+                or self.event_cap < 1):
+            raise ValueError('delay/width/event_cap must be positive and coincidence non-negative')
 
 _NEG = float('-inf')
 
@@ -60,9 +73,10 @@ class PulseSim:
     their wire has pulsed at all (the combinational "did it fire" read-out).
     """
 
-    def __init__(self, grid, routing, max_events=None):
+    def __init__(self, grid, routing, max_events=None, config=None):
         self.grid    = grid
         self.routing = routing
+        self.config  = config or PulseConfig()
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
         # watch[u] = cells that read u on an excitatory input.
         self.src   = {}
@@ -165,7 +179,7 @@ class PulseSim:
         the async Interactive/Designer playback to place edges at real (possibly
         sub-tick) times. Events are queued; call ``advance_to`` to process them."""
         if cell in self.grid:
-            w = WIDTH if width is None else float(width)
+            w = self.config.width if width is None else float(width)
             self._push(float(t), cell, float(t) + w)
 
     def _consider(self, v, u, t):
@@ -182,10 +196,11 @@ class PulseSim:
         else:                                                 # coincidence: both
             self.last_edge[v][u] = t                          # edges within COINC
             other = s2 if u == s1 else s1
-            trig = (t - self.last_edge[v].get(other, _NEG)) <= COINC
+            trig = (t - self.last_edge[v].get(other, _NEG)) <= self.config.coincidence
         if trig:
-            self.refr_until[v] = t + DELAY + WIDTH
-            self._push(t + DELAY, v, t + DELAY + WIDTH)
+            self.refr_until[v] = t + self.config.delay + self.config.width
+            self._push(t + self.config.delay, v,
+                       t + self.config.delay + self.config.width)
 
     # ── the per-tick interface used by scoring / playback ────────────────────
 
@@ -201,7 +216,7 @@ class PulseSim:
                 if self._prev.get(c, 0) and self.pulse_until[c] >= t0:
                     self.pulse_until[c] = max(self.pulse_until[c], t0 + TICK)
                 else:
-                    self._push(t0, c, t0 + max(WIDTH, TICK))
+                    self._push(t0, c, t0 + max(self.config.width, TICK))
             self._prev[c] = b
         sample_t = t0 + 0.5 * TICK
         self._run_until(sample_t)

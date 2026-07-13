@@ -16,8 +16,8 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     output roles. Both PulseSim and LutSim run on a bare grid, so a
     hand-built circuit needs NO genome to be simulated or scored. The nervous
     net is driven ASYNCHRONOUSLY — input pulses placed on a clickable timeline,
-    played in continuous time via PulseSim.advance_to (the engine the fitness
-    reads) — while the clocked LUT keeps its tick-numbered bit streams.
+    played in continuous time via the paper-faithful PulseSim used by Nervous
+    evolution — while the clocked LUT keeps its tick-numbered bit streams.
 
 Genome -> grid is exact via Grow. Grid -> genome is a separate best-effort
 synthesis pass: because growth is many-to-one it verifies the phenotype it can
@@ -28,7 +28,7 @@ Simulation mirrors interactive.py (input schedules + Step/Run/Reset + a trace
 strip). Scoring uses the target's declared event, cadence, or persistence
 metric, exactly as the evolver does.
 
-Imports evolved solutions (results/best_genome.pkl, solver_generation.pkl,
+Imports evolved solutions (results/best_genome.json, solver_generation.json,
 or the running app's current_circuit() hand-off) so a user can start from an
 evolved genome and refine it by hand. Saves designs in the app's pickle
 schema plus {grid, in_pos, out_pos, hand_built} so hand-built phenotypes
@@ -60,7 +60,7 @@ from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGeno
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, SEED_STATE as NV_SEED_STATE)
 from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
-from nv_async_ui import NervousPlayer, PulseLaneEditor, pulses_from_trial
+from nv_evo.playback import NervousPlayer, PulseLaneEditor, pulses_from_trial
 from nv_evo.temporal import (run_nervous_events,
                              place_outputs_by_trace, TemporalTraces,
                              windowed_score, exact_tick_accuracy,
@@ -182,6 +182,9 @@ def read_saved_file(path):
             doc = json.load(f)
     except (UnicodeDecodeError, ValueError, OSError):
         doc = None
+    if isinstance(doc, dict) and str(doc.get('format', '')).startswith('evohw-checkpoint'):
+        from evo_runtime.checkpoint import load_checkpoint
+        return load_checkpoint(path)
     if isinstance(doc, dict) and str(doc.get('format', '')).startswith('evohw-design'):
         backend = doc.get('backend', 'nervous')
         genome = _genome_from_dict(doc['genome'], backend) if doc.get('genome') else None
@@ -464,7 +467,7 @@ class DesignerTab:
         ttk.Label(files, text='Files:').pack(side='left')
         b = ttk.Button(files, text='Load evolved…', command=self._load_evolved)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Import results/best_genome.pkl or solver_generation.pkl: the '
+        _Tip(b, 'Import results/best_genome.json or solver_generation.json: the '
                 'evolved genome opens in the Genome tab, is grown, and its '
                 'target is adopted — then refine it by hand.')
         if self.get_circuit is not None:
@@ -1670,7 +1673,10 @@ class DesignerTab:
 
     def _build_nv_player(self):
         routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
-        self._player = NervousPlayer(self.grid, routing, horizon=self._sim_horizon())
+        self._player = NervousPlayer(
+            self.grid, routing, horizon=self._sim_horizon(),
+            max_events=getattr(self.target, 'max_events', 2048),
+            config=getattr(self.target, 'pulse_config', None))
         sched = (self._editor.schedule(self.in_pos)
                  if getattr(self, '_editor', None) is not None else {})
         self._player.set_schedule(sched)
@@ -1977,7 +1983,7 @@ class DesignerTab:
             initialdir=RESULTS_DIR if os.path.isdir(RESULTS_DIR) else ROOT,
             title='Load design or evolved solution',
             filetypes=[('design or solution', '*.json *.pkl'),
-                       ('text design', '*.json'), ('evolved pickle', '*.pkl'),
+                       ('text design/checkpoint', '*.json'), ('legacy pickle', '*.pkl'),
                        ('all files', '*.*')])
         if not path:
             return
@@ -1991,17 +1997,16 @@ class DesignerTab:
             self._load_json_design(doc, path)
             return
         try:
-            with open(path, 'rb') as f:
-                state = pickle.load(f)
+            state = read_saved_file(path)
         except Exception as exc:
             messagebox.showerror('Load', 'Could not read %s:\n%s' % (path, exc))
             return
         if not isinstance(state, dict):
             messagebox.showerror('Load', 'Not a recognised solution/design file:\n%s\n\n'
-                                 'Expected a saved genome or design (a pickled dict) '
+                                 'Expected a saved genome or design document '
                                  'from the evolver or this designer.' % path)
             return
-        if 'genomes' in state:                                    # solver_generation.pkl
+        if 'genomes' in state:                                    # solver_generation.json
             self._pick_solver(state)
             return
         if state.get('best_genome') is None and not state.get('grid'):

@@ -16,14 +16,13 @@ match it, across three tabs:
 
 The GA runs in a background thread; progress is polled on the Tk main loop.
 On completion the best genome (and its target) are saved to
-results/best_genome.pkl; the two plot tabs can be exported to PNG.
+results/best_genome.json; the two plot tabs can be exported to PNG.
 
 Usage:
     python app.py
 """
-import sys, os, math, time, random, copy, pickle, threading, queue, dataclasses
+import sys, os, math, time, random, threading, queue, dataclasses
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -42,11 +41,10 @@ import numpy as np
 
 from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
                      simulate_trace,
-                     circuit_summary, score, random_genome,
+                     circuit_summary, score,
                      TARGETS, DEFAULT_TARGET, get_target, truth_table_target,
                      Arch, DEFAULT_ARCH)
 from snn_evo.genome import GRID_SIZE, MAX_STATE
-from snn_evo.ga import _eval_batch, next_population
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
 from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
                     nervous_case_outputs, circuit_summary_nervous, ROUTING,
@@ -55,12 +53,16 @@ from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
-from designer import DesignerTab, read_saved_file
+from designer import DesignerTab
 from target_ui import TargetPicker
 import ui_compat
+from evo_runtime.config import GAConfig, RunConfig
+from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
+from evo_runtime.controller import worker_entry as evolution_worker_entry
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
-CKPT        = os.path.join(RESULTS_DIR, 'best_genome.pkl')
+CKPT        = os.path.join(RESULTS_DIR, 'best_genome.json')
+LEGACY_CKPT = os.path.join(RESULTS_DIR, 'best_genome.pkl')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 V_REST          = 0.0
@@ -273,162 +275,6 @@ def _lut_gene_lines(gi, g):
     ]
 
 
-# ── GA background worker ──────────────────────────────────────────────────────
-
-def _ga_worker(gens, pop, n_chroms, tries, target, arch, q, stop_event,
-               base_seed=None, backend='snn'):
-    """
-    Run the GA with random restarts against `target` / `arch` / `backend`. Posts to queue q:
-        ('gen',  try, gen, best_fit, mean_fit)
-        ('best', genome, fitness)
-        ('done', genome, fitness)
-
-    base_seed=None  -> reseed from system entropy each restart (different runs).
-    base_seed=int   -> reproducible: restart i uses seed base_seed + i.
-    """
-    # each backend brings its own genome, operators and evaluator (snn_evo/ga.py
-    # vs nv_evo/ga.py — the nervous GA is tuned for loops/memory); this loop
-    # only orchestrates restarts and reports progress.
-    # `step(pop, fits, cases)` advances one generation. Convergence is NOT forced:
-    # every backend runs a steady exploratory GA (elitism + tournament/lexicase +
-    # immigrants), so the population contracts onto a genome only as far as
-    # selection naturally drives it. The SNN GA takes no per-case vectors.
-    diversify_fn = None      # set for nervous/lut: build a generation of solvers
-    # Two dynamic mutation-rate controls compose each generation:
-    #   base_mm * alpha**gen           — simulated-annealing cooldown (MUT_DECAY)
-    #                     * stress_fn() — SOS reheat while a run is stalled
-    # alpha defaults to 1.0 (no anneal); the SNN backend holds both at their
-    # neutral values (stress_fn ≡ 1, no rate threading).
-    rate_fn, base_mm, alpha = (lambda rate, stagnation: rate), 1.0, 1.0
-    _pool = None             # persistent worker pool (nervous/lut) reused across gens
-    if backend == 'nervous':
-        from nv_evo import random_hex_genome
-        from nv_evo.ga import (eval_batch_cases, next_population as next_pop_nv,
-                               diversify as _div, adaptive_mutation_rate,
-                               MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
-        cache       = {}     # fitness cache shared across restarts (same target)
-        _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
-        make_genome = lambda: random_hex_genome(n_chroms)
-        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
-        step        = lambda p, fits, cv, mm: next_pop_nv(p, fits, make_genome, cv, mm)
-        rate_fn, base_mm, alpha = adaptive_mutation_rate, MEAN_MUTATIONS, MUT_DECAY
-        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid,
-                                                 cache=cache, executor=_pool)
-    elif backend == 'lut':
-        from lut_evo.ga import (eval_batch_cases, next_population as next_pop_lut,
-                                diversify as _div, make_seed_genome,
-                                adaptive_mutation_rate, MEAN_MUTATIONS, MUT_DECAY, N_WORKERS)
-        cache       = {}
-        _pool       = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse (no per-gen respawn)
-        make_genome = lambda: make_seed_genome(n_chroms)   # ontogeny biomorph seeds
-        eval_batch  = lambda genomes: eval_batch_cases(genomes, target, cache, _pool)
-        step        = lambda p, fits, cv, mm: next_pop_lut(p, fits, make_genome, cv, mm)
-        rate_fn, base_mm, alpha = adaptive_mutation_rate, MEAN_MUTATIONS, MUT_DECAY
-        diversify_fn = lambda seeds, valid: _div(seeds, target, pop, valid=valid,
-                                                 cache=cache, executor=_pool)
-    else:
-        from snn_evo.ga import N_WORKERS as _SNN_WORKERS
-        _pool       = ProcessPoolExecutor(max_workers=_SNN_WORKERS)   # reuse (no per-gen respawn)
-        make_genome = lambda: random_genome(n_chroms)
-        eval_batch  = lambda genomes: (_eval_batch(genomes, target, arch, _pool), None)
-        step        = lambda p, fits, cv, mm: next_population(p, fits)
-
-    def size(genome):
-        return sum(len(c.genes) for c in genome.chromosomes)
-
-    best_fit = 0.0
-    best_g   = None
-    population, fitnesses = [], []            # referenced by diversify if a restart
-                                             # is interrupted before its own loop runs
-    try:
-        for try_i in range(tries):
-            if stop_event.is_set():
-                break
-            if base_seed is None:
-                random.seed()                # entropy — different every run
-            else:
-                random.seed(base_seed + try_i)
-            population = [make_genome() for _ in range(pop)]
-            fitnesses, cases = eval_batch(population)
-            bi         = max(range(pop),
-                             key=lambda i: (fitnesses[i], -size(population[i])))
-            g, f       = copy.deepcopy(population[bi]), fitnesses[bi]
-            if f > best_fit:
-                best_fit, best_g = f, copy.deepcopy(g)
-                q.put(('best', copy.deepcopy(best_g), best_fit))
-            # generation-0 point so the chart shows something even when the very
-            # first population already contains a solution. Chart lines: best_fit =
-            # all-time best (monotonic, never drops even across restarts); f = this
-            # generation's population best (dips at each restart).
-            q.put(('gen', try_i + 1, 0, best_fit, sum(fitnesses) / len(fitnesses), f))
-            # no early stop at fitness 1.0: the run continues so the parsimony
-            # tie-break keeps shrinking a solved genome. Convergence is not forced —
-            # the population contracts only as far as selection naturally drives it.
-            stagnation = 0
-            mut_rate   = base_mm                          # annealing schedule
-            for gen in range(gens):
-                if stop_event.is_set():
-                    break
-                mut_rate *= alpha                         # anneal: cool down
-                mm = rate_fn(mut_rate, stagnation)
-                population = step(population, fitnesses, cases, mm)
-                fitnesses, cases = eval_batch(population)
-                gi         = max(range(pop),
-                                 key=lambda i: (fitnesses[i], -size(population[i])))
-                # SOS tracks FITNESS plateaus only — a parsimony-only win updates the
-                # champion but must not reset the stress counter (see nv_evo.ga).
-                if fitnesses[gi] > f + 1e-12:
-                    stagnation = 0
-                else:
-                    stagnation += 1
-                if (fitnesses[gi] > f
-                        or (fitnesses[gi] == f and size(population[gi]) < size(g))):
-                    f = fitnesses[gi]
-                    g = copy.deepcopy(population[gi])
-                    if (f > best_fit
-                            or (f == best_fit and best_g is not None
-                                and size(g) < size(best_g))):
-                        best_fit, best_g = f, copy.deepcopy(g)
-                        q.put(('best', copy.deepcopy(best_g), best_fit))
-                mean_f = sum(fitnesses) / len(fitnesses)
-                gen_best = fitnesses[gi]                 # best in THIS generation
-                # blue = all-time best (best_fit, monotonic); green = this gen's
-                # population best, which can dip below blue mid-run: elites breed the
-                # next generation but are NOT copied verbatim, so the population's
-                # best regresses between improvements (and at each restart).
-                q.put(('gen', try_i + 1, gen + 1, best_fit, mean_f, gen_best))
-            if best_fit >= 1.0:
-                break                        # solved after a full run: no restart
-
-        # Diversification: rather than a monoculture of the champion, spread across
-        # the neutral network to build a whole generation of DISTINCT valid solvers
-        # (each genotypically unique, each still solving). The count is honest — it
-        # returns as many unique solvers as the target's neutral network admits.
-        # The worker pool is still alive here, so diversify reuses it too.
-        n_unique = 0
-        if diversify_fn is not None and best_g is not None and best_fit > 0 and not stop_event.is_set():
-            valid = 1.0 if best_fit >= 0.999 else max(0.0, best_fit - 1e-6)
-            try:
-                seeds = [gg for gg, ff in zip(population, fitnesses) if ff >= valid] or [best_g]
-                pool  = diversify_fn(seeds, valid)
-                n_unique = len(pool)
-                if pool:
-                    with open(os.path.join(RESULTS_DIR, 'solver_generation.pkl'), 'wb') as fp:
-                        pickle.dump({'genomes': pool, 'target': target,
-                                     'backend': backend, 'valid': valid}, fp)
-                    q.put(('diverse', n_unique, valid))
-            except Exception:
-                pass
-    except Exception:                        # any backend/eval failure: surface it
-        import traceback                      # instead of wedging the GUI with the
-        q.put(('error', traceback.format_exc(limit=3)))   # controls disabled forever
-    finally:
-        if _pool is not None:
-            _pool.shutdown()                 # released even if evaluation errors
-        # ALWAYS report completion, so _poll re-enables the controls even on error
-        q.put(('done', copy.deepcopy(best_g) if best_g else None, best_fit))
-
-
 # ── custom truth-table dialog ─────────────────────────────────────────────────
 
 class CustomTargetDialog(tk.Toplevel):
@@ -623,6 +469,9 @@ class App:
         self._gens_var  = lentry(run_ctrl, 'Generations:', 500)
         self._tries_var = lentry(run_ctrl, 'Restarts:', 1)
         self._seed_var  = lentry(run_ctrl, 'Seed:', 'random', width=7)
+
+        self._progress = ttk.Progressbar(run_ctrl, length=130, mode='determinate')
+        self._progress.pack(side='right', padx=(8, 4), fill='x', expand=True)
 
         self._graded_var = tk.BooleanVar(value=False)
         self._graded_chk = ttk.Checkbutton(run_ctrl, text='Graded logic fitness',
@@ -972,42 +821,32 @@ class App:
         if hasattr(self, '_lexicase_var'):
             self._lexicase_var.set(False)    # tournament is the tuned default
 
-    def _apply_tuning(self):
-        """Push the GUI's GA / pulse-physics knobs into the backend modules and
-        os.environ (so the fresh ProcessPool workers that evaluate genomes pick
-        the physics up at import). Returns True on success."""
+    def _read_run_config(self):
+        """Parse controls into an immutable, process-safe run configuration."""
         try:
             mut = float(self._mut_var.get()); imm = float(self._imm_var.get())
-            tk_ = int(self._tourn_var.get()); alpha = float(self._alpha_var.get())
-            elite = int(self._elite_var.get())
-            maxtel = int(self._maxtel_var.get())
+            tournament = int(self._tourn_var.get())
+            alpha = float(self._alpha_var.get()); elite = int(self._elite_var.get())
+            max_telomere = int(self._maxtel_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
-            coinc = float(self._coinc_var.get())
-            if (mut < 0 or not (0 <= imm < 1) or tk_ < 1 or not (0 < alpha <= 1)
-                    or elite < 0 or maxtel < 2 or delay <= 0 or width <= 0 or coinc < 0):
+            coincidence = float(self._coinc_var.get())
+            if (mut < 0 or not (0 <= imm < 1) or tournament < 1
+                    or not (0 < alpha <= 1) or elite < 0 or max_telomere < 2
+                    or delay <= 0 or width <= 0 or coincidence < 0):
                 raise ValueError
         except ValueError:
-            return False
-        import nv_evo.ga as nga, lut_evo.ga as lga, nv_evo.pulse as npulse
-        import nv_evo.genome as nvg, lut_evo.genome as lvg
-        for mod in (nga, lga):
-            mod.MEAN_MUTATIONS = mut
-            mod.IMMIGRANT_FRAC = imm
-            mod.TOURNAMENT_K   = tk_
-            mod.MUT_DECAY      = alpha
-            mod.ELITE_COUNT    = elite      # exact # of elites carried forward
-        # parent-selection scheme — nervous & LUT share nga.SELECTION (lut reads it),
-        # so setting it here switches both backends between tournament and ε-lexicase.
-        nga.SELECTION = 'lexicase' if bool(self._lexicase_var.get()) else 'tournament'
-        # telomere ceiling — caps organism radius. Set on the genome modules
-        # (fresh-genome init) AND the ga modules (telomere mutation); all
-        # main-process (no env needed — growth workers just grow the stored value).
-        nvg.MAX_TELOMERE = lvg.MAX_TELOMERE = nga.MAX_TELOMERE = lga.MAX_TELOMERE = maxtel
-        npulse.DELAY, npulse.WIDTH, npulse.COINC = delay, width, coinc
-        os.environ['NV_DELAY'] = str(delay)
-        os.environ['NV_WIDTH'] = str(width)
-        os.environ['NV_COINC'] = str(coinc)
-        return True
+            return None
+        from nv_evo.pulse import PulseConfig
+        return RunConfig(
+            ga=GAConfig(
+                mean_mutations=mut, immigrant_fraction=imm,
+                tournament_size=tournament, elite_count=elite,
+                mutation_decay=alpha,
+                selection=('lexicase' if bool(self._lexicase_var.get())
+                           else 'tournament'),
+                max_telomere=max_telomere),
+            pulse=PulseConfig(delay=delay, width=width,
+                              coincidence=coincidence))
 
     def _backend(self):
         v = self._backend_var.get().lower()
@@ -1109,7 +948,8 @@ class App:
             self._status.set('Invalid genome — Chroms>=1 (integer).')
             return
 
-        if not self._apply_tuning():
+        run_config = self._read_run_config()
+        if run_config is None:
             self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
                              'Tournament>=1, Elites>=0, 0<α<=1, Max telomere>=2, '
                              'Delay/Width>0, Coinc>=0.')
@@ -1117,18 +957,27 @@ class App:
 
         backend = self._backend()
         eff_target = self._effective_target(high, self._graded_var.get())
+        setattr(eff_target, 'pulse_config', run_config.pulse)
         self._active_target  = eff_target
         self._active_arch    = arch
         self._active_chroms  = n_chroms
         self._active_backend = backend
+        self._active_run_config = run_config
         self._disp_target    = eff_target
         self._disp_arch      = arch
         self._disp_backend   = backend
 
         self._gen_history.clear()
+        self.best_genome = None
+        self.best_fitness = 0.0
         self._abs_gen = 0
         self._n_unique_solvers = 0
         self._ga_error = None
+        self._stop_requested = False
+        self._run_started = time.monotonic()
+        self._work_phase = 'Starting worker processes'
+        self._phase_detail = ''
+        self._progress.configure(maximum=max(1, tries * (gens + 1)), value=0)
         self._best_line.set_data([], [])
         self._mean_line.set_data([], [])
         self._genbest_line.set_data([], [])
@@ -1146,9 +995,9 @@ class App:
 
         self._stop_event = threading.Event()
         self._worker = threading.Thread(
-            target=_ga_worker,
+            target=evolution_worker_entry,
             args=(gens, pop, n_chroms, tries, eff_target, arch, self.q, self._stop_event,
-                  base_seed, backend),
+                  base_seed, backend, run_config, RESULTS_DIR),
             daemon=True)
         self._worker.start()
         self._status.set('Evolving %s [%s] …  pop=%d  gens=%d  tries=%d  seed=%d%s' %
@@ -1156,15 +1005,18 @@ class App:
                           '  [graded]' if self._graded_var.get() else ''))
 
     def _stop_ga(self):
+        self._stop_requested = True
         self._stop_event.set()
         self._stop_btn.config(state='disabled')
-        self._status.set('Stopping after current generation…')
+        self._work_phase = 'Stopping after the current evaluation batch'
+        self._status.set(self._work_phase + '…')
 
     def _load_saved(self):
-        if not os.path.exists(CKPT):
+        path = CKPT if os.path.exists(CKPT) else LEGACY_CKPT
+        if not os.path.exists(path):
             self._status.set('No saved genome at %s — run the GA first.' % CKPT)
             return
-        state = read_saved_file(CKPT)     # text JSON design OR pickle
+        state = load_checkpoint(path)
         if state.get('hand_built') and state.get('best_genome') is None:
             # a Designer phenotype with no genome: the main tabs all regrow from
             # DNA, so there is nothing to show here — open it in the Designer.
@@ -1194,6 +1046,7 @@ class App:
             self._seed_var.set(str(saved_seed))
             self._active_seed = saved_seed
         saved_backend = state.get('backend', 'snn')
+        self._active_run_config = state.get('run_config', RunConfig())
         self._disp_backend   = saved_backend
         self._active_backend = saved_backend
         self._backend_var.set({'nervous': 'Nervous', 'lut': 'LUT'}.get(saved_backend, 'SNN'))
@@ -1250,6 +1103,7 @@ class App:
 
     def _poll(self):
         last_gen = None                        # newest 'gen' this poll — redraw ONCE
+        finished = False
         try:
             while True:
                 msg  = self.q.get_nowait()
@@ -1258,12 +1112,22 @@ class App:
                     _, try_n, gen, best_f, mean_f, gen_best = msg
                     self._abs_gen += 1
                     self._gen_history.append((self._abs_gen, best_f, mean_f, gen_best))
+                    self._progress.configure(value=self._abs_gen)
                     last_gen = (try_n, gen, best_f, mean_f, gen_best)
+                elif kind == 'phase':
+                    _, phase, current, total, amount = msg
+                    self._work_phase = phase
+                    if phase.startswith('Diversif') or phase.startswith('Preparing'):
+                        self._phase_detail = ('round %d/%d, %d unique' %
+                                              (current, total, amount))
+                    else:
+                        self._phase_detail = ('try %d, generation %d, population %d' %
+                                              (current, total, amount))
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
                     self._n_unique_solvers = n_unique
                     self._status.set('Diversifying — built %d genotypically UNIQUE '
-                                     'solvers (each ≥ %.3f) → results/solver_generation.pkl'
+                                     'solvers (each ≥ %.3f) → results/solver_generation.json'
                                      % (n_unique, valid))
                 elif kind == 'error':
                     _, tb = msg
@@ -1279,19 +1143,18 @@ class App:
                     # throttle below repaint at most a few times a second.
                     self._pending_best = (genome, fit)
                 elif kind == 'done':
+                    finished = True
                     _, genome, fit = msg
                     if genome is not None:
                         self.best_genome  = genome
                         self.best_fitness = fit
                         save_target = getattr(self, '_active_target', self.target)
                         save_arch   = getattr(self, '_active_arch', DEFAULT_ARCH)
-                        with open(CKPT, 'wb') as f:
-                            pickle.dump({'best_genome': genome, 'best_fitness': fit,
-                                         'target': save_target,
-                                         'target_name': save_target.name,
-                                         'arch': save_arch,
-                                         'seed': getattr(self, '_active_seed', None),
-                                         'backend': getattr(self, '_active_backend', 'snn')}, f)
+                        save_checkpoint(
+                            CKPT, genome, fit, save_target, save_arch,
+                            getattr(self, '_active_seed', None),
+                            getattr(self, '_active_backend', 'snn'),
+                            getattr(self, '_active_run_config', None))
                         self._pending_best = None      # final draw supersedes it
                         self._update_all(genome, fit)
                     self._run_btn.config(state='normal')
@@ -1300,6 +1163,8 @@ class App:
                     self._target_picker.set_state('normal')
                     self._backend_cb.config(state='readonly')
                     self._save_btn.config(state='normal' if genome else 'disabled')
+                    self._progress.configure(value=self._progress.cget('maximum'))
+                    self._worker = None
                     if getattr(self, '_ga_error', None):
                         self._status.set('GA stopped on error: %s  (controls re-enabled)'
                                          % self._ga_error)
@@ -1307,27 +1172,39 @@ class App:
                         saved = ('  saved → %s' % CKPT) if genome else ''
                         nu = getattr(self, '_n_unique_solvers', 0)
                         div = ('  |  %d unique valid solvers' % nu) if nu else ''
-                        self._status.set('Done — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s' %
-                                         (self.target.name, fit,
+                        outcome = 'Stopped' if getattr(self, '_stop_requested', False) else 'Done'
+                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s' %
+                                         (outcome, self.target.name, fit,
                                           getattr(self, '_active_seed', 0), saved, div))
         except queue.Empty:
             pass
         if last_gen is not None:               # redraw the fitness chart once per poll
             self._redraw_fit_chart()
+        if last_gen is not None and not finished:
             try_n, gen, best_f, mean_f, gen_best = last_gen
             self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  gen-best=%.4f  mean=%.4f' %
                              (self.target.name, getattr(self, '_active_seed', 0),
                               try_n, gen, best_f, gen_best, mean_f))
-        # throttled repaint of the display panels for the latest best (≤ ~1.6/s)
-        pend = getattr(self, '_pending_best', None)
-        if pend is not None:
-            now = time.time()
-            if now - getattr(self, '_last_full_draw', 0.0) > 0.6:
-                self._pending_best = None
-                self._last_full_draw = now
-                self._update_all(*pend)
+        # Full circuit/traces rendering touches every hidden tab and can take
+        # longer than an evaluation batch.  Keep the main loop responsive while
+        # evolving; the final champion is rendered once on completion.
+        if self._worker is not None and last_gen is None:
+            elapsed = time.monotonic() - getattr(self, '_run_started', time.monotonic())
+            phase = getattr(self, '_work_phase', 'Working')
+            detail = getattr(self, '_phase_detail', '')
+            self._status.set('%s… %s  elapsed %s' %
+                             (phase, detail, self._format_elapsed(elapsed)))
         if self.root.winfo_exists():
             self._poll_job = self.root.after(60, self._poll)
+
+    @staticmethod
+    def _format_elapsed(seconds):
+        seconds = max(0, int(seconds))
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return '%d:%02d:%02d' % (hours, minutes, seconds)
+        return '%d:%02d' % (minutes, seconds)
 
     def close(self):
         """Stop background work and scheduled callbacks before closing Tk."""

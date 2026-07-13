@@ -53,6 +53,7 @@ from __future__ import annotations
 import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+from evo_runtime.cache import LRUCache
 
 from .genome import (MAX_STATE, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome, germline_telomere,
@@ -124,6 +125,13 @@ def evaluate_nv_full(genome, target):
     selection falls back to tournament."""
     if not getattr(target, 'temporal', False):
         return score_nervous(genome, target), None
+    retention_mode = getattr(target, 'score_mode', '')
+    if retention_mode == 'retention':
+        from .persistence import evaluate_retention    # event-native memory fitness
+        return evaluate_retention(genome, target)
+    if retention_mode == 'sr_retention':
+        from .persistence import evaluate_sr_retention
+        return evaluate_sr_retention(genome, target)
     n_cases = sum(len(tr.expected) for tr in target.trials)
     prep = prepare_net(genome, target)
     if prep is None:
@@ -170,16 +178,30 @@ def eval_batch_cases(genomes, target, cache=None, executor=None):
                 out[i] = cache[sigs[i]]
     if todo:
         fn = partial(evaluate_nv_full, target=target)
-        subset = [genomes[i] for i in todo]
+        # A generation can contain the same genome more than once (especially
+        # around a strong parent).  The old code submitted every occurrence
+        # before any result reached the cache, wasting whole worker slots on
+        # identical evaluations.  Submit each signature once and fan its result
+        # back out to every matching population index.
+        if cache is not None:
+            unique = {}
+            for i in todo:
+                unique.setdefault(sigs[i], []).append(i)
+            representatives = [(sig, indices[0]) for sig, indices in unique.items()]
+        else:
+            representatives = [(i, i) for i in todo]
+            unique = {i: [i] for i in todo}
+        subset = [genomes[i] for _, i in representatives]
         if executor is not None:
             results = list(executor.map(fn, subset))
         else:
             with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
                 results = list(ex.map(fn, subset))
-        for i, r in zip(todo, results):
-            out[i] = r
+        for (sig, _), r in zip(representatives, results):
+            for i in unique[sig]:
+                out[i] = r
             if cache is not None:
-                cache[sigs[i]] = r
+                cache[sig] = r
     return [r[0] for r in out], [r[1] for r in out]
 
 
@@ -220,10 +242,11 @@ _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 
 
-def _mutate_once_nv(genome):
+def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE):
     """Apply one feasible, state-changing mutation to a nervous-net genome."""
     if not genome.chromosomes:
-        genome.chromosomes.append(random_hex_chromosome())
+        genome.chromosomes.append(random_hex_chromosome(
+            max_telomere=max_telomere))
         return
 
     chroms = genome.chromosomes
@@ -247,7 +270,7 @@ def _mutate_once_nv(genome):
     for c in chroms:
         base = getattr(c, 'telomere', 10)
         values = [base + d for d in (-3, -2, -1, 1, 2, 3)
-                  if 1 <= base + d <= MAX_TELOMERE]
+                  if 1 <= base + d <= max_telomere]
         if values:
             telomeres.append((c, values))
     if telomeres:
@@ -271,7 +294,7 @@ def _mutate_once_nv(genome):
         chrom = random.choice([c for c in chroms if len(c.genes) > 1])
         chrom.genes.pop(random.randrange(len(chrom.genes)))
     elif op == 'add_chrom':
-        chroms.append(random_hex_chromosome())
+        chroms.append(random_hex_chromosome(max_telomere=max_telomere))
     elif op == 'del_chrom':
         chroms.remove(min(chroms, key=lambda c: len(c.genes)))
     elif op == 'split':
@@ -283,11 +306,11 @@ def _mutate_once_nv(genome):
         chrom.telomere = random.choice(values)
 
 
-def mutate_nv(genome, mean_mutations=None):
+def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE):
     g = clone_genome(genome)
     lam = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
     for _ in range(max(1, _poisson(lam))):
-        _mutate_once_nv(g)
+        _mutate_once_nv(g, max_telomere=max_telomere)
             # copy a working rule and vary it — how repeated loop motifs arise
             # remove the SMALLEST chromosome (least growth program) — deleting a
             # random one could wipe a large functional module wholesale, which is
@@ -414,7 +437,7 @@ def adaptive_mutation_rate(annealed_rate, stagnation):
 
 
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
-                    mean_mutations=None):
+                    mean_mutations=None, selection=None, ga_config=None):
     """One generation of a steady, exploratory GA — elitism preserves the best,
     the rest are tournament/ε-lexicase parents recombined and mutated, plus a
     few random immigrants that keep exploration alive.
@@ -427,11 +450,16 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     (immigrant + crossover noise is always present), because that herding was the
     artificial convergence being removed."""
     pop = len(population)
+    elite_count = (ELITE_COUNT if ga_config is None else ga_config.elite_count)
+    immigrant_fraction = (IMMIGRANT_FRAC if ga_config is None
+                          else ga_config.immigrant_fraction)
+    tournament_size = (TOURNAMENT_K if ga_config is None
+                       else ga_config.tournament_size)
     if make_genome is None:
         make_genome = random_hex_genome
-    n_elite = ELITE_COUNT if ELITE_COUNT is not None else int(pop * ELITE_FRAC)
+    n_elite = elite_count if elite_count is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
-    n_imm   = min(int(round(pop * IMMIGRANT_FRAC)), pop)
+    n_imm   = min(int(round(pop * immigrant_fraction)), pop)
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]),
                      reverse=True)
@@ -447,16 +475,21 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     new_pop = [make_genome() for _ in range(n_imm)]                  # immigrants
     # ε-lexicase (when selected) must stream over the WHOLE population; the elite-only
     # breeding pool would otherwise mask it whenever elites>0, so bypass the pool then.
-    use_lexicase = (SELECTION == 'lexicase' and case_vecs is not None
+    selection = ((SELECTION if ga_config is None else ga_config.selection)
+                 if selection is None else selection)
+    use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
     if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
-        k = min(TOURNAMENT_K, len(elite))
+        k = min(tournament_size, len(elite))
         elite_parent = lambda: population[max(
             random.sample(elite, k),
             key=lambda i: rank_key(population[i], fitnesses[i]))]
     else:
-        elite_parent = lambda: select_parent(population, fitnesses, case_vecs)
+        elite_parent = lambda: (_lexicase_parent(population, case_vecs)
+                                 if use_lexicase else population[max(
+                                     random.sample(range(pop), min(tournament_size, pop)),
+                                     key=lambda i: rank_key(population[i], fitnesses[i]))])
     residual = order[n_elite:] if n_elite < pop else order
 
     def parent():
@@ -475,12 +508,18 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             chosen = _lexicase_parent(local_pop, local_cases)
             return candidates[next(i for i, genome in enumerate(local_pop)
                                    if genome is chosen)]
-        k = min(TOURNAMENT_K, len(candidates))
+        k = min(tournament_size, len(candidates))
         return max(random.sample(candidates, k),
                    key=lambda i: rank_key(population[i], fitnesses[i]))
 
     def parent_pair():
         def choose(exclude=None):
+            if use_lexicase:
+                # Lexicase must see every specialist. Restricting it to the
+                # scalar elite pool recreates tournament selection and loses
+                # exactly the partial behaviors a curriculum is meant to join.
+                candidates = [i for i in range(pop) if i != exclude]
+                return pick_index(candidates)
             candidates = [i for i in elite_pool if i != exclude]
             exploratory = [i for i in residual if i != exclude]
             if exploratory and random.random() < EXPLORATION_PARENT_FRAC:
@@ -495,20 +534,37 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 
     while len(new_pop) < pop:
         ca, cb = crossover_nv(*parent_pair())
-        new_pop.append(mutate_nv(ca, mean_mutations))
+        new_pop.append(mutate_nv(
+            ca, mean_mutations,
+            max_telomere=(MAX_TELOMERE if ga_config is None
+                          else ga_config.max_telomere)))
         if len(new_pop) < pop:
-            new_pop.append(mutate_nv(cb, mean_mutations))
+            new_pop.append(mutate_nv(
+                cb, mean_mutations,
+                max_telomere=(MAX_TELOMERE if ga_config is None
+                              else ga_config.max_telomere)))
     return new_pop[:pop]
 
 
 # ── main loop (headless; the GUI runs its own equivalent in app.py) ──────────────
 
-def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
+def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
+                   seed=None, seed_genomes=None, selection=None,
+                   return_population=False):
+    # Reproducibility: fitness evaluation is deterministic (grow + score, no RNG),
+    # so seeding the main-process RNG that drives the genetic operators pins the
+    # whole evolutionary trajectory. Pass a seed for any result meant to be re-run.
+    if seed is not None:
+        random.seed(seed)
     make_genome = lambda: random_hex_genome(n_chroms)
-    cache       = {}
+    cache       = LRUCache(FITNESS_CACHE_MAX)
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
     try:                                                       # (avoids per-gen respawn)
-        population  = [make_genome() for _ in range(pop)]
+        # optional WARM START: begin from provided genomes (e.g. a circuit that
+        # already has the easy behaviour) so evolution climbs toward the harder
+        # objective instead of rediscovering the basics from scratch.
+        population  = [clone_genome(g) for g in (seed_genomes or [])][:pop]
+        population += [make_genome() for _ in range(pop - len(population))]
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)
         bi           = max(range(pop),
                            key=lambda i: rank_key(population[i], fitnesses[i]))
@@ -527,7 +583,9 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         for gen in range(generations):
             mut_rate *= MUT_DECAY                                  # anneal: cool down
             mm = adaptive_mutation_rate(mut_rate, stagnation)
-            population = next_population(population, fitnesses, make_genome, cases, mm)
+            population = next_population(
+                population, fitnesses, make_genome, cases, mm,
+                selection=selection)
             fitnesses, cases = eval_batch_cases(population, target, cache, ex)
             gi = max(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]))
@@ -550,6 +608,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             if verbose and gen % 10 == 0:
                 print("%5d  %6.4f  %6.4f  %5.3f" % (gen, best_fitness,
                                                     sum(fitnesses) / pop, mm))
+        if return_population:
+            return (best_genome, best_fitness, population, fitnesses, cases)
         return best_genome, best_fitness
     finally:
         ex.shutdown()
@@ -558,7 +618,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
 # ── diversification: a whole generation of DISTINCT valid solutions ──────────────
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
-              cache=None, executor=None):
+              cache=None, executor=None, should_stop=None, on_progress=None,
+              max_telomere=MAX_TELOMERE):
     """Fill a population with genomes that are BOTH valid (fitness >= `valid`)
     AND genotypically unique (no two share a genome_signature). Starting from the
     valid `seeds`, it walks the NEUTRAL NETWORK — neutral mutation produces a
@@ -571,9 +632,10 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
     are isolated spikes it returns however few exist — an honest ceiling, not a
     monoculture faked with copies."""
     if cache is None:
-        cache = {}
+        cache = LRUCache(FITNESS_CACHE_MAX)
     if batch is None:
         batch = max(48, pop_size)
+    should_stop = should_stop or (lambda: False)
     _eval = lambda gs: eval_batch_cases(gs, target, cache, executor)[0]   # reuse pool
     pool, seen = [], set()
     for g, f in zip(seeds, _eval(list(seeds))):
@@ -582,16 +644,20 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
             pool.append(g); seen.add(s)
     if not pool:
         return pool
-    for _ in range(rounds):
-        if len(pool) >= pop_size:
+    for round_i in range(rounds):
+        if len(pool) >= pop_size or should_stop():
             break
+        if on_progress is not None:
+            on_progress(round_i + 1, rounds, len(pool))
         cands, sigs = [], []
         for _ in range(batch):
-            c = mutate_nv(random.choice(pool))
+            c = mutate_nv(random.choice(pool), max_telomere=max_telomere)
             s = genome_signature(c)
             if s not in seen:                 # reject clones/known genotypes
                 seen.add(s)                   # (invalid ones stay flagged: no re-eval)
                 cands.append(c); sigs.append(s)
+        if should_stop():
+            break
         for c, f in zip(cands, _eval(cands)):
             if f >= valid and len(pool) < pop_size:
                 pool.append(c)

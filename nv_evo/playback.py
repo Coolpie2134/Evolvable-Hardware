@@ -1,18 +1,18 @@
 """
-nv_async_ui.py — asynchronous (continuous-time) pulse playback and a clickable
+nv_evo/playback.py — asynchronous (continuous-time) pulse playback and a clickable
 pulse-timeline, shared by the Interactive and Designer nervous-net views.
 
 The nervous net is a continuous-time, asynchronous element (nv_evo/pulse.py) and
 its fitness now reads real edge timestamps.  These helpers let the GUI DRIVE and
 SHOW it in that same continuous time instead of a synchronous tick lattice:
 
-  * NervousPlayer wraps a PulseSim, injects a schedule of input pulses at their
-    real times, and advances a physical-time cursor via ``advance_to`` — exactly
-    the engine the scorer uses.  It reports which wires are high at the cursor
-    and the real leading-edge times of any cell.  This class has no GUI
-    dependency and is unit-tested.
-  * PulseLaneEditor binds a matplotlib axis to an editable set of input pulses:
-    click a lane to add a pulse (snapped), click a pulse to remove it.  It draws
+  * NervousPlayer wraps the paper-faithful PulseSim, injects pulse intervals at
+    their real times, and advances a physical-time cursor via ``advance_to`` —
+    the same event engine used by Nervous evolution. It reports wire activity
+    and the real leading-edge times of any cell. This class has no GUI
+    dependency.
+  * PulseLaneEditor binds a matplotlib axis to editable input pulses: click for
+    the default width, drag for a custom width, or click one to remove it. It draws
     the lanes and a moving playback cursor.  Both tabs reuse it, so the fiddly
     event wiring lives in one place.
 
@@ -21,8 +21,8 @@ only the nervous net uses this.
 """
 from __future__ import annotations
 
-from nv_evo import pulse as pulse_engine
-from nv_evo.pulse import PulseSim
+from . import pulse as pulse_engine
+from .simulation import create_simulator
 
 DEFAULT_DT      = 0.5     # playback resolution (sub-tick; WIDTH defaults to 1 TICK)
 DEFAULT_HORIZON = 40.0    # physical-time window shown / played
@@ -33,28 +33,42 @@ class NervousPlayer:
     """Continuous-time playback of one grown nervous net (GUI-free, testable)."""
 
     def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
-                 pulse_width=None, max_events=PLAY_MAX_EVENTS):
+                 pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None):
         self.grid    = grid
         self.routing = routing
         self.horizon = float(horizon)
         self.dt      = float(dt)
-        self.pulse_width = (float(pulse_engine.WIDTH) if pulse_width is None
+        self.config = config
+        default_width = (pulse_engine.WIDTH if config is None else config.width)
+        self.pulse_width = (float(default_width) if pulse_width is None
                             else float(pulse_width))
         self.max_events  = max_events
         self.schedule = {}                    # {input_cell: [times]}
         self.reset()
 
     def set_schedule(self, schedule):
-        """schedule: {input_cell: iterable of pulse times}. Rebuilds the run."""
-        self.schedule = {c: sorted(float(t) for t in ts)
-                         for c, ts in schedule.items()}
+        """Set ``{input_cell: pulses}``, where a pulse is ``time`` or
+        ``(time, width)``. The tuple form exposes physical width coding while
+        the scalar form keeps the Designer's quick-click default."""
+        self.schedule = {}
+        for cell, pulses in schedule.items():
+            normalized = []
+            for item in pulses:
+                if isinstance(item, (tuple, list)) and len(item) == 2:
+                    start, width = float(item[0]), float(item[1])
+                else:
+                    start, width = float(item), self.pulse_width
+                normalized.append((start, width))
+            self.schedule[cell] = sorted(normalized)
         self.reset()
 
     def reset(self):
-        self.sim = PulseSim(self.grid, self.routing, max_events=self.max_events)
-        for cell, times in self.schedule.items():
-            for t in times:
-                self.sim.inject_pulse(cell, t, self.pulse_width)
+        self.sim = create_simulator(
+            self.grid, self.routing, max_events=self.max_events,
+            config=self.config)
+        for cell, pulses in self.schedule.items():
+            for start, width in pulses:
+                self.sim.inject_pulse(cell, start, width)
         self.cursor = 0.0
         self.sim.advance_to(0.0)
 
@@ -121,10 +135,13 @@ class PulseLaneEditor:
         self.horizon   = float(horizon)
         self.snap      = float(snap)
         self.on_change = on_change
-        self.pulses    = [[] for _ in self.labels]   # per-input sorted time lists
+        self.pulses    = [[] for _ in self.labels]   # per-input (start, width)
         self.cursor    = 0.0
         self._cursor_artist = None
+        self._drag = None
         self.cid = canvas.mpl_connect('button_press_event', self._on_click)
+        self.release_cid = canvas.mpl_connect(
+            'button_release_event', self._on_release)
 
     def schedule(self, in_cells):
         """Map lane pulses onto their grid cells: {cell: [times]}."""
@@ -132,7 +149,15 @@ class PulseLaneEditor:
                 for i in range(min(len(in_cells), len(self.pulses)))}
 
     def set_pulses(self, pulses):
-        self.pulses = [sorted(float(t) for t in row) for row in pulses]
+        self.pulses = []
+        for row in pulses:
+            normalized = []
+            for item in row:
+                if isinstance(item, (tuple, list)) and len(item) == 2:
+                    normalized.append((float(item[0]), float(item[1])))
+                else:
+                    normalized.append((float(item), float(pulse_engine.WIDTH)))
+            self.pulses.append(sorted(normalized))
         while len(self.pulses) < len(self.labels):
             self.pulses.append([])
         self.draw()
@@ -159,9 +184,34 @@ class PulseLaneEditor:
         if not (0 <= lane < len(self.labels)):
             return
         t = max(0.0, round(ev.xdata / self.snap) * self.snap)
-        if t > self.horizon:
+        if t >= self.horizon:
             return
-        toggle_pulse(self.pulses[lane], t, self.snap)
+        existing = next(((start, width) for start, width in self.pulses[lane]
+                         if start - self.snap * 0.75 <= t
+                         <= start + width + self.snap * 0.75), None)
+        if existing is not None:
+            self.pulses[lane].remove(existing)
+            self.draw()
+            if self.on_change:
+                self.on_change()
+            return
+        self._drag = (lane, t)
+
+    def _on_release(self, ev):
+        if self._drag is None:
+            return
+        lane, start = self._drag
+        self._drag = None
+        end = start
+        if ev.inaxes is self.ax and ev.xdata is not None and ev.ydata is not None:
+            release_lane = int(round(ev.ydata))
+            if release_lane == lane:
+                end = max(0.0, round(ev.xdata / self.snap) * self.snap)
+        width = (end - start if end > start + self.snap * 0.5
+                 else float(pulse_engine.WIDTH))
+        width = max(self.snap, min(width, self.horizon - start))
+        self.pulses[lane].append((start, width))
+        self.pulses[lane].sort()
         self.draw()
         if self.on_change:
             self.on_change()
@@ -176,13 +226,16 @@ class PulseLaneEditor:
         ax.set_yticklabels(self.labels, fontsize=8)
         ax.set_xlabel('continuous time (tick units)', fontsize=8)
         ax.tick_params(labelsize=7)
-        ax.set_title('input pulses — click a lane to add / remove an edge',
+        ax.set_title('input pulses — click for default width; drag for custom width',
                      fontsize=8)
         for lane in range(len(self.labels)):
             ax.axhline(lane, color='#e6e6e6', lw=0.6, zorder=0)
-            for p in self.pulses[lane]:
-                ax.plot([p], [lane], marker='|', ms=15, mew=2.4,
-                        color='#b02020', zorder=3)
+            for start, width in self.pulses[lane]:
+                ax.plot([start, start + width], [lane, lane], lw=5,
+                        solid_capstyle='butt', color='#b02020', zorder=3)
+                ax.plot([start, start + width], [lane, lane], marker='|',
+                        ls='none', ms=12, mew=1.5,
+                        color='#7c1010', zorder=4)
         self._cursor_artist = ax.axvline(
             self.cursor, color='#e8a33d', lw=1.5, alpha=0.9, zorder=2)
         self.canvas.draw_idle()
@@ -190,5 +243,6 @@ class PulseLaneEditor:
     def disconnect(self):
         try:
             self.canvas.mpl_disconnect(self.cid)
+            self.canvas.mpl_disconnect(self.release_cid)
         except Exception:
             pass
