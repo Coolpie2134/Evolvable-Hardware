@@ -20,11 +20,10 @@ reconstruction runs in three stages:
      self bit separates the two kinds, so each cell's genes win its own lookups
      at Hamming distance 0. This is exact when the ideal trajectory is realised.
 
-  1b. MULTI-STEP REPLAY (_collect_multistep_rules). When identical circuit
-      contexts request different final selectors, emit a shared temporary
-      4-bit selector. As the frontier grows, differing neighbourhoods can then
-      differentiate those circuits. The three results are packed back into the
-      tile phenotype after every synthesized step.
+  1b. MULTI-STEP REPLAY (_collect_multistep_rules). When identical birth
+      contexts request different final states, birth a shared temporary state.
+      As the frontier grows, differing neighbourhoods can then differentiate
+      those cells using the existing 5-bit state vocabulary.
 
   2. BOUNDARY SEAL (_boundary_seals). The genes above are position-blind, so
      they also fire at frontier positions OUTSIDE the target. Pin a suppressor
@@ -51,44 +50,21 @@ Entry point: grid_to_genome_nervous(grid, seeds) -> (genome, report).
 from __future__ import annotations
 from collections import deque
 
-from .genome import (HexGene, Chromosome, Genome, MAX_STATE, MAX_TELOMERE,
+from .genome import (HexGene, Chromosome, Genome, MAX_TELOMERE,
                      germline_telomere)
-from .hexgrid import (DIRECTIONS, developmental_context,
-                      hex_dirs, hex_frontier_cells, pack_tile_state,
-                      unpack_tile_state)
+from .hexgrid import hex_dirs, hex_frontier_cells
 from .nervous import grow_nervous, SEED_STATE
 
 
-_DIRS = DIRECTIONS
+_DIRS = ('L', 'R', 'D')
 
 
-def _ctx(grid, x, y, output_direction='D'):
-    """Return one output circuit's rotated 4-bit developmental context.
-
-    ``grid`` always contains packed 12-bit tile words.  Extracting a circuit
-    through :func:`developmental_context` is essential here: masking the tile
-    word itself to four bits would silently discard its R and D circuits.
-    """
-    return developmental_context(grid, (x, y), output_direction)
-
-
-def _selector_items(tile_state):
-    """Yield ``(direction, selector)`` pairs from one packed phenotype tile."""
-    return zip(_DIRS, unpack_tile_state(tile_state))
-
-
-def _record_rule(table, key, output, conflicts, conflict_key=None):
-    """Keep the first deterministic rule and expose incompatible requests."""
-    output = int(output)
-    if not 0 <= output < MAX_STATE:
-        raise ValueError('reverse rule output must be a 4-bit circuit state')
-    old = table.get(key)
-    if old is not None and old != output:
-        ckey = key if conflict_key is None else conflict_key
-        conflicts.setdefault(ckey, {old}).add(output)
-        return False
-    table.setdefault(key, output)
-    return old is None
+def _ctx(grid, x, y):
+    """The (L, R, D) neighbour context of cell (x, y) in `grid` (0 = empty)."""
+    nb = hex_dirs(x, y)
+    return (grid.get(nb['L'], 0) & 0x1F,
+            grid.get(nb['R'], 0) & 0x1F,
+            grid.get(nb['D'], 0) & 0x1F)
 
 
 def _collect_contexts(grid, seeds, L):
@@ -107,19 +83,13 @@ def _collect_contexts(grid, seeds, L):
     conflicts reported are genuine substrate ambiguities (one context, two
     demanded states). Returns (growth, maint, conflicts, reached)."""
     growth, maint, conflicts = {}, {}, {}
-    seedset = set(seeds)
     organism = {s: SEED_STATE for s in seeds}   # grow pins seeds to SEED_STATE
     tel = {s: L for s in seeds}
     for _ in range(3 * L + 6):
-        # Log one hold rule for each independently developed core circuit. Seeds
-        # are pinned after every step, so their lookup results need no rule.
-        for (x, y), tile_state in organism.items():
-            if (x, y) in seedset:
-                continue
-            for direction, selector in _selector_items(tile_state):
-                cl, cr, cd = _ctx(organism, x, y, direction)
-                key = (cl, cr, cd, selector)
-                _record_rule(maint, key, selector, conflicts, key)
+        # log the hold context every live cell currently presents
+        for (x, y), s in organism.items():
+            cl, cr, cd = _ctx(organism, x, y)
+            maint[(cl, cr, cd, s)] = s
         # parallel division into empty target frontier cells (Hayflick-gated)
         frontier = {}
         for (x, y) in organism:
@@ -133,13 +103,13 @@ def _collect_contexts(grid, seeds, L):
                               if nb[d] in organism), default=0)
             if parent_tel <= 0:
                 continue
-            tile_state = grid[(x, y)]
-            for direction, selector in _selector_items(tile_state):
-                cl, cr, cd = _ctx(organism, x, y, direction)
-                key = (cl, cr, cd)
-                _record_rule(growth, key, selector, conflicts,
-                             (cl, cr, cd, 0))
-            births[(x, y)] = (tile_state, parent_tel - 1)
+            cl, cr, cd = _ctx(organism, x, y)
+            s = grid[(x, y)]
+            if (cl, cr, cd) in growth and growth[(cl, cr, cd)] != s:
+                conflicts.setdefault((cl, cr, cd), {growth[(cl, cr, cd)]}).add(s)
+            else:
+                growth.setdefault((cl, cr, cd), s)
+            births[(x, y)] = (s, parent_tel - 1)
         if not births:
             break
         for pos, (s, t) in births.items():
@@ -148,27 +118,23 @@ def _collect_contexts(grid, seeds, L):
         for s in seeds:                       # seeds stay pinned to SEED_STATE
             organism[s] = SEED_STATE
             tel.setdefault(s, L)
-    # A zero-valued circuit in a live tile and an unborn circuit both have
-    # self_in=0. Report clashes between their hold and birth requests too.
-    for context, output in growth.items():
-        key = (*context, 0)
-        if key in maint and maint[key] != output:
-            conflicts.setdefault(key, {output}).add(maint[key])
     return growth, maint, conflicts, set(organism)
 
 
 def _collect_multistep_rules(grid, seeds, L):
-    """Synthesize a deterministic circuit trajectory with temporary selectors.
+    """Synthesize a deterministic trajectory that may use temporary states.
 
-    Requests are grouped by one circuit's ``(L,R,D,self)`` lookup key.  Every
-    chosen result is a 4-bit selector; the L/R/D results for a position are then
-    packed into its 12-bit phenotype tile before the next replay step.  A
-    timeless rule is never rewritten merely because a later step wants another
-    result.
+    When several cells have the same complete lookup context but need different
+    final states, direct replay cannot birth them differently.  Give the group a
+    shared nonzero intermediate state instead.  On later steps their growing
+    neighbourhoods may differ, producing distinct contexts that can transition
+    to the requested final states without adding coordinates or widening the
+    substrate.  Previously recorded rules are immutable: asking one timeless
+    context to change its output later would only fake a clock.
 
     Returns ``(rules, seals, reached, collisions, temporary_states)`` where each
-    rule maps a four-selector context to one selector and seals contain rotated
-    empty-circuit contexts seen just outside the target trajectory.
+    rule maps ``(L,R,D,self) -> next_state`` and seals are empty-cell contexts
+    observed outside the target during the synthesized trajectory.
     """
     seedset = set(seeds)
     organism = {s: SEED_STATE for s in seeds}
@@ -178,18 +144,10 @@ def _collect_multistep_rules(grid, seeds, L):
     collisions = {}
     reached = set(organism)
 
-    target_selectors = {
-        selector
-        for tile_state in grid.values()
-        for selector in unpack_tile_state(tile_state)
-        if selector
-    }
-    seed_selectors = set(unpack_tile_state(SEED_STATE))
-    token_pool = ([selector for selector in range(1, MAX_STATE)
-                   if selector not in target_selectors
-                   and selector not in seed_selectors]
-                  + [selector for selector in range(1, MAX_STATE)
-                     if selector not in seed_selectors])
+    target_states = {state for state in grid.values() if state}
+    token_pool = ([s for s in range(1, 32)
+                   if s not in target_states and s != SEED_STATE]
+                  + [s for s in range(2, 32)])
     token_for = {}
 
     for _ in range(3 * L + 6):
@@ -197,17 +155,12 @@ def _collect_multistep_rules(grid, seeds, L):
         # born. Seeds are pinned after lookup and need no rule of their own.
         groups = {}
         next_tel = {}
-        for (x, y), tile_state in organism.items():
+        for (x, y), state in organism.items():
             if (x, y) in seedset:
                 continue
-            desired_tile = grid[(x, y)]
-            desired_selectors = unpack_tile_state(desired_tile)
-            for (direction, self_selector), desired in zip(
-                    _selector_items(tile_state), desired_selectors):
-                cl, cr, cd = _ctx(organism, x, y, direction)
-                key = (cl, cr, cd, self_selector)
-                groups.setdefault(key, []).append(
-                    (((x, y), direction), desired))
+            cl, cr, cd = _ctx(organism, x, y)
+            key = (cl, cr, cd, state)
+            groups.setdefault(key, []).append(((x, y), grid[(x, y)]))
             next_tel[(x, y)] = tel.get((x, y), 0)
 
         frontier = set()
@@ -220,24 +173,19 @@ def _collect_multistep_rules(grid, seeds, L):
                               if nb[d] in organism), default=0)
             if parent_tel <= 0:
                 continue
+            cl, cr, cd = _ctx(organism, x, y)
             if (x, y) in grid:
-                for direction, desired in _selector_items(grid[(x, y)]):
-                    cl, cr, cd = _ctx(organism, x, y, direction)
-                    key = (cl, cr, cd, 0)
-                    groups.setdefault(key, []).append(
-                        (((x, y), direction), desired))
+                key = (cl, cr, cd, 0)
+                groups.setdefault(key, []).append(((x, y), grid[(x, y)]))
                 next_tel[(x, y)] = parent_tel - 1
             else:
-                for direction in _DIRS:
-                    seals.add(_ctx(organism, x, y, direction))
+                seals.add((cl, cr, cd))
 
-        circuit_outputs = {}
+        outputs = {}
         for key, requests in groups.items():
-            desired = {selector for _channel, selector in requests}
+            desired = {state for _pos, state in requests}
             if key in rules:
                 out = rules[key]
-                if any(selector != out for selector in desired):
-                    collisions.setdefault(key, {out}).update(desired)
             elif len(desired) == 1:
                 out = next(iter(desired))
                 rules[key] = out
@@ -247,25 +195,14 @@ def _collect_multistep_rules(grid, seeds, L):
                 unavailable = desired | {0}
                 out = token_for.get(token_key)
                 if out is None:
-                    # If every non-seed selector is unavailable, fall back to
-                    # the seed *circuit* selector (normally 1), never the packed
-                    # 12-bit SEED_STATE tile word.
-                    fallback = next(iter(seed_selectors), 1)
                     out = next((state for state in token_pool
-                                if state not in unavailable), fallback)
+                                if state not in unavailable), SEED_STATE)
                     token_for[token_key] = out
                 rules[key] = out
-            for channel, _desired in requests:
-                circuit_outputs[channel] = out
+            for pos, _desired in requests:
+                outputs[pos] = out
 
-        positions = {pos for pos, _direction in circuit_outputs}
-        nxt = {}
-        for pos in positions:
-            tile_state = pack_tile_state(*(
-                circuit_outputs.get((pos, direction), 0)
-                for direction in _DIRS))
-            if tile_state:
-                nxt[pos] = tile_state
+        nxt = {pos: state for pos, state in outputs.items() if state}
         nxt_tel = {pos: next_tel.get(pos, 0) for pos in nxt}
         for seed in seeds:
             nxt[seed] = SEED_STATE
@@ -310,10 +247,9 @@ def _boundary_seals(grid, seeds, wanted_births):
         for nb in hex_frontier_cells(x, y):
             if nb in grid or nb in seedset:
                 continue
-            for direction in _DIRS:
-                context = _ctx(grid, *nb, direction)
-                if context not in wanted_births:
-                    seals.add(context)
+            cl, cr, cd = _ctx(grid, *nb)
+            if (cl, cr, cd) not in wanted_births:
+                seals.add((cl, cr, cd))
     return seals
 
 
@@ -327,9 +263,8 @@ def repair_genome_nervous(source_genome, target_grid, seeds, repair_rounds=24):
     were unchanged by the user outranks satisfying edits, so reconciliation can
     never silently trade away working circuitry to improve the headline count.
     """
-    target = {tuple(pos): int(state) for pos, state in target_grid.items()}
-    for state in target.values():
-        unpack_tile_state(state)  # validate, never truncate a corrupt tile word
+    target = {tuple(pos): int(state) & 0x1F
+              for pos, state in target_grid.items()}
     seeds = tuple(tuple(seed) for seed in seeds)
     baseline = grow_nervous(source_genome, seeds=seeds)
     unchanged = {pos for pos, state in target.items()
@@ -344,11 +279,8 @@ def repair_genome_nervous(source_genome, target_grid, seeds, repair_rounds=24):
         if not patch_map:
             genome = source_genome
         else:
-            repair_genes = list(patch_map.values())
             repair_chrom = Chromosome(
-                genes=repair_genes,
-                split=(0 if len(repair_genes) < 2 else len(repair_genes) // 2),
-                tag=-1, telomere=L)
+                genes=list(patch_map.values()), split=0, tag=-1, telomere=L)
             genome = Genome(chromosomes=[repair_chrom]
                             + list(source_genome.chromosomes),
                             tag=source_genome.tag)
@@ -379,27 +311,18 @@ def repair_genome_nervous(source_genome, target_grid, seeds, repair_rounds=24):
         added = False
         # Desired live cells take precedence over suppressors if one position-
         # blind context is shared by an addition and a deletion.
-        for pos, desired_tile in target.items():
-            actual_tile = grown.get(pos, 0)
-            if actual_tile == desired_tile or pos in seeds:
+        for pos, desired in target.items():
+            actual = grown.get(pos)
+            if actual == desired:
                 continue
-            actual_selectors = unpack_tile_state(actual_tile)
-            desired_selectors = unpack_tile_state(desired_tile)
-            for (direction, self_in), desired in zip(
-                    zip(_DIRS, actual_selectors), desired_selectors):
-                if self_in == desired:
-                    continue
-                cl, cr, cd = _ctx(grown, *pos, direction)
-                added |= request((cl, cr, cd, self_in), desired)
+            cl, cr, cd = _ctx(grown, *pos)
+            self_in = 0 if actual is None else (actual & 0x1F)
+            added |= request((cl, cr, cd, self_in), desired)
         for pos in extras:
-            for direction, actual in _selector_items(grown[pos]):
-                cl, cr, cd = _ctx(grown, *pos, direction)
-                if actual:
-                    # Remove only this core circuit; all three must be zero
-                    # before the packed phenotype tile disappears.
-                    added |= request((cl, cr, cd, actual), 0)
-                # The same direction is independently queried on rebirth.
-                added |= request((cl, cr, cd, 0), 0)
+            actual = grown[pos] & 0x1F
+            cl, cr, cd = _ctx(grown, *pos)
+            added |= request((cl, cr, cd, actual), 0)  # remove this live extra
+            added |= request((cl, cr, cd, 0), 0)       # suppress its rebirth
         if not added:
             break
         current = candidate()
@@ -452,11 +375,7 @@ def grid_to_genome_nervous(grid, seeds, telomere_cap=MAX_TELOMERE,
         exact                True iff the grown grid equals the target exactly
         grown                the verifying grown grid (dict)
     """
-    # The phenotype remains one packed L/R/D tile word.  Only individual gene
-    # fields are 4-bit; never truncate a target tile to its low nibble here.
-    grid = {tuple(p): int(s) for p, s in grid.items()}
-    for state in grid.values():
-        unpack_tile_state(state)  # validate, never truncate a corrupt tile word
+    grid = {tuple(p): (s & 0x1F) for p, s in grid.items()}
     seeds = [tuple(s) for s in seeds]
     seedset = set(seeds)
     report = {'backend': 'nervous'}
@@ -486,24 +405,20 @@ def grid_to_genome_nervous(grid, seeds, telomere_cap=MAX_TELOMERE,
     # then any target cell the replay never reached is unreachable this way
     growth, maint, conflicts, reached = _collect_contexts(grid, seeds, L)
     direct_reached = reached
-    direct_wanted = {context for context, output in growth.items() if output}
+    direct_wanted = set(growth)                   # contexts that must birth a live cell
 
     # base genome: growth genes birth each cell, boundary seals stop the spill,
     # maintenance genes hold the fixed point. Patches (below) are PREPENDED so an
     # exact (Hamming-0) patch always wins the min-Hamming lookup.
     direct_base = (
-        [HexGene(cl, cr, cd, 0, selector)
-         for (cl, cr, cd), selector in growth.items()]
+        [HexGene(cl, cr, cd, 0, s) for (cl, cr, cd), s in growth.items()]
         + [HexGene(cl, cr, cd, 0, 0)
            for (cl, cr, cd) in _boundary_seals(grid, seeds, direct_wanted)]
-        + [HexGene(cl, cr, cd, self_in, selector)
-           for (cl, cr, cd, self_in), selector in maint.items()
-           # A birth rule has priority when an all-zero selector inside a live
-           # tile presents the same key as an unborn output circuit.
-           if not (self_in == 0 and (cl, cr, cd) in growth)])
+        + [HexGene(cl, cr, cd, s, s) for (cl, cr, cd, s) in maint])
 
-    # Alternative synthesis: use shared temporary 4-bit circuit selectors for
-    # ambiguous lookups, then repack the three outputs before every next step.
+    # Alternative synthesis: use shared temporary states for ambiguous births,
+    # then differentiate after their neighbourhoods diverge. It uses the same
+    # 5-bit state vocabulary and the same forward growth engine.
     (multi_rules, trajectory_seals, multi_reached, multi_collisions,
      temporary_states) = _collect_multistep_rules(grid, seeds, L)
     multi_wanted = {key[:3] for key, out in multi_rules.items()
@@ -516,10 +431,8 @@ def grid_to_genome_nervous(grid, seeds, telomere_cap=MAX_TELOMERE,
                      for cl, cr, cd in multi_seals])
 
     def evaluate(base, patches=()):
-        genes = list(patches) + base
-        genome = Genome(chromosomes=[Chromosome(
-            genes=genes, split=(0 if len(genes) < 2 else len(genes) // 2),
-            tag=1, telomere=L)], tag=1)
+        genome = Genome(chromosomes=[Chromosome(genes=list(patches) + base, split=0,
+                                                tag=1, telomere=L)], tag=1)
         grown = grow_nervous(genome, seeds=tuple(seeds))
         matched = sum(1 for p, s in grid.items() if grown.get(p) == s)
         extras = [p for p in grown if p not in grid]
@@ -539,34 +452,22 @@ def grid_to_genome_nervous(grid, seeds, telomere_cap=MAX_TELOMERE,
         for _ in range(repair_rounds):
             seen = {(g.ctx_l, g.ctx_r, g.ctx_d, g.self_in) for g in patches}
             add = []
-            for p, target_tile in grid.items():
-                actual_tile = grown.get(p, 0)
-                if actual_tile == target_tile or p in seedset:
+            for p, state in grid.items():
+                actual = grown.get(p)
+                if actual == state:
                     continue
-                actual_selectors = unpack_tile_state(actual_tile)
-                target_selectors = unpack_tile_state(target_tile)
-                for (direction, self_in), output in zip(
-                        zip(_DIRS, actual_selectors), target_selectors):
-                    if self_in == output:
-                        continue
-                    cl, cr, cd = _ctx(grown, *p, direction)
-                    key = (cl, cr, cd, self_in)
-                    if key not in seen:
-                        add.append(HexGene(cl, cr, cd, self_in, output))
-                        seen.add(key)
+                cl, cr, cd = _ctx(grown, *p)
+                self_in = 0 if actual is None else (actual & 0x1F)
+                key = (cl, cr, cd, self_in)
+                if key not in seen:
+                    add.append(HexGene(cl, cr, cd, self_in, state))
+                    seen.add(key)
             for p in extras:
-                for direction, actual in _selector_items(grown[p]):
-                    cl, cr, cd = _ctx(grown, *p, direction)
-                    if actual:
-                        kill_key = (cl, cr, cd, actual)
-                        if kill_key not in seen:
-                            add.append(HexGene(*kill_key, 0))
-                            seen.add(kill_key)
-                    birth_key = (cl, cr, cd, 0)
-                    if ((cl, cr, cd) not in wanted
-                            and birth_key not in seen):
-                        add.append(HexGene(*birth_key, 0))
-                        seen.add(birth_key)
+                cl, cr, cd = _ctx(grown, *p)
+                key = (cl, cr, cd, 0)
+                if (cl, cr, cd) not in wanted and key not in seen:
+                    add.append(HexGene(cl, cr, cd, 0, 0))
+                    seen.add(key)
             if not add:
                 break
             patches += add

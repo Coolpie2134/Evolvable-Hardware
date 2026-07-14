@@ -28,10 +28,6 @@ excitatory inputs. Every leading edge is retained in ``rise_times`` for
 continuous-time fitness; wires are also sampled once per TICK for playback and
 legacy persistence-window targets.
 
-``PulseSim`` is the generic one-wire event primitive. ``DirectionalPulseSim``
-expands every grown paper tile into three such wires (L/R/D), resolving each
-input to the facing directional circuit on the neighbouring tile.
-
 With the default constants (DELAY = WIDTH = TICK, COINC < TICK) behaviour on
 the integer tick lattice matches the earlier synchronous engine — that engine
 was the quantization of this one. The constants can now be varied to study
@@ -41,8 +37,7 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass
 
-from .hexgrid import (hex_dirs, DIRECTIONS, tile_channel, tile_channels,
-                      is_channel, expand_directional_routing)
+from .hexgrid import hex_dirs
 
 # Backward-compatible defaults. New runs carry an immutable PulseConfig instead
 # of mutating these module values or relying on worker-process environments.
@@ -78,8 +73,7 @@ class PulseSim:
     their wire has pulsed at all (the combinational "did it fire" read-out).
     """
 
-    def __init__(self, grid, routing, max_events=None, config=None,
-                 resolved_sources=False):
+    def __init__(self, grid, routing, max_events=None, config=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or PulseConfig()
@@ -93,13 +87,10 @@ class PulseSim:
                 continue
             e1, e2, i1 = entry[0], entry[1], entry[2]
             self.op[v] = entry[3] if len(entry) > 3 else 'and'
-            if resolved_sources:
-                s1, s2, si = e1, e2, i1
-            else:
-                nb = hex_dirs(*v)
-                s1 = nb[e1] if e1 is not None else None
-                s2 = nb[e2] if e2 is not None else None
-                si = nb[i1] if i1 is not None else None
+            nb = hex_dirs(*v)
+            s1 = nb[e1] if e1 is not None else None
+            s2 = nb[e2] if e2 is not None else None
+            si = nb[i1] if i1 is not None else None
             self.src[v] = (s1, s2, si)
             for s in {s1, s2}:
                 if s is not None and s in self.watch:
@@ -231,91 +222,3 @@ class PulseSim:
         self._run_until(sample_t)
         self._tick += 1
         return {c: (1 if self._high(c, sample_t) else 0) for c in self.grid}
-
-
-class DirectionalPulseSim:
-    """Paper tile facade over the generic event engine.
-
-    A grown tile owns three distinct output wires, keyed ``(x, y, 'L'|'R'|'D')``.
-    Every routed input reads the *facing* output circuit on its neighbour.  For
-    backward-compatible target definitions an external stimulus addressed to a
-    tile coordinate is a perimeter transducer and drives all three circuits on
-    that input tile; callers may address one channel explicitly when desired.
-
-    Activity/event dictionaries contain exact channel keys plus aggregate tile
-    keys.  Scoring reads channels; the aggregate keys keep existing canvases and
-    input displays useful without pretending that the three wires are one net.
-    """
-
-    def __init__(self, grid, routing, max_events=None, config=None):
-        self.grid = grid
-        self.routing = routing
-        self.config = config or PulseConfig()
-        wire_grid = {tile_channel(pos, direction): state
-                     for pos, state in grid.items() for direction in DIRECTIONS}
-        resolved = expand_directional_routing(grid, routing)
-        self._sim = PulseSim(
-            wire_grid, resolved, max_events=max_events, config=self.config,
-            resolved_sources=True)
-
-    def _targets(self, cell):
-        return (tuple(cell),) if is_channel(cell) else tile_channels(cell)
-
-    def inject_pulse(self, cell, t, width=None):
-        for wire in self._targets(cell):
-            self._sim.inject_pulse(wire, t, width)
-
-    def advance_to(self, when):
-        self._sim.advance_to(when)
-
-    @staticmethod
-    def _tile_activity(channel_values, grid):
-        return {pos: int(any(channel_values.get(wire, 0)
-                            for wire in tile_channels(pos)))
-                for pos in grid}
-
-    def activity_at(self, when):
-        channels = self._sim.activity_at(when)
-        mixed = dict(channels)
-        mixed.update(self._tile_activity(channels, self.grid))
-        return mixed
-
-    def step(self, input_vals):
-        expanded = {}
-        for cell, bit in input_vals.items():
-            for wire in self._targets(cell):
-                expanded[wire] = bit
-        channels = self._sim.step(expanded)
-        mixed = dict(channels)
-        mixed.update(self._tile_activity(channels, self.grid))
-        return mixed
-
-    @property
-    def ever(self):
-        channels = dict(self._sim.ever)
-        mixed = dict(channels)
-        mixed.update(self._tile_activity(channels, self.grid))
-        return mixed
-
-    @property
-    def rise_times(self):
-        channels = {wire: list(times)
-                    for wire, times in self._sim.rise_times.items()}
-        tiles = {}
-        for pos in self.grid:
-            # Simultaneous sensory broadcast is one aggregate edge.  These tile
-            # timestamps are display compatibility only; exact scoring always
-            # selects one of the channel lists above.
-            merged = {t for wire in tile_channels(pos)
-                      for t in channels.get(wire, ())}
-            tiles[pos] = sorted(merged)
-        channels.update(tiles)
-        return channels
-
-    @property
-    def overflow(self):
-        return self._sim.overflow
-
-    @property
-    def event_count(self):
-        return self._sim.event_count

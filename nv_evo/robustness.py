@@ -24,7 +24,6 @@ from __future__ import annotations
 from . import pulse
 from . import simulation as ae
 from .nervous import grow_nervous, interpret_nervous
-from .hexgrid import channel_tile, normalize_output_channel
 from .temporal import _obs_len
 
 # ── predeclared scoring constants (a state-1 hold rings with period ~D+W) ────────
@@ -283,8 +282,7 @@ def semantic_trial_scores(genome, target, fitted, schedules):
                         grid_size=target.grid_size, iters=target.iters)
     routing, in_pos, _ = interpret_nervous(grid, target)
     cell = fitted.output_positions[target.outputs[0].role]
-    cell = normalize_output_channel(grid, cell)
-    if cell is None or channel_tile(cell) not in grid:
+    if cell not in grid:
         return [0.0] * len(schedules)
     offset = total_offset(target, fitted)
     # Judge over the TRAINED observation window (_obs_len): this is a JITTER-

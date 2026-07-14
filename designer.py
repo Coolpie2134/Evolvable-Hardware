@@ -9,8 +9,9 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     is exact and deterministic.
   * the CIRCUIT (the organism): the working grid itself is a first-class,
     directly editable artifact — place/delete cells, set each nv cell's
-    three independent 4-bit Figure-3 routing configurations (one L/R/D output circuit;
-    neighbours resolved through hex_dirs so parity is honest) or a LUT cell's four directional
+    routing state (the 32-entry ROUTING_HEX vocabulary: 0-15 AND, 16-31 OR;
+    neighbours resolved
+    through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
     output roles. Both PulseSim and LutSim run on a bare grid, so a
     hand-built circuit needs NO genome to be simulated or scored. The nervous
@@ -52,16 +53,10 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Circle, Rectangle, Patch
 from matplotlib.lines import Line2D
 
-from nv_evo.hexgrid import (hex_dirs, hex_pixel, PAPER_ROUTING,
-                            DIRECTIONS, GENOME_ENCODING, TILE_ENCODING,
-                            CIRCUIT_STATE_COUNT,
-                            pack_tile_state,
-                            unpack_tile_state, promote_legacy_state,
-                            decode_tile_routing, channel_tile, tile_channel,
-                            normalize_output_channel, facing_channel)
+from nv_evo.hexgrid import hex_dirs, hex_pixel, ROUTING_HEX
 from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGenome,
                            random_hex_gene, random_hex_genome,
-                           MAX_TELOMERE as NV_MAX_TEL)
+                           MAX_STATE, MAX_TELOMERE as NV_MAX_TEL)
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, SEED_STATE as NV_SEED_STATE)
 from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
@@ -76,7 +71,7 @@ from nv_evo.temporal import (run_nervous_events,
                              trial_input_summary, expected_window_summary,
                              event_list_summary, period_stepper_score)
 from nv_evo.targets import TEMPORAL_TARGETS
-from nv_evo.viz import draw_hex_net, channel_pixel
+from nv_evo.viz import draw_hex_net
 
 from lut_evo.genome import (LutGene, Chromosome as LutChromosome, Genome as LutGenome,
                             random_lut_gene, MAX_TELOMERE as LUT_MAX_TEL)
@@ -99,22 +94,6 @@ _NV_GENE_FIELDS  = ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out')
 _LUT_GENE_FIELDS = ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out')
 _LUT_DIRS        = ('N', 'S', 'E', 'W')        # grid tuple order (Ln, Ls, Le, Lw)
 _GENE_ROW_CAP    = 40      # widget rows per chromosome (evolved LUT genomes can be huge)
-
-
-def _valid_split(genes, value):
-    count = len(genes)
-    return 0 if count < 2 else max(1, min(int(value), count - 1))
-
-
-def _nv_routing(grid):
-    return {pos: decode_tile_routing(state) for pos, state in grid.items()}
-
-
-def _output_is_live(grid, pos, backend):
-    if not pos:
-        return False
-    return (channel_tile(pos) in grid if backend == 'nervous'
-            else pos in grid)
 
 
 class _Tip:
@@ -155,25 +134,12 @@ DESIGN_FORMAT = 'evohw-design-v1'
 
 def _genome_to_dict(genome, backend):
     fields = _NV_GENE_FIELDS if backend == 'nervous' else _LUT_GENE_FIELDS
-
-    def gene_row(gene):
-        values = [int(getattr(gene, field)) for field in fields]
-        if backend == 'nervous' and any(
-                not 0 <= value < CIRCUIT_STATE_COUNT for value in values):
-            raise ValueError(
-                'nervous genome fields must be 4-bit circuit states (0..15)')
-        return values
-
-    document = {'tag': genome.tag,
-                'gene_fields': list(fields),
-                'chromosomes': [{'tag': c.tag,
-                                 'split': _valid_split(c.genes, c.split),
-                                 'telomere': getattr(c, 'telomere', None),
-                                 'genes': [gene_row(g) for g in c.genes]}
-                                for c in genome.chromosomes]}
-    if backend == 'nervous':
-        document['state_encoding'] = GENOME_ENCODING
-    return document
+    return {'tag': genome.tag,
+            'gene_fields': list(fields),
+            'chromosomes': [{'tag': c.tag, 'split': c.split,
+                             'telomere': getattr(c, 'telomere', None),
+                             'genes': [[getattr(g, f) for f in fields] for g in c.genes]}
+                            for c in genome.chromosomes]}
 
 
 def _genome_from_dict(d, backend):
@@ -182,24 +148,10 @@ def _genome_from_dict(d, backend):
     else:
         Gene, Chrom, Gen, fields = LutGene, LutChromosome, LutGenome, _LUT_GENE_FIELDS
     fields = tuple(d.get('gene_fields') or fields)
-    encoding = d.get('state_encoding') if backend == 'nervous' else None
-    if backend == 'nervous':
-        from evo_runtime.checkpoint import _nervous_gene_rows
     chroms = []
     for c in d['chromosomes']:
-        genes = []
-        for row in c['genes']:
-            values = [int(v) for v in row]
-            rows = (_nervous_gene_rows(values, encoding)
-                    if backend == 'nervous' else [values])
-            genes.extend(Gene(**{f: v for f, v in zip(fields, migrated)})
-                         for migrated in rows)
-        raw_split = int(c.get('split', 0))
-        if backend == 'nervous' and encoding == TILE_ENCODING:
-            raw_split *= 3
-        kw = {'genes': genes,
-              'split': _valid_split(genes, raw_split),
-              'tag': int(c.get('tag', 0))}
+        genes = [Gene(**{f: int(v) for f, v in zip(fields, row)}) for row in c['genes']]
+        kw = {'genes': genes, 'split': int(c.get('split', 0)), 'tag': int(c.get('tag', 0))}
         if c.get('telomere') is not None:
             kw['telomere'] = int(c['telomere'])
         chroms.append(Chrom(**kw))
@@ -208,25 +160,15 @@ def _genome_from_dict(d, backend):
 
 def _grid_to_dict(grid, backend):
     if backend == 'nervous':
-        for state in grid.values():
-            unpack_tile_state(state)  # validate the packed phenotype word
         return {'%d,%d' % p: int(s) for p, s in grid.items()}
     return {'%d,%d' % p: [int(v) for v in s] for p, s in grid.items()}
 
 
-def _grid_from_dict(d, backend, state_encoding=None):
+def _grid_from_dict(d, backend):
     out = {}
     for k, v in d.items():
         x, y = (int(n) for n in k.split(','))
-        if backend == 'nervous':
-            state = int(v)
-            if state_encoding != TILE_ENCODING:
-                state = promote_legacy_state(state)
-            else:
-                unpack_tile_state(state)  # validate current packed encoding
-            out[(x, y)] = state
-        else:
-            out[(x, y)] = tuple(int(n) for n in v)
+        out[(x, y)] = int(v) if backend == 'nervous' else tuple(int(n) for n in v)
     return out
 
 
@@ -253,10 +195,7 @@ def read_saved_file(path):
         return {'best_genome': genome, 'best_fitness': doc.get('fitness', 0.0),
                 'target': target, 'target_name': name, 'arch': None, 'seed': None,
                 'backend': backend, 'hand_built': True,
-                'grid': _grid_from_dict(
-                    doc.get('grid', {}), backend,
-                    doc.get('state_encoding') or
-                    (doc.get('genome') or {}).get('state_encoding')),
+                'grid': _grid_from_dict(doc.get('grid', {}), backend),
                 'in_pos': [tuple(p) for p in doc.get('inputs', [])],
                 'out_pos': {r: tuple(p) for r, p in (doc.get('outputs') or {}).items()},
                 'grid_edited': doc.get('grid_edited', True)}
@@ -265,8 +204,11 @@ def read_saved_file(path):
 
 
 def _route_text(idx, x, y):
-    """One paper Figure-3 configuration with resolved E1/E2/I1 labels."""
-    entry = PAPER_ROUTING[idx]
+    """One routing state AT cell (x,y), in E1/E2/I1 form with every direction
+    label resolved to the actual parity-dependent neighbour via hex_dirs — never
+    show a bare L/R/D. States 0-15 are the paper's AND (coincidence) table; 16-31
+    are the OR twins (fire on EITHER excitatory input)."""
+    entry = ROUTING_HEX[idx]
     e1, e2, i1 = entry[0], entry[1], entry[2]
     op = entry[3] if len(entry) > 3 else 'and'
     nb = hex_dirs(x, y)
@@ -274,18 +216,18 @@ def _route_text(idx, x, y):
     def cell(d):
         return '%s%s' % (d, nb[d])
     if e1 is None:
-        return '%X  off (no routed input)' % idx
+        return '%2d  E1=-  E2=-  I1=-   off (no response)' % idx
     i1s = i1 if i1 is not None else '-'
     if e1 == e2:
-        # This is one physical nerve fanned into the two terminals required by
-        # the coincidence circuit, not two excitatory wires.
-        return ('%X  input=%s -> E1+E2; I1=%s   buffer: relays %s'
-                % (idx, e1, i1s, cell(e1)))
+        desc = 'buffer: relays %s' % cell(e1)
+    elif op == 'or':
+        desc = 'OR: %s OR %s (either fires)' % (cell(e1), cell(e2))
     else:
         desc = 'coincidence: %s AND %s' % (cell(e1), cell(e2))
     if i1 is not None:
         desc += ', veto %s' % cell(i1)
-    return '%X  E1=%s E2=%s I1=%s   %s' % (idx, e1, e2, i1s, desc)
+    return '%2d  E1=%s E2=%s I1=%s %s  %s' % (idx, e1, e2, i1s,
+                                              'OR ' if op == 'or' else '   ', desc)
 
 
 _GUIDE_NERVOUS = """\
@@ -298,30 +240,17 @@ necessary to match the network topology", Fig. 4). Up-
 and down-oriented nodes are mirror images, so the Cell
 tab always shows which real cell each label reaches.
 
-A physical tile has THREE independent core circuits
-(L/R/D outputs).
-Each circuit has two excitatory inputs and one inhibitory:
+A node has two excitatory inputs and one inhibitory:
 
-        out = (E1 AND E2) AND NOT I1
+        out = (E1 op E2) AND NOT I1
 
-"Neither input alone can trigger a response" for
-coincidence. A BUFFER routes ONE nerve to both E1 and E2
-(the required internal fan-out, drawn as one green wire);
-I1, if active, is one separate veto input.
-Each circuit independently selects one of the paper's
-16 Fig. 3 configurations (0-F), so a tile stores three
-4-bit selectors. The packed 12-bit integer is storage,
-not a menu of 4096 primitive circuit states.
-
-The GENOME is deliberately smaller: every context,
-self-input and output field is ONE 4-bit circuit selector
-(decimal 0-15), never a packed tile word. During growth
-the same gene is evaluated independently for the L, R and
-D core circuits, with the neighbourhood rotated to face
-the circuit being updated. Only the three developed
-phenotype results are packed into a 12-bit tile.
-An external target input drives all three channels of
-its perimeter tile; outputs read one named channel.
+"Neither input alone can trigger a response" for op=AND
+(coincidence). A BUFFER is the E1=E2 special case
+(relays one line); I1, if active, vetoes the response.
+Cell-tab states 0-15 are the paper's Fig. 3 AND table.
+States 16-31 are OR twins (op=OR): fire if EITHER
+excitatory input is active — a non-paper extension you
+asked for (purple on the canvas).
 
 MEMORY: a pulse injected by an input circulates a loop
 of buffers "until stopped by application of an
@@ -342,7 +271,7 @@ WORKFLOW
  2. Grow (ontogeny) develops the genome into a circuit.
     One-way: editing the circuit never alters the DNA.
  3. Or skip DNA entirely: Place/Delete cells, then set
-    each tile's three Fig. 3 states in the Cell tab.
+    each node's Fig. 3 state in the Cell tab.
  4. Step/Run injects pulses at the inputs; Score uses
     the target's event, cadence, or persistence metric."""
 
@@ -394,12 +323,12 @@ WORKFLOW
     declared metric, exactly as the evolver does."""
 
 
-def _routed_channels(idx, x, y):
-    """Exact source circuits wired into one Figure-3 circuit at (x,y)."""
-    e1, e2, i1 = PAPER_ROUTING[idx][:3]
-    pos = (x, y)
-    exc = {facing_channel(pos, d) for d in (e1, e2) if d is not None}
-    veto = facing_channel(pos, i1) if i1 is not None else None
+def _routed_neighbours(idx, x, y):
+    """Cells wired into a node with ROUTING_HEX[idx] at (x,y): (excitatory, veto)."""
+    e1, e2, i1 = ROUTING_HEX[idx][:3]
+    nb = hex_dirs(x, y)
+    exc = {nb[d] for d in (e1, e2) if d is not None}
+    veto = nb[i1] if i1 is not None else None
     return exc, veto
 
 
@@ -560,7 +489,7 @@ class DesignerTab:
         for label, val, tip in (
                 ('Select', 'select',
                  'Click a live cell to inspect/edit it in the Cell tab — its '
-                 'three directional Fig. 3 states (nervous) or its four LUTs.'),
+                 'Fig. 3 routing state (nervous) or its four LUTs.'),
                 ('Place/Delete', 'cell',
                  'Click an empty lattice position to add a cell; click a live '
                  'cell to remove it. On the LUT array this only changes '
@@ -571,8 +500,8 @@ class DesignerTab:
                  '(pinned during Grow) and receive the scheduled pulses/clocked '
                  'streams during simulation.'),
                 ('Output', 'output',
-                 'Assign the next unfilled output role to a live cell. Nervous '
-                 'outputs cycle through that tile\'s exact L/R/D channels.')):
+                 'Assign the next unfilled output role to a live cell; click an '
+                 'assigned cell to clear it.')):
             r = ttk.Radiobutton(row2, text=label, value=val, variable=self._mode)
             r.pack(side='left', padx=2)
             _Tip(r, tip)
@@ -842,8 +771,7 @@ class DesignerTab:
             it = getattr(t, 'iters', 30) if t else 30
             self.grid = grow_lut(self.genome, seeds=tuple(self.in_pos),
                                  grid_size=gs, iters=it)
-        self.out_pos = {r: p for r, p in self.out_pos.items()
-                        if _output_is_live(self.grid, p, self.backend)}
+        self.out_pos = {r: p for r, p in self.out_pos.items() if p in self.grid}
         self._grid_edited = self._genome_edited = False
         self._selected = None
         self._reset_sim()
@@ -925,20 +853,9 @@ class DesignerTab:
         """Human-readable account of a network→genome reconstruction."""
         exact = rep['matched'] == rep['target'] and not rep['extra']
         full  = rep['matched'] == rep['target']
-        nervous = rep['backend'] == 'nervous'
-
-        def shown_state(value):
-            # Reverse synthesis describes gene alleles here. Nervous alleles
-            # are individual 4-bit core-circuit selectors, not packed tiles.
-            return str(int(value)) if nervous else str(value)
-
-        def shown_context(context):
-            return ('(' + ', '.join(shown_state(value) for value in context) + ')'
-                    if nervous else str(context))
-
         L = ['Network → genome (verified reconciliation / synthesis)',
-             'Backend: %s' % ('nervous net' if nervous
-                               else 'LUT array'), '']
+             'Backend: %s' % ('nervous net' if rep['backend'] == 'nervous'
+                              else 'LUT array'), '']
         if rep.get('note'):
             L += [rep['note'], '']
         L += ['Target cells reproduced : %d / %d' % (rep['matched'], rep['target']),
@@ -960,10 +877,7 @@ class DesignerTab:
         if rep.get('strategy'):
             L.append('Synthesis trajectory    : %s' % rep['strategy'])
         if rep.get('intermediate_states'):
-            L.append(('Temporary gene values (0-15): %s' if nervous
-                      else 'Temporary LUT states    : %s') %
-                     ', '.join(shown_state(value)
-                               for value in rep['intermediate_states']))
+            L.append('Temporary states used   : %s' % rep['intermediate_states'])
         if rep.get('multistep_collisions'):
             L.append('Collision groups tested : %d' % rep['multistep_collisions'])
         if rep.get('working_behavior') is not None:
@@ -990,9 +904,7 @@ class DesignerTab:
                   'it is not proof that a multi-step genome is impossible:'
                   % len(rep['conflicts'])]
             for ctx, states in rep['conflicts'][:8]:
-                L.append('   %s -> %s' %
-                         (shown_context(ctx),
-                          ', '.join(shown_state(value) for value in states)))
+                L.append('   %s -> %s' % (ctx, states))
             if len(rep['conflicts']) > 8:
                 L.append('   … %d more' % (len(rep['conflicts']) - 8))
         if rep['seed_mismatch']:
@@ -1013,12 +925,12 @@ class DesignerTab:
             return None
         roles = [output.role for output in target.outputs]
         manual = {role: self.out_pos.get(role) for role in roles}
-        use_manual = all(_output_is_live(grid, manual[role], self.backend)
-                         for role in roles)
+        use_manual = all(manual[role] in grid for role in roles)
         if getattr(target, 'temporal', False):
             obs = _obs_len(target)
             if self.backend == 'nervous':
-                routing = _nv_routing(grid)
+                routing = {p: ROUTING_HEX[state & 0x1F]
+                           for p, state in grid.items()}
                 if use_manual:
                     out_pos = manual
                     traces = TemporalTraces({role: [] for role in roles},
@@ -1064,7 +976,7 @@ class DesignerTab:
 
         if self.backend != 'nervous':
             return None
-        routing = _nv_routing(grid)
+        routing = {p: ROUTING_HEX[state & 0x1F] for p, state in grid.items()}
         out_pos = manual
         if not use_manual:
             _, _, out_pos = interpret_nervous(grid, target)
@@ -1129,10 +1041,9 @@ class DesignerTab:
             return
         nv = self.backend == 'nervous'
         fields = _NV_GENE_FIELDS if nv else _LUT_GENE_FIELDS
-        intro = ('Associative memory for ONE core circuit:\n'
-                 'context (L, R, D, self) -> output, matched by min Hamming.\n'
-                 'Every field is one decimal Figure-3 selector, 0-15. The same\n'
-                 'gene is applied independently to tile L/R/D; self=0 grows.'
+        intro = ('Associative memory: context (L, R, D, self) -> new state,\n'
+                 'matched by min Hamming distance. self=0 rows are GROWTH\n'
+                 'rules (the only kind that brings an empty cell to life).'
                  if nv else
                  'Fig. 10 genes: context of five 16-bit LUTs -> new LUT,\n'
                  'min Hamming over all 80 bits; rotated so one gene serves\n'
@@ -1141,26 +1052,19 @@ class DesignerTab:
         ttk.Label(self._genome_frame, text=intro, font=(self._mono, 8),
                   foreground='#556').pack(anchor='w', padx=2, pady=(4, 0))
         for ci, chrom in enumerate(g.chromosomes):
-            chrom.split = _valid_split(chrom.genes, chrom.split)
             head = ttk.Frame(self._genome_frame)
             head.pack(fill='x', pady=(6, 0))
             ttk.Label(head, text='Chromosome %s' % chr(97 + ci),
                       font=(self._mono, 9, 'bold')).pack(side='left')
             self._int_spin(head, 'tag', chrom, 'tag', 0, 9999, width=5)
-            if len(chrom.genes) < 2:
-                ttk.Label(head, text=' split=gene fields',
-                          font=(self._mono, 8), foreground='#667').pack(side='left')
-            else:
-                self._int_spin(head, 'split', chrom, 'split', 1,
-                               len(chrom.genes) - 1, width=4)
+            self._int_spin(head, 'split', chrom, 'split', 0, max(0, len(chrom.genes)), width=4)
             self._int_spin(head, 'telomere', chrom, 'telomere', 1,
                            NV_MAX_TEL if nv else LUT_MAX_TEL, width=4)
             ttk.Button(head, text='+gene', width=6,
                        command=lambda c=chrom: self._add_gene(c)).pack(side='left', padx=2)
             ttk.Button(head, text='x', width=2,
                        command=lambda c=chrom: self._del_chrom(c)).pack(side='left')
-            hdr = ('   #    Lctx Rctx Dctx self -> out\n'
-                   '        [one 4-bit value per field: 0-15]' if nv else
+            hdr = ('   #    L    R    D   self  ->  out' if nv else
                    '   #    N      E      S      W      self    ->  out')
             ttk.Label(self._genome_frame, text=hdr, font=(self._mono, 8),
                       foreground='#666').pack(anchor='w')
@@ -1183,7 +1087,7 @@ class DesignerTab:
                 ttk.Label(row, text='->', font=(self._mono, 8),
                           foreground='#666').pack(side='left', padx=(3, 1))
             if nv:
-                self._nv_circuit_entry(row, gene, f)
+                self._int_spin(row, None, gene, f, 0, MAX_STATE - 1, width=3)
             else:
                 self._hex_entry(row, gene, f)
         ttk.Button(row, text='rnd', width=4,
@@ -1192,45 +1096,6 @@ class DesignerTab:
                    command=lambda c=chrom, i=gi: self._dup_gene(c, i)).pack(side='left')
         ttk.Button(row, text='x', width=2,
                    command=lambda c=chrom, i=gi: self._del_gene(c, i)).pack(side='left')
-
-    def _nv_circuit_entry(self, parent, obj, field):
-        """Edit one nervous-gene allele; packed tile words never enter DNA."""
-        current = int(getattr(obj, field))
-        if not 0 <= current < CIRCUIT_STATE_COUNT:
-            # This should only be reachable through a stale in-memory object;
-            # encoded files are migrated before HexGene is constructed.
-            current = max(0, min(CIRCUIT_STATE_COUNT - 1, current))
-            setattr(obj, field, current)
-        var = tk.StringVar(value=str(current))
-
-        def valid(candidate):
-            return (candidate == '' or
-                    (candidate.isdecimal() and
-                     0 <= int(candidate) < CIRCUIT_STATE_COUNT))
-
-        def commit(*_a):
-            if not var.get():
-                var.set(str(getattr(obj, field)))
-                return
-            value = int(var.get())
-            if getattr(obj, field) != value:
-                setattr(obj, field, value)
-                self._genome_edited = True
-                self._refresh_sync()
-            var.set(str(value))
-
-        validate = (parent.register(valid), '%P')
-        entry = ttk.Spinbox(
-            parent, from_=0, to=CIRCUIT_STATE_COUNT - 1,
-            textvariable=var, width=3, font=(self._mono, 8),
-            validate='key', validatecommand=validate, command=commit)
-        entry.bind('<FocusOut>', commit)
-        entry.bind('<Return>', commit)
-        entry.pack(side='left', padx=1)
-        _Tip(entry, 'One 4-bit Figure-3 core-circuit selector (decimal 0-15). '
-                    'Growth applies this scalar rule separately to L, R and D; '
-                    'the developed tile, not the genome, packs three selectors.')
-        return entry
 
     def _int_spin(self, parent, label, obj, field, lo, hi, width=4):
         if label:
@@ -1289,7 +1154,6 @@ class DesignerTab:
     def _add_gene(self, chrom):
         chrom.genes.append(random_hex_gene() if self.backend == 'nervous'
                            else random_lut_gene())
-        chrom.split = _valid_split(chrom.genes, chrom.split)
         self._genome_edited = True
         self._rebuild_genome_panel()
         self._refresh_sync()
@@ -1303,7 +1167,6 @@ class DesignerTab:
 
     def _dup_gene(self, chrom, gi):
         chrom.genes.insert(gi + 1, dataclasses.replace(chrom.genes[gi]))
-        chrom.split = _valid_split(chrom.genes, chrom.split)
         self._genome_edited = True
         self._rebuild_genome_panel()
         self._refresh_sync()
@@ -1311,7 +1174,6 @@ class DesignerTab:
     def _del_gene(self, chrom, gi):
         if len(chrom.genes) > 1:
             chrom.genes.pop(gi)
-            chrom.split = _valid_split(chrom.genes, chrom.split)
             self._genome_edited = True
             self._rebuild_genome_panel()
             self._refresh_sync()
@@ -1405,9 +1267,7 @@ class DesignerTab:
                 del self.grid[pos]
                 if pos in self.in_pos:
                     self.in_pos.remove(pos)
-                self.out_pos = {
-                    r: p for r, p in self.out_pos.items()
-                    if (channel_tile(p) if self.backend == 'nervous' else p) != pos}
+                self.out_pos = {r: p for r, p in self.out_pos.items() if p != pos}
                 if self._selected == pos:
                     self._selected = None
                     self._rebuild_inspector()
@@ -1425,23 +1285,10 @@ class DesignerTab:
         elif mode == 'output':
             if pos not in self.grid:
                 return
-            held = [r for r, p in self.out_pos.items()
-                    if (channel_tile(p) if self.backend == 'nervous' else p) == pos]
+            held = [r for r, p in self.out_pos.items() if p == pos]
             if held:
-                if self.backend == 'nervous':
-                    role = held[0]
-                    current = normalize_output_channel(self.grid, self.out_pos[role])
-                    index = DIRECTIONS.index(current[2])
-                    if index + 1 < len(DIRECTIONS):
-                        self.out_pos[role] = (pos[0], pos[1], DIRECTIONS[index + 1])
-                        self._status.set("Output '%s' now reads %s channel; click "
-                                         "again to cycle." %
-                                         (role, DIRECTIONS[index + 1]))
-                    else:
-                        del self.out_pos[role]
-                else:
-                    for r in held:
-                        del self.out_pos[r]
+                for r in held:
+                    del self.out_pos[r]
             else:
                 t = self._current_target()
                 roles = [o.role for o in t.outputs] if t else ['Q']
@@ -1450,12 +1297,7 @@ class DesignerTab:
                     self._status.set('All output roles assigned — click an assigned '
                                      'cell to clear its role.')
                     return
-                self.out_pos[free[0]] = (tile_channel(pos, 'L')
-                                         if self.backend == 'nervous' else pos)
-                if self.backend == 'nervous':
-                    self._status.set("Output '%s' reads %s channel; click the tile "
-                                     "to cycle L/R/D or clear." %
-                                     (free[0], self.out_pos[free[0]][2]))
+                self.out_pos[free[0]] = pos
             self._mark_grid_edit()
         self._refresh_canvas()
         self._rebuild_input_bar()
@@ -1514,28 +1356,18 @@ class DesignerTab:
 
     def _nv_inspector(self, pos):
         x, y = pos
-        state = list(unpack_tile_state(self.grid[pos]))
+        state = self.grid[pos] & 0x1F
         nb = hex_dirs(x, y)
         orient = 'up-oriented' if (x + y) % 2 == 0 else 'down-oriented'
         ttk.Label(self._insp_body,
-                  text='%s tile — its L/R/D resolve to (Fig. 4 rotation):\n'
+                  text='%s node — its L/R/D resolve to (Fig. 4 rotation):\n'
                        '  L->%s   R->%s   D->%s'
                        % (orient, nb['L'], nb['R'], nb['D']),
                   font=(self._mono, 8), justify='left').pack(anchor='w', pady=(2, 4))
         ttk.Label(self._insp_body,
-                   text='Three independent L/R/D output circuits; each computes\n'
-                        '(E1 AND E2) AND NOT I1 using one Figure-3 configuration '\
-                        '(0-F).\nE1=E2 means one nerve fanned into both required terminals:',
+                  text='out = (E1 op E2) AND NOT I1 — pick a state (hover previews\n'
+                       'the wiring). 0-15 = AND (coincidence), 16-31 = OR (either):',
                   font=(self._mono, 8), justify='left').pack(anchor='w')
-        picker = ttk.Frame(self._insp_body)
-        picker.pack(fill='x', pady=(3, 1))
-        ttk.Label(picker, text='Edit output circuit:',
-                  font=(self._mono, 8)).pack(side='left')
-        direction_var = tk.StringVar(value='L')
-        direction_box = ttk.Combobox(
-            picker, textvariable=direction_var, values=DIRECTIONS,
-            state='readonly', width=3, font=(self._mono, 8))
-        direction_box.pack(side='left', padx=4)
         routes = ttk.Frame(self._insp_body)
         routes.pack(fill='both', expand=True)
         lb = tk.Listbox(routes, height=16, font=(self._mono, 8),
@@ -1543,10 +1375,10 @@ class DesignerTab:
         vscroll = ttk.Scrollbar(routes, orient='vertical', command=lb.yview)
         hscroll = ttk.Scrollbar(routes, orient='horizontal', command=lb.xview)
         lb.configure(yscrollcommand=vscroll.set, xscrollcommand=hscroll.set)
-        for i in range(len(PAPER_ROUTING)):
+        for i in range(len(ROUTING_HEX)):        # 32: 0-15 AND, 16-31 OR
             lb.insert('end', _route_text(i, x, y))
-        lb.selection_set(state[0])
-        lb.see(state[0])
+        lb.selection_set(state)
+        lb.see(state)
         lb.grid(row=0, column=0, sticky='nsew')
         vscroll.grid(row=0, column=1, sticky='ns')
         hscroll.grid(row=1, column=0, sticky='ew')
@@ -1557,25 +1389,15 @@ class DesignerTab:
             sel = lb.curselection()
             if not sel:
                 return
-            selectors = list(unpack_tile_state(self.grid[pos]))
-            selectors[DIRECTIONS.index(direction_var.get())] = sel[0]
-            self.grid[pos] = pack_tile_state(*selectors)
+            self.grid[pos] = sel[0]
             self._mark_grid_edit()
             self._refresh_canvas()
             self._refresh_sync()
 
-        def on_direction(_evt=None):
-            selectors = unpack_tile_state(self.grid[pos])
-            selected = selectors[DIRECTIONS.index(direction_var.get())]
-            lb.selection_clear(0, 'end')
-            lb.selection_set(selected)
-            lb.see(selected)
-
         def on_hover(evt):
             i = lb.nearest(evt.y)
-            if 0 <= i < len(PAPER_ROUTING):
-                self._refresh_canvas(preview=(pos, direction_var.get(), i))
-        direction_box.bind('<<ComboboxSelected>>', on_direction)
+            if 0 <= i < len(ROUTING_HEX):
+                self._refresh_canvas(preview=(pos, i))
         lb.bind('<<ListboxSelect>>', on_pick)
         lb.bind('<Motion>', on_hover)
         lb.bind('<Leave>', lambda e: self._refresh_canvas())
@@ -1642,11 +1464,9 @@ class DesignerTab:
                  circuit_summary_nervous(self.grid) if self.backend == 'nervous'
                  else '%d cells' % len(self.grid)))
         if self.backend == 'nervous':
-            routing = _nv_routing(self.grid)
+            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
             if preview:
-                entries = list(routing[preview[0]])
-                entries[DIRECTIONS.index(preview[1])] = PAPER_ROUTING[preview[2]]
-                routing[preview[0]] = tuple(entries)
+                routing[preview[0]] = ROUTING_HEX[preview[1]]
             draw_hex_net(ax, self.grid, 7, routing=routing, in_pos=self.in_pos,
                          out_pos=self.out_pos, activity=activity,
                          show_edges=True, title=title)
@@ -1655,20 +1475,16 @@ class DesignerTab:
                 ax.add_patch(Circle((px, py), radius=0.36, fill=False,
                                     edgecolor='#e6a817', lw=2.2, zorder=6))
             if preview:
-                exc, veto = _routed_channels(preview[2], *preview[0])
-                destination = tile_channel(preview[0], preview[1])
-                px, py = channel_pixel(destination)
-                ax.add_patch(Circle((px, py), radius=0.14, fill=False,
-                                    edgecolor='#e6a817', lw=2.0, zorder=7))
-                for source in exc:
-                    if channel_tile(source) in self.grid:
-                        px, py = channel_pixel(source)
-                        ax.add_patch(Circle((px, py), radius=0.14, fill=False,
-                                             edgecolor='#2e8b57', lw=2.0, zorder=6))
-                if veto and channel_tile(veto) in self.grid:
-                    px, py = channel_pixel(veto)
-                    ax.add_patch(Circle((px, py), radius=0.14, fill=False,
-                                         edgecolor='#d0332e', lw=2.0, zorder=6))
+                exc, veto = _routed_neighbours(preview[1], *preview[0])
+                for p in exc:
+                    if p in self.grid:
+                        px, py = hex_pixel(*p)
+                        ax.add_patch(Circle((px, py), radius=0.36, fill=False,
+                                            edgecolor='#2e8b57', lw=2.0, zorder=6))
+                if veto and veto in self.grid:
+                    px, py = hex_pixel(*veto)
+                    ax.add_patch(Circle((px, py), radius=0.36, fill=False,
+                                        edgecolor='#d0332e', lw=2.0, zorder=6))
         else:
             draw_lut_net(ax, self.grid, activity=activity, in_pos=self.in_pos,
                          out_pos=self.out_pos, show_edges=True, title=title)
@@ -1703,21 +1519,20 @@ class DesignerTab:
         self.canvas.draw_idle()
 
     def _legend_handles(self, showing_activity):
-        """Canvas legend in the paper's own colour conventions (nervous circuit
+        """Canvas legend in the paper's own colour conventions (nervous node
         kinds + wire colours; LUT Fig. 13 state colours / Fig. 14 red-green)."""
         if self.backend == 'nervous':
             if showing_activity:
                 nodes = [Patch(color='#18b34a', label='pulsing this tick'),
                          Patch(color='#e6e9ee', label='quiet')]
             else:
-                nodes = [Patch(color='#8fb3e0', label='buffer (one nerve -> E1+E2)'),
+                nodes = [Patch(color='#8fb3e0', label='buffer (E1=E2)'),
                          Patch(color='#2f6fc0', label='coincidence (E1·E2)'),
-                         Patch(color='#e0902e', label='inhibited (has I1)'),
-                         Patch(color='#e8e8e8', label='off circuit')]
+                         Patch(color='#7b52c4', label='OR (E1+E2, either)'),
+                         Patch(color='#e0902e', label='inhibited (has I1)')]
             return nodes + [
                 Line2D([0], [0], color='#2e8b57', lw=1.7, label='excitatory wire'),
-                Line2D([0], [0], color='#d0332e', lw=1.7,
-                       label='inhibitory veto (T-bar)'),
+                Line2D([0], [0], color='#d0332e', lw=1.7, label='inhibitory veto'),
                 Patch(facecolor='white', edgecolor='#b02020', label='input (seed)')]
         if showing_activity:
             return [Patch(color='#1ea64a', label='output bit 1 (Fig. 14)'),
@@ -1857,7 +1672,7 @@ class DesignerTab:
             pass
 
     def _build_nv_player(self):
-        routing = _nv_routing(self.grid)
+        routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
         self._player = NervousPlayer(
             self.grid, routing, horizon=self._sim_horizon(),
             max_events=getattr(self.target, 'max_events', 2048),
@@ -2058,11 +1873,11 @@ class DesignerTab:
             return
         roles = [o.role for o in t.outputs]
         manual = {r: self.out_pos.get(r) for r in roles}
-        use_manual = all(_output_is_live(self.grid, manual[r], self.backend)
-                         for r in roles)
+        use_manual = all(manual[r] in self.grid for r in roles if manual[r])
+        use_manual = use_manual and all(manual[r] for r in roles)
         obs = _obs_len(t)                    # observe past T so a delayed Q is seen
         if self.backend == 'nervous':
-            routing = _nv_routing(self.grid)
+            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
             if use_manual:
                 out_pos = manual
                 traces = TemporalTraces({r: [] for r in roles},
@@ -2115,11 +1930,11 @@ class DesignerTab:
             self._status.set('Target needs %d input(s); the grid has %d designated.'
                              % (len(t.inputs), len(self.in_pos)))
             return
-        routing = _nv_routing(self.grid)
+        routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
         roles = [o.role for o in t.outputs]
         out_pos = {r: self.out_pos.get(r) for r in roles}
-        if (not all(_output_is_live(self.grid, out_pos[r], 'nervous')
-                    for r in roles)):
+        if not all(out_pos[r] in self.grid for r in roles if out_pos[r]) \
+                or not all(out_pos[r] for r in roles):
             _, _, out_pos = interpret_nervous(self.grid, t)
         if any(out_pos.get(r) is None for r in roles):
             self._status.set('Could not place all outputs.')
@@ -2292,10 +2107,6 @@ class DesignerTab:
             self.grid = dict(grid)
             self.in_pos = list(in_pos or [])
             self.out_pos = dict(out_pos or {})
-            if backend == 'nervous':
-                self.out_pos = {
-                    role: normalize_output_channel(self.grid, pos)
-                    for role, pos in self.out_pos.items() if pos}
             self._grid_edited = bool(grid_edited)
         else:
             self.in_pos = list(target.inputs) if target is not None else []
@@ -2334,23 +2145,14 @@ class DesignerTab:
             return
         t = self._current_target_obj()
         grid_edited = bool(self._grid_edited or self.genome is None)
-        try:
-            genome_doc = (_genome_to_dict(self.genome, self.backend)
-                          if self.genome else None)
-        except (TypeError, ValueError) as exc:
-            messagebox.showerror(
-                'Save design', 'Genome is outside the supported encoding:\n%s' % exc)
-            return
         doc = {
             'format':      DESIGN_FORMAT,
             'backend':     self.backend,
-            'state_encoding': (TILE_ENCODING
-                               if self.backend == 'nervous' else None),
             'target':      t.name if t is not None else '',
             'fitness':     self._last_score if self._last_score is not None else 0.0,
             'hand_built':  True,
             'grid_edited': grid_edited,
-            'genome':      genome_doc,
+            'genome':      _genome_to_dict(self.genome, self.backend) if self.genome else None,
             'grid':        _grid_to_dict(self.grid, self.backend),
             'inputs':      [list(p) for p in self.in_pos],
             'outputs':     {r: list(p) for r, p in self.out_pos.items() if p},
@@ -2374,10 +2176,7 @@ class DesignerTab:
             return
         try:
             genome = _genome_from_dict(doc['genome'], backend) if doc.get('genome') else None
-            grid = _grid_from_dict(
-                doc.get('grid', {}), backend,
-                doc.get('state_encoding') or
-                (doc.get('genome') or {}).get('state_encoding'))
+            grid = _grid_from_dict(doc.get('grid', {}), backend)
             in_pos = [tuple(p) for p in doc.get('inputs', [])]
             out_pos = {r: tuple(p) for r, p in (doc.get('outputs') or {}).items()}
         except (KeyError, ValueError, TypeError) as exc:
