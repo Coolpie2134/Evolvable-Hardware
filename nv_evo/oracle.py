@@ -295,12 +295,30 @@ def make_period_stepper(base=2, step=2, max_period=6):
 
 # ── stimulus generation ─────────────────────────────────────────────────────────
 
-def sample_streams(rng, T, n_inputs, min_gap=4, jitter=4, align_prob=0.0):
+def sample_streams(rng, T, n_inputs, min_gap=4, jitter=4, align_prob=0.0,
+                   global_gap=False):
     """A list[T] of random input-bit tuples. Each input gets a sparse pulse
     train (gap >= min_gap, random jitter). `align_prob` occasionally fires all
     inputs on the SAME tick — needed so coincidence/pair targets see positive
     cases instead of almost-always-0."""
     ons = [set() for _ in range(n_inputs)]
+    if global_gap:
+        # Memory outputs need an observable interval after each command. Build
+        # one globally spaced event train and distribute it across the inputs;
+        # independent per-input trains can interleave only a second apart even
+        # when each individual lane has a large min_gap.
+        order = list(range(n_inputs))
+        rng.shuffle(order)
+        event_index = 0
+        t = rng.randint(1, min_gap)
+        while t < T:
+            ons[order[event_index % n_inputs]].add(t)
+            event_index += 1
+            if event_index % n_inputs == 0:
+                rng.shuffle(order)
+            t += max(2, min_gap + rng.randint(0, jitter))
+        return [tuple(1 if t in ons[i] else 0 for i in range(n_inputs))
+                for t in range(T)]
     for i in range(n_inputs):
         t = rng.randint(1, min_gap)
         while t < T:
@@ -340,13 +358,15 @@ def label_trace(oracle, streams, T, latency):
 def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
                   seed=20260702, latency=2, min_gap=5, align_prob=0.0,
                   out_pos=(2, 2), grid_size=5, description='',
-                  score_mode='trace'):
+                  score_mode='trace', fit_latency=True, global_gap=False):
     rng = random.Random(seed)
     out = OutputTerminal(output_role, out_pos)
     n_in = len(inputs)
     trials = []
     for _ in range(n_trials):
-        streams = sample_streams(rng, T, n_in, min_gap=min_gap, align_prob=align_prob)
+        streams = sample_streams(
+            rng, T, n_in, min_gap=min_gap, align_prob=align_prob,
+            global_gap=global_gap)
         exp = label_trace(oracle, streams, T, latency)
         events = ([float(t) for t, value in enumerate(exp) if value == 1]
                   if score_mode == 'events' else [])
@@ -354,7 +374,8 @@ def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
                             {output_role: events} if score_mode == 'events' else {}))
     return TemporalTarget(name, list(inputs), [out], T, trials,
                           grid_size=grid_size, iters=30, description=description,
-                          score_mode=score_mode, latency=latency)
+                          score_mode=score_mode, fit_latency=fit_latency,
+                          latency=latency)
 
 
 def _event_bank_target(name, oracle, inputs, pulse_banks, T, latency,
@@ -400,7 +421,8 @@ def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None):
 
 def sr_latch_oracle(seed=20260702):
     target = oracle_target('SR latch (oracle)', orc_sr_latch, [(0, 1), (0, 3)], 'Q',
-                         T=24, n_trials=12, seed=seed, latency=2, min_gap=6,
+                         T=40, n_trials=12, seed=seed, latency=2, min_gap=10,
+                         global_gap=True,
                          description=describe_target(
         'Input A sets one stored bit; input B resets it; otherwise Q retains its '
         'previous state.', PERSISTENCE_SCORING,
@@ -412,8 +434,8 @@ def sr_latch_oracle(seed=20260702):
     silent = [(0, 0)] * target.T
     cycle = [(0, 0)] * target.T
     cycle[3] = (1, 0)
-    cycle[11] = (0, 1)
-    cycle[18] = (1, 0)
+    cycle[16] = (0, 1)
+    cycle[29] = (1, 0)
     target.trials.extend([
         Trial(silent, {'Q': label_trace(orc_sr_latch, silent, target.T, 2)}),
         Trial(cycle, {'Q': label_trace(orc_sr_latch, cycle, target.T, 2)}),
@@ -423,7 +445,8 @@ def sr_latch_oracle(seed=20260702):
 
 def toggle_oracle(seed=20260702):
     return oracle_target('Toggle (oracle)', orc_toggle, [(0, 2)], 'Q',
-                         T=24, n_trials=12, seed=seed, latency=2, min_gap=5,
+                         T=40, n_trials=12, seed=seed, latency=2, min_gap=10,
+                         global_gap=True,
                          description=describe_target(
         'Each input edge flips the stored output state.', PERSISTENCE_SCORING,
         'Twelve seeded random pulse trains vary phase and spacing.'))
@@ -432,12 +455,13 @@ def toggle_oracle(seed=20260702):
 def echo_oracle(seed=20260702, delay=3):
     return oracle_target('Echo (oracle)', make_echo(delay), [(0, 2)], 'Q',
                          T=22, n_trials=10, seed=seed, latency=delay, min_gap=3,
-                         score_mode='events',
+                         score_mode='events', fit_latency=False,
                          description=describe_target(
-        'Reproduce the input-edge train while preserving its intervals.',
-        EVENT_SCORING,
-        'Ten seeded random schedules use a nominal %d-second reference delay; '
-        'absolute evolved latency is free.' % delay))
+        'Reproduce every input edge exactly %d seconds later.' % delay,
+        'Match output edges one-to-one at the specified absolute times; missing, '
+        'early, late, and extra edges reduce fitness.',
+        'Ten seeded schedules vary phase and spacing. A direct input-to-output '
+        'connection fails because no additional latency offset is fitted.'))
 
 
 def coincidence_oracle(seed=20260702):
@@ -596,7 +620,8 @@ def period_stepper_oracle(seed=20260702, base=2):
 def gated_oscillator_oracle(seed=20260702):
     return oracle_target('Gated oscillator (oracle)', make_gated_oscillator(),
                          [(0, 1), (0, 3)], 'Q',
-                         T=32, n_trials=12, seed=seed, latency=2, min_gap=8,
+                         T=44, n_trials=12, seed=seed, latency=2, min_gap=12,
+                         global_gap=True,
                          description=describe_target(
         'Input A starts a period-2 output cadence; input B stops it. Q is quiet '
         'outside the commanded run interval.', PERSISTENCE_SCORING,
@@ -607,7 +632,8 @@ def gated_oscillator_oracle(seed=20260702):
 def resettable_toggle_oracle(seed=20260702):
     return oracle_target('Resettable toggle (oracle)', make_resettable_toggle(),
                          [(0, 1), (0, 3)], 'Q',
-                         T=26, n_trials=12, seed=seed, latency=2, min_gap=5,
+                         T=44, n_trials=12, seed=seed, latency=2, min_gap=10,
+                         global_gap=True,
                          description=describe_target(
         'Input A flips the stored bit; input B clears it to 0 and dominates a '
         'simultaneous A+B event.', PERSISTENCE_SCORING,

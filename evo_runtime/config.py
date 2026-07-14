@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from nv_evo.pulse import PulseConfig
 from .limits import MAX_CHROMOSOME_COUNT
+from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
@@ -18,10 +19,12 @@ def default_max_telomere(backend):
 @dataclass(frozen=True)
 class GAConfig:
     mean_mutations: float = 4.0
+    mutation_limit: float = DEFAULT_MUTATION_LIMIT
     immigrant_fraction: float = 0.08
     tournament_size: int = 4
     elite_count: int = 1
     mutation_decay: float = 0.997
+    stagnation_beta: float = DEFAULT_STAGNATION_BETA
     selection: str = 'tournament'
     max_telomere: int = DEFAULT_MAX_TELOMERE
     # ``None`` keeps the legacy/direct-API behaviour where chromosome count may
@@ -38,12 +41,16 @@ class GAConfig:
     def __post_init__(self):
         if self.mean_mutations < 0:
             raise ValueError('mean_mutations must be non-negative')
+        if self.mutation_limit < 1:
+            raise ValueError('mutation_limit must be at least 1')
         if not 0 <= self.immigrant_fraction <= 1:
             raise ValueError('immigrant_fraction must be between 0 and 1')
         if self.tournament_size < 1 or self.elite_count < 0:
             raise ValueError('tournament_size must be positive and elite_count non-negative')
         if not 0 < self.mutation_decay <= 1:
             raise ValueError('mutation_decay must be in (0, 1]')
+        if not 0 <= self.stagnation_beta <= 10:
+            raise ValueError('stagnation_beta must be between 0 and 10')
         if self.selection not in ('tournament', 'lexicase'):
             raise ValueError('selection must be tournament or lexicase')
         if self.max_telomere < 1 or self.cache_size < 1:

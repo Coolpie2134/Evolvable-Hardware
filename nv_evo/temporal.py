@@ -495,6 +495,8 @@ def _event_pairs(traces, ttarget):
 
 def _event_candidate_shifts(pairs, ttarget):
     """All exact/boundary alignments that can change tolerant matching."""
+    if not getattr(ttarget, 'fit_latency', True):
+        return [0.0]
     tol = float(getattr(ttarget, 'event_tolerance', 0.5))
     limit = float(getattr(ttarget, 'event_max_shift', ttarget.T))
     shifts = {0.0}
@@ -1175,7 +1177,11 @@ def temporal_report(ttarget, genome=None):
         if prep is not None:
             for term in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (term.role, prep[3][term.role]))
-            lines.append('measured output latency offset: %+.3f' % best_s)
+            if getattr(ttarget, 'fit_latency', True):
+                lines.append('measured output latency offset: %+.3f seconds' % best_s)
+            else:
+                lines.append('fixed timing: required delay %g seconds; no offset fitted'
+                             % getattr(ttarget, 'latency', 0))
         for ti, trial in enumerate(ttarget.trials):
             lines.append('')
             for role in trial.expected:

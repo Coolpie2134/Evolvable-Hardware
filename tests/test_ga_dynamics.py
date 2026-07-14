@@ -62,6 +62,14 @@ def _alleles(gene, fields):
 def test_solved_mutation_gate_suppresses_only_the_sos_reheat():
     assert adaptive_mutation_rate(2.0, 100, solved=True) == 2.0
     assert adaptive_mutation_rate(2.0, 100, solved=False) == 8.0
+    assert adaptive_mutation_rate(2.0, 100, beta=0.0) == 2.0
+    assert adaptive_mutation_rate(1.0, 18, beta=2.0) > \
+        adaptive_mutation_rate(1.0, 18, beta=1.0)
+    assert lut_ga.adaptive_mutation_rate(1.0, 18, beta=2.0) == \
+        adaptive_mutation_rate(1.0, 18, beta=2.0)
+    assert adaptive_mutation_rate(20.0, 0, mutation_limit=6.0) == 6.0
+    assert adaptive_mutation_rate(
+        2.0, 100, mutation_limit=3.0) == 3.0
 
 
 def test_reciprocal_crossover_uses_both_original_parent_suffixes():
@@ -207,13 +215,20 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
     assert {LUT_MAX_CHROMS, NV_MAX_CHROMS, SNN_MAX_CHROMS} == {
         MAX_CHROMOSOME_COUNT}
 
-    original = RunConfig(ga=GAConfig(chromosome_count=MAX_CHROMOSOME_COUNT))
+    original = RunConfig(ga=GAConfig(
+        chromosome_count=MAX_CHROMOSOME_COUNT, stagnation_beta=2.5,
+        mutation_limit=12.0))
     rebuilt = RunConfig.from_dict(dataclasses.asdict(original))
     assert rebuilt.ga.chromosome_count == MAX_CHROMOSOME_COUNT
+    assert rebuilt.ga.stagnation_beta == 2.5
+    assert rebuilt.ga.mutation_limit == 12.0
 
     legacy = dataclasses.asdict(original)
     legacy['ga'].pop('chromosome_count')
-    assert RunConfig.from_dict(legacy).ga.chromosome_count is None
+    legacy['ga'].pop('mutation_limit')
+    legacy_config = RunConfig.from_dict(legacy).ga
+    assert legacy_config.chromosome_count is None
+    assert legacy_config.mutation_limit == 8.0
 
     try:
         GAConfig(chromosome_count=MAX_CHROMOSOME_COUNT + 1)
@@ -224,7 +239,9 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
 
 
 def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
-    config = RunConfig(ga=GAConfig(chromosome_count=2))
+    config = RunConfig(ga=GAConfig(
+        chromosome_count=2, stagnation_beta=1.75,
+        mutation_limit=6.0))
     genome = random_hex_genome(2)
     genome.chromosomes[0].genes = genome.chromosomes[0].genes[:1]
     genome.chromosomes[0].split = 99
@@ -235,6 +252,8 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
             path, genome, 0.5, target, None, 12, 'nervous', config)
         restored = load_checkpoint(path)
         assert restored['run_config'].ga.chromosome_count == 2
+        assert restored['run_config'].ga.stagnation_beta == 1.75
+        assert restored['run_config'].ga.mutation_limit == 6.0
         assert len(restored['best_genome'].chromosomes) == 2
         assert restored['best_genome'].chromosomes[0].split == 0
         assert restored['target'].trials[0].input_events == target.trials[0].input_events

@@ -259,7 +259,7 @@ MEMORY: a pulse injected by an input circulates a loop
 of buffers "until stopped by application of an
 inhibitory input". A node is refractory after firing,
 so a stored 1 reads as RINGING (1010...) — the Score
-metric knows this (±1-tick tolerance on expected 1s).
+metric knows this (±1-second tolerance on expected 1s).
 
 GENES (Genome tab): the associative memory — a context
 (L, R, D, self) mapped to a new state by minimum
@@ -368,7 +368,11 @@ def _traces_report(ttarget, traces, out_pos, label):
         best_s, total = _best_event_shift(traces, ttarget)
         for term in ttarget.outputs:
             lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
-        lines.append('measured output latency offset: %+.3f' % best_s)
+        if getattr(ttarget, 'fit_latency', True):
+            lines.append('measured output latency offset: %+.3f seconds' % best_s)
+        else:
+            lines.append('fixed timing: required delay %g seconds; no offset fitted'
+                         % getattr(ttarget, 'latency', 0))
         for ti, trial in enumerate(ttarget.trials):
             for role in trial.expected:
                 score = _event_case_score(traces, ttarget, ti, role, best_s)
@@ -385,7 +389,7 @@ def _traces_report(ttarget, traces, out_pos, label):
     best_s = _best_shift(traces, ttarget)[0]    # latency-invariant: one global shift
     for term in ttarget.outputs:
         lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
-    lines.append('measured output latency offset: %+d tick(s)' % best_s)
+    lines.append('measured output latency offset: %+d second(s)' % best_s)
     for ti, trial in enumerate(ttarget.trials):
         lines += ['', 'Test %d: %s' % (
             ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
@@ -402,7 +406,7 @@ def _traces_report(ttarget, traces, out_pos, label):
                             'PASS' if s >= 0.999 else 'FAIL',
                             tp_rec, n_exp, tp_prec, n_act))
     total = windowed_score(traces, ttarget, shift=best_s)
-    lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
+    lines += ['', '=> behavioural score %.4f%s   (exact per-second %.4f)'
               % (total, '   SOLVED' if total >= 0.999 else '',
                  exact_tick_accuracy(traces, ttarget))]
     return total, '\n'.join(lines)
@@ -498,7 +502,7 @@ class DesignerTab:
                  'relay seed table (FFFE x4), delete zeroes all four tables.'),
                 ('Input', 'input',
                  'Toggle cells as inputs (A, B, …). Inputs are the growth SEEDS '
-                 '(pinned during Grow) and receive the scheduled pulses / per-tick '
+                 '(pinned during Grow) and receive the scheduled pulses / per-second '
                  'streams during simulation.'),
                 ('Output', 'output',
                  'Assign the next unfilled output role to a live cell; click an '
@@ -1513,7 +1517,7 @@ class DesignerTab:
         kinds + wire colours; LUT Fig. 13 state colours / Fig. 14 red-green)."""
         if self.backend == 'nervous':
             if showing_activity:
-                nodes = [Patch(color='#18b34a', label='pulsing this tick'),
+                nodes = [Patch(color='#18b34a', label='pulsing now'),
                          Patch(color='#e6e9ee', label='quiet')]
             else:
                 nodes = [Patch(color='#8fb3e0', label='buffer (E1=E2)'),
@@ -1552,7 +1556,7 @@ class DesignerTab:
             axt.set_ylim(-0.6, max(1, len(roles)) - 0.4)
             axt.set_yticks(range(len(roles)))
             axt.set_yticklabels([r[:6] for r in roles], fontsize=8)
-            axt.set_xlabel('continuous time (tick units)', fontsize=8)
+            axt.set_xlabel('continuous time (seconds)', fontsize=8)
             return
         axt.set_title('output traces', fontsize=9)
         for k, role in enumerate(roles):
@@ -1561,7 +1565,7 @@ class DesignerTab:
                 axt.step(range(len(tr)), [v + k * 1.4 for v in tr],
                          where='post', lw=1.4, label=role)
         axt.set_ylim(-0.3, 1.4 * max(1, len(roles)))
-        axt.set_xlabel('tick', fontsize=8)
+        axt.set_xlabel('time (seconds)', fontsize=8)
         axt.set_yticks([])
         if any(self._traces.get(r) for r in roles):
             axt.legend(fontsize=7, loc='upper right')
@@ -1689,13 +1693,13 @@ class DesignerTab:
     def _step(self):
         if not self.grid:
             self._status.set('Empty grid — nothing to simulate.')
-            return
+            return False
         if getattr(self, '_player', None) is None:
             self._build_player()
-        if self._running and self._player.at_end():
-            self._player.reset()                 # loop while Playing
-        else:
-            self._player.step()
+        if self._player.at_end():
+            self._status.set('Playback is at the end — press Run to restart or Reset.')
+            return False
+        self._player.step()
         self._nv_playing = True
         self._tick = 1                            # marks "simulating" for _refresh_canvas
         self._state = self._player.activity()
@@ -1706,12 +1710,20 @@ class DesignerTab:
         self._tick_lbl.config(text='t = %.1f%s' % (
             self._player.cursor, '  (event cap)' if self._player.overflow else ''))
         self._refresh_canvas()
+        return True
 
     def _toggle_run(self):
         if self._running:
             self._running = False
             self._run_btn.config(text='Run')
         else:
+            if not self.grid:
+                self._status.set('Empty grid — place or grow a circuit before Run.')
+                return
+            if getattr(self, '_player', None) is not None and self._player.at_end():
+                self._player.reset()
+                if getattr(self, '_editor', None) is not None:
+                    self._editor.set_cursor(0.0)
             self._running = True
             self._run_btn.config(text='Pause')
             self._tick_loop()
@@ -1719,7 +1731,14 @@ class DesignerTab:
     def _tick_loop(self):
         if not self._running:
             return
-        self._step()
+        advanced = self._step()
+        if not advanced or self._player.at_end():
+            self._running = False
+            self._run_btn.config(text='Run')
+            if advanced:
+                self._status.set('Playback complete at %.1f seconds.'
+                                 % self._player.cursor)
+            return
         self.parent.after(70, self._tick_loop)
 
     def close(self):
@@ -1768,7 +1787,9 @@ class DesignerTab:
                     _, trs, raw, overflow = run_nervous_events(
                         self.grid, routing, list(self.in_pos), out_pos,
                         trial.streams, obs,
-                        max_events=getattr(t, 'max_events', 2048))
+                        max_events=getattr(t, 'max_events', 2048),
+                        config=getattr(t, 'pulse_config', None),
+                        input_events=getattr(trial, 'input_events', None))
                     traces.overflow = traces.overflow or overflow
                     for r in roles:
                         traces[r].append(trs[r])

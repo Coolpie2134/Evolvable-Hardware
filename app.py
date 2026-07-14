@@ -556,8 +556,10 @@ class App:
         # ── third row: GA + substrate-physics tuning (applied on Run) ──
         from nv_evo.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
                                TOURNAMENT_K as _TK, MUT_DECAY as _AL)
+        from evo_runtime.mutation import DEFAULT_MUTATION_LIMIT as _ML
         from nv_evo.pulse import DELAY as _D, WIDTH as _W, COINC as _C
-        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL, elite=5,
+        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL,
+                                   beta=1.0, limit=_ML, elite=5,
                                    delay=_D, width=_W, coinc=_C)
         ctrl3 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl3.pack(fill='x', side='top')
@@ -577,6 +579,12 @@ class App:
         self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3, store=self._ga_entries)
         # simulated-annealing decay: mutation rate *= α each generation (1 = off)
         self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6, store=self._ga_entries)
+        # β controls plateau reheating: 0 disables it, 1 keeps the tuned
+        # behavior, and larger values raise mutation faster during stagnation.
+        self._beta_var = aentry(ga_frame, 'Plateau β:', 1.0,
+                                width=4, store=self._ga_entries)
+        self._mutation_limit_var = aentry(
+            ga_frame, 'Mutation cap:', _ML, width=4, store=self._ga_entries)
         # ε-lexicase selection (nervous/LUT temporal targets only): streams over the
         # whole population instead of tournament, bypassing the elite pool so it can
         # actually act. Off = tournament (the tuned default).
@@ -710,9 +718,24 @@ class App:
         self._fit_ax.grid(True, alpha=0.3)
         self._best_line, = self._fit_ax.plot([], [], 'b-',  lw=1.5, label='Best (all-time)')
         self._genbest_line, = self._fit_ax.plot([], [], color='#1ea64a', lw=1.0,
-                                                label='Best (this gen)', alpha=0.85)
+                                                label='Best new offspring', alpha=0.85)
         self._mean_line, = self._fit_ax.plot([], [], 'r--', lw=1.0, label='Mean', alpha=0.7)
-        self._fit_ax.legend(fontsize=8)
+        self._mut_ax = self._fit_ax.twinx()
+        self._mut_ax.set_ylabel('Effective mutation rate', color='#7d3c98')
+        self._mut_ax.tick_params(axis='y', labelcolor='#7d3c98', labelsize=8)
+        self._mut_ax.set_ylim(0, 8.4)
+        self._mutation_line, = self._mut_ax.plot(
+            [], [], color='#7d3c98', lw=1.0, alpha=0.8,
+            label='Effective mutation')
+        self._mutation_text = self._fit_ax.text(
+            0.99, 0.02, 'Mutation: —', transform=self._fit_ax.transAxes,
+            ha='right', va='bottom', fontsize=8, color='#7d3c98',
+            bbox=dict(facecolor='white', edgecolor='#7d3c98', alpha=0.75,
+                      boxstyle='round,pad=0.2'))
+        chart_lines = [self._best_line, self._genbest_line, self._mean_line,
+                       self._mutation_line]
+        self._fit_ax.legend(chart_lines, [line.get_label() for line in chart_lines],
+                            fontsize=8, loc='best')
         self._fit_fig.tight_layout()
         self._fit_canvas = FigureCanvasTkAgg(self._fit_fig, master=left)
         self._fit_canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
@@ -854,6 +877,8 @@ class App:
         d = self._tune_defaults
         self._mut_var.set(str(d['mut']));   self._imm_var.set(str(d['imm']))
         self._tourn_var.set(str(d['tk']));  self._alpha_var.set(str(d['alpha']))
+        self._beta_var.set(str(d['beta']))
+        self._mutation_limit_var.set(str(d['limit']))
         self._elite_var.set(str(d['elite']))
         self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
@@ -865,12 +890,16 @@ class App:
         try:
             mut = float(self._mut_var.get()); imm = float(self._imm_var.get())
             tournament = int(self._tourn_var.get())
-            alpha = float(self._alpha_var.get()); elite = int(self._elite_var.get())
+            alpha = float(self._alpha_var.get()); beta = float(self._beta_var.get())
+            mutation_limit = float(self._mutation_limit_var.get())
+            elite = int(self._elite_var.get())
             max_telomere = int(self._maxtel_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coincidence = float(self._coinc_var.get())
             if (mut < 0 or not (0 <= imm < 1) or tournament < 1
-                    or not (0 < alpha <= 1) or elite < 0 or max_telomere < 2
+                    or not (0 < alpha <= 1) or not (0 <= beta <= 10)
+                    or mutation_limit < 1
+                    or elite < 0 or max_telomere < 2
                     or delay <= 0 or width <= 0 or coincidence < 0):
                 raise ValueError
         except ValueError:
@@ -879,8 +908,10 @@ class App:
         return RunConfig(
             ga=GAConfig(
                 mean_mutations=mut, immigrant_fraction=imm,
+                mutation_limit=mutation_limit,
                 tournament_size=tournament, elite_count=elite,
                 mutation_decay=alpha,
+                stagnation_beta=beta,
                 selection=('lexicase' if bool(self._lexicase_var.get())
                            else 'tournament'),
                 max_telomere=max_telomere,
@@ -1013,7 +1044,9 @@ class App:
         run_config = self._read_run_config(chromosome_count=n_chroms)
         if run_config is None:
             self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
-                             'Tournament>=1, Elites>=0, 0<α<=1, Max telomere>=2, '
+                             'Tournament>=1, Elites>=0, 0<α<=1, 0<=β<=10, '
+                             'Mutation cap>=1, '
+                             'Max telomere>=2, '
                              'Delay/Width>0, Coinc>=0.')
             return
 
@@ -1044,6 +1077,8 @@ class App:
         self._best_line.set_data([], [])
         self._mean_line.set_data([], [])
         self._genbest_line.set_data([], [])
+        self._mutation_line.set_data([], [])
+        self._mutation_text.set_text('Mutation: —')
         self._fit_ax.set_xlim(0, max(gens * tries, 10) + 1)
         self._fit_ax.set_title('Fitness vs Generation — %s' % self.target.name, fontsize=10)
         self._fit_canvas.draw_idle()
@@ -1138,6 +1173,8 @@ class App:
             self._active_seed = saved_seed
         saved_backend = state.get('backend', 'snn')
         self._active_run_config = normalized_config
+        self._beta_var.set(str(normalized_config.ga.stagnation_beta))
+        self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
         self._chroms_var.set(str(actual_chroms))
         self._active_chroms = actual_chroms
         self._disp_backend   = saved_backend
@@ -1166,8 +1203,8 @@ class App:
     # ── queue polling ─────────────────────────────────────────────────────────
 
     def _redraw_fit_chart(self, max_pts=2000):
-        """Push the best/mean/gen-best history to the chart. The full history is
-        kept (three floats per generation) but each PLOTTED line is reduced to at
+        """Push fitness and effective mutation history to the chart. The full
+        history is kept, but each plotted line is reduced to at
         most ~`max_pts` points so redraw cost stays flat on 100k-generation runs.
 
         Reduction is a per-bucket MIN/MAX ENVELOPE per series, not a stride: the
@@ -1179,7 +1216,7 @@ class App:
         if not hist:
             return
         series = ((self._best_line, 1), (self._mean_line, 2),
-                  (self._genbest_line, 3))
+                  (self._genbest_line, 3), (self._mutation_line, 4))
         if len(hist) <= max_pts:
             xs = [d[0] for d in hist]
             for line, col in series:
@@ -1198,6 +1235,9 @@ class App:
                     xs.append(hist[-1][0]); ys.append(hist[-1][col])
                 line.set_data(xs, ys)
         self._fit_ax.set_xlim(0, hist[-1][0] + 1)
+        mutation_values = [row[4] for row in hist]
+        self._mut_ax.set_ylim(0, max(1.05, max(mutation_values) * 1.08))
+        self._mutation_text.set_text('Mutation: %.3f' % mutation_values[-1])
         self._fit_canvas.draw_idle()
 
     def _poll(self):
@@ -1208,11 +1248,13 @@ class App:
                 msg  = self.q.get_nowait()
                 kind = msg[0]
                 if kind == 'gen':
-                    _, try_n, gen, best_f, mean_f, gen_best = msg
+                    _, try_n, gen, best_f, mean_f, offspring_best, mutation_rate = msg
                     self._abs_gen += 1
-                    self._gen_history.append((self._abs_gen, best_f, mean_f, gen_best))
+                    self._gen_history.append(
+                        (self._abs_gen, best_f, mean_f, offspring_best, mutation_rate))
                     self._progress.configure(value=self._abs_gen)
-                    last_gen = (try_n, gen, best_f, mean_f, gen_best)
+                    last_gen = (try_n, gen, best_f, mean_f, offspring_best,
+                                mutation_rate)
                 elif kind == 'phase':
                     _, phase, current, total, amount = msg
                     self._work_phase = phase
@@ -1288,10 +1330,10 @@ class App:
         if last_gen is not None:               # redraw the fitness chart once per poll
             self._redraw_fit_chart()
         if last_gen is not None and not finished:
-            try_n, gen, best_f, mean_f, gen_best = last_gen
-            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  gen-best=%.4f  mean=%.4f' %
+            try_n, gen, best_f, mean_f, offspring_best, mutation_rate = last_gen
+            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  offspring-best=%.4f  mean=%.4f  mutation=%.3f' %
                              (self.target.name, getattr(self, '_active_seed', 0),
-                              try_n, gen, best_f, gen_best, mean_f))
+                              try_n, gen, best_f, offspring_best, mean_f, mutation_rate))
         # Full circuit/traces rendering touches every hidden tab and can take
         # longer than an evaluation batch.  Keep the main loop responsive while
         # evolving; the final champion is rendered once on completion.

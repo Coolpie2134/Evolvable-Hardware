@@ -247,7 +247,7 @@ class PulseLaneEditor:
         ax.set_ylim(-0.6, n - 0.4)
         ax.set_yticks(range(len(self.labels)))
         ax.set_yticklabels(self.labels, fontsize=8)
-        ax.set_xlabel('continuous time (tick units)', fontsize=8)
+        ax.set_xlabel('continuous time (seconds)', fontsize=8)
         ax.tick_params(labelsize=7)
         ax.set_title('input pulses — click for default width; drag for custom width',
                      fontsize=8)

@@ -54,6 +54,8 @@ import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from evo_runtime.cache import LRUCache
+from evo_runtime.mutation import (STRESS_MAX_MULT, STRESS_PATIENCE,
+                                  adaptive_mutation_rate)
 from evo_runtime.parallel import map_ordered
 
 from .genome import (MAX_STATE, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
@@ -563,25 +565,6 @@ def select_parent(population, fitnesses, case_vecs=None):
 # climb off a plateau, then relaxing the instant progress resumes. The temporal
 # plateaus (latch/toggle/stepper) are exactly the deceptive landscapes this is
 # meant for: flat regions where only a burst of variation reaches the next rung.
-STRESS_PATIENCE = 12
-STRESS_MAX_MULT = 8.0
-
-
-def adaptive_mutation_rate(annealed_rate, stagnation, solved=False):
-    """Actual mutation rate with a plateau reheat independent of annealing.
-
-    Once the target is SOLVED (best fitness == 1.0), stagnation is permanent —
-    nothing can beat 1.0 — so the SOS reheat would fire forever and pointlessly
-    scatter the population (there is no plateau left to escape). When `solved`,
-    skip the reheat and stay at the annealed base so the population can settle."""
-    base = max(1.0, annealed_rate)
-    if solved or stagnation < STRESS_PATIENCE:
-        return base
-    ramp = 1.0 + ((stagnation - STRESS_PATIENCE)
-                  / max(1.0, STRESS_PATIENCE / 2.0))
-    return max(base, min(STRESS_MAX_MULT, ramp))
-
-
 def consolidate_population(parents, parent_fitnesses, parent_cases,
                            offspring, offspring_fitnesses, offspring_cases):
     """Terminal ``(mu + lambda)`` survivor selection.

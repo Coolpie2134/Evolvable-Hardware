@@ -59,6 +59,10 @@ class TemporalTarget:
     score_mode:      str = 'trace'
     event_tolerance: float = 0.5
     event_max_shift: float = 12.0
+    # Most behaviors care about relative timing and fit one shared propagation
+    # offset. Precision-delay targets such as Echo set this False because their
+    # expected timestamps already specify the required physical delay.
+    fit_latency:     bool = True
     max_events:      int = 2048
     # Nominal input->output latency baked into the expected traces (oracle
     # `latency`). Kept as explicit metadata so semantic scoring does not have to
@@ -361,12 +365,13 @@ def echo(grid_size=5, delay=3):
                                    if p + delay < T]}))
     return TemporalTarget('Echo (delay %d)' % delay, [In], [out], T, trials,
                           grid_size=grid_size, iters=30, score_mode='events',
+                          fit_latency=False,
                           description=describe_target(
-        'Reproduce the input-edge train at Q while preserving every inter-edge '
-        'interval.', EVENT_SCORING,
-        'Four schedules vary pulse count and spacing. The nominal %d-second '
-        'label sets the reference trace; absolute circuit latency remains free.'
-        % delay))
+        'Reproduce every input edge at Q exactly %d seconds later.' % delay,
+        'Match output edges one-to-one at the specified absolute times; missing, '
+        'early, late, and extra edges reduce fitness.',
+        'Four schedules vary pulse count and spacing. A direct input-to-output '
+        'connection fails because no additional latency offset is fitted.'))
 
 
 def coincidence_detector(grid_size=5, latency=1):

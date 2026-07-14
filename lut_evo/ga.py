@@ -14,6 +14,8 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from itertools import combinations
 from evo_runtime.cache import LRUCache
+from evo_runtime.mutation import (STRESS_MAX_MULT, STRESS_PATIENCE,
+                                  adaptive_mutation_rate)
 from evo_runtime.parallel import map_ordered
 
 from nv_evo.temporal import (_pr_counts, _f1,
@@ -55,24 +57,6 @@ FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 
 # LUT temporal search has the same flat recurrent landscapes as the nervous
 # net; reheat after a plateau instead of cooling indefinitely.
-STRESS_PATIENCE = 12
-STRESS_MAX_MULT = 8.0
-
-
-def adaptive_mutation_rate(annealed_rate, stagnation, solved=False):
-    """Reheat a plateau to a real mutation rate, not a tiny annealed product.
-
-    Skips the reheat once the target is SOLVED (best == 1.0): stagnation is then
-    permanent, so reheating would only scatter the population with no plateau
-    left to escape. See nv_evo.ga.adaptive_mutation_rate."""
-    base = max(1.0, annealed_rate)
-    if solved or stagnation < STRESS_PATIENCE:
-        return base
-    ramp = 1.0 + ((stagnation - STRESS_PATIENCE)
-                  / max(1.0, STRESS_PATIENCE / 2.0))
-    return max(base, min(STRESS_MAX_MULT, ramp))
-
-
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
 # Output candidates are the OUT_RADIUS cells nearest each terminal, via the
 # shared nv_evo.temporal._output_candidates (same radius, same tie-breaks).
@@ -1030,7 +1014,7 @@ def lut_report(ttarget, genome=None):
     if desc:
         lines += [''] + desc.splitlines()
     if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-        lines += ['', 'Backend detail: LUT cadence transitions may occur at sub-tick times.']
+        lines += ['', 'Backend detail: LUT cadence transitions may occur at sub-second times.']
         if genome is None:
             return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
         prep = prepare_lut(genome, ttarget)
@@ -1069,14 +1053,18 @@ def lut_report(ttarget, genome=None):
             total, '   SOLVED' if total >= 0.999 else '')]
         return '\n'.join(lines)
     if getattr(ttarget, 'score_mode', 'trace') == 'events':
-        lines += ['', 'Backend detail: raw LUT wire timestamps retain sub-tick edges.']
+        lines += ['', 'Backend detail: raw LUT wire timestamps retain sub-second edges.']
         prep = None if genome is None else prepare_lut(genome, ttarget)
         traces = prep[2] if prep is not None else None
         best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0
         if prep is not None:
             for term in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (term.role, prep[1][term.role]))
-            lines.append('measured output latency offset: %+.3f cycle(s)' % best_s)
+            if getattr(ttarget, 'fit_latency', True):
+                lines.append('measured output latency offset: %+.3f seconds' % best_s)
+            else:
+                lines.append('fixed timing: required delay %g seconds; no offset fitted'
+                             % getattr(ttarget, 'latency', 0))
         for ti, trial in enumerate(ttarget.trials):
             for role in trial.expected:
                 lines.append('Test %d: %s' % (
@@ -1095,9 +1083,9 @@ def lut_report(ttarget, genome=None):
         return '\n'.join(lines)
     lines += ['',
               'Scored as persistent behaviour in active and quiet windows.',
-              'A one-tick phase tolerance allows recurrent outputs to ring.',
+              'A one-second phase tolerance allows recurrent outputs to ring.',
               'One shared input-to-output latency is used across every test/output.',
-              'The exact per-tick value is diagnostic only and ignores tolerance.']
+              'The exact per-second value is diagnostic only and ignores tolerance.']
     traces = None
     best_s = 0
     if genome is not None:
@@ -1109,7 +1097,7 @@ def lut_report(ttarget, genome=None):
             best_s = _best_shift(traces, ttarget)[0]
             for t in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
-            lines.append('measured output latency offset: %+d tick(s)' % best_s)
+            lines.append('measured output latency offset: %+d second(s)' % best_s)
     for ti, trial in enumerate(ttarget.trials):
         lines += ['', 'Test %d: %s' % (
             ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
@@ -1130,7 +1118,7 @@ def lut_report(ttarget, genome=None):
                                 tp_rec, n_exp, tp_prec, n_act))
     if traces is not None:
         s = windowed_score(traces, ttarget, shift=best_s)
-        lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
+        lines += ['', '=> behavioural score %.4f%s   (exact per-second %.4f)'
                   % (s, '   SOLVED' if s >= 0.999 else '',
                      exact_tick_accuracy(traces, ttarget))]
     return '\n'.join(lines)

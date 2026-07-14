@@ -295,6 +295,53 @@ def test_registered_target_copy_uses_seconds_not_ticks():
     assert 'Watchdog timeout (5 seconds)' in TEMPORAL_TARGETS
 
 
+def test_echo_delay_three_requires_absolute_timing():
+    """Echo is a precision delay, so a fitted shift cannot rescue a wire."""
+    target = TEMPORAL_TARGETS['Echo (delay 3)']
+    assert target.score_mode == 'events'
+    assert target.latency == 3
+    assert target.fit_latency is False
+    expected = [trial.expected_events['Q'] for trial in target.trials]
+
+    exact = TemporalTraces(
+        {'Q': [[] for _ in target.trials]}, events={'Q': expected})
+    assert event_score(exact, target) == 1.0
+
+    direct_events = []
+    for trial in target.trials:
+        direct_events.append([
+            float(second) for second, row in enumerate(trial.streams)
+            if row[0] and (second == 0 or not trial.streams[second - 1][0])])
+    direct = TemporalTraces(
+        {'Q': [[] for _ in target.trials]}, events={'Q': direct_events})
+    assert event_score(direct, target) < 0.25
+
+    for delta in (-1.0, 1.0):
+        mistimed = TemporalTraces(
+            {'Q': [[] for _ in target.trials]},
+            events={'Q': [[event + delta for event in events]
+                           for events in expected]})
+        assert event_score(mistimed, target) < 1.0
+
+
+def test_memory_targets_leave_time_to_observe_each_state():
+    """Commands cannot arrive before ringing/quiet output is distinguishable."""
+    minimum_gaps = {
+        'SR latch': 10,
+        'Toggle flip-flop': 10,
+        'Gated oscillator': 12,
+        'Resettable toggle': 10,
+    }
+    for name, minimum in minimum_gaps.items():
+        target = TEMPORAL_TARGETS[name]
+        for trial in target.trials:
+            event_times = [second for second, row in enumerate(trial.streams)
+                           if any(row)]
+            assert all(b - a >= minimum
+                       for a, b in zip(event_times, event_times[1:])), \
+                (name, event_times)
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     passed = 0

@@ -40,7 +40,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     diversify_fn = None
     consolidate_fn = None
     rank_fn = snn_rank_key
-    rate_fn = lambda rate, stagnation, solved=False: rate
+    rate_fn = lambda rate, stagnation, solved=False, beta=0.0, limit=8.0: rate
     base_rate, decay = config.ga.mean_mutations, config.ga.mutation_decay
 
     if backend == 'nervous':
@@ -161,19 +161,27 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 best_fit, best_genome, best_rank = (
                     run_fit, copy.deepcopy(champion), run_rank)
             messages.put(('gen', try_i, 0, best_fit,
-                          sum(fitnesses) / len(fitnesses), run_fit))
+                          sum(fitnesses) / len(fitnesses), run_fit, base_rate))
             stagnation, mutation_rate = 0, base_rate
             for generation in range(1, gens + 1):
                 if stop_event.is_set():
                     raise EvolutionCancelled
                 mutation_rate *= decay
-                actual_rate = rate_fn(mutation_rate, stagnation, run_fit >= 1.0)
+                actual_rate = rate_fn(
+                    mutation_rate, stagnation, run_fit >= 1.0,
+                    config.ga.stagnation_beta, config.ga.mutation_limit)
                 parents, parent_fitnesses, parent_cases = population, fitnesses, cases
                 offspring = step(parents, parent_fitnesses, parent_cases, actual_rate)
                 offspring_fitnesses, offspring_cases = evaluate(
                     offspring, 'Evaluating population', try_i, generation)
+                # Report reproduction separately from survivor selection.  Once
+                # a terminal LUT solution exists, environmental selection keeps
+                # that solved parent alive; reporting the selected population's
+                # best would therefore duplicate the all-time-best line even
+                # when every newly generated offspring is worse.
+                offspring_best = max(offspring_fitnesses)
                 if (consolidate_fn is not None
-                        and max(run_fit, max(offspring_fitnesses)) >= 1.0):
+                        and max(run_fit, offspring_best) >= 1.0):
                     population, fitnesses, cases = consolidate_fn(
                         parents, parent_fitnesses, parent_cases,
                         offspring, offspring_fitnesses, offspring_cases)
@@ -194,7 +202,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                         best_fit, best_genome, best_rank = (
                             run_fit, copy.deepcopy(champion), run_rank)
                 messages.put(('gen', try_i, generation, best_fit,
-                              sum(fitnesses) / len(fitnesses), fitnesses[gi]))
+                              sum(fitnesses) / len(fitnesses), offspring_best,
+                              actual_rate))
             if best_fit >= 1.0:
                 break
 
