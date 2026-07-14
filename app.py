@@ -47,8 +47,8 @@ from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
 from snn_evo.genome import GRID_SIZE, MAX_STATE
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
 from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
-                    nervous_case_outputs, circuit_summary_nervous, ROUTING,
-                    temporal_report)
+                    nervous_case_outputs, circuit_summary_nervous,
+                    decode_tile_routing, temporal_report)
 from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
@@ -56,7 +56,9 @@ from interactive import InteractiveTab
 from designer import DesignerTab
 from target_ui import TargetPicker
 import ui_compat
-from evo_runtime.config import GAConfig, RunConfig
+from evo_runtime.config import (GAConfig, RunConfig,
+                                MAX_CHROMOSOME_COUNT as MAX_CHROMS,
+                                default_max_telomere)
 from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
 from evo_runtime.controller import worker_entry as evolution_worker_entry
 
@@ -189,6 +191,15 @@ def grid_to_rgba(grid, grid_size, seed_set, output_pos):
     return img
 
 
+def _split_display(chromosome):
+    count = len(chromosome.genes)
+    if count == 0:
+        return 'none'
+    if count == 1:
+        return 'gene fields'
+    return str(max(1, min(int(chromosome.split), count - 1)))
+
+
 def build_genome_text(genome, fitness=None):
     """Render the genome as a readable, aligned chromosome/gene table."""
     chroms  = list(getattr(genome, 'chromosomes', []) or [])
@@ -203,15 +214,19 @@ def build_genome_text(genome, fitness=None):
     g0 = chroms[0].genes[0] if (chroms and chroms[0].genes) else None
     hexmode = g0 is not None and hasattr(g0, 'ctx_l')
     lutmode = g0 is not None and hasattr(g0, 'ctx_n')
-    sides = ('hex sides L/R/D' if hexmode
+    sides = ('rotated circuit context L/R/D (4-bit states 0-15)' if hexmode
              else 'the 4 sides N/E/S/W (each a 16-bit LUT)' if lutmode
              else 'the 4 sides N/E/S/W')
-    L.append('Each gene maps an expected neighbourhood (%s + the cell' % sides)
-    L.append("itself) to an output state. During growth a cell adopts the output of the")
+    element = 'core circuit' if hexmode else 'cell'
+    L.append('Each gene maps an expected neighbourhood (%s + the %s' %
+             (sides, element))
+    L.append('itself) to an output state. During growth a %s adopts the output of the' %
+             element)
     L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
     if hexmode:
-        L.append("out = 0 means the cell is off (dead); L/R are read in the node's")
-        L.append("own orientation (context rotation).")
+        L.append('Each rule develops one 4-bit core circuit and is applied independently')
+        L.append("to a tile's L/R/D circuits in their rotated orientation. out = 0 switches")
+        L.append('that circuit off; the phenotype tile disappears only when all three are off.')
     elif lutmode:
         L.append('Each 16-bit LUT is really a BOOLEAN FUNCTION of the four bits the cell')
         L.append('receives from its neighbours — shown here minimised as out = f(N,S,E,W)')
@@ -221,14 +236,15 @@ def build_genome_text(genome, fitness=None):
         L.append('stays dead.  Raw hex is kept in brackets for reference.')
     else:
         L.append("'until' = the gene only applies while the growth iteration <= that limit.")
-    L.append('split = the crossover point used when two genomes mate.')
+    L.append('split = the between-gene crossover point; a one-gene chromosome')
+    L.append('recombines the rule fields inside that gene instead.')
     L.append('')
     if not chroms:
         L.append('(empty genome)')
         return '\n'.join(L)
 
     if hexmode:
-        hdr = '    #  |   L    R    D  | self |  out'
+        hdr = '    #  | ctx L ctx R ctx D | self |  out'
         sep = '  -----+----------------+------+------'
     elif lutmode:
         hdr = sep = None                          # block layout instead of a row
@@ -237,15 +253,17 @@ def build_genome_text(genome, fitness=None):
         sep = '  -----+---------------------+------+------+-------'
     for ci, c in enumerate(chroms):
         tel = getattr(c, 'telomere', None)
-        L.append('Chromosome %s     tag=%-4d  split=%-2d%s   (%d genes)'
-                 % (chr(ord('a') + ci), c.tag, c.split,
+        L.append('Chromosome %s     tag=%-4d  split=%-11s%s   (%d genes)'
+                 % (chr(ord('a') + ci), c.tag, _split_display(c),
                     ('  telomere=%d' % tel) if tel is not None else '',
                     len(c.genes)))
         if hdr:
             L.append(hdr)
             L.append(sep)
+        effective_split = (max(1, min(int(c.split), len(c.genes) - 1))
+                           if len(c.genes) > 1 else 0)
         for gi, g in enumerate(c.genes):
-            if 0 < c.split == gi:
+            if effective_split == gi:
                 L.append('       - - - - - - split - - - - - -')
             if hexmode:
                 L.append('  %4d | %4d %4d %4d | %4d | %4d'
@@ -424,6 +442,11 @@ class App:
 
         ttk.Label(ctrl, text='Model:').pack(side='left', padx=(2, 2))
         self._backend_var = tk.StringVar(value='SNN')
+        self._telomere_values = {
+            backend: str(default_max_telomere(backend))
+            for backend in ('snn', 'nervous', 'lut')
+        }
+        self._telomere_backend = 'snn'
         self._backend_cb  = ttk.Combobox(ctrl, textvariable=self._backend_var,
                                          values=['SNN', 'Nervous', 'LUT'],
                                          width=8, state='readonly')
@@ -514,9 +537,12 @@ class App:
         # Telomere ceiling: caps how far a chromosome's telomere — the organism's
         # growth RADIUS — may drift via mutation (and bounds fresh-genome init).
         # Eval cost tracks cell count ~ radius^2, so this is the lever for run
-        # speed vs how big nets may grow. Lower it (e.g. 8-10) to keep runs fast;
-        # the default 20 allows large organisms.
-        self._maxtel_var = aentry(self._layout_frame, 'Max telomere:', 20, width=4)
+        # speed vs how big nets may grow. LUT organisms default to 8 because
+        # their dense ontogeny otherwise fills hundreds of cells; nervous nets
+        # retain their existing default of 20.
+        self._maxtel_var = aentry(
+            self._layout_frame, 'Max telomere:',
+            default_max_telomere('snn'), width=4)
         self._layout_reset_btn = ttk.Button(self._layout_frame, text='Reset', width=6,
                                              command=self._reset_arch)
         self._layout_reset_btn.pack(side='left', padx=8)
@@ -545,9 +571,9 @@ class App:
         self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4, store=self._ga_entries)
         self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4, store=self._ga_entries)
         self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3, store=self._ga_entries)
-        # size of the elite breeding pool: the top N genomes are the recombination
-        # parents for the next generation (they are NOT copied over verbatim). 0 =
-        # select parents from the whole population.
+        # Size of the elite breeding pool. Reproduction does not copy these
+        # verbatim; after a terminal solve, evaluated parents may survive the
+        # parent+offspring consolidation step. 0 = use the whole population.
         self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3, store=self._ga_entries)
         # simulated-annealing decay: mutation rate *= α each generation (1 = off)
         self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6, store=self._ga_entries)
@@ -613,14 +639,16 @@ class App:
     def _reconfigure_for_backend(self):
         """Show only the controls / tab labels relevant to the selected model."""
         backend = self._backend()
+        self._sync_telomere_backend(backend)
         if backend != 'snn':
             self._arch_frame.pack_forget()
             self._arch_sep.pack_forget()
             self._graded_chk.state(['disabled'])
             if backend == 'nervous':
-                note = ('Nervous net — HEX array (each cell wired to 3 neighbours L/R/D); '
-                        'coincidence (AND) or OR + inhibition, loops circulate injected '
-                        'pulses (memory). Substrate (Vth/Syn/Input) and Graded do not apply.')
+                note = ('Nervous net — HEX array; each tile has 3 independent L/R/D '
+                        'Figure-3 circuits (coincidence/buffer + inhibition). Loops '
+                        'circulate injected pulses as memory. Substrate '
+                        '(Vth/Syn/Input) and Graded do not apply.')
             else:
                 note = ('LUT array — SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
                         '4 directional 16-bit lookup tables per cell, latched & synchronous '
@@ -689,11 +717,16 @@ class App:
         self._fit_canvas = FigureCanvasTkAgg(self._fit_fig, master=left)
         self._fit_canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
 
-        right = ttk.LabelFrame(frame, text='Truth Table', padding=6)
-        right.pack(side='right', fill='both', padx=(0, 6), pady=6)
+        # Titled dynamically by _set_tt_title: 'Truth Table' for combinational
+        # targets, 'Trace Report' for temporal ones (it shows temporal_report /
+        # lut_report there, not a truth table).
+        self._tt_frame = ttk.LabelFrame(frame, text='Report', padding=6)
+        self._tt_frame.pack(side='right', fill='both', padx=(0, 6), pady=6)
+        # wrap='word' so long prose lines flow onto the next line instead of
+        # being clipped by the panel width; short aligned rows are unaffected.
         self._tt_text = scrolledtext.ScrolledText(
-            right, width=58, height=22,
-            font=(self._mono, 9), state='disabled', wrap='none')
+            self._tt_frame, width=62, height=22,
+            font=(self._mono, 9), state='disabled', wrap='word')
         self._tt_text.pack(fill='both', expand=True)
 
     def _build_growth_tab(self, nb):
@@ -786,7 +819,7 @@ class App:
             self._reconfigure_for_backend()
             # show what this target IS right away in the Evolution tab's panel
             try:
-                self._set_tt(temporal_report(self.target))
+                self._set_tt(temporal_report(self.target), title='Trace Report')
             except Exception:
                 pass
             model = 'clocked LUT array' if self._backend() == 'lut' else 'continuous-time nervous net'
@@ -821,7 +854,7 @@ class App:
         if hasattr(self, '_lexicase_var'):
             self._lexicase_var.set(False)    # tournament is the tuned default
 
-    def _read_run_config(self):
+    def _read_run_config(self, chromosome_count=None):
         """Parse controls into an immutable, process-safe run configuration."""
         try:
             mut = float(self._mut_var.get()); imm = float(self._imm_var.get())
@@ -844,7 +877,8 @@ class App:
                 mutation_decay=alpha,
                 selection=('lexicase' if bool(self._lexicase_var.get())
                            else 'tournament'),
-                max_telomere=max_telomere),
+                max_telomere=max_telomere,
+                chromosome_count=chromosome_count),
             pulse=PulseConfig(delay=delay, width=width,
                               coincidence=coincidence))
 
@@ -855,6 +889,24 @@ class App:
         if v.startswith('lut'):
             return 'lut'
         return 'snn'
+
+    def _sync_telomere_backend(self, backend=None):
+        """Swap in the remembered growth ceiling for the selected backend.
+
+        Fresh LUT runs start at 8 and the other models at 20. A value typed by
+        the user is retained when switching away from a model and back.
+        """
+        backend = backend or self._backend()
+        previous = getattr(self, '_telomere_backend', backend)
+        if previous == backend or not hasattr(self, '_maxtel_var'):
+            self._telomere_backend = backend
+            return
+        current = self._maxtel_var.get().strip()
+        if current:
+            self._telomere_values[previous] = current
+        self._maxtel_var.set(self._telomere_values.get(
+            backend, str(default_max_telomere(backend))))
+        self._telomere_backend = backend
 
     def _on_backend_change(self, _evt=None):
         self._reconfigure_for_backend()
@@ -889,7 +941,10 @@ class App:
         self._vmax_var.set(str(DEFAULT_ARCH.vth_levels[-1]))
         self._cur_var.set(str(self.target.high))
         self._chroms_var.set('2')
-        self._maxtel_var.set('20')
+        backend = self._backend()
+        value = str(default_max_telomere(backend))
+        self._maxtel_var.set(value)
+        self._telomere_values[backend] = value
 
     def _open_custom(self):
         CustomTargetDialog(self.root, self._on_custom_built)
@@ -942,13 +997,14 @@ class App:
 
         try:
             n_chroms = int(self._chroms_var.get())
-            if n_chroms < 1:
+            if not 1 <= n_chroms <= MAX_CHROMS:
                 raise ValueError
         except ValueError:
-            self._status.set('Invalid genome — Chroms>=1 (integer).')
+            self._status.set('Invalid genome — Chroms must be an integer from '
+                             '1 to %d.' % MAX_CHROMS)
             return
 
-        run_config = self._read_run_config()
+        run_config = self._read_run_config(chromosome_count=n_chroms)
         if run_config is None:
             self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
                              'Tournament>=1, Elites>=0, 0<α<=1, Max telomere>=2, '
@@ -972,6 +1028,7 @@ class App:
         self.best_fitness = 0.0
         self._abs_gen = 0
         self._n_unique_solvers = 0
+        self._certification = None
         self._ga_error = None
         self._stop_requested = False
         self._run_started = time.monotonic()
@@ -1016,14 +1073,42 @@ class App:
         if not os.path.exists(path):
             self._status.set('No saved genome at %s — run the GA first.' % CKPT)
             return
-        state = load_checkpoint(path)
+        try:
+            state = load_checkpoint(path)
+        except (OSError, ValueError) as exc:
+            self._status.set('Could not load saved genome: %s' % exc)
+            return
         if state.get('hand_built') and state.get('best_genome') is None:
             # a Designer phenotype with no genome: the main tabs all regrow from
             # DNA, so there is nothing to show here — open it in the Designer.
             self._status.set('Hand-built design (no genome) — open it in the '
                              'Designer tab (Load design…).')
             return
-        self.best_genome  = state['best_genome']
+        loaded_genome = state['best_genome']
+        actual_chroms = len(getattr(loaded_genome, 'chromosomes', []) or [])
+        if not 1 <= actual_chroms <= MAX_CHROMS:
+            self._status.set(
+                'Saved genome has %d chromosomes; this build supports 1–%d.' %
+                (actual_chroms, MAX_CHROMS))
+            return
+        loaded_config = state.get('run_config') or RunConfig()
+        if isinstance(loaded_config, dict):  # trusted legacy pickle migration
+            try:
+                loaded_config = RunConfig.from_dict(loaded_config)
+            except ValueError as exc:
+                self._status.set('Saved run configuration is invalid: %s' % exc)
+                return
+        configured_chroms = loaded_config.ga.chromosome_count
+        chrom_warn = ''
+        if configured_chroms is not None and configured_chroms != actual_chroms:
+            chrom_warn = ('   — saved Chroms=%d disagreed with the genome; '
+                          'using its actual count %d' %
+                          (configured_chroms, actual_chroms))
+        normalized_config = dataclasses.replace(
+            loaded_config, ga=dataclasses.replace(
+                loaded_config.ga, chromosome_count=actual_chroms))
+
+        self.best_genome  = loaded_genome
         self.best_fitness = state['best_fitness']
         # a Designer design with a genome AND hand edits: the main app regrows
         # from DNA, so it cannot reproduce the exact hand-edited grid — flag it
@@ -1046,13 +1131,20 @@ class App:
             self._seed_var.set(str(saved_seed))
             self._active_seed = saved_seed
         saved_backend = state.get('backend', 'snn')
-        self._active_run_config = state.get('run_config', RunConfig())
+        self._active_run_config = normalized_config
+        self._chroms_var.set(str(actual_chroms))
+        self._active_chroms = actual_chroms
         self._disp_backend   = saved_backend
         self._active_backend = saved_backend
         self._backend_var.set({'nervous': 'Nervous', 'lut': 'LUT'}.get(saved_backend, 'SNN'))
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
         self._reconfigure_for_backend()      # filters the dropdown for the backend
+        # A loaded checkpoint reflects its saved run, not the fresh-run default.
+        saved_telomere = str(normalized_config.ga.max_telomere)
+        self._maxtel_var.set(saved_telomere)
+        self._telomere_values[saved_backend] = saved_telomere
+        self._telomere_backend = saved_backend
         self._refresh_target_list()          # keep the backend filter (don't re-broaden;
                                              # LUT deliberately hides combinational targets)
         self._target_picker.select(saved_target.name)
@@ -1060,7 +1152,8 @@ class App:
                 'open the Designer tab to see the exact edited circuit'
                 if hand_edited else '')
         self._status.set('Loaded %s  fitness=%.4f  syn_w=%.2f%s' %
-                         (saved_target.name, self.best_fitness, saved_arch.syn_weight, warn))
+                         (saved_target.name, self.best_fitness,
+                          saved_arch.syn_weight, warn + chrom_warn))
         self._update_all(self.best_genome, self.best_fitness)
         self._save_btn.config(state='normal')
 
@@ -1129,6 +1222,10 @@ class App:
                     self._status.set('Diversifying — built %d genotypically UNIQUE '
                                      'solvers (each ≥ %.3f) → results/solver_generation.json'
                                      % (n_unique, valid))
+                elif kind == 'certified':
+                    # Held-out verdict for the winning genome (CERTIFIED /
+                    # OVERFIT / BELOW / SOLVED / PLATEAU / UNCERTIFIED).
+                    self._certification = msg[1]
                 elif kind == 'error':
                     _, tb = msg
                     lines = tb.strip().splitlines()
@@ -1145,7 +1242,7 @@ class App:
                 elif kind == 'done':
                     finished = True
                     _, genome, fit = msg
-                    if genome is not None:
+                    if genome is not None and not self._ga_error:
                         self.best_genome  = genome
                         self.best_fitness = fit
                         save_target = getattr(self, '_active_target', self.target)
@@ -1154,7 +1251,8 @@ class App:
                             CKPT, genome, fit, save_target, save_arch,
                             getattr(self, '_active_seed', None),
                             getattr(self, '_active_backend', 'snn'),
-                            getattr(self, '_active_run_config', None))
+                            getattr(self, '_active_run_config', None),
+                            getattr(self, '_certification', None))
                         self._pending_best = None      # final draw supersedes it
                         self._update_all(genome, fit)
                     self._run_btn.config(state='normal')
@@ -1162,7 +1260,8 @@ class App:
                     self._load_btn.config(state='normal')
                     self._target_picker.set_state('normal')
                     self._backend_cb.config(state='readonly')
-                    self._save_btn.config(state='normal' if genome else 'disabled')
+                    self._save_btn.config(
+                        state='normal' if self.best_genome else 'disabled')
                     self._progress.configure(value=self._progress.cget('maximum'))
                     self._worker = None
                     if getattr(self, '_ga_error', None):
@@ -1172,10 +1271,12 @@ class App:
                         saved = ('  saved → %s' % CKPT) if genome else ''
                         nu = getattr(self, '_n_unique_solvers', 0)
                         div = ('  |  %d unique valid solvers' % nu) if nu else ''
+                        cert = getattr(self, '_certification', None)
+                        cv = ('  |  %s' % cert['verdict']) if cert and cert.get('verdict') else ''
                         outcome = 'Stopped' if getattr(self, '_stop_requested', False) else 'Done'
-                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s' %
+                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s' %
                                          (outcome, self.target.name, fit,
-                                          getattr(self, '_active_seed', 0), saved, div))
+                                          getattr(self, '_active_seed', 0), saved, div, cv))
         except queue.Empty:
             pass
         if last_gen is not None:               # redraw the fitness chart once per poll
@@ -1234,15 +1335,18 @@ class App:
         self._draw_voltages(genome)
         self._draw_genome(genome, fitness)
 
-    def _set_tt(self, text):
+    def _set_tt(self, text, title=None):
+        if title is not None and getattr(self, '_tt_frame', None) is not None:
+            self._tt_frame.config(text=title)
         self._tt_text.config(state='normal')
         self._tt_text.delete('1.0', 'end')
         self._tt_text.insert('end', text)
         self._tt_text.config(state='disabled')
 
     def _update_truth_table(self, genome):
+        temporal = getattr(self._disp_target, 'temporal', False)
         try:
-            if getattr(self._disp_target, 'temporal', False):
+            if temporal:
                 if self._disp_backend == 'lut':
                     from lut_evo import lut_report
                     text = lut_report(self._disp_target, genome)
@@ -1256,8 +1360,8 @@ class App:
             else:
                 text = build_truth_table(genome, self._disp_target, self._disp_arch)
         except Exception as exc:
-            text = 'Error building truth table:\n' + str(exc)
-        self._set_tt(text)
+            text = 'Error building report:\n' + str(exc)
+        self._set_tt(text, title='Trace Report' if temporal else 'Truth Table')
 
     def _draw_growth(self, genome, fitness):
         target = self._disp_target
@@ -1355,7 +1459,7 @@ class App:
         axes  = fig.subplots(nrows, ncols, squeeze=False)
         flat  = [a for row in axes for a in row]
         for idx, snap in enumerate(snaps):
-            rt   = {p: ROUTING[s & 0x1F] for p, s in snap.items()}
+            rt   = {p: decode_tile_routing(s) for p, s in snap.items()}
             last = (idx == n - 1)
             draw_hex_net(flat[idx], snap, gs, routing=rt, in_pos=in_pos,
                          out_pos=(out_pos if last else {}), show_edges=last,
@@ -1398,19 +1502,27 @@ class App:
         from lut_evo.viz import _lut_color
         counts = Counter(v for st in final.values() for v in st if v)
         luts   = [v for v, _ in counts.most_common(8)]
-        total  = n + 1 + len(luts)                  # snapshots + legend + LUT gallery
-        ncols  = min(6, max(3, math.ceil(math.sqrt(total))))
-        nrows  = math.ceil(total / ncols)
-        axes   = fig.subplots(nrows, ncols, squeeze=False)
-        flat   = [a for row in axes for a in row]
+        # Two STRUCTURED sections (a single uniform grid scattered the LUT tables
+        # among the growth snapshots): growth stages + legend on top, the
+        # distinct-LUT gallery in its own grid below — each section self-contained
+        # so the tables no longer land in arbitrary leftover cells.
+        snap_cells = n + 1                          # growth snapshots + one legend cell
+        snap_cols  = min(6, max(2, snap_cells))
+        snap_rows  = math.ceil(snap_cells / snap_cols)
+        lut_cols   = min(6, max(1, len(luts)))
+        lut_rows   = math.ceil(len(luts) / lut_cols) if luts else 0
+        gs = fig.add_gridspec(2, 1, height_ratios=[snap_rows, max(1, lut_rows)],
+                              hspace=0.35, top=0.92, bottom=0.05, left=0.04, right=0.97)
+        gs_snap = gs[0].subgridspec(snap_rows, snap_cols, hspace=0.45, wspace=0.15)
         for idx, snap in enumerate(snaps):
             last = (idx == n - 1)
-            draw_lut_net(flat[idx], snap, in_pos=in_pos,
+            ax = fig.add_subplot(gs_snap[idx // snap_cols, idx % snap_cols])
+            draw_lut_net(ax, snap, in_pos=in_pos,
                          out_pos=(out_pos if last else {}), show_edges=True,
                          title=('Iter %d (%d)' % (idx, len(snap))) if idx
                                else 'Seed (%d)' % len(snap))
-        leg = flat[n]
-        leg.set_visible(True); leg.axis('off')
+        leg = fig.add_subplot(gs_snap[n // snap_cols, n % snap_cols])
+        leg.axis('off')
         patches = [
             mpatches.Patch(facecolor='white', edgecolor='#b02020', lw=2, label='Input seed'),
             mpatches.Patch(facecolor='white', edgecolor='#17902f', lw=2, label='Output cell'),
@@ -1423,17 +1535,18 @@ class App:
             mpatches.Patch(facecolor='#1ea64a', edgecolor='#b9c2cc',
                            label='tables below: green=1, white=0'),
         ]
-        leg.legend(handles=patches, loc='center', fontsize=7.5, frameon=False,
-                   title='LUT array  (colour = LUT state, per Fig. 13;\nactual lookup tables shown below)',
-                   title_fontsize=8)
-        for k, v in enumerate(luts):
-            sop = lut_sop(v)
-            if len(sop) > 16:
-                sop = sop[:15] + '…'
-            draw_lut_table(flat[n + 1 + k], v, swatch=_lut_color(v),
-                           title='LUT %04X  ×%d\n%s' % (v, counts[v], sop))
-        for idx in range(total, len(flat)):
-            flat[idx].set_visible(False)
+        leg.legend(handles=patches, loc='center', fontsize=7, frameon=False,
+                   title='LUT array — growth stages above,\ndistinct lookup tables below (Fig. 13)',
+                   title_fontsize=7.5)
+        if luts:
+            gs_lut = gs[1].subgridspec(lut_rows, lut_cols, hspace=0.6, wspace=0.2)
+            for k, v in enumerate(luts):
+                sop = lut_sop(v)
+                if len(sop) > 16:
+                    sop = sop[:15] + '…'
+                ax = fig.add_subplot(gs_lut[k // lut_cols, k % lut_cols])
+                draw_lut_table(ax, v, swatch=_lut_color(v),
+                               title='LUT %04X  ×%d\n%s' % (v, counts[v], sop))
         self._growth_canvas.draw_idle()
 
     def _draw_lut_dynamics(self, genome):
@@ -1721,47 +1834,65 @@ class App:
             title += '   (fitness = %.4f)' % fitness
         title += self._seed_tag()
 
+        g0 = next((g for c in chroms for g in c.genes), None)
+        lutmode = g0 is not None and hasattr(g0, 'ctx_n')
+        CARD_CAP = 24
+        # A dense LUT genome (hundreds of ontogeny genes) can't be shown as one
+        # card per gene — they overlap into noise. Show its VOCABULARY instead:
+        # the distinct output lookup tables it installs, most-common first, the
+        # way the Growth tab summarises the grown organism.
+        if lutmode and n_total > CARD_CAP:
+            self._draw_genome_lut_summary(fig, chroms, n_total, title)
+            self._genome_canvas.draw_idle()
+            return
+
         ax = fig.add_subplot(111)
         ax.set_title(title, fontsize=11, fontweight='bold', pad=12)
         ax.axis('off')
 
         CW, CH  = 7.0, 4.4        # card footprint (incl. spacing)
         per_row = 4
-        cap     = 48              # keep cards readable; note the rest
         y       = 0.0
         drawn   = 0
         truncated = False
 
         for ci, chrom in enumerate(chroms):
             tel = getattr(chrom, 'telomere', None)
-            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %d%s   ·   %d genes"
-                    % (chr(ord('a') + ci), chrom.tag, chrom.split,
+            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %s%s   ·   %d genes"
+                    % (chr(ord('a') + ci), chrom.tag, _split_display(chrom),
                        ('   ·   telomere %d' % tel) if tel is not None else '',
                        len(chrom.genes)),
                     fontsize=9.5, fontweight='bold', color='#334', va='bottom')
             y += 1.0
-            ng = len(chrom.genes)
-            for gi, gene in enumerate(chrom.genes):
-                if drawn >= cap:
+            drawn_here = 0
+            for gene in chrom.genes:
+                if drawn >= CARD_CAP:
                     truncated = True
                     break
-                self._draw_gene(ax, (gi % per_row) * CW, y + (gi // per_row) * CH, gene)
+                # position within THIS chromosome's drawn cards
+                self._draw_gene(ax, (drawn_here % per_row) * CW,
+                                y + (drawn_here // per_row) * CH, gene)
                 drawn += 1
-            y += (math.ceil(ng / per_row) if ng else 1) * CH + 0.7
+                drawn_here += 1
+            # advance by the rows actually drawn, not the full gene count — the
+            # old code stretched the axis by hundreds of unused rows on a capped
+            # genome, which (with aspect='equal') crushed the cards into overlap.
+            y += (math.ceil(drawn_here / per_row) if drawn_here else 1) * CH + 0.7
             if truncated:
-                ax.text(0.0, y, '…  %d more genes not shown' % (n_total - cap),
-                        fontsize=9, color='#a00', va='bottom')
+                ax.text(0.0, y, '…  %d more genes not shown (see the genome .txt export)'
+                        % (n_total - drawn), fontsize=9, color='#a00', va='bottom')
                 y += 1.0
                 break
 
-        _hex = bool(chroms and chroms[0].genes and hasattr(chroms[0].genes[0], 'ctx_l'))
-        _sides = 'hex L/R/D sides' if _hex else 'N/E/S/W sides'
+        _hex = bool(g0 is not None and hasattr(g0, 'ctx_l'))
+        _sides = ('rotated L/R/D circuit states (each 0-15)'
+                  if _hex else 'N/E/S/W sides')
         _tail = ('.' if _hex else
                  ', active while iter <= limit.')
         ax.text(0.0, y + 0.2,
                 'card = one gene: the cluster is the expected neighbourhood '
                 '(%s + centre = self), the chip after -> is the output state; '
-                'growth picks the gene closest (min Hamming distance) to a cell%s'
+                 'growth picks the gene closest (min Hamming distance) to a circuit%s'
                 % (_sides, _tail),
                 fontsize=7.5, color='#666', va='bottom', wrap=True)
 
@@ -1771,6 +1902,49 @@ class App:
         ax.set_aspect('equal', adjustable='box')
         fig.tight_layout()
         self._genome_canvas.draw_idle()
+
+    def _draw_genome_lut_summary(self, fig, chroms, n_total, title):
+        """Faithful per-CHROMOSOME view of a dense LUT genome: one row per
+        chromosome showing its stats + the most-common output lookup tables IT
+        installs (its own 'vocabulary'), as real truth grids with ×counts + SOP.
+        Shows the genome's structure (which chromosome carries which LUTs) rather
+        than a global merge or an unreadable wall of one card per gene."""
+        from collections import Counter
+        from lut_evo import lut_sop
+        from lut_evo.viz import _lut_color
+        K = 6                                     # top output LUTs shown per chromosome
+        shown = chroms[:8]
+        axes = fig.subplots(len(shown), K + 1, squeeze=False)
+        fig.suptitle(title, fontsize=11, fontweight='bold')
+        for r, c in enumerate(shown):
+            counts = Counter(g.self_out for g in c.genes if g.self_out)
+            n_growth = sum(1 for g in c.genes if getattr(g, 'self_in', 1) == 0)
+            tel = getattr(c, 'telomere', None)
+            lbl = axes[r][0]
+            lbl.axis('off')
+            lbl.text(0.0, 0.5, 'Chrom %s\n%d genes\n%d distinct\n%d growth%s' % (
+                chr(ord('a') + r), len(c.genes), len(counts), n_growth,
+                ('\ntel %d' % tel) if tel is not None else ''),
+                va='center', ha='left', fontsize=8.5, family='monospace',
+                transform=lbl.transAxes)
+            top = counts.most_common(K)
+            for k in range(K):
+                ax = axes[r][k + 1]
+                if k < len(top):
+                    w, cnt = top[k]
+                    sop = lut_sop(w)
+                    if len(sop) > 14:
+                        sop = sop[:13] + '…'
+                    draw_lut_table(ax, w, swatch=_lut_color(w),
+                                   title='%04X ×%d\n%s' % (w, cnt, sop))
+                else:
+                    ax.set_visible(False)
+        if len(chroms) > len(shown):
+            fig.text(0.5, 0.005,
+                     '…  %d more chromosomes — full detail in the genome .txt export'
+                     % (len(chroms) - len(shown)),
+                     ha='center', fontsize=8, color='#a00')
+        fig.tight_layout(rect=[0, 0.02, 1, 0.95])
 
     # ── save PNGs ─────────────────────────────────────────────────────────────
 

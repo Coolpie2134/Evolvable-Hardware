@@ -26,7 +26,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .genome import LutGene, Chromosome, Genome, LUT_STATES
+from .genome import (LutGene, Chromosome, Genome, LUT_STATES, MAX_CHROMS)
 
 MAX_ITER = 20                      # sim6 MAX_ITER: growth iterations per biomorph
 Pos      = Tuple[int, int]
@@ -203,12 +203,18 @@ def _lutgene(g: Gene) -> LutGene:
 
 
 def _pack(lg: List[LutGene], n_chroms: int) -> Genome:
-    chroms, per = [], max(1, len(lg) // max(1, n_chroms))
-    for i in (range(0, len(lg), per) if lg else []):
-        chroms.append(Chromosome(genes=lg[i:i + per], split=max(1, (per // 2)),
-                                 tag=0, telomere=MAX_ITER))
-    if not chroms:
-        chroms = [Chromosome(genes=[], split=0, tag=0, telomere=MAX_ITER)]
+    """Partition an ontogeny gene list into exactly ``n_chroms`` chromosomes."""
+    if not 1 <= n_chroms <= MAX_CHROMS:
+        raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
+    base, extra = divmod(len(lg), n_chroms)
+    chroms, start = [], 0
+    for index in range(n_chroms):
+        size = base + (1 if index < extra else 0)
+        genes = lg[start:start + size]
+        start += size
+        chroms.append(Chromosome(
+            genes=genes, split=(0 if size < 2 else size // 2),
+            tag=0, telomere=MAX_ITER))
     return Genome(chromosomes=chroms, tag=0)
 
 

@@ -12,7 +12,9 @@ from __future__ import annotations
 import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
+from itertools import combinations
 from evo_runtime.cache import LRUCache
+from evo_runtime.parallel import map_ordered
 
 from nv_evo.temporal import (_pr_counts, _f1,
                              _best_shift, _obs_len,
@@ -47,7 +49,7 @@ TOURNAMENT_K   = 4
 EXPLORATION_PARENT_FRAC = 0.30
 MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see nv_evo.ga)
 MUT_DECAY      = 0.997       # slow cooldown: 4.0 -> ~0.89 by gen 500
-N_WORKERS      = min(os.cpu_count() or 2, 8)
+N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see nv_evo.ga
 FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 
 # LUT temporal search has the same flat recurrent landscapes as the nervous
@@ -56,10 +58,14 @@ STRESS_PATIENCE = 12
 STRESS_MAX_MULT = 8.0
 
 
-def adaptive_mutation_rate(annealed_rate, stagnation):
-    """Reheat a plateau to a real mutation rate, not a tiny annealed product."""
+def adaptive_mutation_rate(annealed_rate, stagnation, solved=False):
+    """Reheat a plateau to a real mutation rate, not a tiny annealed product.
+
+    Skips the reheat once the target is SOLVED (best == 1.0): stagnation is then
+    permanent, so reheating would only scatter the population with no plateau
+    left to escape. See nv_evo.ga.adaptive_mutation_rate."""
     base = max(1.0, annealed_rate)
-    if stagnation < STRESS_PATIENCE:
+    if solved or stagnation < STRESS_PATIENCE:
         return base
     ramp = 1.0 + ((stagnation - STRESS_PATIENCE)
                   / max(1.0, STRESS_PATIENCE / 2.0))
@@ -82,6 +88,11 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     in_set = set(in_pos)
     out_pos = {t.role: None for t in ttarget.outputs}
     traces  = TemporalTraces()
+    # LUT holds a level (a latch), it does not ring like the nervous net — so a
+    # commanded HOLD must be genuinely high on every tick, not satisfied by a
+    # sparse 2-3 tick burst under the nervous net's ±1 ring tolerance. Mark these
+    # traces strict (hold_tol=0) so scoring + placement demand the full hold.
+    traces.hold_tol = 0
     if len(grid) <= len(in_set):
         return out_pos, traces
     sim = LutSim(grid)                       # one sim, reset between trials
@@ -121,7 +132,7 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
                 s, aux = cached if cached is not None else (None, None)
             if ctr and s is None:
                 s, aux = _score_output_candidate(
-                    ctr, cevents, cexp, term.role, ttarget)
+                    ctr, cevents, cexp, term.role, ttarget, tol=0)  # LUT: strict hold
             if ctr:
                 score_cache[signature] = (s, aux)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
@@ -154,6 +165,7 @@ def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
         sim.reset()
         trial_bits.append(sim.run_bits(trial.streams, in_pos, obs))
     traces = TemporalTraces()
+    traces.hold_tol = 0                        # LUT holds strictly (see place_outputs_by_trace)
     for role, pos in out_pos.items():
         col = sim._cidx[pos]
         traces[role] = [bits[:, col].tolist() for bits in trial_bits]
@@ -343,10 +355,13 @@ def genome_signature(genome):
         for c in genome.chromosomes)
 
 
-def eval_batch_cases(genomes, target, cache=None, executor=None):
+def eval_batch_cases(genomes, target, cache=None, executor=None,
+                     should_stop=None, on_progress=None):
     """(fitnesses, case_vectors) in parallel; cache holds (fit, cases). A
     persistent `executor` is reused instead of spawning a fresh pool per call
-    (large speed-up on Windows); omitting it keeps the one-shot-pool behaviour."""
+    (large speed-up on Windows); omitting it keeps the one-shot-pool behaviour.
+    `should_stop`/`on_progress` are threaded to map_ordered so a run stays
+    cancellable without a chunk barrier."""
     out  = [None] * len(genomes)
     todo = list(range(len(genomes)))
     if cache is not None and len(cache) > FITNESS_CACHE_MAX:
@@ -369,10 +384,10 @@ def eval_batch_cases(genomes, target, cache=None, executor=None):
             unique = {i: [i] for i in todo}
         subset = [genomes[i] for _, i in representatives]
         if executor is not None:
-            results = list(executor.map(fn, subset))
+            results = map_ordered(executor, fn, subset, should_stop, on_progress)
         else:
             with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-                results = list(ex.map(fn, subset))
+                results = map_ordered(ex, fn, subset, should_stop, on_progress)
         for (sig, _), r in zip(representatives, results):
             for i in unique[sig]:
                 out[i] = r
@@ -397,9 +412,83 @@ def _poisson(lam):
 _GENE_FIELDS = ["ctx_n", "ctx_e", "ctx_s", "ctx_w", "self_in", "self_out"]
 
 
+def _normalize_split(chromosome):
+    """Keep split on a real between-gene boundary (or zero for one gene)."""
+    count = len(chromosome.genes)
+    chromosome.split = (0 if count < 2 else
+                        max(1, min(int(chromosome.split), count - 1)))
+
+
+def _recombine_gene_fields(gene_a, gene_b):
+    """Uniformly recombine a single LUT rule's active alleles."""
+    differing = [field for field in _GENE_FIELDS
+                  if getattr(gene_a, field) != getattr(gene_b, field)]
+    if len(differing) < 2:
+        return gene_a, gene_b
+    exchanged = set(random.sample(
+        differing, random.randint(1, len(differing) - 1)))
+    child_a, child_b = copy.copy(gene_a), copy.copy(gene_b)
+    for field in exchanged:
+        value_a, value_b = getattr(gene_a, field), getattr(gene_b, field)
+        setattr(child_a, field, value_b)
+        setattr(child_b, field, value_a)
+    return child_a, child_b
+
+
+def _recombination_signature(genome):
+    """Alleles crossover can actually exchange (not slot/object identity)."""
+    return tuple(
+        tuple(tuple(getattr(gene, field) for field in _GENE_FIELDS)
+              for gene in chromosome.genes)
+        for chromosome in genome.chromosomes)
+
+
 def _other_lut(value):
     """Choose a genuinely different 16-bit LUT value."""
     return (value + random.randrange(1, LUT_STATES)) % LUT_STATES
+
+
+_SOFT_LUT_MASKS = tuple(
+    sum(1 << bit for bit in bits)
+    for width in (1, 2, 3)
+    for bits in combinations(range(16), width))
+_SOFT_LUT_MASK_INDEX = {mask: index for index, mask in enumerate(_SOFT_LUT_MASKS)}
+
+
+def _soft_lut_excluding(value, parent_value):
+    """Flip 1-3 bits without returning either current or parental LUT."""
+    forbidden = (None if parent_value is None else value ^ parent_value)
+    forbidden_index = _SOFT_LUT_MASK_INDEX.get(forbidden)
+    if forbidden_index is None:
+        return value ^ random.choice(_SOFT_LUT_MASKS)
+    pick = random.randrange(len(_SOFT_LUT_MASKS) - 1)
+    if pick >= forbidden_index:
+        pick += 1
+    return value ^ _SOFT_LUT_MASKS[pick]
+
+
+def _force_nonparent_tweak(genome, parent):
+    """End a multi-edit transaction at an allele distinct from its parent."""
+    with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
+                  if chromosome.genes]
+    if not with_genes:
+        if not genome.chromosomes:
+            genome.chromosomes.append(random_lut_chromosome())
+        else:
+            random.choice(genome.chromosomes).genes.append(random_lut_gene())
+        with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
+                      if chromosome.genes]
+    ci = random.choice(with_genes)
+    gi = random.randrange(len(genome.chromosomes[ci].genes))
+    field = random.choice(_GENE_FIELDS)
+    gene = copy.copy(genome.chromosomes[ci].genes[gi])
+    parent_value = None
+    if (ci < len(parent.chromosomes)
+            and gi < len(parent.chromosomes[ci].genes)):
+        parent_value = getattr(parent.chromosomes[ci].genes[gi], field)
+    setattr(gene, field, _soft_lut_excluding(
+        getattr(gene, field), parent_value))
+    genome.chromosomes[ci].genes[gi] = gene
 
 
 def _tweak_gene(gene):
@@ -425,42 +514,111 @@ _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 
 
-def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE):
+def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
+                     chromosome_count=None):
+    """Apply one feasible, state-changing mutation to a LUT genome."""
+    if not genome.chromosomes:
+        genome.chromosomes.append(random_lut_chromosome())
+        return
+
+    chroms = genome.chromosomes
+    with_genes = [chromosome for chromosome in chroms if chromosome.genes]
+    options = []
+    if with_genes:
+        options.append('tweak')
+    if any(chromosome.genes and len(chromosome.genes) < _gene_cap()
+           for chromosome in chroms):
+        options.append('duplicate')
+    if any(len(chromosome.genes) < _gene_cap() for chromosome in chroms):
+        options.append('add_gene')
+    if any(len(chromosome.genes) > 1 for chromosome in chroms):
+        options.append('del_gene')
+    if chromosome_count is None and len(chroms) < MAX_CHROMS:
+        options.append('add_chrom')
+    if chromosome_count is None and len(chroms) > 1:
+        options.append('del_chrom')
+    split_options = []
+    for chromosome in chroms:
+        values = [value for value in range(1, len(chromosome.genes))
+                  if value != chromosome.split]
+        if values:
+            split_options.append((chromosome, values))
+    if split_options:
+        options.append('split')
+    telomere_options = []
+    for chromosome in chroms:
+        base = getattr(chromosome, 'telomere', 10)
+        values = [base + delta for delta in (-3, -2, -1, 1, 2, 3)
+                  if 1 <= base + delta <= max_telomere]
+        if values:
+            telomere_options.append((chromosome, values))
+    if telomere_options:
+        options.append('telomere')
+
+    weights = [_MUT_WEIGHTS[_MUT_OPS.index(op)] for op in options]
+    op = random.choices(options, weights=weights)[0]
+    if op == 'tweak':
+        chromosome = random.choice(with_genes)
+        index = random.randrange(len(chromosome.genes))
+        chromosome.genes[index] = _tweak_gene(chromosome.genes[index])
+    elif op == 'duplicate':
+        chromosome = random.choice([
+            item for item in chroms
+            if item.genes and len(item.genes) < _gene_cap()
+        ])
+        chromosome.genes.insert(
+            random.randrange(len(chromosome.genes) + 1),
+            _tweak_gene(random.choice(chromosome.genes)))
+    elif op == 'add_gene':
+        chromosome = random.choice([
+            item for item in chroms if len(item.genes) < _gene_cap()
+        ])
+        chromosome.genes.append(random_lut_gene())
+    elif op == 'del_gene':
+        chromosome = random.choice([
+            item for item in chroms if len(item.genes) > 1
+        ])
+        chromosome.genes.pop(random.randrange(len(chromosome.genes)))
+    elif op == 'add_chrom':
+        chroms.append(random_lut_chromosome())
+    elif op == 'del_chrom':
+        chroms.remove(min(chroms, key=lambda item: len(item.genes)))
+    elif op == 'split':
+        chromosome, values = random.choice(split_options)
+        chromosome.split = random.choice(values)
+    else:  # telomere
+        chromosome, values = random.choice(telomere_options)
+        chromosome.telomere = random.choice(values)
+
+
+def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
+               chromosome_count=None):
+    if (chromosome_count is not None
+            and len(genome.chromosomes) != chromosome_count):
+        raise ValueError('expected %d chromosomes, got %d' %
+                         (chromosome_count, len(genome.chromosomes)))
     g = clone_genome(genome)
+    for chromosome in g.chromosomes:
+        _normalize_split(chromosome)
     lam = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
-    for _ in range(_poisson(lam)):
-        if not g.chromosomes:
-            g.chromosomes.append(random_lut_chromosome())
-            continue
-        op    = random.choices(_MUT_OPS, weights=_MUT_WEIGHTS)[0]
-        chrom = random.choice(g.chromosomes)
-        if op == "telomere":
-            base = getattr(chrom, 'telomere', 10)
-            chrom.telomere = max(1, min(max_telomere,
-                                        base + random.randint(-3, 3)))
-        elif op == "tweak" and chrom.genes:
-            idx = random.randrange(len(chrom.genes))
-            chrom.genes[idx] = _tweak_gene(chrom.genes[idx])
-        elif op == "duplicate" and chrom.genes and len(chrom.genes) < _gene_cap():
-            src = random.choice(chrom.genes)
-            chrom.genes.insert(random.randrange(len(chrom.genes) + 1),
-                               _tweak_gene(src))
-        elif op == "add_gene" and len(chrom.genes) < _gene_cap():
-            chrom.genes.append(random_lut_gene())
-        elif op == "del_gene" and len(chrom.genes) > 1:
-            chrom.genes.pop(random.randrange(len(chrom.genes)))
-        elif op == "add_chrom" and len(g.chromosomes) < MAX_CHROMS:
-            g.chromosomes.append(random_lut_chromosome())
-        elif op == "del_chrom" and len(g.chromosomes) > 1:
-            # remove the SMALLEST chromosome (least growth program) — deleting a
-            # random one could wipe a large functional module wholesale.
-            g.chromosomes.remove(min(g.chromosomes, key=lambda c: len(c.genes)))
-        elif op == "split" and len(chrom.genes) > 1:
-            chrom.split = random.randint(1, len(chrom.genes) - 1)
+    events = max(1, _poisson(lam))
+    for _ in range(events - 1):
+        _mutate_once_lut(
+            g, max_telomere=max_telomere,
+            chromosome_count=chromosome_count)
+    if events == 1:
+        _mutate_once_lut(
+            g, max_telomere=max_telomere,
+            chromosome_count=chromosome_count)
+    else:
+        _force_nonparent_tweak(g, genome)
+    for chromosome in g.chromosomes:
+        _normalize_split(chromosome)
     return g
 
 
 def crossover_lut(pa, pb):
+    """Tag-matched hierarchical crossover, including one-rule chromosomes."""
     ca, cb = clone_genome(pa), clone_genome(pb)
     used_b = set()
     for i, chrom_a in enumerate(ca.chromosomes):
@@ -475,9 +633,27 @@ def crossover_lut(pa, pb):
             continue
         used_b.add(best_j)
         chrom_b = cb.chromosomes[best_j]
-        sp      = max(0, min(chrom_a.split, len(chrom_a.genes), len(chrom_b.genes)))
-        ca.chromosomes[i].genes      = chrom_a.genes[:sp] + chrom_b.genes[sp:]
-        cb.chromosomes[best_j].genes = chrom_b.genes[:sp] + chrom_a.genes[sp:]
+        # Snapshot both inputs: chrom_a aliases child A, so assigning A before
+        # reading its reciprocal suffix used to make child B a parent-B clone.
+        genes_a, genes_b = chrom_a.genes[:], chrom_b.genes[:]
+        common = min(len(genes_a), len(genes_b))
+        if common >= 2:
+            sp = max(1, min(int(chrom_a.split), common - 1))
+            ca.chromosomes[i].genes = genes_a[:sp] + genes_b[sp:]
+            cb.chromosomes[best_j].genes = genes_b[:sp] + genes_a[sp:]
+            ca.chromosomes[i].split = cb.chromosomes[best_j].split = sp
+        elif common == 1:
+            gene_a, gene_b = _recombine_gene_fields(genes_a[0], genes_b[0])
+            ca.chromosomes[i].genes = [gene_a] + genes_b[1:]
+            cb.chromosomes[best_j].genes = [gene_b] + genes_a[1:]
+            ca.chromosomes[i].split = cb.chromosomes[best_j].split = 0
+        else:
+            ca.chromosomes[i].genes = genes_b
+            cb.chromosomes[best_j].genes = genes_a
+        _normalize_split(ca.chromosomes[i])
+        _normalize_split(cb.chromosomes[best_j])
+    for chromosome in ca.chromosomes + cb.chromosomes:
+        _normalize_split(chromosome)
     return ca, cb
 
 
@@ -506,8 +682,10 @@ def compact_genome(genome, seeds, grid_size=7, iters=30):
         kept = [g for gi, g in enumerate(c.genes) if counts[k + gi] > 0]
         k += len(c.genes)
         if kept:
+            split = (0 if len(kept) < 2 else
+                     max(1, min(int(c.split), len(kept) - 1)))
             new_chroms.append(Chromosome(
-                genes=kept, split=min(c.split, max(0, len(kept) - 1)),
+                genes=kept, split=split,
                 tag=c.tag, telomere=getattr(c, 'telomere', MAX_TELOMERE)))
     if not new_chroms:                     # everything unexpressed -> keep 1 gene
         c0 = genome.chromosomes[0]
@@ -546,7 +724,7 @@ def make_seed_genome(n_chroms=2):
         g = random_ontogeny_genome(n_chroms, cap_genes=ONTOGENY_CAP)
         pool.append(g)
         return clone_genome(g)     # the pool master stays pristine
-    return mutate_lut(random.choice(pool))
+    return mutate_lut(random.choice(pool), chromosome_count=n_chroms)
 
 
 def _tiebreak(genome):
@@ -575,65 +753,140 @@ def select_parent(population, fitnesses, case_vecs=None):
     return tournament_lut(population, fitnesses)
 
 
+def consolidate_population(parents, parent_fitnesses, parent_cases,
+                           offspring, offspring_fitnesses, offspring_cases):
+    """Keep the best evaluated parent/offspring entries after a terminal solve."""
+    pop = len(parents)
+    if (len(parent_fitnesses) != pop or len(offspring) != pop
+            or len(offspring_fitnesses) != pop):
+        raise ValueError('parent/offspring population sizes must match')
+    case_vectors = parent_cases is not None or offspring_cases is not None
+    if case_vectors and (parent_cases is None or offspring_cases is None):
+        raise ValueError('parent and offspring case vectors must both be present')
+    if case_vectors and (len(parent_cases) != pop or len(offspring_cases) != pop):
+        raise ValueError('case-vector count must match population size')
+
+    genomes = list(parents) + list(offspring)
+    fitnesses = list(parent_fitnesses) + list(offspring_fitnesses)
+    cases = ((list(parent_cases) + list(offspring_cases))
+             if case_vectors else None)
+    order = list(range(len(genomes)))
+    random.shuffle(order)
+    order.sort(key=lambda i: (fitnesses[i], _tiebreak(genomes[i])), reverse=True)
+    keep = order[:pop]
+    return ([genomes[i] for i in keep],
+            [fitnesses[i] for i in keep],
+            ([cases[i] for i in keep] if cases is not None else None))
+
+
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
-                    mean_mutations=None, ga_config=None):
+                    mean_mutations=None, ga_config=None,
+                    chromosome_count=None):
     """One generation of a steady, exploratory GA — elitism + immigrants +
     recombination/mutation, parents via ε-lexicase when per-case vectors are
-    available (temporal targets), else tournament. Convergence is NOT forced:
-    the population contracts onto a genome only insofar as selection favours it
-    (see nv_evo.ga.next_population). `mean_mutations` overrides the mutation rate
-    for this generation (used by the annealing schedule)."""
+    available (temporal targets), else tournament. This operator stays full
+    replacement; terminal convergence is handled after evaluation by
+    ``consolidate_population``. `mean_mutations` overrides the mutation rate for
+    this generation (used by the annealing schedule)."""
     pop = len(population)
     elite_count = (ELITE_COUNT if ga_config is None else ga_config.elite_count)
     immigrant_fraction = (IMMIGRANT_FRAC if ga_config is None
                           else ga_config.immigrant_fraction)
     tournament_size = (TOURNAMENT_K if ga_config is None
                        else ga_config.tournament_size)
+    if ga_config is not None and ga_config.chromosome_count is not None:
+        chromosome_count = ga_config.chromosome_count
+    if chromosome_count is not None:
+        if not 1 <= chromosome_count <= MAX_CHROMS:
+            raise ValueError('chromosome_count must be between 1 and %d' %
+                             MAX_CHROMS)
+        if any(len(genome.chromosomes) != chromosome_count
+               for genome in population):
+            raise ValueError('population violates configured chromosome count')
     import nv_evo.ga as _nga
     selection = (_nga.SELECTION if ga_config is None else ga_config.selection)
     if make_genome is None:
-        make_genome = make_seed_genome
+        make_genome = lambda: make_seed_genome(chromosome_count or 2)
     n_elite = elite_count if elite_count is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
     n_imm   = min(int(round(pop * immigrant_fraction)), pop)
     order   = sorted(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])),
                      reverse=True)
-    # Elites = recombination parent pool, NOT verbatim survivors (see nv_evo.ga).
-    # As in the nervous GA, elites only choose parents; no genome survives
-    # verbatim, so the current-generation best is an honest population value.
+    # Elites choose parents here; terminal survivors are chosen later from the
+    # evaluated parent+offspring union rather than copied inside reproduction.
     new_pop = [make_genome() for _ in range(n_imm)]                  # immigrants
     use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
-    if n_elite > 0 and not use_lexicase:
-        elite = order[:n_elite]
-        k = min(tournament_size, len(elite))
-        elite_parent = lambda: population[max(
-            random.sample(elite, k),
-            key=lambda i: (fitnesses[i], _tiebreak(population[i])))]
-    else:
-        elite_parent = lambda: (_nga._lexicase_parent(population, case_vecs)
-                                 if use_lexicase else population[max(
-                                     random.sample(range(pop), min(tournament_size, pop)),
-                                     key=lambda i: (fitnesses[i],
-                                                    _tiebreak(population[i])))])
     residual = order[n_elite:] if n_elite < pop else order
+    elite_pool = order[:n_elite] if n_elite else order
+    recombination_signatures = [
+        _recombination_signature(genome) for genome in population]
 
-    def parent():
-        if residual and random.random() < EXPLORATION_PARENT_FRAC:
-            return population[random.choice(residual)]
-        return elite_parent()
+    def pick_index(candidates):
+        if use_lexicase:
+            local_population = [population[index] for index in candidates]
+            local_cases = [case_vecs[index] for index in candidates]
+            chosen = _nga._lexicase_parent(local_population, local_cases)
+            return candidates[next(
+                index for index, genome in enumerate(local_population)
+                if genome is chosen)]
+        k = min(tournament_size, len(candidates))
+        return max(
+            random.sample(candidates, k),
+            key=lambda index: (
+                fitnesses[index], _tiebreak(population[index])))
+
+    def parent_pair():
+        if pop == 1:
+            return population[0], population[0]
+
+        def choose(exclude=None):
+            if use_lexicase:
+                candidates = [index for index in range(pop) if index != exclude]
+                return pick_index(candidates)
+            candidates = [index for index in elite_pool if index != exclude]
+            exploratory = [index for index in residual if index != exclude]
+            if exploratory and random.random() < EXPLORATION_PARENT_FRAC:
+                candidates = exploratory
+            if not candidates:
+                candidates = [index for index in range(pop) if index != exclude]
+            return pick_index(candidates)
+
+        first = choose()
+        second = choose(first)
+        if recombination_signatures[second] == recombination_signatures[first]:
+            distinct = [
+                index for index in range(pop)
+                if index != first
+                and recombination_signatures[index]
+                != recombination_signatures[first]
+            ]
+            if distinct:
+                second = pick_index(distinct)
+        return population[first], population[second]
+
     while len(new_pop) < pop:
-        ca, cb = crossover_lut(parent(), parent())
+        ca, cb = crossover_lut(*parent_pair())
         max_telomere = (MAX_TELOMERE if ga_config is None
                         else ga_config.max_telomere)
-        new_pop.append(mutate_lut(ca, mean_mutations, max_telomere))
+        new_pop.append(mutate_lut(
+            ca, mean_mutations, max_telomere,
+            chromosome_count=chromosome_count))
         if len(new_pop) < pop:
-            new_pop.append(mutate_lut(cb, mean_mutations, max_telomere))
+            new_pop.append(mutate_lut(
+                cb, mean_mutations, max_telomere,
+                chromosome_count=chromosome_count))
+    if (chromosome_count is not None
+            and any(len(genome.chromosomes) != chromosome_count
+                    for genome in new_pop)):
+        raise ValueError('genome factory violated configured chromosome count')
     return new_pop[:pop]
 
 
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
+    if not 1 <= n_chroms <= MAX_CHROMS:
+        raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
     make_genome = lambda: make_seed_genome(n_chroms)     # ontogeny biomorph seeds
     cache       = LRUCache(FITNESS_CACHE_MAX)
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
@@ -648,9 +901,21 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
         mut_rate     = MEAN_MUTATIONS        # annealing schedule (see MUT_DECAY)
         for gen in range(generations):
             mut_rate *= MUT_DECAY
-            mm = adaptive_mutation_rate(mut_rate, stagnation)
-            population = next_population(population, fitnesses, make_genome, cases, mm)
-            fitnesses, cases = eval_batch_cases(population, target, cache, ex)
+            mm = adaptive_mutation_rate(mut_rate, stagnation,
+                                        solved=best_fitness >= 1.0)
+            parents, parent_fitnesses, parent_cases = population, fitnesses, cases
+            offspring = next_population(
+                parents, parent_fitnesses, make_genome, parent_cases, mm,
+                chromosome_count=n_chroms)
+            offspring_fitnesses, offspring_cases = eval_batch_cases(
+                offspring, target, cache, ex)
+            if max(best_fitness, max(offspring_fitnesses)) >= 1.0:
+                population, fitnesses, cases = consolidate_population(
+                    parents, parent_fitnesses, parent_cases,
+                    offspring, offspring_fitnesses, offspring_cases)
+            else:
+                population, fitnesses, cases = (
+                    offspring, offspring_fitnesses, offspring_cases)
             gi = max(range(pop),
                      key=lambda i: (fitnesses[i], _tiebreak(population[i])))
             if fitnesses[gi] > best_fitness + 1e-12:
@@ -672,21 +937,26 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
               cache=None, executor=None, should_stop=None, on_progress=None,
-              max_telomere=MAX_TELOMERE):
-    """Fill a population with genomes that are BOTH valid (>= `valid`) and
-    genotypically unique, by walking the neutral network via neutral mutation
-    with rejection. See nv_evo.ga.diversify — same idea on the LUT substrate."""
+              max_telomere=MAX_TELOMERE, chromosome_count=None):
+    """Build evaluated, rule-distinct valid offspring; see NV's implementation."""
     if cache is None:
         cache = LRUCache(FITNESS_CACHE_MAX)
     if batch is None:
         batch = max(48, pop_size)
     should_stop = should_stop or (lambda: False)
+    seeds = list(seeds)
+    if chromosome_count is not None:
+        if not 1 <= chromosome_count <= MAX_CHROMS:
+            raise ValueError('chromosome_count must be between 1 and %d' %
+                             MAX_CHROMS)
+        if any(len(genome.chromosomes) != chromosome_count for genome in seeds):
+            raise ValueError('seed violates configured chromosome count')
     _eval = lambda gs: eval_batch_cases(gs, target, cache, executor)[0]   # reuse pool
-    pool, seen = [], set()
-    for g, f in zip(seeds, _eval(list(seeds))):
-        s = genome_signature(g)
+    pool, pool_signatures, seen = [], [], set()
+    for g, f in zip(seeds, _eval(seeds)):
+        s = _recombination_signature(g)
         if f >= valid and s not in seen:
-            pool.append(g); seen.add(s)
+            pool.append(g); pool_signatures.append(s); seen.add(s)
     if not pool:
         return pool
     for round_i in range(rounds):
@@ -694,18 +964,29 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
             break
         if on_progress is not None:
             on_progress(round_i + 1, rounds, len(pool))
-        cands = []
+        cands, candidate_signatures = [], []
         for _ in range(batch):
-            c = mutate_lut(random.choice(pool), max_telomere=max_telomere)
-            s = genome_signature(c)
+            parent_index = random.randrange(len(pool))
+            parent_a = pool[parent_index]
+            signature_a = pool_signatures[parent_index]
+            mates = [index for index, signature in enumerate(pool_signatures)
+                     if signature != signature_a]
+            if mates:
+                base = random.choice(crossover_lut(
+                    parent_a, pool[random.choice(mates)]))
+            else:
+                base = parent_a
+            c = mutate_lut(base, max_telomere=max_telomere,
+                           chromosome_count=chromosome_count)
+            s = _recombination_signature(c)
             if s not in seen:
                 seen.add(s)
-                cands.append(c)
+                cands.append(c); candidate_signatures.append(s)
         if should_stop():
             break
-        for c, f in zip(cands, _eval(cands)):
+        for c, s, f in zip(cands, candidate_signatures, _eval(cands)):
             if f >= valid and len(pool) < pop_size:
-                pool.append(c)
+                pool.append(c); pool_signatures.append(s)
     return pool[:pop_size]
 
 

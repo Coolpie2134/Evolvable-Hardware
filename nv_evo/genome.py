@@ -1,15 +1,14 @@
 """
 nv_evo/genome.py — genome native to the hexagonal nervous net.
 
-Fully self-contained: the nervous net shares *no* code with snn_evo. The SNN's
-Gene has four neighbour fields (N/S/E/W) and forbids self_out==0; the hex node
-has only three directions (L/R/D) and *wants* to express "off" (a dead /
-unrouted cell), so it gets its own gene and its own container types:
+Fully self-contained: the nervous net shares *no* code with snn_evo. A physical
+tile contains three core circuits, but a gene acts on ONE circuit at a time.
+Every state field is therefore exactly the paper's 4-bit Figure-3 selector:
 
     HexGene(ctx_l, ctx_r, ctx_d, self_in, self_out)
-        ctx_*     expected neighbour state in each hex direction (context)
-        self_in   expected own state (context)
-        self_out  state to emit if this gene wins   (0 = off / cell dies)
+        ctx_*     expected facing-circuit state in each rotated direction
+        self_in   expected own circuit state (context)
+        self_out  circuit state to emit if this gene wins (0 = off)
 
 This mirrors the paper's associative-memory gene exactly: a context (the states
 of the neighbouring cells + the cell's own state) mapped to a new state, chosen
@@ -25,7 +24,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
-MAX_STATE    = 32       # 5-bit cell state: 0-15 = paper AND routing, 16-31 = OR
+MAX_STATE    = 16       # one 4-bit Figure-3 core-circuit configuration
 MAX_GENES    = 24
 MAX_CHROMS   = 6
 MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
@@ -38,6 +37,20 @@ class HexGene:
     ctx_d:    int = 0
     self_in:  int = 0
     self_out: int = 0        # 0 = off / dead (native — no shift needed)
+
+    def __post_init__(self):
+        """Reject packed tile words at the genotype boundary.
+
+        A phenotype tile contains three selectors, but each gene allele is one
+        physical 4-bit core-circuit configuration.  Failing here makes that
+        distinction structural instead of relying on whichever editor happens
+        to display the genome.
+        """
+        for name in ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'):
+            value = int(getattr(self, name))
+            if not 0 <= value < MAX_STATE:
+                raise ValueError('%s must be a 4-bit circuit state (0..15)' % name)
+            setattr(self, name, value)
 
 
 @dataclass
@@ -79,12 +92,17 @@ def random_hex_gene() -> HexGene:
     # genomes need a healthy share of them or nothing ever grows — sim6 gets this
     # for free because table_create manufactures a gene for every empty-cell
     # context it meets.
+    # Retain the historical 1/32 off-output prior explicitly.  The important
+    # distinction is that every sampled value is now a single 4-bit circuit
+    # configuration; no gene contains a packed 12-bit tile word.
+    self_out = (0 if random.randrange(32) == 0
+                else random.randrange(1, MAX_STATE))
     return HexGene(
         ctx_l    = random.randrange(MAX_STATE),
         ctx_r    = random.randrange(MAX_STATE),
         ctx_d    = random.randrange(MAX_STATE),
         self_in  = 0 if random.random() < 0.25 else random.randrange(MAX_STATE),
-        self_out = random.randrange(MAX_STATE),      # 0..31, 0 = death
+        self_out = self_out,                         # 0 = this circuit is off
     )
 
 
@@ -93,7 +111,7 @@ def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE) -> Chromosome
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
         genes = [random_hex_gene() for _ in range(n_genes)],
-        split = random.randint(1, max(1, n_genes - 1)),
+        split = (0 if n_genes < 2 else random.randint(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         telomere = random.randint(2, min(5, max_telomere)),
     )

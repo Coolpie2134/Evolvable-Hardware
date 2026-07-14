@@ -112,6 +112,64 @@ def make_resettable_toggle():
     return f
 
 
+def make_pulse_doubler():
+    """Pulse-width doubler: an input pulse held for x ticks produces an output
+    pulse held for 2x ticks (starting with the input). The circuit must MEASURE
+    the input's duration, not just respond to its edge — a fixed delay-line
+    cheat (out = in OR delay_k(in), width x+k) only doubles the single width
+    x = k, so the trial bank mixes several widths to force real measurement.
+
+    As a state machine: while the input is high, output high and bank one tick
+    of 'debt'; after it falls, keep the output high until the debt is repaid —
+    x during + x after = 2x total, contiguous. A pulse arriving during the tail
+    merges (output stays high, debt accumulates), conserving total output = 2 x
+    total input ticks."""
+    def f(inb, st):
+        debt = st or 0
+        if inb[0]:
+            return (1,), debt + 1              # high: emit + bank one tail tick
+        if debt > 0:
+            return (1,), debt - 1              # tail: emit while repaying
+        return (0,), 0
+    return f
+
+
+def orc_period_doubler(inb, st):
+    """Divide-by-2 over edges: emit on the 1st, 3rd, 5th, ... input pulse, so a
+    periodic input train of period p yields a periodic output of period 2p —
+    the output "doubles the period" (halves the rate). Edge-native: the input
+    information is inter-edge INTERVALS, exactly what an asynchronous substrate
+    computes with (a held level would be one edge and carry no period at all)."""
+    parity = st or 0
+    if inb[0]:
+        return (1 if parity == 0 else 0,), parity ^ 1
+    return (0,), parity
+
+
+def make_c_element():
+    """Muller C-element in transition signalling — a 2-input rendezvous / join.
+
+    Emit an output event only once BOTH inputs have produced an edge, in EITHER
+    order, then rearm and wait for the next pair. A lone edge on one input must
+    NOT emit; the element has to REMEMBER that the first input arrived while it
+    waits for the second — so this is a stored-state element, the asynchronous
+    handshake keystone (the C-element is what joins the two rails of a
+    micropipeline). The stored state is which inputs have arrived this round.
+
+    (The textbook level-mode C-element — output high while both inputs are high,
+    holding on disagreement — is not a natural fit for an edge-coincidence
+    substrate that has no level-AND; transition signalling is the faithful
+    encoding and is the same device in event form.)"""
+    def f(inb, st):
+        seen_a, seen_b = st if st is not None else (False, False)
+        seen_a = seen_a or bool(inb[0])
+        seen_b = seen_b or bool(inb[1])
+        if seen_a and seen_b:                  # rendezvous complete
+            return (1,), (False, False)        # emit one event, then rearm
+        return (0,), (seen_a, seen_b)
+    return f
+
+
 def make_period_stepper(base=2, step=2, max_period=6):
     """Build a bounded, re-phased cadence controller.
 
@@ -269,9 +327,16 @@ def coincidence_oracle(seed=20260702):
         'offset input events.'))
 
 
-def one_shot_oracle(seed=20260702, width=3):
+def one_shot_oracle(seed=20260702, width=5):
+    # width MUST exceed 3: the persistence scorer's +/-1 ring tolerance lets a
+    # SINGLE output pulse cover a 3-tick active window (a pulse at the centre hits
+    # all three expected ticks), so a plain delay-line/echo scored a perfect
+    # one-shot. A 5-tick window cannot be covered by one pulse, so it forces a
+    # genuine self-terminating BURST (a ~10101 ring that stops) — the actual
+    # monostable behaviour. (Verified: width 3 solves with single pulses; width 5
+    # solves with sustained bursts.)
     return oracle_target('One-shot (oracle)', make_one_shot(width), [(0, 2)], 'Q',
-                         T=24, n_trials=10, seed=seed, latency=2, min_gap=width + 4,
+                         T=28, n_trials=10, seed=seed, latency=2, min_gap=width + 4,
                          description=describe_target(
         'Each input edge starts a %d-tick active interval that self-terminates.'
         % width, PERSISTENCE_SCORING,
@@ -355,12 +420,113 @@ def resettable_toggle_oracle(seed=20260702):
         'post-clear recovery.'))
 
 
+def pulse_doubler_oracle(seed=20260702, widths=(1, 2, 3)):
+    """Pulse-width doubler trials: held input runs of MIXED widths x, each
+    expecting a contiguous 2x-tick output hold. Mixing widths in one bank is the
+    anti-cheat: a fixed-delay response (width x+k) or a fixed-length one-shot
+    fits at most one width, so only genuine width measurement scores across all
+    trials. Runs are spaced so each 2x tail completes plus quiet margin before
+    the next pulse; a silent trial guards the quiet side."""
+    T, latency, rng = 40, 1, random.Random(seed)
+    oracle = make_pulse_doubler()
+    trials = []
+
+    def add(runs):
+        ons = set()
+        for (start, width) in runs:
+            for k in range(width):
+                ons.add(start + k)
+        streams = [(1 if t in ons else 0,) for t in range(T)]
+        trials.append(Trial(streams, {'Q': label_trace(oracle, streams, T, latency)}))
+
+    for w in widths:                              # clean single-pulse measurements
+        for _ in range(2):
+            add([(rng.randint(2, 8), w)])
+    for _ in range(3):                            # two pulses, mixed widths
+        w1, w2 = rng.choice(widths), rng.choice(widths)
+        s1 = rng.randint(2, 6)
+        s2 = s1 + 3 * w1 + rng.randint(3, 6)      # after w1's 2x tail + quiet
+        if s2 + 3 * w2 + latency + 2 < T:
+            add([(s1, w1), (s2, w2)])
+        else:
+            add([(s1, w1)])
+    add([])                                       # never-pulsed: Q must stay quiet
+    return TemporalTarget(
+        'Pulse doubler (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
+        T, trials, grid_size=5, iters=30,
+        description=describe_target(
+            'Stretch each input pulse to twice its width: a pulse held x ticks '
+            'yields one contiguous 2x-tick output hold starting with it. The '
+            'bank mixes widths x in %s, so a fixed delay or fixed-length '
+            'one-shot cannot fit them all - the circuit must measure x.'
+            % (tuple(widths),), PERSISTENCE_SCORING,
+            'Seeded single- and double-pulse schedules across every width plus '
+            'a silent guard trial.'),
+        score_mode='trace', latency=latency)
+
+
+def period_doubler_oracle(seed=20260702, periods=(2, 3, 4)):
+    """Period-doubler trials: periodic input trains of MIXED periods p, each
+    expecting an output train of period 2p (every 2nd input edge). Mixing
+    periods is the anti-cheat — a free-running oscillator or any fixed-cadence
+    responder fits at most one input rate — and the silent guard trial kills
+    oscillators outright (no input => no output). Phases vary per trial so a
+    phase-locked fake can't memorise tick positions.
+
+    Period 1 is deliberately EXCLUDED: a pulse every tick wired-OR merges into
+    one held level (one edge), physically indistinguishable from constant
+    input on both substrates — it carries no period."""
+    T, latency, rng = 30, 1, random.Random(seed)
+    trials = []
+
+    def add(ticks):
+        on = set(ticks)
+        streams = [(1 if t in on else 0,) for t in range(T)]
+        exp = label_trace(orc_period_doubler, streams, T, latency)
+        events = [float(t) for t, v in enumerate(exp) if v == 1]
+        trials.append(Trial(streams, {'Q': exp}, {'Q': events}))
+
+    for p in periods:
+        for _ in range(3):                        # 3 phase-shifted trials per period
+            phase = rng.randint(1, p + 2)
+            add([phase + k * p for k in range((T - 2 - phase) // p + 1)])
+    add([])                                       # silent guard: no input, no output
+    return TemporalTarget(
+        'Period doubler (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
+        T, trials, grid_size=5, iters=30,
+        description=describe_target(
+            'Double the period of the input train: for a periodic input of '
+            'period p, emit every 2nd input edge so the output is periodic at '
+            '2p. The bank mixes periods p in %s at varying phases, so a fixed '
+            'free-running cadence cannot fit them all, and a silent trial '
+            'forbids output without input.' % (tuple(periods),), EVENT_SCORING,
+            'Three phase-varied periodic schedules per period plus a silent '
+            'guard trial.'),
+        score_mode='events', latency=latency)
+
+
+def c_element_oracle(seed=20260702):
+    return oracle_target('C-element (oracle)', make_c_element(), [(0, 1), (0, 3)], 'Q',
+                         T=28, n_trials=12, seed=seed, latency=2, min_gap=5,
+                         align_prob=0.3, score_mode='events',
+                         description=describe_target(
+        'Transition-signalling Muller C-element (2-input rendezvous/join): emit Q '
+        'once BOTH inputs have produced an edge, in either order, then rearm. '
+        'Remembering the first arrival while waiting for the second is the stored '
+        'state — the asynchronous handshake keystone.', EVENT_SCORING,
+        'Twelve seeded random A/B schedules interleave the two inputs in both '
+        'orders, including lone edges that must not emit until the partner arrives.'))
+
+
 ORACLE_SPECS = {
     'SR latch (oracle)':          sr_latch_oracle,
+    'C-element (oracle)':         c_element_oracle,
     'Toggle (oracle)':            toggle_oracle,
     'Echo (oracle)':              echo_oracle,
     'Coincidence (oracle)':       coincidence_oracle,
     'One-shot (oracle)':          one_shot_oracle,
+    'Pulse doubler (oracle)':     pulse_doubler_oracle,
+    'Period doubler (oracle)':    period_doubler_oracle,
     'Pair detector (oracle)':     pair_oracle,
     'Period stepper (oracle)':    period_stepper_oracle,
     'Gated oscillator (oracle)':  gated_oscillator_oracle,

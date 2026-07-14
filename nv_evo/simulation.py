@@ -20,14 +20,16 @@ DYNAMICALLY (not imported by value), so a physics sweep that rebinds
 from __future__ import annotations
 
 from . import pulse
-from .pulse import PulseSim
+from .pulse import PulseSim, DirectionalPulseSim
+from .hexgrid import is_directional_routing
 
 
 def create_simulator(grid, routing, max_events=None, config=None):
     """Construct the paper-faithful simulator used by every Nervous consumer."""
     if max_events is None and config is not None:
         max_events = config.event_cap
-    return PulseSim(grid, routing, max_events=max_events, config=config)
+    simulator = DirectionalPulseSim if is_directional_routing(routing) else PulseSim
+    return simulator(grid, routing, max_events=max_events, config=config)
 
 
 def normalize(schedule):

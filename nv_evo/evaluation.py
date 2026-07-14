@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
-Pos = Tuple[int, int]
+Pos = Tuple                 # tile (x,y) for LUT; channel (x,y,direction) for NV
 
 
 @dataclass(frozen=True)

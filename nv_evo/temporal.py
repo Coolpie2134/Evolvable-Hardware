@@ -30,7 +30,10 @@ from bisect import bisect_left
 import math
 
 from .nervous import grow_nervous, interpret_nervous
-from .hexgrid import hex_dirs
+from .hexgrid import (hex_dirs, is_directional_routing,
+                      expand_directional_routing, tile_channels,
+                      channel_tile, active_channels,
+                      normalize_output_channel)
 from . import pulse as pulse_engine
 from .pulse import TICK
 from .simulation import create_simulator
@@ -67,13 +70,17 @@ def input_cone(grid, routing, in_pos):
     time; simulating only the cone is exact and, on the unbounded field where
     growth may leave a large off-cone blob, far cheaper."""
     edges = signal_graph(grid, routing)          # u -> cells that read u
-    seen  = set(p for p in in_pos if p in grid)
+    directional = is_directional_routing(routing)
+    sources = ([wire for pos in in_pos if pos in grid
+                for wire in tile_channels(pos)] if directional
+               else [p for p in in_pos if p in grid])
+    seen  = set(sources)
     stack = list(seen)
     while stack:
         for v in edges.get(stack.pop(), ()):
             if v not in seen:
                 seen.add(v); stack.append(v)
-    return seen
+    return ({channel_tile(wire) for wire in seen} if directional else seen)
 
 
 def _inject_stream_edges(sim, in_pos, streams, T):
@@ -99,13 +106,16 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
-    that input cell's net (held 1s are one long pulse). out_pos is
-    {role: (x,y)}. Returns (states, traces):
-        states : list[T] of sampled {(x,y):0/1} activity maps
+    all three channels of that sensory tile (held 1s are one long pulse).
+    out_pos is {role: (x,y,direction)}. Returns (states, traces):
+        states : list[T] of sampled tile + directional-channel activity maps
         traces : {role: [0/1 over T]}
     `prune` restricts the simulation to the input cone (exact for the nervous
     net); off-cone cells are absent from `states` and read as 0 by callers.
     """
+    if is_directional_routing(routing):
+        out_pos = {role: normalize_output_channel(grid, pos)
+                   for role, pos in out_pos.items()}
     sub = grid
     if prune:
         cone = input_cone(grid, routing, in_pos)
@@ -155,8 +165,8 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                        max_events=None, sample=True, config=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
-    ``rise_times`` maps every simulated cell to its continuous leading-edge
-    timestamps.  No tick quantisation is applied to this event record.
+    ``rise_times`` contains exact directional-channel events plus aggregate tile
+    events for display. No tick quantisation is applied.
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
@@ -282,10 +292,14 @@ def _f1(tp_rec, n_exp, tp_prec, n_act):
     return (2 * rec * prec / (rec + prec)) if (rec + prec) else 0.0
 
 
-def _pr_score(trace, exp, shift=0):
+def _pr_score(trace, exp, shift=0, tol=1):
     """Per-trace F1 of the highs (see _pr_counts). Silent -> 0 when anything is
-    expected; always-high -> low; a correct ringing/quiet output -> 1."""
-    return _f1(*_pr_counts(trace, exp, shift))
+    expected; always-high -> low; a correct ringing/quiet output -> 1. `tol` is
+    the recall coverage window: 1 for the nervous net (a stored bit RINGS 1010,
+    so ±1 counts it as held), 0 for the LUT array (a latch can hold a steady
+    level, so a hold must be genuinely high on every tick — a 2-3 tick burst is
+    not a 5-tick hold)."""
+    return _f1(*_pr_counts(trace, exp, shift, tol))
 
 
 # ── latency-invariant scoring ────────────────────────────────────────────────────
@@ -299,14 +313,14 @@ def _pr_score(trace, exp, shift=0):
 # firing (precision is anchored to the output's scored region — see _pr_counts).
 # shift=0 is included, so the aligned score is a lower bound: nothing regresses.
 
-def _pooled_f1(traces, ttarget, shift):
+def _pooled_f1(traces, ttarget, shift, tol=1):
     tr = ne = tp = na = 0
     for ti, trial in enumerate(ttarget.trials):
         for role, exp in trial.expected.items():
             seq = traces.get(role, [])
             if ti >= len(seq):
                 continue
-            a, b, c, d = _pr_counts(seq[ti], exp, shift)
+            a, b, c, d = _pr_counts(seq[ti], exp, shift, tol)
             tr += a; ne += b; tp += c; na += d
     return _f1(tr, ne, tp, na)
 
@@ -344,28 +358,30 @@ def _target_pairs(traces, ttarget):
     return pairs
 
 
-def _best_shift(traces, ttarget):
+def _best_shift(traces, ttarget, tol=1):
     """(best_shift, best_f1): the global latency offset maximising pooled F1."""
     best_s, best_f = 0, -1.0
-    for s in _cand_shifts(_target_pairs(traces, ttarget), ttarget.T):
-        f = _pooled_f1(traces, ttarget, s)
+    for s in _cand_shifts(_target_pairs(traces, ttarget), ttarget.T, tol):
+        f = _pooled_f1(traces, ttarget, s, tol)
         if f > best_f:
             best_f, best_s = f, s
     return best_s, best_f
 
 
-def _placement_score(cell_traces, exps, ttarget):
+def _placement_score(cell_traces, exps, ttarget, tol=1):
     """Best-shift pooled F1 for ONE candidate output cell (a single latency shift
     over its own traces) — the per-cell ranking used when PLACING outputs. This
     MUST be latency-invariant too: if placement ranked at a fixed alignment, which
     cell gets chosen would depend on the target's nominal latency, quietly
     reintroducing the timing-dependence the score removes (measured: it did).
-    Same _cand_shifts trick as _best_shift keeps it cheap."""
+    Same _cand_shifts trick as _best_shift keeps it cheap. `tol` matches the
+    substrate (0 = strict LUT hold, 1 = nervous-net ring) so placement picks the
+    same cell the final score rewards."""
     best = 0.0
-    for s in _cand_shifts(list(zip(cell_traces, exps)), ttarget.T):
+    for s in _cand_shifts(list(zip(cell_traces, exps)), ttarget.T, tol):
         tr = ne = tp = na = 0
         for trace, exp in zip(cell_traces, exps):
-            a, b, c, d = _pr_counts(trace, exp, s)
+            a, b, c, d = _pr_counts(trace, exp, s, tol)
             tr += a; ne += b; tp += c; na += d
         f = _f1(tr, ne, tp, na)
         if f > best:
@@ -792,18 +808,20 @@ def _trace_metric(trace, exp, metric=None):
 
 
 # The output is read at a cell NEAR the target's terminal, not anywhere in the
-# organism. On the unbounded field a net can be hundreds of cells, and scoring
-# every one both costs O(cells) per genome and lets a lucky far-off cell inflate
+# organism. On the unbounded field a net can be hundreds of tiles, and scoring
+# every one both costs O(tiles) per genome and lets a lucky far-off wire inflate
 # the fitness without a real mechanism (the output location then jitters between
 # genomes, wrecking the gradient). Restricting to the OUT_RADIUS-nearest cells
 # to the terminal keeps placement cheap and the fitness signal about a fixed,
-# local output — the terminal is a designated read-out point, after all.
+# local output — the terminal is a designated read-out point, after all. For a
+# nervous tile all three programmed L/R/D channels on each near tile are tested.
 OUT_RADIUS = 12
 
 
 def _score_output_candidate(sampled, events, expected, role, target,
-                            overflow=False):
-    """Score one prospective output and return ``(score, reusable result)``."""
+                            overflow=False, tol=1):
+    """Score one prospective output and return ``(score, reusable result)``.
+    `tol` = the substrate's hold coverage (0 strict for LUT, 1 ring for nv)."""
     if not sampled:
         return 0.0, None
     mode = getattr(target, 'score_mode', 'trace')
@@ -817,23 +835,33 @@ def _score_output_candidate(sampled, events, expected, role, target,
     if mode == 'cadence':
         result = _best_cadence_latency(bundle, target)
         return result[1], result
-    return _placement_score(sampled, expected, target), None
+    return _placement_score(sampled, expected, target, tol), None
 
 
-def _output_candidates(grid, in_set, term):
+def _output_candidates(grid, in_set, term, routing=None):
     tx, ty = term.pos
-    cands = [c for c in grid if c not in in_set]
+    # A paper tile exposes three distinct output circuits.  Readouts therefore
+    # select a physical channel, never an aggregate tile alias.
+    if not is_directional_routing(routing):
+        from .hexgrid import decode_tile_routing
+        routing = {pos: decode_tile_routing(state) for pos, state in grid.items()}
+    tiles = [pos for pos in grid if pos not in in_set]
+    tiles.sort(key=lambda pos: (
+        abs(pos[0] - tx) + abs(pos[1] - ty), pos))
+    near_tiles = set(tiles[:OUT_RADIUS])
+    cands = [c for c in active_channels(grid, routing)
+             if channel_tile(c) in near_tiles]
     cands.sort(key=lambda c: (abs(c[0] - tx) + abs(c[1] - ty), c))
-    return cands[:OUT_RADIUS]
+    return cands
 
 
 def place_outputs_by_trace(grid, routing, in_pos, ttarget):
-    """Assign each output role the live non-input cell — among those nearest its
-    terminal (see OUT_RADIUS) — whose activity trace best matches the expected
-    trace across ALL trials (ties broken by distance to the terminal, then cell
-    order). Evolution builds the computation and lands it near the read-out.
+    """Assign each output role a programmed non-input channel, considering all
+    circuits on the tiles nearest its terminal (see OUT_RADIUS), whose activity
+    best matches the expected trace across ALL trials (ties broken by distance,
+    then channel order). Evolution builds the computation near the read-out.
 
-    Returns (out_pos {role: (x,y)|None}, traces {role: [trace per trial]}).
+    Returns (out_pos {role: (x,y,direction)|None}, traces by role/trial).
     """
     in_set = set(in_pos)
     out_pos = {term.role: None for term in ttarget.outputs}
@@ -862,7 +890,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     for term in ttarget.outputs:
         best, best_key, best_aux = None, None, None
         score_cache = {}
-        for c in _output_candidates(grid, in_set, term):
+        for c in _output_candidates(grid, in_set, term, routing):
             if c in used:
                 continue
             ctr, cevents, cexp = [], [], []
@@ -919,7 +947,11 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
     It is the evaluation path for validation schedules: output identity is a
     fitted model parameter and must remain unchanged after training.
     """
-    if any(pos not in grid for pos in out_pos.values()):
+    if is_directional_routing(routing):
+        out_pos = {role: normalize_output_channel(grid, pos)
+                   for role, pos in out_pos.items()}
+    if any(pos is None or channel_tile(pos) not in grid
+           for pos in out_pos.values()):
         return None
     obs = _obs_len(ttarget)
     mode = getattr(ttarget, 'score_mode', 'trace')
@@ -943,8 +975,8 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
 def prepare_net(genome, ttarget):
     """Grow + interpret a genome for a temporal target, placing outputs by
     trace match. Returns (grid, routing, in_pos, out_pos, traces) — where
-    traces[role][i] is the chosen cell's trace in trial i — or None if the net
-    is unusable (too small, no candidate output cells, or an input seed dead)."""
+    traces[role][i] is the chosen channel's trace in trial i — or None if the net
+    is unusable (too small, no candidate output channels, or an input seed dead)."""
     grid = grow_nervous(genome, seeds=tuple(ttarget.inputs),
                         grid_size=ttarget.grid_size, iters=ttarget.iters)
     if len(grid) <= ttarget.n_inputs:
@@ -958,7 +990,7 @@ def prepare_net(genome, ttarget):
     return grid, routing, in_pos, out_pos, traces
 
 
-def windowed_score(traces, ttarget, metric=None, shift=None):
+def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
     """Selection fitness core, pooled globally over every (trial, role) under
     METRIC (or an explicit `metric`):
       f1       — spike-event precision/recall (default; silent = 0, always-high low)
@@ -976,10 +1008,12 @@ def windowed_score(traces, ttarget, metric=None, shift=None):
         return cadence_score(traces, ttarget)[0]
     if mode == 'period_stepper':
         return period_stepper_score(traces, ttarget)[0]
+    if tol is None:
+        tol = getattr(traces, 'hold_tol', 1)   # 0 = strict LUT hold, 1 = nv ring
     m = metric or METRIC
     if m in ('f1', 'blend'):
-        f1 = (_pooled_f1(traces, ttarget, shift) if shift is not None
-              else _best_shift(traces, ttarget)[1])
+        f1 = (_pooled_f1(traces, ttarget, shift, tol) if shift is not None
+              else _best_shift(traces, ttarget, tol)[1])
     else:
         f1 = 0.0
     if m == 'f1':
@@ -1045,7 +1079,8 @@ def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
             for role in trial.expected)
         return score, cases, shift
 
-    shift = (_best_shift(traces, ttarget)[0]
+    tol = getattr(traces, 'hold_tol', 1)       # 0 = strict LUT hold, 1 = nv ring
+    shift = (_best_shift(traces, ttarget, tol)[0]
              if alignment is _REFIT_ALIGNMENT else int(alignment))
     cases = []
     for ti, trial in enumerate(ttarget.trials):
@@ -1054,10 +1089,10 @@ def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
             if ti >= len(role_traces):
                 cases.append(0.0)
             elif METRIC == 'f1':
-                cases.append(_pr_score(role_traces[ti], exp, shift))
+                cases.append(_pr_score(role_traces[ti], exp, shift, tol))
             else:
                 cases.append(_trace_metric(role_traces[ti], exp))
-    return windowed_score(traces, ttarget, shift=shift), tuple(cases), shift
+    return windowed_score(traces, ttarget, shift=shift, tol=tol), tuple(cases), shift
 
 
 def exact_tick_accuracy(traces, ttarget):
@@ -1216,8 +1251,15 @@ def temporal_report(ttarget, genome=None):
 # ── feedback-loop analysis (for the GA's loop-aware shaping) ────────────────────
 
 def signal_graph(grid, routing):
-    """Directed signal graph as {node: set(readers)}: u -> v iff node v's
-    routing reads neighbour u (excitatory or inhibitory)."""
+    """Directed physical-wire graph; directional tile channels are its nodes."""
+    if is_directional_routing(routing):
+        resolved = expand_directional_routing(grid, routing)
+        edges = {wire: set() for wire in resolved}
+        for output, entry in resolved.items():
+            for source in entry[:3]:
+                if source in edges:
+                    edges[source].add(output)
+        return edges
     edges = {c: set() for c in grid}
     for v, entry in routing.items():
         e1, e2, i1 = entry[0], entry[1], entry[2]
@@ -1243,8 +1285,7 @@ def _reachable(edges, sources):
 
 
 def cycle_nodes(edges):
-    """Nodes that lie on a directed cycle (can reach themselves). Grids are
-    tiny (<= ~50 nodes), so per-node reachability is plenty fast."""
+    """Wires that lie on a directed cycle (can reach themselves)."""
     on_cycle = set()
     for s in edges:
         seen, stack = set(), list(edges[s])
@@ -1262,18 +1303,25 @@ def cycle_nodes(edges):
 
 def loop_profile(grid, routing, in_pos, out_pos):
     """Feedback-loop stats of a grown net:
-        n_cycle    — nodes on any directed cycle
-        n_relevant — cycle nodes both writable from an input and driving an output
+        n_cycle    — directional wires on any directed cycle
+        n_relevant — cycle wires both writable from an input and driving an output
     A latch is exactly a relevant cycle: inputs can set/clear the circulating
     value and the output can read it."""
     edges = signal_graph(grid, routing)
     cyc   = cycle_nodes(edges)
     if not cyc:
         return {'n_cycle': 0, 'n_relevant': 0}
-    from_in = _reachable(edges, in_pos)
+    directional = is_directional_routing(routing)
+    sources = ([wire for pos in in_pos for wire in tile_channels(pos)]
+               if directional else in_pos)
+    from_in = _reachable(edges, sources)
     rev = {c: set() for c in edges}
     for u, vs in edges.items():
         for v in vs:
             rev[v].add(u)
-    to_out = _reachable(rev, [p for p in out_pos.values() if p])
+    outputs = [p for p in out_pos.values() if p]
+    if directional:
+        outputs = [normalize_output_channel(grid, output)
+                   for output in outputs]
+    to_out = _reachable(rev, outputs)
     return {'n_cycle': len(cyc), 'n_relevant': len(cyc & from_in & to_out)}

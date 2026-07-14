@@ -2,13 +2,12 @@
 nv_evo/nervous.py — hexagonal nervous-network growth, interpretation, scoring.
 
 The array is a honeycomb (each node has 3 neighbours: L, R, D — see hexgrid.py).
-A grown cell's 5-bit state is decoded (ROUTING_HEX) into a routing config
-(e1, e2, i1, op): which of the 3 directions feed the two excitatory and the one
-inhibitory input of a nervous-net node, and how the two excitatory inputs combine
-(op = 'and' for states 0-15, the paper's Fig. 3; 'or' for the 16-31 OR twins).
-Output:
+A grown tile stores three independent 4-bit Figure-3 routing selectors, one for
+each L/R/D output circuit.  Development applies the same 4-bit gene separately
+to those three circuits; the packed 12-bit tile word is phenotype storage only.
+Each circuit computes:
 
-        out = (val(e1) op val(e2)) AND NOT val(i1)        # coincidence/OR + veto
+        out = (val(e1) AND val(e2)) AND NOT val(i1)
 
 Inputs are held at the seed cells and the array is relaxed; outputs are read at
 the target's terminals. No LIF — pure pulse logic, and the degree-3 topology is
@@ -16,19 +15,21 @@ what forms the excitatory / inhibitory loops.
 """
 from __future__ import annotations
 
-from .hexgrid import hex_dirs, hex_frontier_cells, ROUTING_HEX, routing_kind
+from .hexgrid import (hex_dirs, hex_frontier_cells, PAPER_ROUTING, routing_kind,
+                      pack_tile_state, decode_tile_routing, active_channels,
+                      channel_tile, DIRECTIONS, unpack_tile_state,
+                      developmental_context)
 from .genome import germline_telomere
 
-ROUTING    = ROUTING_HEX       # back-compat name (used by the GUI colourer)
-SEED_STATE = 1
+ROUTING    = PAPER_ROUTING
+SEED_STATE = pack_tile_state(1, 1, 1)
 
-# 5-bit popcount for the Hamming-distance gene lookup (state is 0..31: 0-15 AND
-# routing, 16-31 OR — the growth match must see the 5th bit to tell them apart).
-_PC4 = [bin(i).count("1") for i in range(32)]
+# Four-bit popcount for one core circuit.  Genome values can never exceed 15.
+_PC4 = [bin(i).count("1") for i in range(16)]
 
 
 def _h4(a, b):
-    return _PC4[(a ^ b) & 0x1F]
+    return _PC4[(a ^ b) & 0xF]
 
 
 # ── hex growth (native hex genome: self_out == 0 means the cell dies) ──────────
@@ -55,19 +56,23 @@ def _lookup_nv(genome, sL, sR, sD, si):
     telomere now gates DIVISION per cell in _grow_step, not which genes exist."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
         return 0
-    pc = _PC4                      # local ref + inlined popcount: this loop ran
-    best_gene, best_dist = None, 1 << 30   # ~3.4M times/200 evals — the _h4 call
+    pc = _PC4                      # local ref + inlined popcount: hot lookup
+    best_gene, best_dist = None, 1 << 30   # hot lookup loop: popcount is inlined
     for chrom in genome.chromosomes:       # overhead was ~15% of eval (sim6 did
         for gene in chrom.genes:           # the same inlining in table_lookup).
-            d = (pc[(gene.ctx_l ^ sL) & 0x1F] + pc[(gene.ctx_r ^ sR) & 0x1F] +
-                 pc[(gene.ctx_d ^ sD) & 0x1F] + pc[(gene.self_in ^ si) & 0x1F])
+            d = (pc[(gene.ctx_l ^ sL) & 0xF]
+                 + pc[(gene.ctx_r ^ sR) & 0xF]
+                 + pc[(gene.ctx_d ^ sD) & 0xF]
+                 + pc[(gene.self_in ^ si) & 0xF])
             if d < best_dist:
                 best_dist, best_gene = d, gene
     if best_gene is None:
         return 0
     if si == 0 and best_gene.self_in != 0:         # empty cells grow only via
         return 0                                   # growth rules (sim6 guard)
-    return best_gene.self_out                      # 0 = off / death (native)
+    # HexGene enforces the range at construction; the mask also makes growth
+    # safe for trusted legacy pickle objects whose __init__ was bypassed.
+    return int(best_gene.self_out) & 0xF            # 0 = off / death (native)
 
 
 def _next_state(genome, sL, sR, sD, si, cache):
@@ -79,6 +84,22 @@ def _next_state(genome, sL, sR, sD, si, cache):
         ns = _lookup_nv(genome, sL, sR, sD, si)
         cache[key] = ns
     return ns
+
+
+def _next_tile_state(genome, grid, pos, current, cache):
+    """Develop the L/R/D core circuits independently with one 4-bit genome.
+
+    ``developmental_context`` rotates each output circuit into the same
+    canonical frame.  Thus a rule remains orientation-independent while a new
+    tile may express three different Figure-3 configurations.
+    """
+    selectors = unpack_tile_state(current)
+    outputs = []
+    for direction, self_state in zip(DIRECTIONS, selectors):
+        sL, sR, sD = developmental_context(grid, pos, direction)
+        outputs.append(_next_state(
+            genome, sL, sR, sD, self_state, cache) & 0xF)
+    return pack_tile_state(*outputs)
 
 
 def _grow_step(genome, grid, tel, seeds, L, cache):
@@ -94,9 +115,7 @@ def _grow_step(genome, grid, tel, seeds, L, cache):
     nxt, nxt_tel = {}, {}
     # maintenance / survival of the existing organism
     for (x, y), state in grid.items():
-        nb = hex_dirs(x, y)
-        ns = _next_state(genome, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
-                         grid.get(nb['D'], 0), state, cache)
+        ns = _next_tile_state(genome, grid, (x, y), state, cache)
         if ns:
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = tel.get((x, y), 0)
@@ -112,8 +131,7 @@ def _grow_step(genome, grid, tel, seeds, L, cache):
                           if nb[d] in grid), default=0)
         if parent_tel <= 0:                       # every neighbour senescent
             continue                              # -> no division (Hayflick)
-        ns = _next_state(genome, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
-                         grid.get(nb['D'], 0), 0, cache)
+        ns = _next_tile_state(genome, grid, (x, y), 0, cache)
         if ns:
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = parent_tel - 1
@@ -176,12 +194,11 @@ def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
 # ── interpret / evaluate ────────────────────────────────────────────────────────
 
 def _place_outputs(grid, target):
-    """Assign each output role a live cell: nearest free non-input cell to its
-    terminal ("terminals"), or nearest-to-mid in the rightmost columns (legacy
-    "heuristic"). Candidates scan in sorted-cell order so ties are stable.
-    Returns {role: (x,y) | None}."""
+    """Assign each role a programmed directional circuit near its terminal."""
     input_set = set(target.inputs)
-    non_input = [p for p in sorted(grid) if p not in input_set]
+    decoded = {pos: decode_tile_routing(state) for pos, state in grid.items()}
+    non_input = [wire for wire in active_channels(grid, decoded)
+                 if channel_tile(wire) not in input_set]
     out_pos   = {term.role: None for term in target.outputs}
     if getattr(target, 'output_strategy', 'terminals') == 'terminals':
         used = set()
@@ -190,12 +207,13 @@ def _place_outputs(grid, target):
             cands  = [p for p in non_input if p not in used]
             if not cands:
                 break
-            best = min(cands, key=lambda p: abs(p[0] - tx) + abs(p[1] - ty))
+            best = min(cands, key=lambda p: (
+                abs(p[0] - tx) + abs(p[1] - ty), p))
             used.add(best)
             out_pos[term.role] = best
     else:
         mid_y  = target.grid_size // 2
-        x_cols = sorted({x for (x, _) in non_input}, reverse=True)
+        x_cols = sorted({p[0] for p in non_input}, reverse=True)
         for i, term in enumerate(target.outputs):
             if i >= len(x_cols):
                 break
@@ -205,8 +223,12 @@ def _place_outputs(grid, target):
 
 
 def interpret_nervous(grid, target=None):
-    """Return (routing {pos:(e1,e2,i1,op)}, input_pos, output_pos {role:(x,y)|None})."""
-    routing = {pos: ROUTING_HEX[state & 0x1F] for pos, state in grid.items()}
+    """Return three independent Figure-3 routing circuits per grown tile.
+
+    ``routing[pos]`` is ``(L_entry, R_entry, D_entry)``; output positions are
+    directional wire keys ``(x, y, direction)`` rather than whole-tile aliases.
+    """
+    routing = {pos: decode_tile_routing(state) for pos, state in grid.items()}
     if target is not None:
         input_pos  = list(target.inputs)
         output_pos = _place_outputs(grid, target)
@@ -277,11 +299,13 @@ def nervous_case_outputs(genome, target):
 
 
 def circuit_summary_nervous(grid):
-    kinds = {'off': 0, 'buffer': 0, 'coincidence': 0, 'or': 0, 'inhibited': 0}
+    kinds = {'off': 0, 'buffer': 0, 'coincidence': 0, 'inhibited': 0}
     for state in grid.values():
-        kinds[routing_kind(ROUTING_HEX[state & 0x1F])] += 1
-    return ('%d nodes  (%d buffer, %d coincidence, %d OR, %d inhibited, %d off)'
-            % (len(grid), kinds['buffer'], kinds['coincidence'], kinds['or'],
+        for entry in decode_tile_routing(state):
+            kinds[routing_kind(entry)] += 1
+    return ('%d tiles / %d directional circuits  '
+            '(%d buffer, %d coincidence, %d inhibited, %d off)'
+            % (len(grid), 3 * len(grid), kinds['buffer'], kinds['coincidence'],
                kinds['inhibited'], kinds['off']))
 
 

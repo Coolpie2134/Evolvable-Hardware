@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import os
 import random
 import traceback
@@ -8,11 +9,8 @@ from concurrent.futures import ProcessPoolExecutor
 
 from .cache import LRUCache
 from .checkpoint import save_population
-from .config import RunConfig
-
-
-class EvolutionCancelled(Exception):
-    pass
+from .config import RunConfig, MAX_CHROMOSOME_COUNT
+from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
 def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
@@ -20,54 +18,82 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                   results_dir='results'):
     """Backend-neutral evolution worker used by the desktop application."""
     from snn_evo.genome import random_genome
-    from snn_evo.ga import _eval_batch as eval_snn, next_population as next_snn
+    from snn_evo.ga import (_eval_batch as eval_snn,
+                            next_population as next_snn,
+                            rank_key as snn_rank_key)
 
     config = run_config or RunConfig()
+    chromosome_count = (config.ga.chromosome_count
+                        if config.ga.chromosome_count is not None else n_chroms)
+    if not 1 <= chromosome_count <= MAX_CHROMOSOME_COUNT:
+        raise ValueError('chromosome count must be between 1 and %d' %
+                         MAX_CHROMOSOME_COUNT)
+    if (config.ga.chromosome_count is not None
+            and n_chroms != config.ga.chromosome_count):
+        raise ValueError('n_chroms disagrees with run_config chromosome_count')
+    if config.ga.chromosome_count is None:
+        config = dataclasses.replace(
+            config, ga=dataclasses.replace(
+                config.ga, chromosome_count=chromosome_count))
     setattr(target, 'pulse_config', config.pulse)
     pool = None
     diversify_fn = None
-    rate_fn = lambda rate, stagnation: rate
+    consolidate_fn = None
+    rank_fn = snn_rank_key
+    rate_fn = lambda rate, stagnation, solved=False: rate
     base_rate, decay = config.ga.mean_mutations, config.ga.mutation_decay
 
     if backend == 'nervous':
         from nv_evo import random_hex_genome
         from nv_evo.ga import (eval_batch_cases, next_population, diversify,
-                               adaptive_mutation_rate, N_WORKERS)
+                               consolidate_population,
+                               adaptive_mutation_rate, rank_key, N_WORKERS)
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
         make_genome = lambda: random_hex_genome(
-            n_chroms, max_telomere=config.ga.max_telomere)
-        raw_eval = lambda genomes: eval_batch_cases(genomes, target, cache, pool)
+            chromosome_count, max_telomere=config.ga.max_telomere)
+        raw_eval = lambda genomes, should_stop=None, on_progress=None: \
+            eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         step = lambda p, f, c, mm: next_population(
-            p, f, make_genome, c, mm, ga_config=config.ga)
+            p, f, make_genome, c, mm, ga_config=config.ga,
+            chromosome_count=chromosome_count)
         rate_fn = adaptive_mutation_rate
+        rank_fn = rank_key
+        consolidate_fn = consolidate_population
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,
             max_telomere=config.ga.max_telomere,
+            chromosome_count=chromosome_count,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     elif backend == 'lut':
         from lut_evo.ga import (eval_batch_cases, next_population, diversify,
-                                make_seed_genome, adaptive_mutation_rate, N_WORKERS)
+                                consolidate_population, make_seed_genome,
+                                adaptive_mutation_rate, _tiebreak, N_WORKERS)
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
         def make_genome():
-            genome = make_seed_genome(n_chroms)
+            genome = make_seed_genome(chromosome_count)
             for chromosome in genome.chromosomes:
                 chromosome.telomere = min(
                     chromosome.telomere, config.ga.max_telomere)
             return genome
-        raw_eval = lambda genomes: eval_batch_cases(genomes, target, cache, pool)
+        raw_eval = lambda genomes, should_stop=None, on_progress=None: \
+            eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         step = lambda p, f, c, mm: next_population(
-            p, f, make_genome, c, mm, ga_config=config.ga)
+            p, f, make_genome, c, mm, ga_config=config.ga,
+            chromosome_count=chromosome_count)
         rate_fn = adaptive_mutation_rate
+        rank_fn = lambda genome, fitness: (fitness, _tiebreak(genome))
+        consolidate_fn = consolidate_population
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,
             max_telomere=config.ga.max_telomere,
+            chromosome_count=chromosome_count,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     else:
@@ -75,43 +101,65 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
-        make_genome = lambda: random_genome(n_chroms)
-        raw_eval = lambda genomes: (eval_snn(genomes, target, arch, pool, cache), None)
-        step = lambda p, f, c, mm: next_snn(p, f)
-
-    chunk_size = max(workers, workers * config.ga.evaluation_chunk_multiplier)
+        make_genome = lambda: random_genome(chromosome_count)
+        raw_eval = lambda genomes, should_stop=None, on_progress=None: (
+            eval_snn(genomes, target, arch, pool, cache, should_stop, on_progress),
+            None)
+        step = lambda p, f, c, mm: next_snn(
+            p, f, chromosome_count=chromosome_count)
 
     def evaluate(genomes, phase, try_i, generation):
-        fits, cases = [], []
-        case_vectors = True
-        for start in range(0, len(genomes), chunk_size):
-            if stop_event.is_set():
-                raise EvolutionCancelled
-            end = min(len(genomes), start + chunk_size)
-            messages.put(('phase', phase, try_i, generation, end))
-            batch_fits, batch_cases = raw_eval(genomes[start:end])
-            fits.extend(batch_fits)
-            if batch_cases is None:
-                case_vectors = False
-            elif case_vectors:
-                cases.extend(batch_cases)
-        return fits, (cases if case_vectors else None)
+        # One saturated pool pass over the whole population (no chunk barrier):
+        # map_ordered keeps every worker busy and polls the stop signal as each
+        # genome finishes, so cancellation stays responsive without idling
+        # workers on a slow genome. Progress is reported per completion.
+        if stop_event.is_set():
+            raise EvolutionCancelled
+        messages.put(('phase', phase, try_i, generation, len(genomes)))
 
-    size = lambda genome: sum(len(c.genes) for c in genome.chromosomes)
-    best_fit, best_genome = 0.0, None
+        def progress(done, total):
+            # Coarse progress: ~20 updates/generation, not one per genome — the
+            # display only shows a count, so keep queue traffic near the old
+            # per-chunk cadence.
+            if done == total or done % max(1, total // 20) == 0:
+                messages.put(('phase', phase, try_i, generation, done))
+
+        return raw_eval(genomes, should_stop=stop_event.is_set,
+                        on_progress=progress)
+
+    def validate_population(genomes):
+        if any(len(genome.chromosomes) != chromosome_count
+               for genome in genomes):
+            raise ValueError(
+                'population violates configured chromosome count %d' %
+                chromosome_count)
+
+    best_fit, best_genome, best_rank = 0.0, None, None
     population, fitnesses = [], []
     try:
         for try_i in range(1, tries + 1):
             if stop_event.is_set():
                 break
             random.seed(None if base_seed is None else base_seed + try_i - 1)
-            population = [make_genome() for _ in range(pop)]
+            # Build one genome at a time with a stop check: constructing the
+            # initial population of dense LUT ontogeny seeds takes seconds, and a
+            # plain comprehension ignored Stop until the whole population was
+            # built (the "stop still grows a generation for LUTs" lag).
+            population = []
+            for _ in range(pop):
+                if stop_event.is_set():
+                    raise EvolutionCancelled
+                population.append(make_genome())
+            validate_population(population)
             fitnesses, cases = evaluate(
                 population, 'Evaluating initial population', try_i, 0)
-            bi = max(range(pop), key=lambda i: (fitnesses[i], -size(population[i])))
+            bi = max(range(pop),
+                     key=lambda index: rank_fn(population[index], fitnesses[index]))
             champion, run_fit = copy.deepcopy(population[bi]), fitnesses[bi]
-            if run_fit > best_fit:
-                best_fit, best_genome = run_fit, copy.deepcopy(champion)
+            run_rank = rank_fn(champion, run_fit)
+            if best_rank is None or run_rank > best_rank:
+                best_fit, best_genome, best_rank = (
+                    run_fit, copy.deepcopy(champion), run_rank)
             messages.put(('gen', try_i, 0, best_fit,
                           sum(fitnesses) / len(fitnesses), run_fit))
             stagnation, mutation_rate = 0, base_rate
@@ -119,23 +167,52 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 if stop_event.is_set():
                     raise EvolutionCancelled
                 mutation_rate *= decay
-                actual_rate = rate_fn(mutation_rate, stagnation)
-                population = step(population, fitnesses, cases, actual_rate)
-                fitnesses, cases = evaluate(
-                    population, 'Evaluating population', try_i, generation)
-                gi = max(range(pop), key=lambda i: (fitnesses[i], -size(population[i])))
+                actual_rate = rate_fn(mutation_rate, stagnation, run_fit >= 1.0)
+                parents, parent_fitnesses, parent_cases = population, fitnesses, cases
+                offspring = step(parents, parent_fitnesses, parent_cases, actual_rate)
+                offspring_fitnesses, offspring_cases = evaluate(
+                    offspring, 'Evaluating population', try_i, generation)
+                if (consolidate_fn is not None
+                        and max(run_fit, max(offspring_fitnesses)) >= 1.0):
+                    population, fitnesses, cases = consolidate_fn(
+                        parents, parent_fitnesses, parent_cases,
+                        offspring, offspring_fitnesses, offspring_cases)
+                else:
+                    population, fitnesses, cases = (
+                        offspring, offspring_fitnesses, offspring_cases)
+                validate_population(population)
+                gi = max(
+                    range(pop),
+                    key=lambda index: rank_fn(
+                        population[index], fitnesses[index]))
+                generation_rank = rank_fn(population[gi], fitnesses[gi])
                 stagnation = 0 if fitnesses[gi] > run_fit + 1e-12 else stagnation + 1
-                if (fitnesses[gi] > run_fit or
-                        (fitnesses[gi] == run_fit and size(population[gi]) < size(champion))):
-                    run_fit, champion = fitnesses[gi], copy.deepcopy(population[gi])
-                    if (run_fit > best_fit or
-                            (run_fit == best_fit and best_genome is not None
-                             and size(champion) < size(best_genome))):
-                        best_fit, best_genome = run_fit, copy.deepcopy(champion)
+                if generation_rank > run_rank:
+                    run_fit, champion, run_rank = (
+                        fitnesses[gi], copy.deepcopy(population[gi]), generation_rank)
+                    if best_rank is None or run_rank > best_rank:
+                        best_fit, best_genome, best_rank = (
+                            run_fit, copy.deepcopy(champion), run_rank)
                 messages.put(('gen', try_i, generation, best_fit,
                               sum(fitnesses) / len(fitnesses), fitnesses[gi]))
             if best_fit >= 1.0:
                 break
+
+        # Credibility gate: a high training fitness is not a claim. For temporal
+        # backends whose target has a reference oracle, re-score the winner on
+        # FRESH held-out schedules (readout/alignment frozen) and emit a verdict
+        # so a memorised-timing / leaky solution is flagged rather than trusted.
+        # Advisory only — a failure here must never sink the run.
+        certification = None
+        if (backend in ('nervous', 'lut') and best_genome is not None
+                and not stop_event.is_set()):
+            try:
+                from nv_evo.certification import certify
+                certification = certify(best_genome, target, train=best_fit,
+                                        backend=backend)
+                messages.put(('certified', certification))
+            except Exception:
+                certification = None
 
         if (diversify_fn is not None and best_genome is not None
                 and best_fit >= 0.999 and not stop_event.is_set()):
@@ -145,7 +222,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             diverse = diversify_fn(seeds, valid)
             if diverse:
                 path = os.path.join(results_dir, 'solver_generation.json')
-                save_population(path, diverse, target, backend, valid, config)
+                save_population(path, diverse, target, backend, valid, config,
+                                certification=certification)
                 messages.put(('diverse', len(diverse), valid))
     except EvolutionCancelled:
         pass
@@ -153,7 +231,12 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         messages.put(('error', traceback.format_exc(limit=5)))
     finally:
         if pool is not None:
-            pool.shutdown(cancel_futures=True)
+            # wait=False so a Stop returns immediately: pending genomes are
+            # cancelled and the few in-flight dense-LUT evals finish (and are
+            # discarded) in the background instead of blocking the UI for the
+            # ~2s it took to drain + join the worker processes. Results for a
+            # normal completion were already collected before this point.
+            pool.shutdown(wait=False, cancel_futures=True)
         messages.put(('done', copy.deepcopy(best_genome), best_fit))
 
 

@@ -22,6 +22,7 @@ from . import pulse
 from . import simulation as ae
 from .targets import TemporalTarget, Trial, OutputTerminal
 from .nervous import grow_nervous, interpret_nervous
+from .hexgrid import channel_tile, normalize_output_channel
 from .temporal import _output_candidates
 from .robustness import (parity_intervals, score_retention_graded,
                          score_retention, score_interval_graded,
@@ -109,7 +110,7 @@ def evaluate_retention(genome, target):
     routing, in_pos, _ = interpret_nervous(grid, target)
     if any(p not in grid for p in in_pos):
         return 0.0, zero
-    cands = _output_candidates(grid, set(in_pos), target.outputs[0])
+    cands = _output_candidates(grid, set(in_pos), target.outputs[0], routing)
     if not cands:
         return 0.0, zero
     config = getattr(target, 'pulse_config', None)
@@ -283,11 +284,12 @@ def _evaluate_sr_details(genome, target, fitted=None):
 
     if fitted is None:
         candidates = _output_candidates(
-            grid, set(in_pos), target.outputs[0])
+            grid, set(in_pos), target.outputs[0], routing)
         offsets = [target.latency + k for k in _OFFSETS]
     else:
         cell = fitted.output_positions.get('Q')
-        if cell not in grid:
+        cell = normalize_output_channel(grid, cell)
+        if cell is None or channel_tile(cell) not in grid:
             return 0.0, zero, None, 0.0
         candidates = [cell]
         offsets = [target.latency + float(fitted.alignment or 0.0)]

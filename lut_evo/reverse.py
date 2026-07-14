@@ -143,8 +143,11 @@ def repair_genome_lut(source_genome, target_grid, seeds, grid_size=7, iters=30,
         if not patch_map:
             genome = source_genome
         else:
+            repair_genes = list(patch_map.values())
             repair_chrom = Chromosome(
-                genes=list(patch_map.values()), split=0, tag=-1, telomere=L)
+                genes=repair_genes,
+                split=(0 if len(repair_genes) < 2 else len(repair_genes) // 2),
+                tag=-1, telomere=L)
             genome = Genome(chromosomes=[repair_chrom]
                             + list(source_genome.chromosomes),
                             tag=source_genome.tag)
@@ -268,8 +271,9 @@ def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
         genes += [LutGene(ctx_n=cn, ctx_s=cs, ctx_e=ce, ctx_w=cw,
                           self_in=self_lut, self_out=self_lut)
                   for ((cn, cs, ce, cw), self_lut) in maint if self_lut]
-        return Genome(chromosomes=[Chromosome(genes=genes, split=0, tag=1,
-                                              telomere=L)], tag=1)
+        return Genome(chromosomes=[Chromosome(
+            genes=genes, split=(0 if len(genes) < 2 else len(genes) // 2),
+            tag=1, telomere=L)], tag=1)
 
     def evaluate(genome):
         # Verify with exactly the safety cap the Designer's Grow button uses;

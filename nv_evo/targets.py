@@ -580,17 +580,27 @@ TEMPORAL_TARGETS = {
     'Divide-by-3':           divide_by_3(),
 }
 
+# Registry display name -> its reference-oracle spec name (in oracle.ORACLE_SPECS).
+# Exposed so held-out certification can recover the reference state machine that
+# defines a given target and re-sample fresh validation schedules from it.
+ORACLE_KEY_TO_SPEC = {
+    'SR latch':              'SR latch (oracle)',
+    'C-element (2-in join)': 'C-element (oracle)',
+    'Toggle flip-flop':      'Toggle (oracle)',
+    'Echo (delay 3)':        'Echo (oracle)',
+    'One-shot (5 ticks)':    'One-shot (oracle)',
+    'Period doubler (2x)':   'Period doubler (oracle)',
+    'Pair detector (gap 2)': 'Pair detector (oracle)',
+    'Period stepper':        'Period stepper (oracle)',
+    'Gated oscillator':      'Gated oscillator (oracle)',
+    'Resettable toggle':     'Resettable toggle (oracle)',
+}
+
+
 def _register_oracle_targets():
     import dataclasses
     from .oracle import ORACLE_SPECS
-    for key, spec_name in (('SR latch',              'SR latch (oracle)'),
-                           ('Toggle flip-flop',      'Toggle (oracle)'),
-                           ('Echo (delay 3)',        'Echo (oracle)'),
-                           ('One-shot (3 ticks)',    'One-shot (oracle)'),
-                           ('Pair detector (gap 2)', 'Pair detector (oracle)'),
-                           ('Period stepper',        'Period stepper (oracle)'),
-                           ('Gated oscillator',      'Gated oscillator (oracle)'),
-                           ('Resettable toggle',     'Resettable toggle (oracle)')):
+    for key, spec_name in ORACLE_KEY_TO_SPEC.items():
         t = ORACLE_SPECS[spec_name]()
         TEMPORAL_TARGETS[key] = dataclasses.replace(t, name=key)
 

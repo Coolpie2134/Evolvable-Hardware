@@ -1,0 +1,93 @@
+"""
+nv_evo/certification.py — turn a "solved" fitness into a defensible verdict.
+
+A training fitness near 1.0 is not a claim: temporal targets can be gamed by a
+circuit that memorised the training schedules' exact timing, or by a leaky ring
+that a short training window can't tell from real storage. The north-star's
+credibility gate is generalisation to FRESH stimulus. This module re-samples new
+schedules from a target's reference oracle, scores the winner with its TRAINING
+readout and alignment frozen (no re-fit on validation), and classifies the gap:
+
+    CERTIFIED  held-out >= threshold          (generalises — a real circuit)
+    OVERFIT    trains >= threshold but the train->held-out drop is large
+               (memorised timing)
+    BELOW      trains and generalises but under the bar (not solved at this budget)
+    SOLVED / PLATEAU / UNCERTIFIED             (autonomous / documented limit /
+                                                no oracle reference available)
+
+One verdict rule, shared by reproduce.py, the evolution controller, and tests.
+"""
+from __future__ import annotations
+
+# The train-vs-held-out drop that distinguishes memorised timing (a big drop)
+# from a target that simply isn't fully solved yet (a small drop, still general).
+OVERFIT_GAP = 0.10
+DEFAULT_HOLDOUT_SEEDS = (4242, 777, 31415)
+
+
+def classify(train, holdout, threshold, kind='certify', overfit_gap=OVERFIT_GAP):
+    """The single verdict rule. `holdout` may be None (no oracle reference)."""
+    if kind == 'solve':
+        return 'SOLVED' if train >= 0.999 else 'NOT SOLVED (train %.3f)' % train
+    if kind == 'plateau':
+        return 'PLATEAU (documented limit; train %.3f)' % train
+    if holdout is None:
+        return 'UNCERTIFIED (no oracle reference for this target)'
+    if holdout >= threshold:
+        return 'CERTIFIED'
+    if train >= threshold and (train - holdout) > overfit_gap:
+        return ('OVERFIT (memorised timing: train %.3f vs held-out %.3f)'
+                % (train, holdout))
+    # Below the bar: only claim it GENERALISES when the train->held-out drop is
+    # small; a large drop is weak generalisation (partial memorisation), which
+    # must not be dressed up as "generalises".
+    quality = ('generalises' if (train - holdout) <= overfit_gap
+               else 'weak generalisation, held-out drops %.3f' % (train - holdout))
+    return ('BELOW THRESHOLD %.2f (train %.3f, held-out %.3f - %s, '
+            'not fully solved at this budget)'
+            % (threshold, train, holdout, quality))
+
+
+def oracle_spec_for(target):
+    """The reference-oracle spec function for a registry target, or None if the
+    target has no oracle (autonomous rhythms, hand-built combinational, etc.)."""
+    from .targets import ORACLE_KEY_TO_SPEC
+    from .oracle import ORACLE_SPECS
+    spec_name = ORACLE_KEY_TO_SPEC.get(getattr(target, 'name', None))
+    return ORACLE_SPECS.get(spec_name) if spec_name else None
+
+
+def certify(genome, target, train=None, backend='nervous',
+            seeds=DEFAULT_HOLDOUT_SEEDS, threshold=0.90, kind='certify'):
+    """Certify a winning genome against fresh held-out stimulus.
+
+    Returns a dict: {target, train, holdouts, holdout (mean), verdict}. For a
+    target with no oracle reference the verdict is UNCERTIFIED and no held-out
+    scoring is attempted. `train` is the training fitness (passed in — this does
+    not re-evolve); when omitted it is left None and only held-out is reported.
+    """
+    from .oracle import holdout_score
+    from .evaluation import fit_readout
+
+    name = getattr(target, 'name', '?')
+    result = {'target': name, 'train': train, 'holdouts': None,
+              'holdout': None, 'verdict': None}
+    spec = oracle_spec_for(target)
+    if spec is None:
+        result['verdict'] = classify(train or 0.0, None, threshold, kind=kind)
+        return result
+
+    fitted = fit_readout(genome, spec(), backend=backend)   # fit once, reuse
+    if fitted is None:
+        result['holdouts'] = [0.0] * len(seeds)
+        result['holdout'] = 0.0
+        result['verdict'] = classify(train or 0.0, 0.0, threshold, kind=kind)
+        return result
+    holdouts = [holdout_score(genome, spec, backend=backend, seed=s, fitted=fitted)
+                for s in seeds]
+    mean_ho = sum(holdouts) / len(holdouts)
+    result['holdouts'] = holdouts
+    result['holdout'] = mean_ho
+    result['verdict'] = classify(train if train is not None else mean_ho,
+                                 mean_ho, threshold, kind=kind)
+    return result

@@ -62,7 +62,7 @@ def random_chromosome(n_genes=None) -> Chromosome:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
         genes = [random_gene() for _ in range(n_genes)],
-        split = random.randint(1, max(1, n_genes - 1)),
+        split = (0 if n_genes < 2 else random.randint(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         # Start generous so the organism spans the I/O layout and stays solvable;
         # parsimony then shrinks the telomere toward the smallest body that still
