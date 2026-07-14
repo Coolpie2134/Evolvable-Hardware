@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nv_evo import pulse, simulation as sim                # noqa: E402
 from nv_evo.pulse import PulseSim, PulseConfig             # noqa: E402
 from nv_evo.hexgrid import ROUTING_HEX                     # noqa: E402
+from nv_evo.temporal import run_nervous_events             # noqa: E402
 
 TOL = 1e-9
 
@@ -84,6 +85,18 @@ def test_wired_or_extend_no_second_edge():
     assert s.rise_times[(0, 0)] == [0.0], s.rise_times[(0, 0)]
     assert s.activity_at(4.5) == {(0, 0): 1}    # extended past the first end
     assert s.activity_at(5.1) == {(0, 0): 0}
+
+
+def test_explicit_fractional_trial_events_bypass_tick_injection():
+    """A physical target event at 1.37 propagates from that exact time."""
+    grid = {(0, 0): 0, (1, 0): 2}
+    routing = {(0, 0): ROUTING_HEX[0], (1, 0): ROUTING_HEX[2]}
+    _, _, rises, overflow = run_nervous_events(
+        grid, routing, [(0, 0)], {'Q': (1, 0)}, [(0,)] * 6, 6,
+        sample=False, input_events=[[(1.37, 1.0)]])
+    assert not overflow
+    assert rises[(0, 0)] == [1.37]
+    assert rises[(1, 0)] == [2.37]
 
 
 def _main():

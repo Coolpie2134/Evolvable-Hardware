@@ -16,10 +16,12 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
+from evo_runtime.limits import MAX_CHROMOSOME_COUNT
+
 LUT_BITS     = 16
 LUT_STATES   = 1 << LUT_BITS     # 65536 possible cell states
 MAX_GENES    = 24
-MAX_CHROMS   = 6
+MAX_CHROMS   = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20                # longest evolvable growth phase (iterations)
 
 

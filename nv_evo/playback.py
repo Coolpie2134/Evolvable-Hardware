@@ -103,6 +103,12 @@ def pulses_from_trial(target, n_inputs):
     trials = getattr(target, 'trials', None) if target is not None else None
     if not trials:
         return out
+    physical = getattr(trials[0], 'input_events', None)
+    if physical is not None:
+        for i in range(n_inputs):
+            out[i] = ([float(start) for start, _width in physical[i]]
+                      if i < len(physical) else [])
+        return out
     streams = trials[0].streams
     for i in range(n_inputs):
         out[i] = [float(t) for t in range(len(streams))

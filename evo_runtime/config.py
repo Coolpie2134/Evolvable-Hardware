@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from nv_evo.pulse import PulseConfig
+from .limits import MAX_CHROMOSOME_COUNT
 
-MAX_CHROMOSOME_COUNT = 6
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
 

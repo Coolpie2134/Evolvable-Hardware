@@ -94,8 +94,16 @@ def _inject_stream_edges(sim, in_pos, streams, T):
             sim.inject_pulse(cell, start * TICK, duration)
 
 
+def _inject_physical_events(sim, in_pos, input_events):
+    """Queue an explicit floating-time stimulus schedule onto the input nets."""
+    for input_index, cell in enumerate(in_pos):
+        events = input_events[input_index] if input_index < len(input_events) else ()
+        for start, width in events:
+            sim.inject_pulse(cell, float(start), float(width))
+
+
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
-                 max_events=None, sample=True, config=None):
+                 max_events=None, sample=True, config=None, input_events=None):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -113,9 +121,12 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
             sub = {c: grid[c] for c in cone}
     sim    = create_simulator(sub, routing, max_events=max_events,
                               config=config)
+    if input_events is not None:
+        _inject_physical_events(sim, in_pos, input_events)
     if not sample:
         # Event/cadence fitness needs edges, not O(T*cells) display snapshots.
-        _inject_stream_edges(sim, in_pos, streams, T)
+        if input_events is None:
+            _inject_stream_edges(sim, in_pos, streams, T)
         sim.advance_to(T * TICK)
         return [], {role: [] for role in out_pos}, sim.rise_times, sim.overflow
     states = []
@@ -124,8 +135,13 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         # run past the end of the input streams with zero input (padding), so a
         # circuit that responds at a DELAY is still observed — its late events
         # fall in [len(streams), T) instead of off the end (see _obs_len).
-        row = streams[t] if t < len(streams) else (0,) * len(in_pos)
-        state = sim.step({in_pos[i]: row[i] for i in range(len(in_pos))})
+        if input_events is None:
+            row = streams[t] if t < len(streams) else (0,) * len(in_pos)
+            state = sim.step({in_pos[i]: row[i] for i in range(len(in_pos))})
+        else:
+            sample_time = (t + 0.5) * TICK
+            sim.advance_to(sample_time)
+            state = sim.activity_at(sample_time)
         states.append(state)
         for role, p in out_pos.items():
             traces[role].append(state.get(p, 0) if p else 0)
@@ -152,7 +168,8 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
 
 
 def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
-                       max_events=None, sample=True, config=None):
+                       max_events=None, sample=True, config=None,
+                       input_events=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
     ``rise_times`` maps every simulated cell to its continuous leading-edge
@@ -160,7 +177,7 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
-                        config=config)
+                        config=config, input_events=input_events)
 
 
 # ── temporal scoring ───────────────────────────────────────────────────────────
@@ -570,7 +587,11 @@ def trial_input_summary(trial, n_inputs, names=None):
     parts = []
     for i in range(n_inputs):
         label = names[i] if i < len(names) else 'I%d' % i
-        edges = ', '.join(_display_time(t) for t in _input_edges(trial.streams, i))
+        physical = getattr(trial, 'input_events', None)
+        times = ([event[0] for event in physical[i]]
+                 if physical is not None and i < len(physical)
+                 else _input_edges(trial.streams, i))
+        edges = ', '.join(_display_time(t) for t in times)
         parts.append('%s@[%s]' % (label, edges))
     return '  '.join(parts)
 
@@ -860,7 +881,8 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     runs = [run_nervous_events(
                 sub, routing, in_pos, {}, tr.streams, obs, prune=False,
                 max_events=getattr(ttarget, 'max_events', 2048),
-                sample=need_samples, config=config)
+                sample=need_samples, config=config,
+                input_events=getattr(tr, 'input_events', None))
             for tr in ttarget.trials]
     trial_states = [run[0] for run in runs]
     trial_events = [run[2] for run in runs]
@@ -937,7 +959,8 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
     runs = [run_nervous_events(
                 sub, routing, in_pos, out_pos, trial.streams, obs,
                 prune=False, max_events=getattr(ttarget, 'max_events', 2048),
-                sample=need_samples, config=config)
+                sample=need_samples, config=config,
+                input_events=getattr(trial, 'input_events', None))
             for trial in ttarget.trials]
     traces = TemporalTraces(
         {role: [run[1].get(role, []) for run in runs] for role in out_pos},
@@ -1106,7 +1129,7 @@ def temporal_report(ttarget, genome=None):
     if desc:
         lines += [''] + desc.splitlines()
     if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-        lines += ['', 'Backend detail: nervous-net transition phase may be sub-tick.']
+        lines += ['', 'Backend detail: nervous-net transition phase may be sub-second.']
         if genome is None:
             return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
         prep = prepare_net(genome, ttarget)
@@ -1145,7 +1168,7 @@ def temporal_report(ttarget, genome=None):
             total, '   SOLVED' if total >= 0.999 else '')]
         return '\n'.join(lines)
     if getattr(ttarget, 'score_mode', 'trace') == 'events':
-        lines += ['', 'Backend detail: raw nervous-net timestamps retain sub-tick edges.']
+        lines += ['', 'Backend detail: raw nervous-net timestamps retain sub-second edges.']
         prep = None if genome is None else prepare_net(genome, ttarget)
         traces = prep[4] if prep is not None else None
         best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0
@@ -1177,9 +1200,9 @@ def temporal_report(ttarget, genome=None):
     lines += ['',
               'Scored as persistent behaviour in active and quiet windows.',
               'A stored 1 may ring (1010...) because a nervous node is refractory;',
-              'the scorer therefore tolerates one tick of ring phase.',
+              'the scorer therefore tolerates one second of ring phase.',
               'One shared input-to-output latency is used across every test/output.',
-              'The exact per-tick value is diagnostic only and ignores ring tolerance.']
+              'The exact per-second value is diagnostic only and ignores ring tolerance.']
 
     prep = traces = None
     best_s = 0
@@ -1192,7 +1215,7 @@ def temporal_report(ttarget, genome=None):
             best_s = _best_shift(traces, ttarget)[0]
             for t in ttarget.outputs:
                 lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
-            lines.append('measured output latency offset: %+d tick(s)' % best_s)
+            lines.append('measured output latency offset: %+d second(s)' % best_s)
 
     for ti, trial in enumerate(ttarget.trials):
         lines += ['', 'Test %d: %s' % (
@@ -1214,7 +1237,7 @@ def temporal_report(ttarget, genome=None):
                                 tp_rec, n_exp, tp_prec, n_act))
     if traces is not None:
         total = windowed_score(traces, ttarget, shift=best_s)
-        lines += ['', '=> behavioural score %.4f%s   (exact per-tick %.4f)'
+        lines += ['', '=> behavioural score %.4f%s   (exact per-second %.4f)'
                   % (total, '   SOLVED' if total >= 0.999 else '',
                      exact_tick_accuracy(traces, ttarget))]
     else:

@@ -34,6 +34,11 @@ class Trial:
     # Optional ground-truth point events.  Event-semantic targets populate this
     # directly so consecutive events are not confused with one held-high run.
     expected_events: Dict[str, List[float]] = field(default_factory=dict)
+    # Optional physical input schedule, one list per input. Each event is
+    # ``(start_time, pulse_width)`` and may start between ticks. Nervous
+    # evaluation uses this instead of ``streams``; the sampled stream remains as
+    # a compatibility/display fallback for clocked backends.
+    input_events: Optional[List[List[Tuple[float, float]]]] = None
 
 
 @dataclass
@@ -68,6 +73,9 @@ class TemporalTarget:
     stepper_settle: int = 2
     stepper_min_events: int = 4
     stepper_max_delay: int = 8
+    # Empty means no additional restriction. Physical floating-time targets can
+    # opt into Nervous only so clocked backends do not silently quantize them.
+    supported_backends: Tuple[str, ...] = ()
 
     @property
     def n_inputs(self):  return len(self.inputs)
@@ -355,7 +363,7 @@ def echo(grid_size=5, delay=3):
                           description=describe_target(
         'Reproduce the input-edge train at Q while preserving every inter-edge '
         'interval.', EVENT_SCORING,
-        'Four schedules vary pulse count and spacing. The nominal %d-tick '
+        'Four schedules vary pulse count and spacing. The nominal %d-second '
         'label sets the reference trace; absolute circuit latency remains free.'
         % delay))
 
@@ -393,7 +401,7 @@ def coincidence_detector(grid_size=5, latency=1):
                           description=describe_target(
         'Emit one Q edge only when inputs A and B arrive together.',
         EVENT_SCORING,
-        'Six schedules mix coincident pairs, one- and two-tick offsets, and '
+        'Six schedules mix coincident pairs, one- and two-second offsets, and '
         'single-input events. Offset and lone events must remain silent.'))
 
 
@@ -416,11 +424,11 @@ def one_shot(grid_size=5, width=3, latency=3):
             if p + latency + width < T:
                 exp[p + latency + width] = None            # turn-off transient
         trials.append(Trial(streams, {'Q': exp}))
-    return TemporalTarget('One-shot (%d ticks)' % width, [In], [out], T, trials,
+    return TemporalTarget('One-shot (%d seconds)' % width, [In], [out], T, trials,
                           grid_size=grid_size, iters=30,
                           description=describe_target(
         'Each input edge starts a self-terminating active interval lasting %d '
-        'ticks, after which Q must return quiet.' % width,
+        'seconds, after which Q must return quiet.' % width,
         PERSISTENCE_SCORING,
         'Four schedules include isolated and repeated triggers. Every interval '
         'must terminate and the circuit must re-arm for later input.'))
@@ -454,7 +462,7 @@ def pair_detector(grid_size=5, gap=2, latency=3):
     return TemporalTarget('Pair detector (gap %d)' % gap, [In], [out], T, trials,
                           grid_size=grid_size, iters=30, score_mode='events',
                           description=describe_target(
-        'Emit Q when two input edges are separated by exactly %d ticks.' % gap,
+        'Emit Q when two input edges are separated by exactly %d seconds.' % gap,
         EVENT_SCORING,
         'Five schedules include valid pairs, wrong gaps, multiple pairs, and a '
         'single edge. Only correctly spaced pairs may produce output.'))
@@ -501,7 +509,7 @@ def ordered_sequence(grid_size=5, gap=3, latency=1):
         ({0: [8],        1: []},            []),                    # lone A    -> silent
     ], T=T, n_inputs=2, latency=latency, grid_size=grid_size,
        description=describe_target(
-        'Emit Q only for the ordered sequence A then B, separated by %d ticks.'
+        'Emit Q only for the ordered sequence A then B, separated by %d seconds.'
         % gap, EVENT_SCORING,
         'Five schedules include correct order, reverse order, wrong spacing, '
         'repeated valid sequences, and an incomplete sequence.'))
@@ -539,7 +547,7 @@ def burst_generator(grid_size=5, n=3, spacing=2, latency=1):
         ({0: [4]},         burst(4)),
     ], T=T, n_inputs=1, latency=latency, grid_size=grid_size,
        description=describe_target(
-        'Convert each input edge into %d Q edges separated by %d ticks, then '
+        'Convert each input edge into %d Q edges separated by %d seconds, then '
         'return to silence.' % (n, spacing), EVENT_SCORING,
         'Four schedules vary trigger time and include a two-trigger test that '
         'requires the generator to re-arm.'))
@@ -586,18 +594,28 @@ TEMPORAL_TARGETS = {
 ORACLE_KEY_TO_SPEC = {
     'SR latch':              'SR latch (oracle)',
     'C-element (2-in join)': 'C-element (oracle)',
-    'Refractory filter (3 ticks)': 'Refractory filter (oracle)',
+    'Refractory filter (3 seconds)': 'Refractory filter (oracle)',
     'A-first rendezvous':     'A-first rendezvous (oracle)',
     'Collision serializer (2-to-1)': 'Collision serializer (oracle)',
-    'Watchdog timeout (5 ticks)': 'Watchdog timeout (oracle)',
+    'Watchdog timeout (5 seconds)': 'Watchdog timeout (oracle)',
     'Toggle flip-flop':      'Toggle (oracle)',
     'Echo (delay 3)':        'Echo (oracle)',
-    'One-shot (5 ticks)':    'One-shot (oracle)',
+    'One-shot (5 seconds)':  'One-shot (oracle)',
     'Period doubler (2x)':   'Period doubler (oracle)',
     'Pair detector (gap 2)': 'Pair detector (oracle)',
+    'Pair detection gap (2x pulse width)': 'Pair gap 2x width (oracle)',
     'Period stepper':        'Period stepper (oracle)',
     'Gated oscillator':      'Gated oscillator (oracle)',
     'Resettable toggle':     'Resettable toggle (oracle)',
+}
+
+# Checkpoints created before time units were presented as seconds retain these
+# names. They remain valid for certification, but are not registered as duplicate
+# entries in the target picker.
+LEGACY_ORACLE_KEY_TO_SPEC = {
+    'Refractory filter (3 ticks)': 'Refractory filter (oracle)',
+    'Watchdog timeout (5 ticks)': 'Watchdog timeout (oracle)',
+    'One-shot (5 ticks)': 'One-shot (oracle)',
 }
 
 

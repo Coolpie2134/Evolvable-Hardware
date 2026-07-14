@@ -22,6 +22,7 @@ relations, so they keep their hand-built targets; everything input-driven moves
 here.
 """
 from __future__ import annotations
+import math
 import random
 
 from .targets import (TemporalTarget, Trial, OutputTerminal, describe_target,
@@ -435,7 +436,7 @@ def echo_oracle(seed=20260702, delay=3):
                          description=describe_target(
         'Reproduce the input-edge train while preserving its intervals.',
         EVENT_SCORING,
-        'Ten seeded random schedules use a nominal %d-tick reference delay; '
+        'Ten seeded random schedules use a nominal %d-second reference delay; '
         'absolute evolved latency is free.' % delay))
 
 
@@ -460,7 +461,7 @@ def one_shot_oracle(seed=20260702, width=5):
     return oracle_target('One-shot (oracle)', make_one_shot(width), [(0, 2)], 'Q',
                          T=28, n_trials=10, seed=seed, latency=2, min_gap=width + 4,
                          description=describe_target(
-        'Each input edge starts a %d-tick active interval that self-terminates.'
+        'Each input edge starts a %d-second active interval that self-terminates.'
         % width, PERSISTENCE_SCORING,
         'Ten seeded random schedules space triggers far enough to verify '
         'termination and re-arming.'))
@@ -471,10 +472,81 @@ def pair_oracle(seed=20260702, gap=2):
                          T=24, n_trials=12, seed=seed, latency=3, min_gap=1,
                          score_mode='events',
                          description=describe_target(
-        'Emit Q when two input edges are separated by exactly %d ticks.' % gap,
+        'Emit Q when two input edges are separated by exactly %d seconds.' % gap,
         EVENT_SCORING,
         'Twelve seeded random trains mix valid pairs, wrong gaps, and isolated '
         'events.'))
+
+
+def pair_two_widths_oracle(seed=20260702, pulse_width=None):
+    """Physical-time pair detector with gap measured relative to input width.
+
+    ``gap`` means leading-edge separation, matching the existing pair detector's
+    convention. Every explicit input pulse is ``pulse_width`` wide; only a second
+    leading edge exactly ``2 * pulse_width`` after the preceding edge emits Q.
+    Fractional phases keep this target off the integer stimulus lattice.
+    """
+    if pulse_width is None:
+        from .pulse import WIDTH
+        pulse_width = WIDTH
+    width = float(pulse_width)
+    if width <= 0:
+        raise ValueError('pulse_width must be positive')
+    rng = random.Random(seed)
+    # (edge positions in width units, positions that complete valid pairs)
+    patterns = [
+        ([0.0, 2.0], [2.0]),
+        ([0.0, 2.0], [2.0]),
+        ([0.0, 1.5], []),
+        ([0.0, 2.5], []),
+        ([0.0, 3.0], []),
+        ([0.0], []),
+        ([], []),
+        ([0.0, 2.0, 7.0, 9.0], [2.0, 9.0]),
+        ([0.0, 2.0, 4.0], [2.0, 4.0]),
+        ([0.0, 2.0, 5.0], [2.0]),
+        ([0.0, 3.0, 5.0], [5.0]),
+        ([0.0, 2.5, 4.5], [4.5]),
+    ]
+    rng.shuffle(patterns)
+    latency = 1.0
+    trials_data = []
+    last_time = 0.0
+    for positions, completions in patterns:
+        phase = rng.uniform(1.25, 3.75) * width
+        starts = [phase + position * width for position in positions]
+        expected = [phase + position * width + latency
+                    for position in completions]
+        last_time = max([last_time] + starts + expected)
+        trials_data.append((starts, expected))
+
+    horizon = max(24, int(math.ceil(last_time + 6.0 * width + latency)))
+    trials = []
+    for starts, expected_events in trials_data:
+        # The Nervous path consumes input_events directly. A zero stream remains
+        # as an honest fallback: a clocked backend cannot silently claim it ran
+        # this continuous-time target by rounding the fractional phases.
+        streams = [(0,)] * horizon
+        exp = [0] * horizon
+        trials.append(Trial(
+            streams, {'Q': exp}, {'Q': expected_events},
+            input_events=[[(start, width) for start in starts]]))
+
+    target = TemporalTarget(
+        'Pair gap 2x width (oracle)', [(0, 2)],
+        [OutputTerminal('Q', (2, 2))], horizon, trials,
+        grid_size=5, iters=30, score_mode='events', latency=latency,
+        event_tolerance=0.15 * width,
+        event_max_shift=max(12.0, 12.0 * width),
+        supported_backends=('nervous',),
+        description=describe_target(
+            'Emit Q when two physical input-pulse leading edges are separated by '
+            'exactly twice the input pulse width (2w).',
+            EVENT_SCORING,
+            'Twelve seeded fractional-phase schedules include exact 2w pairs, '
+            '1.5w/2.5w/3w wrong gaps, chains, mixed valid/invalid gaps, a lone '
+            'pulse, and silence. Input pulse width w is %.3g seconds.' % width))
+    return target
 
 
 def period_stepper_oracle(seed=20260702, base=2):
@@ -577,8 +649,8 @@ def pulse_doubler_oracle(seed=20260702, widths=(1, 2, 3)):
         'Pulse doubler (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
         T, trials, grid_size=5, iters=30,
         description=describe_target(
-            'Stretch each input pulse to twice its width: a pulse held x ticks '
-            'yields one contiguous 2x-tick output hold starting with it. The '
+            'Stretch each input pulse to twice its width: a pulse held x seconds '
+            'yields one contiguous 2x-second output hold starting with it. The '
             'bank mixes widths x in %s, so a fixed delay or fixed-length '
             'one-shot cannot fit them all - the circuit must measure x.'
             % (tuple(widths),), PERSISTENCE_SCORING,
@@ -628,16 +700,67 @@ def period_doubler_oracle(seed=20260702, periods=(2, 3, 4)):
 
 
 def c_element_oracle(seed=20260702):
-    return oracle_target('C-element (oracle)', make_c_element(), [(0, 1), (0, 3)], 'Q',
-                         T=28, n_trials=12, seed=seed, latency=2, min_gap=5,
-                         align_prob=0.3, score_mode='events',
-                         description=describe_target(
-        'Transition-signalling Muller C-element (2-input rendezvous/join): emit Q '
-        'once BOTH inputs have produced an edge, in either order, then rearm. '
-        'Remembering the first arrival while waiting for the second is the stored '
-        'state — the asynchronous handshake keystone.', EVENT_SCORING,
-        'Twelve seeded random A/B schedules interleave the two inputs in both '
-        'orders, including lone edges that must not emit until the partner arrives.'))
+    """Balanced rendezvous schedules that require influence from both inputs.
+
+    The generic aligned-stream sampler is deliberately not used here. It makes
+    every B edge a same-or-later copy of A, which lets a direct B-to-Q path imitate
+    the rendezvous without remembering A. Every mixed trial below contains an
+    A-first round, a B-first round, a simultaneous round, and an incomplete final
+    round. Dedicated A-only, B-only, and silent guards penalise either-input
+    echoes, wired OR, and spontaneous oscillation.
+    """
+    rng = random.Random(seed)
+    banks = []
+    for trial_index in range(10):
+        a_ticks, b_ticks = set(), set()
+        cursor = rng.randint(2, 3)
+        rounds = ['A', 'B', 'tie']
+        rng.shuffle(rounds)
+        for kind in rounds:
+            if kind == 'tie':
+                a_ticks.add(cursor)
+                b_ticks.add(cursor)
+                close = cursor
+            else:
+                gap = rng.randint(2, 5)
+                first, second = ((a_ticks, b_ticks) if kind == 'A'
+                                 else (b_ticks, a_ticks))
+                first.add(cursor)
+                # Repeats from the first input must not create Q before the
+                # other side arrives. Keep them strictly inside this round.
+                if gap >= 4 and rng.random() < 0.65:
+                    first.add(cursor + rng.randint(2, gap - 1))
+                close = cursor + gap
+                second.add(close)
+            cursor = close + rng.randint(3, 4)
+
+        # Leave one side pending at the end. Alternating the side prevents an
+        # A-only or B-only readout from being favoured by pooled event scoring.
+        pending = a_ticks if trial_index % 2 == 0 else b_ticks
+        pending.add(cursor)
+        if rng.random() < 0.5:
+            pending.add(cursor + 2)
+        banks.append({0: sorted(a_ticks), 1: sorted(b_ticks)})
+
+    guard_start = rng.randint(3, 5)
+    banks.extend([
+        {0: [guard_start, guard_start + 4, guard_start + 9]},
+        {1: [guard_start + 1, guard_start + 6, guard_start + 10]},
+        {},
+    ])
+    return _event_bank_target(
+        'C-element (oracle)', make_c_element(), [(0, 1), (0, 3)], banks,
+        T=36, latency=2,
+        description=describe_target(
+            'Transition-signalling Muller C-element (2-input rendezvous/join): '
+            'emit Q once BOTH inputs have produced an edge, in either order, '
+            'then rearm. Remembering the first arrival while waiting for the '
+            'second is the stored state — the asynchronous handshake keystone.',
+            EVENT_SCORING,
+            'Ten seeded mixed schedules each contain A-first, B-first, '
+            'simultaneous, repeated-first, incomplete, and re-arm cases. A-only, '
+            'B-only, and silent guards forbid single-input echoes, wired OR, and '
+            'free oscillation.'))
 
 
 def refractory_filter_oracle(seed=20260702, dead_time=3):
@@ -663,7 +786,7 @@ def refractory_filter_oracle(seed=20260702, dead_time=3):
         'Refractory filter (oracle)', make_refractory_filter(dead_time),
         [(0, 2)], banks, T=34, latency=1,
         description=describe_target(
-            'Pass the first input event, suppress events for %d ticks, then '
+            'Pass the first input event, suppress events for %d seconds, then '
             're-arm and pass the next eligible event.' % dead_time,
             EVENT_SCORING,
             'Ten seeded burst schedules mix blocked gaps below the dead time, '
@@ -730,7 +853,7 @@ def collision_serializer_oracle(seed=20260702, spacing=2):
         description=describe_target(
             'Merge A and B onto Q without losing event count: an isolated input '
             'makes one Q event, while simultaneous A+B is serialized into two '
-            'Q events separated by %d ticks.' % spacing,
+            'Q events separated by %d seconds.' % spacing,
             EVENT_SCORING,
             'Ten seeded episode banks mix A-only, B-only, and collision events '
             'at varied phases, plus a silent guard; every input token must emerge.'))
@@ -762,7 +885,7 @@ def watchdog_oracle(seed=20260702, timeout=5):
         [(0, 2)], banks, T=42, latency=1,
         description=describe_target(
             'After the first heartbeat, emit one alarm if no new heartbeat '
-            'arrives for %d ticks. A deadline heartbeat cancels the alarm; after '
+            'arrives for %d seconds. A deadline heartbeat cancels the alarm; after '
             'an alarm, a later heartbeat re-arms the watchdog.' % timeout,
             EVENT_SCORING,
             'Seeded schedules mix safe, exact-deadline, and late heartbeat gaps, '
@@ -783,6 +906,7 @@ ORACLE_SPECS = {
     'Pulse doubler (oracle)':     pulse_doubler_oracle,
     'Period doubler (oracle)':    period_doubler_oracle,
     'Pair detector (oracle)':     pair_oracle,
+    'Pair gap 2x width (oracle)': pair_two_widths_oracle,
     'Period stepper (oracle)':    period_stepper_oracle,
     'Gated oscillator (oracle)':  gated_oscillator_oracle,
     'Resettable toggle (oracle)': resettable_toggle_oracle,

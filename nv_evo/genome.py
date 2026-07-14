@@ -25,9 +25,11 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
+from evo_runtime.limits import MAX_CHROMOSOME_COUNT
+
 MAX_STATE    = 32       # 5-bit cell state: 0-15 = paper AND routing, 16-31 = OR
 MAX_GENES    = 24
-MAX_CHROMS   = 6
+MAX_CHROMS   = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
 
 

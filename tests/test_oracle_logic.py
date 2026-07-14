@@ -20,6 +20,7 @@ from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            make_a_first_rendezvous,
                            make_collision_serializer,
                            make_watchdog)
+from nv_evo.temporal import TemporalTraces, event_score     # noqa: E402
 
 
 def _trace(fn, seq):
@@ -109,6 +110,41 @@ def test_period_doubler_bank_mixes_periods():
     assert 'Pulse doubler (oracle)' in ORACLE_SPECS   # width variant kept available
 
 
+def test_pair_gap_two_widths_is_physical_and_relative():
+    """The new target uses float pulses and labels only exact 2w edge gaps."""
+    display = 'Pair detection gap (2x pulse width)'
+    spec = 'Pair gap 2x width (oracle)'
+    assert display in TEMPORAL_TARGETS and spec in ORACLE_SPECS
+    target = ORACLE_SPECS[spec](seed=515, pulse_width=0.75)
+    assert target.supported_backends == ('nervous',)
+    assert target.score_mode == 'events'
+    assert any(start != int(start)
+               for trial in target.trials
+               for start, _width in trial.input_events[0])
+
+    positives = wrong_gap_negatives = lone_or_silent = 0
+    for trial in target.trials:
+        events = trial.input_events[0]
+        starts = [start for start, width in events if abs(width - 0.75) < 1e-12]
+        expected = trial.expected_events['Q']
+        for event in expected:
+            completion = event - target.latency
+            assert any(abs(start - completion) < 1e-9 for start in starts)
+            assert any(abs(start - (completion - 1.5)) < 1e-9 for start in starts)
+        if expected:
+            positives += 1
+        elif len(starts) >= 2:
+            wrong_gap_negatives += 1
+        else:
+            lone_or_silent += 1
+    assert positives >= 6
+    assert wrong_gap_negatives >= 3
+    assert lone_or_silent >= 2
+    fresh = ORACLE_SPECS[spec](seed=616, pulse_width=0.75)
+    assert [trial.input_events for trial in target.trials] != [
+        trial.input_events for trial in fresh.trials]
+
+
 def test_c_element_registered_as_target():
     """The C-element is reachable from the GUI/registry and the holdout spec."""
     assert 'C-element (2-in join)' in TEMPORAL_TARGETS
@@ -118,6 +154,65 @@ def test_c_element_registered_as_target():
     assert len(t.inputs) == 2
     # every trial with a positive expectation must have at least one output event
     assert any(1 in [x for x in tr.expected['Q'] if x is not None] for tr in t.trials)
+
+
+def test_c_element_bank_requires_both_inputs():
+    """The target must reject A-only, B-only, wired-OR, and autonomous cheats."""
+    t = ORACLE_SPECS['C-element (oracle)'](seed=404)
+    kinds = []
+    for trial in t.trials:
+        has_a = any(row[0] for row in trial.streams)
+        has_b = any(row[1] for row in trial.streams)
+        kinds.append((has_a, has_b, len(trial.expected_events['Q'])))
+    assert (True, False, 0) in kinds
+    assert (False, True, 0) in kinds
+    assert (False, False, 0) in kinds
+    mixed = [kind for kind in kinds if kind[0] and kind[1]]
+    assert len(mixed) == 10 and all(n_events == 3 for _, _, n_events in mixed)
+
+    def input_cheat(mode):
+        event_lists = []
+        for trial in t.trials:
+            a = {float(tick) for tick, row in enumerate(trial.streams) if row[0]}
+            b = {float(tick) for tick, row in enumerate(trial.streams) if row[1]}
+            event_lists.append(sorted(a if mode == 'A' else b if mode == 'B'
+                                      else a | b))
+        traces = TemporalTraces({'Q': [[] for _ in t.trials]},
+                                events={'Q': event_lists})
+        return event_score(traces, t)
+
+    # A global latency shift is deliberately still free, but no direct input
+    # echo or wired-OR response may approach the certification threshold.
+    assert input_cheat('A') < 0.70
+    assert input_cheat('B') < 0.70
+    assert input_cheat('OR') < 0.70
+
+    best_autonomous = 0.0
+    for period in range(1, 11):
+        for phase in range(period):
+            events = [[float(tick) for tick in range(phase, t.T, period)]
+                      for _ in t.trials]
+            traces = TemporalTraces({'Q': [[] for _ in t.trials]},
+                                    events={'Q': events})
+            best_autonomous = max(best_autonomous, event_score(traces, t))
+    assert best_autonomous < 0.55
+
+
+def test_c_element_bank_changes_with_seed_without_late_truncation():
+    """Held-out timings vary, and every completed round remains observable."""
+    first = ORACLE_SPECS['C-element (oracle)'](seed=11)
+    second = ORACLE_SPECS['C-element (oracle)'](seed=22)
+    assert [trial.streams for trial in first.trials] != [trial.streams for trial in second.trials]
+    for target in (first, second):
+        mixed_counts = []
+        for trial in target.trials:
+            has_a = any(row[0] for row in trial.streams)
+            has_b = any(row[1] for row in trial.streams)
+            if has_a and has_b:
+                mixed_counts.append(len(trial.expected_events['Q']))
+            assert all(tick + target.latency < target.T
+                       for tick, row in enumerate(trial.streams) if any(row))
+        assert mixed_counts == [3] * 10
 
 
 def test_refractory_filter_dead_time_boundary():
@@ -166,10 +261,10 @@ def test_watchdog_deadline_rearm_and_never_armed_silence():
 def test_new_async_oracles_are_registered_and_seeded():
     """All presets reach the GUI/certifier and fresh seeds vary their timings."""
     pairs = {
-        'Refractory filter (3 ticks)': 'Refractory filter (oracle)',
+        'Refractory filter (3 seconds)': 'Refractory filter (oracle)',
         'A-first rendezvous': 'A-first rendezvous (oracle)',
         'Collision serializer (2-to-1)': 'Collision serializer (oracle)',
-        'Watchdog timeout (5 ticks)': 'Watchdog timeout (oracle)',
+        'Watchdog timeout (5 seconds)': 'Watchdog timeout (oracle)',
     }
     for display_name, spec_name in pairs.items():
         assert display_name in TEMPORAL_TARGETS
@@ -186,6 +281,16 @@ def test_new_async_oracles_are_registered_and_seeded():
     for trial in serializer.trials:
         n_input_events = sum(sum(bits) for bits in trial.streams)
         assert len(trial.expected_events['Q']) == n_input_events
+
+
+def test_registered_target_copy_uses_seconds_not_ticks():
+    """User-facing temporal names and descriptions use the shared time unit."""
+    for name, target in TEMPORAL_TARGETS.items():
+        assert 'tick' not in name.lower(), name
+        assert 'tick' not in target.description.lower(), (name, target.description)
+    assert 'One-shot (5 seconds)' in TEMPORAL_TARGETS
+    assert 'Refractory filter (3 seconds)' in TEMPORAL_TARGETS
+    assert 'Watchdog timeout (5 seconds)' in TEMPORAL_TARGETS
 
 
 def _main():

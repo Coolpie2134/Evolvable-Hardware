@@ -84,7 +84,11 @@ def _target_from_dict(item):
                            for o in data['outputs']]
         data['trials'] = [Trial(
             streams=[tuple(row) for row in t['streams']], expected=t['expected'],
-            expected_events=t.get('expected_events', {})) for t in data['trials']]
+            expected_events=t.get('expected_events', {}),
+            input_events=(None if t.get('input_events') is None else
+                          [[tuple(event) for event in events]
+                           for events in t['input_events']]))
+                          for t in data['trials']]
         target = TemporalTarget(**data)
         for name, value in item.get('extras', {}).items():
             setattr(target, name, _tuples(value))

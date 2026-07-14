@@ -51,9 +51,11 @@ def classify(train, holdout, threshold, kind='certify', overfit_gap=OVERFIT_GAP)
 def oracle_spec_for(target):
     """The reference-oracle spec function for a registry target, or None if the
     target has no oracle (autonomous rhythms, hand-built combinational, etc.)."""
-    from .targets import ORACLE_KEY_TO_SPEC
+    from .targets import ORACLE_KEY_TO_SPEC, LEGACY_ORACLE_KEY_TO_SPEC
     from .oracle import ORACLE_SPECS
-    spec_name = ORACLE_KEY_TO_SPEC.get(getattr(target, 'name', None))
+    name = getattr(target, 'name', None)
+    spec_name = (ORACLE_KEY_TO_SPEC.get(name)
+                 or LEGACY_ORACLE_KEY_TO_SPEC.get(name))
     return ORACLE_SPECS.get(spec_name) if spec_name else None
 
 

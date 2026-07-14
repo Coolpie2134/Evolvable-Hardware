@@ -10,23 +10,27 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from evo_runtime.config import GAConfig, RunConfig, default_max_telomere
+from evo_runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
+                                default_max_telomere)
 from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
 import lut_evo.ga as lut_ga
 import nv_evo.ga as nv_ga
 import snn_evo.ga as snn_ga
 from lut_evo.ga import (crossover_lut, diversify as diversify_lut, mutate_lut)
-from lut_evo.genome import (Chromosome as LutChromosome, Genome as LutGenome,
+from lut_evo.genome import (MAX_CHROMS as LUT_MAX_CHROMS,
+                            Chromosome as LutChromosome, Genome as LutGenome,
                             LutGene, random_lut_gene, random_lut_genome)
 from lut_evo.ontogeny import _pack
 from nv_evo.ga import (adaptive_mutation_rate, consolidate_population,
                        crossover_nv, diversify as diversify_nv, mutate_nv,
                        next_population)
-from nv_evo.genome import (Chromosome as NvChromosome, Genome as NvGenome,
+from nv_evo.genome import (MAX_CHROMS as NV_MAX_CHROMS,
+                           Chromosome as NvChromosome, Genome as NvGenome,
                            HexGene, random_hex_genome)
 from nv_evo.targets import TEMPORAL_TARGETS
 from snn_evo.ga import crossover as crossover_snn, mutate as mutate_snn
-from snn_evo.genome import (Chromosome as SnnChromosome, Gene as SnnGene,
+from snn_evo.genome import (MAX_CHROMS as SNN_MAX_CHROMS,
+                            Chromosome as SnnChromosome, Gene as SnnGene,
                             Genome as SnnGenome, random_genome)
 
 
@@ -199,16 +203,20 @@ def test_empty_homologs_exchange_gene_lists_reciprocally():
 
 
 def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
-    original = RunConfig(ga=GAConfig(chromosome_count=3))
+    assert MAX_CHROMOSOME_COUNT == 32
+    assert {LUT_MAX_CHROMS, NV_MAX_CHROMS, SNN_MAX_CHROMS} == {
+        MAX_CHROMOSOME_COUNT}
+
+    original = RunConfig(ga=GAConfig(chromosome_count=MAX_CHROMOSOME_COUNT))
     rebuilt = RunConfig.from_dict(dataclasses.asdict(original))
-    assert rebuilt.ga.chromosome_count == 3
+    assert rebuilt.ga.chromosome_count == MAX_CHROMOSOME_COUNT
 
     legacy = dataclasses.asdict(original)
     legacy['ga'].pop('chromosome_count')
     assert RunConfig.from_dict(legacy).ga.chromosome_count is None
 
     try:
-        GAConfig(chromosome_count=7)
+        GAConfig(chromosome_count=MAX_CHROMOSOME_COUNT + 1)
     except ValueError:
         pass
     else:
@@ -220,7 +228,7 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
     genome = random_hex_genome(2)
     genome.chromosomes[0].genes = genome.chromosomes[0].genes[:1]
     genome.chromosomes[0].split = 99
-    target = TEMPORAL_TARGETS['Pattern (1000)']
+    target = TEMPORAL_TARGETS['Pair detection gap (2x pulse width)']
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, 'checkpoint.json')
         save_checkpoint(
@@ -229,6 +237,7 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
         assert restored['run_config'].ga.chromosome_count == 2
         assert len(restored['best_genome'].chromosomes) == 2
         assert restored['best_genome'].chromosomes[0].split == 0
+        assert restored['target'].trials[0].input_events == target.trials[0].input_events
 
         try:
             save_checkpoint(
@@ -319,7 +328,7 @@ def test_lut_cached_immigrant_factory_preserves_requested_chromosome_count():
 
 def test_lut_ontogeny_pack_produces_exact_requested_count():
     random.seed(405)
-    for chromosome_count in range(1, 7):
+    for chromosome_count in (1, 2, 6, 16, MAX_CHROMOSOME_COUNT):
         for gene_count in (0, 1, 17, 151, 350):
             genes = [random_lut_gene() for _ in range(gene_count)]
             genome = _pack(genes, chromosome_count)

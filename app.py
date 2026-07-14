@@ -458,7 +458,7 @@ class App:
         ttk.Label(ctrl, text='Target:').pack(side='left', padx=(2, 2))
         self._target_var = tk.StringVar(value=DEFAULT_TARGET)
         self._target_picker = TargetPicker(
-            ctrl, self._all_targets(), variable=self._target_var,
+            ctrl, self._targets_for_backend(self._backend()), variable=self._target_var,
             command=self._on_target_change, target_width=19)
         self._target_picker.pack(side='left')
         self._target_cb = self._target_picker.target_cb
@@ -797,8 +797,13 @@ class App:
             d = dict(TEMPORAL_TARGETS)
             d.update({k: v for k, v in self._custom.items()
                       if getattr(v, 'temporal', False)})
-            return d
-        return self._all_targets()
+        else:
+            d = self._all_targets()
+        return {
+            name: target for name, target in d.items()
+            if (not getattr(target, 'supported_backends', ())
+                or backend in target.supported_backends)
+        }
 
     def _refresh_target_list(self):
         """Repopulate the dropdown for the current backend; if the current
@@ -823,7 +828,7 @@ class App:
             except Exception:
                 pass
             model = 'clocked LUT array' if self._backend() == 'lut' else 'continuous-time nervous net'
-            self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test ticks. '
+            self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test seconds. '
                              'See Evolution for scoring details and Interactive for playback.'
                              % (self.target.name, model, self.target.n_inputs,
                                 '' if self.target.n_inputs == 1 else 's',
@@ -1552,7 +1557,7 @@ class App:
     def _draw_lut_dynamics(self, genome):
         """Activity tab for a temporal LUT target: the paper's Fig. 14 'motion
         picture' as a filmstrip — the array's OUTPUT BITS (green=1 / red=0 per
-        direction) at a spread of ticks through the first trial, so the running
+        direction) at a spread of seconds through the first trial, so the running
         dynamics that ARE the LUT's computation are visible over time."""
         target = self._disp_target
         try:
@@ -1578,7 +1583,7 @@ class App:
         k    = min(8, len(frames))
         idxs = [round(i * (len(frames) - 1) / max(1, k - 1)) for i in range(k)]
         self._volt_fig.clf()
-        self._volt_fig.suptitle('%s — LUT output dynamics over ticks  '
+        self._volt_fig.suptitle('%s — LUT output dynamics over seconds  '
                                 '(green=1 / red=0, Fig. 14)%s'
                                 % (target.name, self._seed_tag()),
                                 fontsize=10, fontweight='bold', y=0.99)
@@ -1589,7 +1594,7 @@ class App:
         for j, fi in enumerate(idxs):
             tick, nib = frames[fi]
             draw_lut_net(flat[j], grid, activity=nib, in_pos=in_pos,
-                         out_pos=out_pos, show_edges=True, title='tick %d' % tick)
+                         out_pos=out_pos, show_edges=True, title='second %d' % tick)
         for j in range(k, len(flat)):
             flat[j].set_visible(False)
         self._volt_canvas.draw_idle()

@@ -31,7 +31,9 @@ CLAIMS = {
     'c_element': dict(
         target='C-element (2-in join)', oracle='C-element (oracle)',
         gens=60, pop=80, seed=1, kind='certify', threshold=0.99,
-        note='async keystone: 2-input rendezvous / join (Muller C-element)'),
+        note='OPEN FRONTIER: the corrected balanced rendezvous bank rejects '
+             'single-input echoes and fixed oscillators; seed 1 currently '
+             'generalises around 0.72 but does not solve'),
     'echo': dict(
         target='Echo (delay 3)', oracle='Echo (oracle)',
         gens=40, pop=80, seed=1, kind='certify', threshold=0.90,

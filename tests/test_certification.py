@@ -8,6 +8,7 @@ Run under pytest, or standalone:  py tests/test_certification.py
 """
 import os
 import sys
+import dataclasses
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -49,6 +50,11 @@ def test_classify_solve_and_plateau_and_uncertified():
 def test_oracle_mapping_present_only_for_oracle_targets():
     assert oracle_spec_for(TEMPORAL_TARGETS['C-element (2-in join)']) is not None
     assert oracle_spec_for(TEMPORAL_TARGETS['SR latch']) is not None
+    assert oracle_spec_for(
+        TEMPORAL_TARGETS['Pair detection gap (2x pulse width)']) is not None
+    legacy = dataclasses.replace(
+        TEMPORAL_TARGETS['One-shot (5 seconds)'], name='One-shot (5 ticks)')
+    assert oracle_spec_for(legacy) is not None
     assert oracle_spec_for(TEMPORAL_TARGETS['Oscillator']) is None   # autonomous
 
 

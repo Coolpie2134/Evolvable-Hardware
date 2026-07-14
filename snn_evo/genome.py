@@ -3,12 +3,14 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
+from evo_runtime.limits import MAX_CHROMOSOME_COUNT
+
 MAX_ITER     = 12        # legacy per-gene time cap (kept only for pickle compat)
 GRID_SIZE    = 9         # field size — a generous OUTER bound; the telomere is
                          # now the real limiter and normally halts growth first
 MAX_STATE    = 16
 MAX_GENES    = 24
-MAX_CHROMS   = 6
+MAX_CHROMS   = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 16        # longest evolvable growth radius (Hayflick divisions)
 
 @dataclass
