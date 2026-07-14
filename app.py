@@ -651,7 +651,7 @@ class App:
                         '(Vth/Syn/Input) and Graded do not apply.')
             else:
                 note = ('LUT array — SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
-                        '4 directional 16-bit lookup tables per cell, latched & synchronous '
+                        '4 directional 16-bit lookup tables per cell, asynchronous level logic '
                         '(paper Architecture 2 / sim6). Recurrent & dynamical — TEMPORAL '
                         'targets only (it cannot settle to combinational logic). '
                         'Substrate/Graded do not apply.')
@@ -827,7 +827,8 @@ class App:
                 self._set_tt(temporal_report(self.target), title='Trace Report')
             except Exception:
                 pass
-            model = 'clocked LUT array' if self._backend() == 'lut' else 'continuous-time nervous net'
+            model = ('continuous-time LUT array' if self._backend() == 'lut'
+                     else 'continuous-time nervous net')
             self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test seconds. '
                              'See Evolution for scoring details and Interactive for playback.'
                              % (self.target.name, model, self.target.n_inputs,
@@ -921,7 +922,7 @@ class App:
                              'best with small grids and close I/O.')
         elif backend == 'lut':
             self._status.set('Model: LUT array — square grid, 4 neighbours, four 16-bit '
-                             'lookup tables per cell, latched & synchronous (sim6 / Arch 2).')
+                             'lookup tables per cell, asynchronous level logic (sim6 / Arch 2).')
         else:
             self._status.set('Model: SNN — leaky integrate-and-fire neurons.')
 
@@ -1561,7 +1562,7 @@ class App:
         dynamics that ARE the LUT's computation are visible over time."""
         target = self._disp_target
         try:
-            from lut_evo import grow_lut, LutSim, place_outputs_by_trace
+            from lut_evo import grow_lut, AsyncLutSim, place_outputs_by_trace
             grid = grow_lut(genome, seeds=tuple(target.inputs),
                             grid_size=target.grid_size, iters=target.iters)
             if len(grid) <= target.n_inputs:
@@ -1573,12 +1574,23 @@ class App:
             return
         trial   = target.trials[0]
         in_pos  = [p for p in target.inputs if p in grid]
-        sim     = LutSim(grid)
+        sim     = AsyncLutSim(grid)
         frames  = []                                   # (tick, nibble-map)
-        for t in range(target.T):
-            sim.step({target.inputs[i]: trial.streams[t][i]
-                      for i in range(target.n_inputs)})
-            frames.append((t, dict(sim.out)))
+        physical = getattr(trial, 'input_events', None)
+        if physical is not None:
+            # float-time stimulus: inject the real (sub-tick) schedule and
+            # sample the running levels mid-tick, as scoring does
+            for i, cell in enumerate(target.inputs):
+                for start, width in (physical[i] if i < len(physical) else ()):
+                    sim.inject_pulse(cell, start, width)
+            for t in range(target.T):
+                sim.advance_to(t + 0.5)
+                frames.append((t, dict(sim.out)))
+        else:
+            for t in range(target.T):
+                sim.step({target.inputs[i]: trial.streams[t][i]
+                          for i in range(target.n_inputs)})
+                frames.append((t, dict(sim.out)))
         # show up to 8 evenly-spaced ticks
         k    = min(8, len(frames))
         idxs = [round(i * (len(frames) - 1) / max(1, k - 1)) for i in range(k)]

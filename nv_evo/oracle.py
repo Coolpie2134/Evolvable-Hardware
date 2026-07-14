@@ -523,9 +523,10 @@ def pair_two_widths_oracle(seed=20260702, pulse_width=None):
     horizon = max(24, int(math.ceil(last_time + 6.0 * width + latency)))
     trials = []
     for starts, expected_events in trials_data:
-        # The Nervous path consumes input_events directly. A zero stream remains
-        # as an honest fallback: a clocked backend cannot silently claim it ran
-        # this continuous-time target by rounding the fractional phases.
+        # Both asynchronous backends consume input_events directly at their
+        # real fractional times. A zero stream remains as an honest fallback:
+        # a clocked backend cannot silently claim it ran this continuous-time
+        # target by rounding the fractional phases.
         streams = [(0,)] * horizon
         exp = [0] * horizon
         trials.append(Trial(
@@ -538,7 +539,7 @@ def pair_two_widths_oracle(seed=20260702, pulse_width=None):
         grid_size=5, iters=30, score_mode='events', latency=latency,
         event_tolerance=0.15 * width,
         event_max_shift=max(12.0, 12.0 * width),
-        supported_backends=('nervous',),
+        supported_backends=('nervous', 'lut'),
         description=describe_target(
             'Emit Q when two physical input-pulse leading edges are separated by '
             'exactly twice the input pulse width (2w).',

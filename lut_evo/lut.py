@@ -223,6 +223,11 @@ def grow_lut_snapshots(genome, seeds, grid_size, iters):
 
 
 # ── synchronous latched dynamics (sim6 step_network) ────────────────────────────
+# NOTE: this engine is now the REFERENCE, not the production dynamics. Scoring,
+# playback and the Designer all run lut_evo.pulse.AsyncLutSim — the asynchronous
+# continuous-time engine whose tick-lattice behaviour this one quantises to
+# (verified bit-identical in tests/test_lut_synchrony.py). LutSim is kept as the
+# sim6-faithful clocked baseline that equivalence is audited against.
 
 class LutSim:
     """Synchronous simulation of a grown LUT array, VECTORISED with numpy.

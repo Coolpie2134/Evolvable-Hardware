@@ -116,7 +116,9 @@ def test_pair_gap_two_widths_is_physical_and_relative():
     spec = 'Pair gap 2x width (oracle)'
     assert display in TEMPORAL_TARGETS and spec in ORACLE_SPECS
     target = ORACLE_SPECS[spec](seed=515, pulse_width=0.75)
-    assert target.supported_backends == ('nervous',)
+    # both asynchronous backends may run this continuous-time target; clocked
+    # backends (snn) stay excluded so the fractional phases are never quantised
+    assert set(target.supported_backends) == {'nervous', 'lut'}
     assert target.score_mode == 'events'
     assert any(start != int(start)
                for trial in target.trials

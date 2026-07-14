@@ -17,10 +17,10 @@ from evo_runtime.cache import LRUCache
 from evo_runtime.parallel import map_ordered
 
 from nv_evo.temporal import (_pr_counts, _f1,
-                             _best_shift, _obs_len,
+                             _best_shift, _obs_len, _output_candidates,
                              windowed_score, exact_tick_accuracy,
                              period_stepper_score, TemporalTraces,
-                             sampled_events, event_score, _best_event_shift,
+                             event_score, _best_event_shift,
                              _event_case_score, _expected_events, _role_events,
                              cadence_score, score_temporal_bundle,
                              _score_output_candidate, trial_input_summary,
@@ -28,7 +28,8 @@ from nv_evo.temporal import (_pr_counts, _f1,
 from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome)
-from .lut import grow_lut, grow_lut_tracked, LutSim
+from .lut import grow_lut, grow_lut_tracked
+from .pulse import AsyncLutSim
 
 
 def clone_genome(genome):
@@ -73,8 +74,38 @@ def adaptive_mutation_rate(annealed_rate, stagnation, solved=False):
 
 
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
+# Output candidates are the OUT_RADIUS cells nearest each terminal, via the
+# shared nv_evo.temporal._output_candidates (same radius, same tie-breaks).
 
-OUT_RADIUS = 12   # read the output near its terminal (see nv temporal.py)
+
+def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
+    """Run every trial once on the asynchronous engine (lut_evo.pulse).
+
+    Returns (trial_B, trial_events, overflow): the [obs, ncells] mid-tick
+    sample matrix per trial (empty when the score mode consumes edges, not
+    samples), the continuous leading-edge trains of the ``watch_cells`` per
+    trial, and whether any run blew its event budget. A trial that carries a
+    physical ``input_events`` schedule is injected at its real (possibly
+    sub-tick) times — the LUT backend no longer quantises such targets."""
+    obs = _obs_len(ttarget)                  # observe past T to catch delayed events
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    need_samples = mode not in ('events', 'cadence')
+    sim = AsyncLutSim(grid, config=getattr(ttarget, 'lut_config', None))
+    trial_B, trial_events, overflow = [], [], False
+    first = True
+    for tr in ttarget.trials:
+        if not first:
+            sim.reset()
+        first = False
+        events = getattr(tr, 'input_events', None)
+        if events is not None:
+            B = sim.run_input_events(events, in_pos, obs, sample=need_samples)
+        else:
+            B = sim.run_bits(tr.streams, in_pos, obs)
+        trial_B.append(B)
+        trial_events.append(sim.rise_trains(watch_cells))
+        overflow = overflow or sim.overflow
+    return sim, trial_B, trial_events, overflow
 
 
 def place_outputs_by_trace(grid, in_pos, ttarget):
@@ -82,9 +113,11 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     its terminal whose trace best matches the expectation across all trials
     (terminal-distance tie-break), exactly like the nervous backend.
 
-    The per-trial dynamics run in numpy (LutSim.run_bits): one [T, ncells]
-    emit-bit matrix per trial, from which any candidate cell's trace is a column
-    slice — no per-tick dicts (that dict churn dominated LUT scoring)."""
+    The dynamics are the asynchronous engine (lut_evo.pulse.AsyncLutSim):
+    trace/persistence modes score the mid-tick sample matrix (a column slice
+    per candidate cell — no per-tick dicts), while event/cadence modes read
+    the wires' raw continuous leading-edge timestamps, exactly as the nervous
+    backend does."""
     in_set = set(in_pos)
     out_pos = {t.role: None for t in ttarget.outputs}
     traces  = TemporalTraces()
@@ -95,22 +128,20 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     traces.hold_tol = 0
     if len(grid) <= len(in_set):
         return out_pos, traces
-    sim = LutSim(grid)                       # one sim, reset between trials
-    cidx = sim._cidx
-    obs = _obs_len(ttarget)                  # observe past T to catch delayed events
     mode = getattr(ttarget, 'score_mode', 'trace')
-    trial_B = []                             # [obs, ncells] emit-bit matrix per trial
-    for tr in ttarget.trials:
-        sim.reset()
-        trial_B.append(sim.run_bits(tr.streams, in_pos, obs))
+    cands_by_role = {term.role: _output_candidates(grid, in_set, term)
+                     for term in ttarget.outputs}
+    watch = sorted(set().union(*cands_by_role.values()))
+    sim, trial_B, trial_events, overflow = _run_lut_trials(
+        grid, in_pos, ttarget, watch)
+    traces.overflow = overflow
+    cidx = sim._cidx
+    need_samples = mode not in ('events', 'cadence')
     used = set()
     for term in ttarget.outputs:
-        tx, ty = term.pos
-        cands = sorted((c for c in grid if c not in in_set),
-                       key=lambda c: (abs(c[0] - tx) + abs(c[1] - ty), c))[:OUT_RADIUS]
         best, best_key, best_aux = None, None, None
         score_cache = {}
-        for c in cands:
+        for c in cands_by_role[term.role]:
             if c in used:
                 continue
             col = cidx[c]
@@ -119,9 +150,8 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                dense = trial_B[ti][:, col].tolist()
-                ctr.append(dense)
-                cevents.append(sampled_events(dense))
+                ctr.append(trial_B[ti][:, col].tolist() if need_samples else [])
+                cevents.append(list(trial_events[ti].get(c, ())))
                 cexp.append(exp)
             if not ctr:
                 s, aux = 0.0, None
@@ -132,7 +162,8 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
                 s, aux = cached if cached is not None else (None, None)
             if ctr and s is None:
                 s, aux = _score_output_candidate(
-                    ctr, cevents, cexp, term.role, ttarget, tol=0)  # LUT: strict hold
+                    ctr, cevents, cexp, term.role, ttarget, traces.overflow,
+                    tol=0)                              # LUT: strict hold
             if ctr:
                 score_cache[signature] = (s, aux)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
@@ -143,10 +174,10 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         used.add(best)
         out_pos[term.role] = best
         col = cidx[best]
-        traces[term.role]  = [trial_B[ti][:, col].tolist()
+        traces[term.role]  = [trial_B[ti][:, col].tolist() if need_samples else []
                               for ti in range(len(ttarget.trials))]
-        traces.events[term.role] = [sampled_events(seq)
-                                    for seq in traces[term.role]]
+        traces.events[term.role] = [list(trial_events[ti].get(best, ()))
+                                    for ti in range(len(ttarget.trials))]
         if len(ttarget.outputs) == 1 and mode == 'events':
             traces._event_result = best_aux
         elif len(ttarget.outputs) == 1 and mode == 'cadence':
@@ -158,18 +189,18 @@ def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
     """Run LUT trials at pre-selected output cells without validation search."""
     if any(pos not in grid for pos in out_pos.values()):
         return None
-    sim = LutSim(grid)
-    obs = _obs_len(ttarget)
-    trial_bits = []
-    for trial in ttarget.trials:
-        sim.reset()
-        trial_bits.append(sim.run_bits(trial.streams, in_pos, obs))
-    traces = TemporalTraces()
+    mode = getattr(ttarget, 'score_mode', 'trace')
+    need_samples = mode not in ('events', 'cadence')
+    watch = sorted(set(out_pos.values()))
+    sim, trial_B, trial_events, overflow = _run_lut_trials(
+        grid, in_pos, ttarget, watch)
+    traces = TemporalTraces(overflow=overflow)
     traces.hold_tol = 0                        # LUT holds strictly (see place_outputs_by_trace)
     for role, pos in out_pos.items():
         col = sim._cidx[pos]
-        traces[role] = [bits[:, col].tolist() for bits in trial_bits]
-        traces.events[role] = [sampled_events(seq) for seq in traces[role]]
+        traces[role] = [B[:, col].tolist() if need_samples else []
+                        for B in trial_B]
+        traces.events[role] = [list(ev.get(pos, ())) for ev in trial_events]
     return traces
 
 
@@ -230,7 +261,7 @@ def _settled_outputs(grid, target, out_pos, in_bits, window=SETTLE_WINDOW,
     last `window` ticks (a fixed point); otherwise None (never settled)."""
     steps  = horizon or (4 * target.grid_size + 12)
     invals = {p: in_bits[i] for i, p in enumerate(target.inputs)}
-    sim    = LutSim(grid)
+    sim    = AsyncLutSim(grid)
     tails  = {r: [] for r in out_pos if out_pos[r] is not None}
     for _ in range(steps):
         bits = sim.step(invals)
@@ -297,7 +328,7 @@ def lut_truth_table(genome, target):
     lines = ['Target: %s   [LUT array]' % target.name,
              'Circuit: %d live cells  (square array, four 16-bit LUTs/cell,'
              % len(grid),
-             '          latched & synchronous — paper Architecture 2)']
+             '          asynchronous level logic — paper Architecture 2)']
     for term in target.outputs:
         p = out_pos.get(term.role)
         lines.append("  out '%s': %s" % (term.role,
@@ -999,7 +1030,7 @@ def lut_report(ttarget, genome=None):
     if desc:
         lines += [''] + desc.splitlines()
     if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-        lines += ['', 'Backend detail: LUT cadence changes occur on clock boundaries.']
+        lines += ['', 'Backend detail: LUT cadence transitions may occur at sub-tick times.']
         if genome is None:
             return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
         prep = prepare_lut(genome, ttarget)
@@ -1018,7 +1049,7 @@ def lut_report(ttarget, genome=None):
             total, '   SOLVED' if total >= 0.999 else ''))
         return '\n'.join(lines)
     if getattr(ttarget, 'score_mode', 'trace') == 'cadence':
-        lines += ['', 'Backend detail: LUT output cadence is measured in clock cycles.']
+        lines += ['', 'Backend detail: cadence uses raw LUT wire edge timestamps.']
         if genome is None:
             return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
         prep = prepare_lut(genome, ttarget)
@@ -1038,7 +1069,7 @@ def lut_report(ttarget, genome=None):
             total, '   SOLVED' if total >= 0.999 else '')]
         return '\n'.join(lines)
     if getattr(ttarget, 'score_mode', 'trace') == 'events':
-        lines += ['', 'Backend detail: LUT edges and latency are measured in whole clock cycles.']
+        lines += ['', 'Backend detail: raw LUT wire timestamps retain sub-tick edges.']
         prep = None if genome is None else prepare_lut(genome, ttarget)
         traces = prep[2] if prep is not None else None
         best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0

@@ -1,23 +1,24 @@
 """
-nv_evo/playback.py — asynchronous (continuous-time) pulse playback and a clickable
-pulse-timeline, shared by the Interactive and Designer nervous-net views.
+nv_evo/playback.py — asynchronous (continuous-time) playback and a clickable
+pulse-timeline, shared by the Interactive and Designer substrate views.
 
-The nervous net is a continuous-time, asynchronous element (nv_evo/pulse.py) and
-its fitness now reads real edge timestamps.  These helpers let the GUI DRIVE and
-SHOW it in that same continuous time instead of a synchronous tick lattice:
+Both asynchronous substrates — the nervous net (nv_evo/pulse.py) and the LUT
+array (lut_evo/pulse.py) — are continuous-time, event-driven elements whose
+fitness reads real edge timestamps.  These helpers let the GUI DRIVE and SHOW
+them in that same continuous time instead of a synchronous tick lattice:
 
-  * NervousPlayer wraps the paper-faithful PulseSim, injects pulse intervals at
-    their real times, and advances a physical-time cursor via ``advance_to`` —
-    the same event engine used by Nervous evolution. It reports wire activity
-    and the real leading-edge times of any cell. This class has no GUI
-    dependency.
+  * AsyncPlayer drives any simulator speaking the pulse dialect
+    (``inject_pulse`` / ``advance_to`` / ``activity_at`` / ``rise_times`` /
+    ``overflow``): it injects pulse intervals at their real times and advances
+    a physical-time cursor, reporting wire activity and the real leading-edge
+    times of any cell. No GUI dependency.
+  * NervousPlayer builds it over the paper-faithful PulseSim — the same event
+    engine used by Nervous evolution. The LUT twin (lut_evo.playback.LutPlayer)
+    builds it over AsyncLutSim.
   * PulseLaneEditor binds a matplotlib axis to editable input pulses: click for
     the default width, drag for a custom width, or click one to remove it. It draws
-    the lanes and a moving playback cursor.  Both tabs reuse it, so the fiddly
-    event wiring lives in one place.
-
-The LUT array is genuinely clocked, so it keeps its synchronous tick playback;
-only the nervous net uses this.
+    the lanes and a moving playback cursor.  Both tabs and both substrates reuse
+    it, so the fiddly event wiring lives in one place.
 """
 from __future__ import annotations
 
@@ -29,22 +30,22 @@ DEFAULT_HORIZON = 40.0    # physical-time window shown / played
 PLAY_MAX_EVENTS = 20000   # runaway guard for a pathological oscillator
 
 
-class NervousPlayer:
-    """Continuous-time playback of one grown nervous net (GUI-free, testable)."""
+class AsyncPlayer:
+    """Continuous-time playback over any pulse-dialect simulator (GUI-free,
+    testable). Subclasses supply ``_make_sim()`` for their substrate."""
 
-    def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
-                 pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None):
-        self.grid    = grid
-        self.routing = routing
+    def __init__(self, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
+                 pulse_width=None, default_width=None):
         self.horizon = float(horizon)
         self.dt      = float(dt)
-        self.config = config
-        default_width = (pulse_engine.WIDTH if config is None else config.width)
-        self.pulse_width = (float(default_width) if pulse_width is None
+        base = pulse_engine.WIDTH if default_width is None else default_width
+        self.pulse_width = (float(base) if pulse_width is None
                             else float(pulse_width))
-        self.max_events  = max_events
-        self.schedule = {}                    # {input_cell: [times]}
+        self.schedule = {}                    # {input_cell: [(start, width)]}
         self.reset()
+
+    def _make_sim(self):
+        raise NotImplementedError
 
     def set_schedule(self, schedule):
         """Set ``{input_cell: pulses}``, where a pulse is ``time`` or
@@ -63,9 +64,7 @@ class NervousPlayer:
         self.reset()
 
     def reset(self):
-        self.sim = create_simulator(
-            self.grid, self.routing, max_events=self.max_events,
-            config=self.config)
+        self.sim = self._make_sim()
         for cell, pulses in self.schedule.items():
             for start, width in pulses:
                 self.sim.inject_pulse(cell, start, width)
@@ -82,7 +81,7 @@ class NervousPlayer:
         return self.cursor >= self.horizon - 1e-9
 
     def activity(self):
-        """{cell: 0/1} — which wires are pulsing at the current cursor time."""
+        """{cell: 0/1} — which wires are high at the current cursor time."""
         return self.sim.activity_at(self.cursor)
 
     def events_upto(self, cell):
@@ -94,6 +93,24 @@ class NervousPlayer:
     @property
     def overflow(self):
         return self.sim.overflow
+
+
+class NervousPlayer(AsyncPlayer):
+    """Continuous-time playback of one grown nervous net."""
+
+    def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
+                 pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None):
+        self.grid    = grid
+        self.routing = routing
+        self.config  = config
+        self.max_events = max_events
+        default_width = (pulse_engine.WIDTH if config is None else config.width)
+        super().__init__(horizon=horizon, dt=dt, pulse_width=pulse_width,
+                         default_width=default_width)
+
+    def _make_sim(self):
+        return create_simulator(self.grid, self.routing,
+                                max_events=self.max_events, config=self.config)
 
 
 def pulses_from_trial(target, n_inputs):

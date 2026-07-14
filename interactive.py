@@ -16,8 +16,11 @@ uses the input and time representation appropriate to its physics:
                time and watch pulses propagate with their actual delays, loops
                latch, and oscillators run. It uses the paper-faithful PulseSim,
                the same asynchronous event engine used by Nervous evolution.
-  * LUT      — synchronous playback: input levels are sampled on each clock tick
-               and the four directional lookup-table outputs update together.
+  * LUT      — the SAME timeline and continuous-time playback, driving the
+               asynchronous level-logic engine (AsyncLutSim, the same one LUT
+               evolution scores with): watch the cells' four directional
+               lookup outputs propagate with their real gate delay, levels
+               instead of pulses.
 
 Kept in its own module so app.py stays lean: app.py builds one tab and hands it a
 callback (`app.current_circuit()`) returning the genome / target / backend / arch.
@@ -32,7 +35,8 @@ from snn_evo import grow_snn, interpret_grid, simulate_trace, draw_snn_net, N_ST
 from nv_evo import grow_nervous, interpret_nervous, place_outputs_by_trace
 from nv_evo.viz import draw_hex_net
 from nv_evo.playback import NervousPlayer, PulseLaneEditor, pulses_from_trial
-from lut_evo import grow_lut, LutSim
+from lut_evo import grow_lut
+from lut_evo.playback import LutPlayer
 
 
 from lut_evo import place_outputs_by_trace as lut_place_by_trace
@@ -48,11 +52,9 @@ class InteractiveTab:
     def __init__(self, parent, get_circuit):
         self.parent      = parent
         self.get_circuit = get_circuit         # () -> dict | None
-        self._inputs     = []                  # list of (label, BooleanVar)
+        self._inputs     = []                  # list of (label, BooleanVar) — SNN only
         self._circuit    = None                # current loaded circuit context
         self._state      = {}                  # nervous activity map
-        self._trace      = {}                  # role -> [bits]
-        self._tick       = 0
         self._running    = False
         self._build_ui()
 
@@ -108,7 +110,7 @@ class InteractiveTab:
         for w in self._inbar.winfo_children():
             w.destroy()
         self._inputs = []
-        if backend == 'nervous':
+        if backend in ('nervous', 'lut'):
             ttk.Label(self._inbar, text='pulses: click the timeline',
                       foreground='#888').pack(side='left', padx=4)
             ttk.Button(self._inbar, text='Clear', width=6,
@@ -132,11 +134,11 @@ class InteractiveTab:
                 # show the same output cell the fitness reads (trace-matched)
                 self._out_pos, _ = place_outputs_by_trace(
                     self._grid, self._routing, self._in_pos, target)
-            self._setup_nervous_async(target)
+            self._setup_async(target)
             self._playback_controls(
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
-        elif backend == 'lut':                             # LUT array (clocked)
+        elif backend == 'lut':                             # LUT array (async levels)
             self._grid = grow_lut(c['genome'], seeds=tuple(target.inputs),
                                   grid_size=target.grid_size, iters=target.iters)
             self._in_pos = list(target.inputs)
@@ -144,8 +146,9 @@ class InteractiveTab:
                 self._out_pos, _ = lut_place_by_trace(self._grid, self._in_pos, target)
             else:
                 self._out_pos = lut_place_combinational(self._grid, target)
+            self._setup_async(target)
             self._playback_controls(
-                '   (toggle inputs, then Step/Run — latched synchronous array)')
+                '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
         else:                                              # SNN — LIF playback
             self._grid = grow_snn(c['genome'], seeds=tuple(target.inputs),
@@ -169,12 +172,12 @@ class InteractiveTab:
         ttk.Button(self._ctrl, text='Reset', command=self._reset).pack(side='left', padx=3)
         ttk.Label(self._ctrl, text=hint, foreground='#888').pack(side='left', padx=6)
 
-    # ── nervous net: asynchronous continuous-time playback ────────────────────────
+    # ── nervous + LUT: asynchronous continuous-time playback ──────────────────────
 
-    def _setup_nervous_async(self, target):
+    def _setup_async(self, target):
         labels = [chr(65 + i) if i < 26 else 'i%d' % i
                   for i in range(len(self._in_pos))]
-        horizon = float(max(24, getattr(target, 'T', 24)))
+        horizon = float(max(24, getattr(target, 'T', 24) or 24))
         self.fig.clf()
         gs = self.fig.add_gridspec(2, 2, height_ratios=[0.55, 1.0],
                                    width_ratios=[1.1, 1.0], hspace=0.6, wspace=0.25)
@@ -185,32 +188,45 @@ class InteractiveTab:
                                        horizon=horizon, snap=0.5,
                                        on_change=self._nv_schedule_changed)
         self._editor.set_pulses(pulses_from_trial(target, len(self._in_pos)))
-        self._player = NervousPlayer(
-            self._grid, self._routing, horizon=horizon,
-            max_events=getattr(target, 'max_events', 2048),
-            config=getattr(target, 'pulse_config', None))
+        if self._backend == 'nervous':
+            self._player = NervousPlayer(
+                self._grid, self._routing, horizon=horizon,
+                max_events=getattr(target, 'max_events', 2048),
+                config=getattr(target, 'pulse_config', None))
+        else:                                  # LUT — same player, level engine
+            self._player = LutPlayer(
+                self._grid, horizon=horizon,
+                config=getattr(target, 'lut_config', None))
         self._player.set_schedule(self._editor.schedule(self._in_pos))
 
     def _nv_schedule_changed(self):
         self._stop()
         self._player.set_schedule(self._editor.schedule(self._in_pos))
-        self._draw_nervous_async()
+        self._draw_async()
 
     def _nv_clear_pulses(self):
         if getattr(self, '_editor', None) is not None:
             self._editor.clear()
 
-    def _draw_nervous_async(self):
+    def _draw_async(self):
         target = self._circuit['target']
         # Update only the cursor artist; the final draw below paints all axes.
         self._editor.set_cursor(self._player.cursor, redraw=False)
         self._axg.clear()
-        draw_hex_net(self._axg, self._grid, target.grid_size, routing=self._routing,
-                     in_pos=self._in_pos, out_pos=self._out_pos,
-                     activity=self._player.activity(), show_edges=True,
-                     title='t = %.1f%s' % (
-                         self._player.cursor,
-                         '   (event cap hit)' if self._player.overflow else ''))
+        title = 't = %.1f%s' % (self._player.cursor,
+                                '   (event cap hit)' if self._player.overflow
+                                else '')
+        if self._backend == 'nervous':
+            draw_hex_net(self._axg, self._grid, target.grid_size,
+                         routing=self._routing,
+                         in_pos=self._in_pos, out_pos=self._out_pos,
+                         activity=self._player.activity(), show_edges=True,
+                         title=title)
+        else:
+            in_pos = [p for p in self._in_pos if p in self._grid]
+            draw_lut_net(self._axg, self._grid, activity=self._player.nibbles(),
+                         in_pos=in_pos, out_pos=self._out_pos, show_edges=True,
+                         title=title)
         self._draw_event_strip(self._axt)
         self.canvas.draw_idle()
         self._status.set('t = %.1f time units   output edges: %s' % (
@@ -246,16 +262,16 @@ class InteractiveTab:
         return tuple(1 if v.get() else 0 for _, v in self._inputs)
 
     def _on_toggle(self):
+        # level toggles exist only for the SNN backend; the asynchronous
+        # substrates are driven by the pulse timeline
         if not self._circuit:
             return
         if self._backend == 'snn':
             self._snn_prepare()         # inputs changed → recompute the LIF run
             self._cursor = 0
             self._draw()
-        else:
-            self._draw()                # lut: show change; takes effect next Step
 
-    # ── playback (SNN LIF / LUT tick / nervous async) ─────────────────────────────
+    # ── playback (SNN LIF / nervous + LUT async) ──────────────────────────────────
 
     def _reset(self):
         self._stop()
@@ -264,47 +280,24 @@ class InteractiveTab:
             self._cursor = 0
             self._draw()
             return
-        if self._backend == 'nervous':
-            self._player.reset()                # async continuous-time playback
-            self._draw_nervous_async()
-            return
-        self._sim = LutSim(self._grid)          # LUT — synchronous, clocked
-        self._nibbles = {}
-        self._state = {c: 0 for c in self._grid}
-        self._trace = {t.role: [] for t in self._circuit['target'].outputs}
-        self._tick = 0
-        self._draw()
+        self._player.reset()                    # async continuous-time playback
+        self._draw_async()
 
     def _step(self):
         if self._backend == 'snn':
             self._snn_step()
             return
-        if self._backend == 'nervous':
-            if self._running and self._player.at_end():
-                self._player.reset()            # loop the run while Playing
-            else:
-                self._player.step()
-            self._draw_nervous_async()
-            return
-        bits = self._in_bits()                  # LUT tick step
-        invals = {self._in_pos[i]: bits[i] for i in range(len(self._in_pos))}
-        self._state = self._sim.step(invals)
-        self._nibbles = dict(self._sim.out)     # 4-bit N/S/E/W emission map
-        self._tick += 1
-        for t in self._circuit['target'].outputs:
-            p = self._out_pos.get(t.role)
-            self._trace[t.role].append(self._state.get(p, 0) if p else 0)
-            if len(self._trace[t.role]) > 60:
-                self._trace[t.role] = self._trace[t.role][-60:]
-        self._draw()
+        if self._running and self._player.at_end():
+            self._player.reset()                # loop the run while Playing
+        else:
+            self._player.step()
+        self._draw_async()
 
     def _draw(self):
         if self._backend == 'snn':
             self._draw_snn()
-        elif self._backend == 'nervous':
-            self._draw_nervous_async()
         else:
-            self._draw_lut()
+            self._draw_async()
 
     def _toggle_run(self):
         if self._running:
@@ -318,7 +311,7 @@ class InteractiveTab:
         if not self._running:
             return
         self._step()
-        interval = {'snn': 90, 'nervous': 70}.get(self._backend, 180)
+        interval = 90 if self._backend == 'snn' else 70
         self.parent.after(interval, self._tick_loop)
 
     def _stop(self):
@@ -335,33 +328,6 @@ class InteractiveTab:
         if getattr(self, '_editor', None) is not None:
             self._editor.disconnect()
             self._editor = None
-
-    def _draw_lut(self):
-        target = self._circuit['target']
-        self.fig.clf()
-        gs_spec = self.fig.add_gridspec(1, 2, width_ratios=[1.1, 1.0], wspace=0.25)
-        axg = self.fig.add_subplot(gs_spec[0, 0])
-        axt = self.fig.add_subplot(gs_spec[0, 1])
-        in_pos = [p for p in self._in_pos if p in self._grid]
-        draw_lut_net(axg, self._grid, activity=self._nibbles, in_pos=in_pos,
-                     out_pos=self._out_pos, show_edges=True,
-                     title='tick %d   inputs=%s' % (self._tick, ''.join(map(str, self._in_bits()))))
-        self._draw_trace_strip(axt, 'output bit trains')
-        self.canvas.draw_idle()
-
-    def _draw_trace_strip(self, axt, title):
-        """Shared right-hand output-trace panel for nervous & LUT playback."""
-        target = self._circuit['target']
-        axt.set_title(title, fontsize=9)
-        for k, t in enumerate(target.outputs):
-            tr = self._trace.get(t.role, [])
-            if tr:
-                axt.step(range(len(tr)), [v + k * 1.4 for v in tr],
-                         where='post', lw=1.4, label=t.role)
-        axt.set_ylim(-0.3, 1.4 * max(1, len(target.outputs)))
-        axt.set_xlabel('tick'); axt.set_yticks([])
-        if any(self._trace.get(t.role) for t in target.outputs):
-            axt.legend(fontsize=7, loc='upper right')
 
     # ── SNN LIF playback (membrane charge → spikes over 20 ms) ─────────────────────
 

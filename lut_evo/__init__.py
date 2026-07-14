@@ -3,7 +3,11 @@ lut_evo — boolean-logic lookup (LUT) backend: the paper's Architecture 2
 (Edwards EH'02 §5-7).
 
 A square cellular array where each cell is a 16-bit lookup table over its
-four neighbours' binary outputs; the system is latched and synchronous.
+four neighbours' binary outputs. The dynamics are ASYNCHRONOUS level logic
+(lut_evo.pulse.AsyncLutSim): each cell is a logic element with a fixed
+propagation delay, simulated event-driven in continuous time — the same
+physical footing as the nervous net. The synchronous latched engine
+(lut.LutSim) is retained as the reference its lattice behaviour quantises to.
 Growth is the associative-memory ontogeny with 16-bit gene fields (Fig. 10),
 run to a stable attractor. Shares the project's problem definitions
 (temporal + combinational targets) and trace-scoring maths; the substrate
@@ -18,6 +22,7 @@ best, fit = evolve_lut(TEMPORAL_TARGETS['SR latch'], generations=60)
 from .genome import (LutGene, Chromosome, Genome, LUT_STATES,
                      random_lut_gene, random_lut_chromosome, random_lut_genome)
 from .lut import SEED_STATE, grow_lut, grow_lut_snapshots, LutSim
+from .pulse import LutConfig, AsyncLutSim, run_lut
 from .ga import (evaluate_lut, eval_batch_lut, mutate_lut, crossover_lut,
                  tournament_lut, next_population, evolve_lut, lut_report,
                  prepare_lut, place_outputs_by_trace, trace_fixed_outputs,

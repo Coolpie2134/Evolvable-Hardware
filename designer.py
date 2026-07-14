@@ -13,11 +13,12 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     neighbours resolved
     through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
-    output roles. Both PulseSim and LutSim run on a bare grid, so a
+    output roles. Both PulseSim and AsyncLutSim run on a bare grid, so a
     hand-built circuit needs NO genome to be simulated or scored. The nervous
-    net is driven ASYNCHRONOUSLY — input pulses placed on a clickable timeline,
-    played in continuous time via the paper-faithful PulseSim used by Nervous
-    evolution — while the clocked LUT keeps its tick-numbered bit streams.
+    BOTH substrates are driven ASYNCHRONOUSLY the same way — input pulses
+    placed on a clickable timeline, played in continuous time via the same
+    event engines evolution scores with (PulseSim for the nervous net,
+    AsyncLutSim for the LUT array's level logic).
 
 Genome -> grid is exact via Grow. Grid -> genome is a separate best-effort
 synthesis pass: because growth is many-to-one it verifies the phenotype it can
@@ -67,7 +68,7 @@ from nv_evo.temporal import (run_nervous_events,
                              _pr_counts, _f1, _best_shift, _obs_len,
                              _best_event_shift, _event_case_score,
                              _expected_events, _role_events,
-                             cadence_score, sampled_events,
+                             cadence_score,
                              trial_input_summary, expected_window_summary,
                              event_list_summary, period_stepper_score)
 from nv_evo.targets import TEMPORAL_TARGETS
@@ -75,9 +76,11 @@ from nv_evo.viz import draw_hex_net
 
 from lut_evo.genome import (LutGene, Chromosome as LutChromosome, Genome as LutGenome,
                             random_lut_gene, MAX_TELOMERE as LUT_MAX_TEL)
-from lut_evo.lut import grow_lut, LutSim, SEED_STATE as LUT_SEED_STATE
+from lut_evo.lut import grow_lut, SEED_STATE as LUT_SEED_STATE
+from lut_evo.playback import LutPlayer
 from lut_evo.reverse import grid_to_genome_lut, repair_genome_lut
 from lut_evo.ga import (place_outputs_by_trace as lut_place_by_trace,
+                        trace_fixed_outputs as lut_trace_fixed_outputs,
                         make_seed_genome as make_lut_seed_genome,
                         compact_genome as lut_compact_genome)
 from lut_evo.viz import draw_lut_net, draw_lut_table
@@ -318,8 +321,9 @@ WORKFLOW
     always-relay table FFFE during Grow).
  2. Grow (ontogeny), or hand-build: Place cells and
     edit their four tables in the Cell tab.
- 3. Step/Run drives the latched array one tick at a
-    time (Fig. 14 view); Score uses the target's
+ 3. Place input pulses on the timeline (as for the
+    nervous net); Step/Run plays them in continuous
+    time (Fig. 14 view). Score uses the target's
     declared metric, exactly as the evolver does."""
 
 
@@ -420,14 +424,11 @@ class DesignerTab:
         self._genome_edited = False      # genome touched since last Grow
         self._selected   = None
         self._last_score = None
-        self._sim        = None
         self._tick       = 0
         self._state      = {}
         self._nibbles    = {}
         self._traces     = {}
         self._running    = False
-        self._stream_vars = []           # per-input tick-numbered bit-stream entries
-        self._trial_idx  = tk.IntVar(value=1)
         self._lut_bind   = None          # (get, set, describe) for the table editor
         self._mono       = ui_compat.mono_family(parent)
         self._build_ui()
@@ -447,7 +448,7 @@ class DesignerTab:
         cb.bind('<<ComboboxSelected>>', self._on_backend_change)
         _Tip(cb, "The paper's two substrates: Architecture 1 = honeycomb nervous "
                  "net (coincidence + inhibition, pulse dynamics); Architecture 2 = "
-                 "square array of four 16-bit LUTs per cell, latched & synchronous.")
+                 "square array of four 16-bit LUTs per cell, asynchronous level logic.")
 
         ttk.Label(top, text='Target:').pack(side='left')
         self._target_var = tk.StringVar(value='(none)')
@@ -497,7 +498,7 @@ class DesignerTab:
                  'relay seed table (FFFE x4), delete zeroes all four tables.'),
                 ('Input', 'input',
                  'Toggle cells as inputs (A, B, …). Inputs are the growth SEEDS '
-                 '(pinned during Grow) and receive the scheduled pulses/clocked '
+                 '(pinned during Grow) and receive the scheduled pulses / per-tick '
                  'streams during simulation.'),
                 ('Output', 'output',
                  'Assign the next unfilled output role to a live cell; click an '
@@ -950,23 +951,12 @@ class DesignerTab:
                         grid, routing, list(self.in_pos), target)
             else:
                 if use_manual:
+                    # pinned outputs, asynchronous engine — real edge times,
+                    # input_events schedules, and the LUT strict-hold scoring,
+                    # exactly like the GA's evaluation path
                     out_pos = manual
-                    traces = TemporalTraces({role: [] for role in roles},
-                                            events={role: [] for role in roles})
-                    for trial in target.trials:
-                        sim = LutSim(grid)
-                        per = {role: [] for role in roles}
-                        for tick in range(obs):
-                            row = (trial.streams[tick]
-                                   if tick < len(trial.streams) else None)
-                            state = sim.step({
-                                self.in_pos[i]: (row[i] if row else 0)
-                                for i in range(len(self.in_pos))})
-                            for role in roles:
-                                per[role].append(state.get(out_pos[role], 0))
-                        for role in roles:
-                            traces[role].append(per[role])
-                            traces.events[role].append(sampled_events(per[role]))
+                    traces = lut_trace_fixed_outputs(
+                        grid, list(self.in_pos), out_pos, target)
                 else:
                     out_pos, traces = lut_place_by_trace(
                         grid, list(self.in_pos), target)
@@ -1548,8 +1538,8 @@ class DesignerTab:
         axt = self._ax_trace
         axt.clear()
         roles = list(self.out_pos)
-        # nervous playback: output pulse EDGES on a real-time axis
-        if (self.backend == 'nervous' and getattr(self, '_player', None) is not None
+        # async playback (both substrates): output EDGES on a real-time axis
+        if (getattr(self, '_player', None) is not None
                 and getattr(self, '_nv_playing', False)):
             axt.set_title('output pulse edges (real time)', fontsize=9)
             for k, role in enumerate(roles):
@@ -1602,10 +1592,9 @@ class DesignerTab:
     # ── simulation (mirrors interactive.py) ─────────────────────────────────────
 
     def _rebuild_input_bar(self):
-        # The nervous net is asynchronous: drive it with a clickable pulse
-        # TIMELINE (real, possibly sub-tick times). The LUT is clocked, so it
-        # keeps the tick-numbered bit STREAM editor.
-        old = [v.get() for v in getattr(self, '_stream_vars', [])]
+        # Both asynchronous substrates are driven by the same clickable pulse
+        # TIMELINE (real, possibly sub-tick times) — nervous wires carry the
+        # pulses, LUT input nets hold the injected level for the pulse width.
         if getattr(self, '_editor', None) is not None:
             self._editor.disconnect()
             self._editor = None
@@ -1613,32 +1602,10 @@ class DesignerTab:
             w.destroy()
         for w in self._input_actions.winfo_children():
             w.destroy()
-        self._stream_vars = []
-        if self.backend == 'nervous':
-            self._input_heading.set('Input pulses (continuous time):')
-            self._build_pulse_timeline()
-            return
-        self._input_heading.set('Input streams (clock ticks):')
-        for i, _p in enumerate(self.in_pos):
-            lbl = chr(65 + i) if i < 26 else 'i%d' % i
-            ttk.Label(self._inbar, text=lbl, font=(self._mono, 9)).pack(side='left', padx=(4, 1))
-            v = tk.StringVar(value=old[i] if i < len(old) else '')
-            ttk.Entry(self._inbar, textvariable=v, width=16,
-                      font=(self._mono, 9)).pack(side='left')
-            self._stream_vars.append(v)
-        if self.in_pos:
-            ttk.Label(self._inbar, text='test', font=(self._mono, 8),
-                      foreground='#888').pack(side='left', padx=(6, 1))
-            ttk.Spinbox(self._inbar, from_=1, to=99, width=3,
-                        textvariable=self._trial_idx).pack(side='left')
-            ttk.Button(self._inbar, text='From test', width=9,
-                       command=self._streams_from_trial).pack(side='left', padx=(2, 1))
-            ttk.Button(self._inbar, text='Load', width=5,
-                       command=self._load_streams).pack(side='left')
-            ttk.Button(self._inbar, text='Save', width=5,
-                       command=self._save_streams).pack(side='left')
+        self._input_heading.set('Input pulses (continuous time):')
+        self._build_pulse_timeline()
 
-    # ── nervous net: asynchronous pulse timeline + continuous-time playback ───────
+    # ── asynchronous pulse timeline + continuous-time playback (both substrates) ──
 
     def _sim_horizon(self):
         t = self._current_target()
@@ -1671,12 +1638,18 @@ class DesignerTab:
         except Exception:
             pass
 
-    def _build_nv_player(self):
-        routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
-        self._player = NervousPlayer(
-            self.grid, routing, horizon=self._sim_horizon(),
-            max_events=getattr(self.target, 'max_events', 2048),
-            config=getattr(self.target, 'pulse_config', None))
+    def _build_player(self):
+        target = self._current_target()          # may be None (free playback)
+        if self.backend == 'nervous':
+            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+            self._player = NervousPlayer(
+                self.grid, routing, horizon=self._sim_horizon(),
+                max_events=getattr(target, 'max_events', 2048),
+                config=getattr(target, 'pulse_config', None))
+        else:                                    # LUT — same player, level engine
+            self._player = LutPlayer(
+                self.grid, horizon=self._sim_horizon(),
+                config=getattr(target, 'lut_config', None))
         sched = (self._editor.schedule(self.in_pos)
                  if getattr(self, '_editor', None) is not None else {})
         self._player.set_schedule(sched)
@@ -1695,93 +1668,19 @@ class DesignerTab:
         self._state = {}
         self._refresh_canvas()
 
-    def _stream_bit(self, i, tick):
-        if i >= len(self._stream_vars):
-            return 0
-        s = self._stream_vars[i].get()
-        j = 0
-        for ch in s:                       # ignore spaces/separators; count 0/1 only
-            if ch in '01':
-                if j == tick:
-                    return int(ch)
-                j += 1
-        return 0
-
-    def _streams_from_trial(self):
-        t = self._current_target()
-        if t is None or not getattr(t, 'trials', None):
-            self._status.set('Pick a temporal target first — it supplies the input tests.')
-            return
-        if len(self.in_pos) != t.n_inputs:
-            self._adopt_target_io()          # align inputs to the target (rebuilds bar)
-        ti = max(1, min(self._trial_idx.get(), len(t.trials))) - 1
-        trial = t.trials[ti]
-        for i in range(min(len(self._stream_vars), t.n_inputs)):
-            self._stream_vars[i].set(''.join(str(trial.streams[k][i]) for k in range(t.T)))
-        self._reset_sim_ui()
-        self._status.set('Loaded test %d/%d input streams (%d ticks) — press Run.'
-                         % (ti + 1, len(t.trials), t.T))
-
-    def _load_streams(self):
-        path = filedialog.askopenfilename(
-            title='Load input streams (one 0/1 line per input)',
-            filetypes=[('text', '*.txt *.csv'), ('all files', '*.*')])
-        if not path:
-            return
-        try:
-            with open(path, encoding='utf-8') as f:
-                lines = [ln.strip() for ln in f
-                         if ln.strip() and not ln.strip().startswith('#')]
-        except Exception as exc:
-            messagebox.showerror('Load streams', str(exc))
-            return
-        def clean(ln):                       # accept "A: 0010" or bare "0010"
-            body = ln.split(':', 1)[1] if ':' in ln else ln
-            return ''.join(ch for ch in body if ch in '01')
-        streams = [clean(ln) for ln in lines]
-        for i, v in enumerate(self._stream_vars):
-            v.set(streams[i] if i < len(streams) else '')
-        self._reset_sim_ui()
-        self._status.set('Loaded %d input stream(s) from %s.'
-                         % (len(streams), os.path.basename(path)))
-
-    def _save_streams(self):
-        if not self._stream_vars:
-            self._status.set('No inputs to save streams for.')
-            return
-        path = filedialog.asksaveasfilename(
-            title='Save input streams', defaultextension='.txt',
-            initialfile='streams.txt', filetypes=[('text', '*.txt'), ('all files', '*.*')])
-        if not path:
-            return
-        lines = ['# one 0/1 input stream per line, tick 0 first (label is a comment)']
-        for i, v in enumerate(self._stream_vars):
-            lbl = chr(65 + i) if i < 26 else 'i%d' % i
-            lines.append('%s: %s' % (lbl, ''.join(ch for ch in v.get() if ch in '01')))
-        try:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines) + '\n')
-        except Exception as exc:
-            messagebox.showerror('Save streams', str(exc))
-            return
-        self._status.set('Saved %d input stream(s) → %s'
-                         % (len(self._stream_vars), path))
-
     def _reset_sim(self):
         self._running = False
-        self._sim = None
         self._player = None
         self._nv_playing = False
         self._tick = 0
         self._state, self._nibbles = {}, {}
         self._traces = {r: [] for r in self.out_pos}
-        if self.backend == 'nervous' and getattr(self, '_editor', None) is not None:
+        if getattr(self, '_editor', None) is not None:
             self._editor.set_cursor(0.0)
         if hasattr(self, '_run_btn'):
             self._run_btn.config(text='Run')
         if hasattr(self, '_tick_lbl'):
-            self._tick_lbl.config(
-                text='t = 0.0' if self.backend == 'nervous' else 'tick 0')
+            self._tick_lbl.config(text='t = 0.0')
 
     def _reset_sim_ui(self):
         self._reset_sim()
@@ -1791,27 +1690,8 @@ class DesignerTab:
         if not self.grid:
             self._status.set('Empty grid — nothing to simulate.')
             return
-        if self.backend == 'nervous':
-            self._step_nervous_async()
-            return
-        if self._sim is None:                    # LUT — synchronous, clocked
-            self._sim = LutSim(self.grid)
-            self._traces = {r: [] for r in self.out_pos}
-        invals = {p: self._stream_bit(i, self._tick)
-                  for i, p in enumerate(self.in_pos)}
-        self._state = self._sim.step(invals)
-        self._nibbles = dict(self._sim.out)
-        self._tick += 1
-        for role, p in self.out_pos.items():
-            self._traces.setdefault(role, []).append(self._state.get(p, 0))
-            if len(self._traces[role]) > 60:
-                self._traces[role] = self._traces[role][-60:]
-        self._tick_lbl.config(text='tick %d' % self._tick)
-        self._refresh_canvas()
-
-    def _step_nervous_async(self):
         if getattr(self, '_player', None) is None:
-            self._build_nv_player()
+            self._build_player()
         if self._running and self._player.at_end():
             self._player.reset()                 # loop while Playing
         else:
@@ -1819,6 +1699,8 @@ class DesignerTab:
         self._nv_playing = True
         self._tick = 1                            # marks "simulating" for _refresh_canvas
         self._state = self._player.activity()
+        if self.backend == 'lut':
+            self._nibbles = self._player.nibbles()   # Fig. 14 wedge activity
         if getattr(self, '_editor', None) is not None:
             self._editor.set_cursor(self._player.cursor)
         self._tick_lbl.config(text='t = %.1f%s' % (
@@ -1838,7 +1720,7 @@ class DesignerTab:
         if not self._running:
             return
         self._step()
-        self.parent.after(70 if self.backend == 'nervous' else 180, self._tick_loop)
+        self.parent.after(70, self._tick_loop)
 
     def close(self):
         """Release playback callbacks and matplotlib event bindings."""
@@ -1896,22 +1778,12 @@ class DesignerTab:
                                                          list(self.in_pos), t)
         else:
             if use_manual:
+                # pinned outputs, asynchronous engine — real edge times,
+                # input_events schedules, and the LUT strict-hold scoring,
+                # exactly like the GA's evaluation path
                 out_pos = manual
-                traces = TemporalTraces({r: [] for r in roles},
-                                        events={r: [] for r in roles})
-                for trial in t.trials:
-                    sim = LutSim(self.grid)
-                    per = {r: [] for r in roles}
-                    ns = len(trial.streams)
-                    for tick in range(obs):
-                        row = trial.streams[tick] if tick < ns else None
-                        st = sim.step({self.in_pos[i]: (row[i] if row else 0)
-                                       for i in range(len(self.in_pos))})
-                        for r in roles:
-                            per[r].append(st.get(out_pos[r], 0))
-                    for r in roles:
-                        traces[r].append(per[r])
-                        traces.events[r].append(sampled_events(per[r]))
+                traces = lut_trace_fixed_outputs(
+                    self.grid, list(self.in_pos), out_pos, t)
             else:
                 out_pos, traces = lut_place_by_trace(self.grid, list(self.in_pos), t)
         if any(out_pos.get(r) is None for r in roles):

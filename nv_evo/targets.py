@@ -74,7 +74,8 @@ class TemporalTarget:
     stepper_min_events: int = 4
     stepper_max_delay: int = 8
     # Empty means no additional restriction. Physical floating-time targets can
-    # opt into Nervous only so clocked backends do not silently quantize them.
+    # opt into the asynchronous backends (nervous, lut) only, so clocked
+    # backends do not silently quantize them.
     supported_backends: Tuple[str, ...] = ()
 
     @property
