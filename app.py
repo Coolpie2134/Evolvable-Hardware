@@ -48,7 +48,7 @@ from snn_evo.genome import GRID_SIZE, MAX_STATE
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
 from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
                     nervous_case_outputs, circuit_summary_nervous,
-                    decode_tile_routing, temporal_report)
+                    ROUTING, temporal_report)
 from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
@@ -1459,7 +1459,7 @@ class App:
         axes  = fig.subplots(nrows, ncols, squeeze=False)
         flat  = [a for row in axes for a in row]
         for idx, snap in enumerate(snaps):
-            rt   = {p: decode_tile_routing(s) for p, s in snap.items()}
+            rt   = {p: ROUTING[s & 0x1F] for p, s in snap.items()}
             last = (idx == n - 1)
             draw_hex_net(flat[idx], snap, gs, routing=rt, in_pos=in_pos,
                          out_pos=(out_pos if last else {}), show_edges=last,

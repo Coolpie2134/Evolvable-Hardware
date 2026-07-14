@@ -15,7 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nv_evo import TEMPORAL_TARGETS                        # noqa: E402
 from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            orc_toggle, make_pulse_doubler,
-                           orc_period_doubler, ORACLE_SPECS)
+                           orc_period_doubler, ORACLE_SPECS,
+                           make_refractory_filter,
+                           make_a_first_rendezvous,
+                           make_collision_serializer,
+                           make_watchdog)
 
 
 def _trace(fn, seq):
@@ -114,6 +118,74 @@ def test_c_element_registered_as_target():
     assert len(t.inputs) == 2
     # every trial with a positive expectation must have at least one output event
     assert any(1 in [x for x in tr.expected['Q'] if x is not None] for tr in t.trials)
+
+
+def test_refractory_filter_dead_time_boundary():
+    """An accepted event blocks exactly the next three ticks, then re-arms."""
+    f = make_refractory_filter(3)
+    # t=0 fires; t=2 is blocked; t=4 is the earliest accepted event.
+    assert _trace(f, [(1,), (0,), (1,), (0,), (1,), (0,)]) \
+        == [1, 0, 0, 0, 1, 0]
+    assert _trace(f, [(0,)] * 8) == [0] * 8
+
+
+def test_a_first_rendezvous_order_ties_and_rearm():
+    """Only A-first rounds emit; B-first and ties are consumed silently."""
+    f = make_a_first_rendezvous()
+    seq = [
+        (1, 0), (1, 0), (0, 0), (0, 1),  # A first, repeat ignored -> emit
+        (0, 1), (0, 0), (1, 0),          # B first -> silent
+        (1, 1),                            # tie -> silent and immediately rearm
+        (1, 0), (0, 1),                   # A first again -> emit
+    ]
+    assert _trace(f, seq) == [0, 0, 0, 1, 0, 0, 0, 0, 0, 1]
+
+
+def test_collision_serializer_preserves_tokens():
+    """A collision becomes two spaced events; isolated inputs stay one-for-one."""
+    f = make_collision_serializer(2)
+    seq = [(1, 1), (0, 0), (0, 0), (0, 0), (1, 0), (0, 0), (0, 0)]
+    out = _trace(f, seq)
+    assert out == [1, 0, 1, 0, 1, 0, 0]
+    assert sum(out) == sum(a + b for a, b in seq)
+
+
+def test_watchdog_deadline_rearm_and_never_armed_silence():
+    """Deadline heartbeats win; quiet alarms once; later heartbeat re-arms."""
+    f = make_watchdog(5)
+    seq = [
+        (1,), (0,), (0,), (0,), (0,), (1,),  # heartbeat at deadline cancels
+        (0,), (0,), (0,), (0,), (0,),        # then five quiet ticks -> alarm
+        (0,), (1,),                           # stay disarmed, then re-arm
+        (0,), (0,), (0,), (0,), (0,),        # another five quiet -> alarm
+    ]
+    assert _trace(f, seq) == [0] * 10 + [1, 0, 0] + [0] * 4 + [1]
+    assert _trace(f, [(0,)] * 12) == [0] * 12
+
+
+def test_new_async_oracles_are_registered_and_seeded():
+    """All presets reach the GUI/certifier and fresh seeds vary their timings."""
+    pairs = {
+        'Refractory filter (3 ticks)': 'Refractory filter (oracle)',
+        'A-first rendezvous': 'A-first rendezvous (oracle)',
+        'Collision serializer (2-to-1)': 'Collision serializer (oracle)',
+        'Watchdog timeout (5 ticks)': 'Watchdog timeout (oracle)',
+    }
+    for display_name, spec_name in pairs.items():
+        assert display_name in TEMPORAL_TARGETS
+        assert spec_name in ORACLE_SPECS
+        registered = TEMPORAL_TARGETS[display_name]
+        fresh_a = ORACLE_SPECS[spec_name](seed=101)
+        fresh_b = ORACLE_SPECS[spec_name](seed=202)
+        assert registered.score_mode == fresh_a.score_mode == 'events'
+        assert registered.n_outputs == fresh_a.n_outputs == 1
+        assert len(registered.inputs) == len(fresh_a.inputs)
+        assert [tr.streams for tr in fresh_a.trials] != [tr.streams for tr in fresh_b.trials]
+
+    serializer = ORACLE_SPECS['Collision serializer (oracle)'](seed=303)
+    for trial in serializer.trials:
+        n_input_events = sum(sum(bits) for bits in trial.streams)
+        assert len(trial.expected_events['Q']) == n_input_events
 
 
 def _main():

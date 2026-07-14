@@ -170,6 +170,103 @@ def make_c_element():
     return f
 
 
+def make_refractory_filter(dead_time=3):
+    """Pass one input event, then suppress events during a finite dead time.
+
+    This is an event-rate limiter rather than a one-shot: the accepted output is
+    one point event, not a held interval.  An event accepted at tick ``t`` blocks
+    ticks ``t+1`` through ``t+dead_time`` and the filter can fire again at
+    ``t+dead_time+1``.
+    """
+    dead_time = int(dead_time)
+    if dead_time < 1:
+        raise ValueError('dead_time must be positive')
+
+    def f(inb, st):
+        cooldown = int(st or 0)
+        if cooldown > 0:
+            return (0,), cooldown - 1
+        if inb[0]:
+            return (1,), dead_time
+        return (0,), 0
+    return f
+
+
+def make_a_first_rendezvous():
+    """Order-sensitive two-input rendezvous with repeated re-arming rounds.
+
+    The first arrival is remembered until the other input completes the round.
+    Emit one event only when A arrived first; B-first and simultaneous-tie rounds
+    complete silently.  Same-channel repeats do not change the remembered winner.
+    Unlike the fixed-gap A->B target, any positive gap is accepted.
+    """
+    def f(inb, st):
+        first = int(st or 0)             # 0 idle, 1 A-first, 2 B-first
+        a, b = bool(inb[0]), bool(inb[1])
+        if first == 0:
+            if a and b:                  # simultaneous tie: consume the round
+                return (0,), 0
+            if a:
+                return (0,), 1
+            if b:
+                return (0,), 2
+            return (0,), 0
+        if first == 1 and b:
+            return (1,), 0               # A won; B closes the round
+        if first == 2 and a:
+            return (0,), 0               # B won; A closes silently
+        return (0,), first               # wait; ignore same-channel repeats
+    return f
+
+
+def make_collision_serializer(spacing=2):
+    """Serialize event multiplicity from two inputs onto one output wire.
+
+    Every A or B event contributes one token.  At most one output event is
+    emitted at a time, with ``spacing`` ticks between emissions.  Therefore an
+    isolated input produces one event while simultaneous A+B produces two
+    separated events instead of losing one in a wired-OR collision.
+    """
+    spacing = int(spacing)
+    if spacing < 1:
+        raise ValueError('spacing must be positive')
+
+    def f(inb, st):
+        cooldown, queued = st if st is not None else (0, 0)
+        cooldown, queued = int(cooldown), int(queued)
+        queued += int(bool(inb[0])) + int(bool(inb[1]))
+        if cooldown > 0:
+            cooldown -= 1
+        if cooldown == 0 and queued > 0:
+            return (1,), (spacing, queued - 1)
+        return (0,), (cooldown, queued)
+    return f
+
+
+def make_watchdog(timeout=5):
+    """Emit once when an armed heartbeat input stays quiet for ``timeout`` ticks.
+
+    The first heartbeat arms the watchdog and every later heartbeat restarts its
+    timer.  A heartbeat exactly on the deadline wins and prevents an alarm.  Once
+    an alarm fires the watchdog disarms; a later heartbeat arms a fresh round.
+    Never-armed silence therefore remains silent.
+    """
+    timeout = int(timeout)
+    if timeout < 1:
+        raise ValueError('timeout must be positive')
+
+    def f(inb, st):
+        if inb[0]:                       # heartbeat wins on the deadline tick
+            return (0,), 0
+        if st is None:                   # never armed / already timed out
+            return (0,), None
+        quiet = int(st) + 1
+        if quiet >= timeout:
+            return (1,), None            # one alarm, then disarm
+        return (0,), quiet
+    return f
+
+
 def make_period_stepper(base=2, step=2, max_period=6):
     """Build a bounded, re-phased cadence controller.
 
@@ -257,6 +354,31 @@ def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
     return TemporalTarget(name, list(inputs), [out], T, trials,
                           grid_size=grid_size, iters=30, description=description,
                           score_mode=score_mode, latency=latency)
+
+
+def _event_bank_target(name, oracle, inputs, pulse_banks, T, latency,
+                       description, out_pos=(2, 2), grid_size=5):
+    """Build a single-output event target from seeded, explicit pulse banks.
+
+    ``pulse_banks`` is a sequence of ``{input_index: iterable[tick]}`` mappings.
+    Keeping the schedule generator separate from the state machine guarantees
+    positive, negative, boundary, re-arm, and silence cases while still allowing
+    ``spec(seed=...)`` to produce genuinely fresh held-out timings.
+    """
+    trials = []
+    n_inputs = len(inputs)
+    for pulses in pulse_banks:
+        ons = {index: set(map(int, ticks)) for index, ticks in pulses.items()}
+        streams = [tuple(1 if tick in ons.get(index, ()) else 0
+                         for index in range(n_inputs))
+                   for tick in range(T)]
+        exp = label_trace(oracle, streams, T, latency)
+        events = [float(tick) for tick, value in enumerate(exp) if value == 1]
+        trials.append(Trial(streams, {'Q': exp}, {'Q': events}))
+    return TemporalTarget(
+        name, list(inputs), [OutputTerminal('Q', out_pos)], T, trials,
+        grid_size=grid_size, iters=30, description=description,
+        score_mode='events', latency=latency)
 
 
 def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None):
@@ -518,9 +640,142 @@ def c_element_oracle(seed=20260702):
         'orders, including lone edges that must not emit until the partner arrives.'))
 
 
+def refractory_filter_oracle(seed=20260702, dead_time=3):
+    """Seeded burst banks straddling the dead-time acceptance boundary."""
+    rng = random.Random(seed)
+    banks = []
+    for _ in range(10):
+        tick = rng.randint(2, 4)
+        pulses = [tick]
+        # Every trial contains a blocked short gap, an accepted boundary/long
+        # gap, and two independently sampled gaps.  Pulses stay one tick wide.
+        gaps = [rng.choice((2, 3)), rng.choice((4, 5, 6)),
+                rng.choice((2, 3, 4, 5, 6)), rng.choice((3, 4, 5, 7))]
+        if rng.random() < 0.5:
+            gaps[0], gaps[1] = gaps[1], gaps[0]
+        for gap in gaps:
+            tick += gap
+            if tick < 31:
+                pulses.append(tick)
+        banks.append({0: pulses})
+    banks.append({})                         # never stimulated: must stay quiet
+    return _event_bank_target(
+        'Refractory filter (oracle)', make_refractory_filter(dead_time),
+        [(0, 2)], banks, T=34, latency=1,
+        description=describe_target(
+            'Pass the first input event, suppress events for %d ticks, then '
+            're-arm and pass the next eligible event.' % dead_time,
+            EVENT_SCORING,
+            'Ten seeded burst schedules mix blocked gaps below the dead time, '
+            'the exact re-arm boundary, longer accepted gaps, and a silent guard.'))
+
+
+def a_first_rendezvous_oracle(seed=20260702):
+    """Balanced, variable-gap A-first/B-first/tie rounds with re-arming."""
+    rng = random.Random(seed)
+    banks = []
+    for _ in range(12):
+        a_ticks, b_ticks = set(), set()
+        cursor = rng.randint(2, 4)
+        rounds = ['A', 'B', 'tie']
+        rng.shuffle(rounds)
+        for kind in rounds:
+            gap = rng.randint(2, 6)
+            if kind == 'A':
+                a_ticks.add(cursor); b_ticks.add(cursor + gap)
+                if gap >= 4 and rng.random() < 0.5:
+                    a_ticks.add(cursor + 2)       # same-side distractor
+            elif kind == 'B':
+                b_ticks.add(cursor); a_ticks.add(cursor + gap)
+                if gap >= 4 and rng.random() < 0.5:
+                    b_ticks.add(cursor + 2)
+            else:
+                a_ticks.add(cursor); b_ticks.add(cursor)
+            cursor += gap + rng.randint(3, 5)
+        # An incomplete final request checks that merely seeing A is not enough.
+        if cursor < 39 and rng.random() < 0.5:
+            (a_ticks if rng.random() < 0.5 else b_ticks).add(cursor)
+        banks.append({0: sorted(a_ticks), 1: sorted(b_ticks)})
+    return _event_bank_target(
+        'A-first rendezvous (oracle)', make_a_first_rendezvous(),
+        [(0, 1), (0, 3)], banks, T=42, latency=2,
+        description=describe_target(
+            'Treat each A/B pair as a race: emit Q when A arrived first and B '
+            'completes the round; B-first and simultaneous ties stay silent.',
+            EVENT_SCORING,
+            'Twelve seeded schedules mix both orders, variable gaps, ties, '
+            'same-channel distractors, incomplete rounds, and repeated re-arming.'))
+
+
+def collision_serializer_oracle(seed=20260702, spacing=2):
+    """Banks where singles remain single and A+B collisions become two events."""
+    rng = random.Random(seed)
+    banks = []
+    for _ in range(10):
+        a_ticks, b_ticks = set(), set()
+        cursor = rng.randint(2, 4)
+        episodes = ['A', 'B', 'AB', rng.choice(('A', 'B', 'AB'))]
+        rng.shuffle(episodes)
+        for kind in episodes:
+            if kind in ('A', 'AB'):
+                a_ticks.add(cursor)
+            if kind in ('B', 'AB'):
+                b_ticks.add(cursor)
+            cursor += spacing + rng.randint(4, 6)  # let the serializer drain
+        banks.append({0: sorted(a_ticks), 1: sorted(b_ticks)})
+    banks.append({})                               # no spontaneous output
+    return _event_bank_target(
+        'Collision serializer (oracle)', make_collision_serializer(spacing),
+        [(0, 1), (0, 3)], banks, T=40, latency=1,
+        description=describe_target(
+            'Merge A and B onto Q without losing event count: an isolated input '
+            'makes one Q event, while simultaneous A+B is serialized into two '
+            'Q events separated by %d ticks.' % spacing,
+            EVENT_SCORING,
+            'Ten seeded episode banks mix A-only, B-only, and collision events '
+            'at varied phases, plus a silent guard; every input token must emerge.'))
+
+
+def watchdog_oracle(seed=20260702, timeout=5):
+    """Heartbeat banks covering safe, deadline, late, re-arm, and silent cases."""
+    rng = random.Random(seed)
+    banks = []
+    # Exact-deadline heartbeats cancel the alarm and exercise the off-by-one.
+    start = rng.randint(2, 4)
+    banks.append({0: list(range(start, 38, timeout))})
+    for _ in range(10):
+        tick = rng.randint(2, 4)
+        pulses = [tick]
+        # Guaranteed safe/deadline gaps and late gaps; shuffle their order so
+        # held-out seeds change the history without dropping boundary coverage.
+        gaps = [rng.choice((3, 4, 5)), rng.choice((6, 7, 8)),
+                rng.choice((3, 5)), rng.choice((6, 8, 9))]
+        rng.shuffle(gaps)
+        for gap in gaps:
+            tick += gap
+            if tick < 37:
+                pulses.append(tick)
+        banks.append({0: pulses})
+    banks.append({})                               # never armed: no alarm
+    return _event_bank_target(
+        'Watchdog timeout (oracle)', make_watchdog(timeout),
+        [(0, 2)], banks, T=42, latency=1,
+        description=describe_target(
+            'After the first heartbeat, emit one alarm if no new heartbeat '
+            'arrives for %d ticks. A deadline heartbeat cancels the alarm; after '
+            'an alarm, a later heartbeat re-arms the watchdog.' % timeout,
+            EVENT_SCORING,
+            'Seeded schedules mix safe, exact-deadline, and late heartbeat gaps, '
+            'multiple timeout/re-arm rounds, and never-armed silence.'))
+
+
 ORACLE_SPECS = {
     'SR latch (oracle)':          sr_latch_oracle,
     'C-element (oracle)':         c_element_oracle,
+    'Refractory filter (oracle)': refractory_filter_oracle,
+    'A-first rendezvous (oracle)': a_first_rendezvous_oracle,
+    'Collision serializer (oracle)': collision_serializer_oracle,
+    'Watchdog timeout (oracle)':   watchdog_oracle,
     'Toggle (oracle)':            toggle_oracle,
     'Echo (oracle)':              echo_oracle,
     'Coincidence (oracle)':       coincidence_oracle,

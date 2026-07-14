@@ -586,6 +586,10 @@ TEMPORAL_TARGETS = {
 ORACLE_KEY_TO_SPEC = {
     'SR latch':              'SR latch (oracle)',
     'C-element (2-in join)': 'C-element (oracle)',
+    'Refractory filter (3 ticks)': 'Refractory filter (oracle)',
+    'A-first rendezvous':     'A-first rendezvous (oracle)',
+    'Collision serializer (2-to-1)': 'Collision serializer (oracle)',
+    'Watchdog timeout (5 ticks)': 'Watchdog timeout (oracle)',
     'Toggle flip-flop':      'Toggle (oracle)',
     'Echo (delay 3)':        'Echo (oracle)',
     'One-shot (5 ticks)':    'One-shot (oracle)',

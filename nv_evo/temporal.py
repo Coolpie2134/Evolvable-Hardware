@@ -282,10 +282,14 @@ def _f1(tp_rec, n_exp, tp_prec, n_act):
     return (2 * rec * prec / (rec + prec)) if (rec + prec) else 0.0
 
 
-def _pr_score(trace, exp, shift=0):
+def _pr_score(trace, exp, shift=0, tol=1):
     """Per-trace F1 of the highs (see _pr_counts). Silent -> 0 when anything is
-    expected; always-high -> low; a correct ringing/quiet output -> 1."""
-    return _f1(*_pr_counts(trace, exp, shift))
+    expected; always-high -> low; a correct ringing/quiet output -> 1. `tol` is
+    the recall coverage window: 1 for the nervous net (a stored bit RINGS 1010,
+    so ±1 counts it as held), 0 for the LUT array (a latch can hold a steady
+    level, so a hold must be genuinely high on every tick — a 2-3 tick burst is
+    not a 5-tick hold)."""
+    return _f1(*_pr_counts(trace, exp, shift, tol))
 
 
 # ── latency-invariant scoring ────────────────────────────────────────────────────
@@ -299,14 +303,14 @@ def _pr_score(trace, exp, shift=0):
 # firing (precision is anchored to the output's scored region — see _pr_counts).
 # shift=0 is included, so the aligned score is a lower bound: nothing regresses.
 
-def _pooled_f1(traces, ttarget, shift):
+def _pooled_f1(traces, ttarget, shift, tol=1):
     tr = ne = tp = na = 0
     for ti, trial in enumerate(ttarget.trials):
         for role, exp in trial.expected.items():
             seq = traces.get(role, [])
             if ti >= len(seq):
                 continue
-            a, b, c, d = _pr_counts(seq[ti], exp, shift)
+            a, b, c, d = _pr_counts(seq[ti], exp, shift, tol)
             tr += a; ne += b; tp += c; na += d
     return _f1(tr, ne, tp, na)
 
@@ -344,28 +348,30 @@ def _target_pairs(traces, ttarget):
     return pairs
 
 
-def _best_shift(traces, ttarget):
+def _best_shift(traces, ttarget, tol=1):
     """(best_shift, best_f1): the global latency offset maximising pooled F1."""
     best_s, best_f = 0, -1.0
-    for s in _cand_shifts(_target_pairs(traces, ttarget), ttarget.T):
-        f = _pooled_f1(traces, ttarget, s)
+    for s in _cand_shifts(_target_pairs(traces, ttarget), ttarget.T, tol):
+        f = _pooled_f1(traces, ttarget, s, tol)
         if f > best_f:
             best_f, best_s = f, s
     return best_s, best_f
 
 
-def _placement_score(cell_traces, exps, ttarget):
+def _placement_score(cell_traces, exps, ttarget, tol=1):
     """Best-shift pooled F1 for ONE candidate output cell (a single latency shift
     over its own traces) — the per-cell ranking used when PLACING outputs. This
     MUST be latency-invariant too: if placement ranked at a fixed alignment, which
     cell gets chosen would depend on the target's nominal latency, quietly
     reintroducing the timing-dependence the score removes (measured: it did).
-    Same _cand_shifts trick as _best_shift keeps it cheap."""
+    Same _cand_shifts trick as _best_shift keeps it cheap. `tol` matches the
+    substrate (0 = strict LUT hold, 1 = nervous-net ring) so placement picks the
+    same cell the final score rewards."""
     best = 0.0
-    for s in _cand_shifts(list(zip(cell_traces, exps)), ttarget.T):
+    for s in _cand_shifts(list(zip(cell_traces, exps)), ttarget.T, tol):
         tr = ne = tp = na = 0
         for trace, exp in zip(cell_traces, exps):
-            a, b, c, d = _pr_counts(trace, exp, s)
+            a, b, c, d = _pr_counts(trace, exp, s, tol)
             tr += a; ne += b; tp += c; na += d
         f = _f1(tr, ne, tp, na)
         if f > best:
@@ -802,8 +808,9 @@ OUT_RADIUS = 12
 
 
 def _score_output_candidate(sampled, events, expected, role, target,
-                            overflow=False):
-    """Score one prospective output and return ``(score, reusable result)``."""
+                            overflow=False, tol=1):
+    """Score one prospective output and return ``(score, reusable result)``.
+    `tol` = the substrate's hold coverage (0 strict for LUT, 1 ring for nv)."""
     if not sampled:
         return 0.0, None
     mode = getattr(target, 'score_mode', 'trace')
@@ -817,7 +824,7 @@ def _score_output_candidate(sampled, events, expected, role, target,
     if mode == 'cadence':
         result = _best_cadence_latency(bundle, target)
         return result[1], result
-    return _placement_score(sampled, expected, target), None
+    return _placement_score(sampled, expected, target, tol), None
 
 
 def _output_candidates(grid, in_set, term):
@@ -958,7 +965,7 @@ def prepare_net(genome, ttarget):
     return grid, routing, in_pos, out_pos, traces
 
 
-def windowed_score(traces, ttarget, metric=None, shift=None):
+def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
     """Selection fitness core, pooled globally over every (trial, role) under
     METRIC (or an explicit `metric`):
       f1       — spike-event precision/recall (default; silent = 0, always-high low)
@@ -976,10 +983,12 @@ def windowed_score(traces, ttarget, metric=None, shift=None):
         return cadence_score(traces, ttarget)[0]
     if mode == 'period_stepper':
         return period_stepper_score(traces, ttarget)[0]
+    if tol is None:
+        tol = getattr(traces, 'hold_tol', 1)   # 0 = strict LUT hold, 1 = nv ring
     m = metric or METRIC
     if m in ('f1', 'blend'):
-        f1 = (_pooled_f1(traces, ttarget, shift) if shift is not None
-              else _best_shift(traces, ttarget)[1])
+        f1 = (_pooled_f1(traces, ttarget, shift, tol) if shift is not None
+              else _best_shift(traces, ttarget, tol)[1])
     else:
         f1 = 0.0
     if m == 'f1':
@@ -1045,7 +1054,8 @@ def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
             for role in trial.expected)
         return score, cases, shift
 
-    shift = (_best_shift(traces, ttarget)[0]
+    tol = getattr(traces, 'hold_tol', 1)       # 0 = strict LUT hold, 1 = nv ring
+    shift = (_best_shift(traces, ttarget, tol)[0]
              if alignment is _REFIT_ALIGNMENT else int(alignment))
     cases = []
     for ti, trial in enumerate(ttarget.trials):
@@ -1054,10 +1064,10 @@ def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
             if ti >= len(role_traces):
                 cases.append(0.0)
             elif METRIC == 'f1':
-                cases.append(_pr_score(role_traces[ti], exp, shift))
+                cases.append(_pr_score(role_traces[ti], exp, shift, tol))
             else:
                 cases.append(_trace_metric(role_traces[ti], exp))
-    return windowed_score(traces, ttarget, shift=shift), tuple(cases), shift
+    return windowed_score(traces, ttarget, shift=shift, tol=tol), tuple(cases), shift
 
 
 def exact_tick_accuracy(traces, ttarget):

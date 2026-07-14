@@ -6,8 +6,8 @@ The project's north-star claim is that the substrate is *genuinely asynchronous*
 (continuous-time, event-driven), not merely a synchronous machine clocked at TICK
 granularity. A single lucky trace cannot establish that; a clock cheat has bitten
 this project before ("combinational scoring was phantom / fixed-tick"). These
-tests exercise the directional tile engine (built from the PulseSim primitive
-through the audited float path in nv_evo.simulation) with metamorphic relations that a truly
+tests exercise the engine (nv_evo.pulse.PulseSim, driven through the audited
+float path in nv_evo.simulation) with metamorphic relations that a truly
 time-invariant system must satisfy and a tick-quantized one cannot:
 
   * TRANSLATION — shifting all inputs by an arbitrary (sub-tick) delta shifts all
