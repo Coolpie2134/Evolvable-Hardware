@@ -13,9 +13,23 @@ from .config import RunConfig, MAX_CHROMOSOME_COUNT
 from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
+def wait_for_resume(pause_event, stop_event, messages):
+    """Block at a safe boundary until Resume, remaining Stop-responsive."""
+    announced = False
+    while pause_event is not None and pause_event.is_set():
+        if not announced:
+            messages.put(('paused', True))
+            announced = True
+        if stop_event.wait(0.05):
+            raise EvolutionCancelled
+    if announced:
+        messages.put(('paused', False))
+
+
 def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                   stop_event, base_seed=None, backend='snn', run_config=None,
-                  results_dir='results'):
+                  results_dir='results', pause_event=None,
+                  recombination_event=None):
     """Backend-neutral evolution worker used by the desktop application."""
     from snn_evo.genome import random_genome
     from snn_evo.ga import (_eval_batch as eval_snn,
@@ -55,9 +69,9 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             chromosome_count, max_telomere=config.ga.max_telomere)
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
-        step = lambda p, f, c, mm: next_population(
+        step = lambda p, f, c, mm, recombine: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
-            chromosome_count=chromosome_count)
+            chromosome_count=chromosome_count, recombination=recombine)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
@@ -83,9 +97,9 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
-        step = lambda p, f, c, mm: next_population(
+        step = lambda p, f, c, mm, recombine: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
-            chromosome_count=chromosome_count)
+            chromosome_count=chromosome_count, recombination=recombine)
         rate_fn = adaptive_mutation_rate
         rank_fn = lambda genome, fitness: (fitness, _tiebreak(genome))
         consolidate_fn = consolidate_population
@@ -105,8 +119,14 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         raw_eval = lambda genomes, should_stop=None, on_progress=None: (
             eval_snn(genomes, target, arch, pool, cache, should_stop, on_progress),
             None)
-        step = lambda p, f, c, mm: next_snn(
-            p, f, chromosome_count=chromosome_count)
+        step = lambda p, f, c, mm, recombine: next_snn(
+            p, f, chromosome_count=chromosome_count,
+            recombination=recombine)
+
+    def recombination_enabled():
+        if recombination_event is not None:
+            return recombination_event.is_set()
+        return config.ga.recombination_enabled
 
     def evaluate(genomes, phase, try_i, generation):
         # One saturated pool pass over the whole population (no chunk barrier):
@@ -140,6 +160,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         for try_i in range(1, tries + 1):
             if stop_event.is_set():
                 break
+            wait_for_resume(pause_event, stop_event, messages)
             random.seed(None if base_seed is None else base_seed + try_i - 1)
             # Build one genome at a time with a stop check: constructing the
             # initial population of dense LUT ontogeny seeds takes seconds, and a
@@ -166,12 +187,15 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             for generation in range(1, gens + 1):
                 if stop_event.is_set():
                     raise EvolutionCancelled
+                wait_for_resume(pause_event, stop_event, messages)
                 mutation_rate *= decay
                 actual_rate = rate_fn(
                     mutation_rate, stagnation, run_fit >= 1.0,
                     config.ga.stagnation_beta, config.ga.mutation_limit)
                 parents, parent_fitnesses, parent_cases = population, fitnesses, cases
-                offspring = step(parents, parent_fitnesses, parent_cases, actual_rate)
+                offspring = step(
+                    parents, parent_fitnesses, parent_cases, actual_rate,
+                    recombination_enabled())
                 offspring_fitnesses, offspring_cases = evaluate(
                     offspring, 'Evaluating population', try_i, generation)
                 # Report reproduction separately from survivor selection.  Once

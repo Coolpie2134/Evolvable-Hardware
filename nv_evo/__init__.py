@@ -34,6 +34,7 @@ from .nervous import (ROUTING, SEED_STATE, interpret_nervous, evaluate_nervous,
                       score_nervous, nervous_truth_table, nervous_case_outputs,
                       circuit_summary_nervous, grow_nervous, grow_nervous_snapshots)
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
+                      periodic_combinational_target,
                       spike_target, sr_latch, toggle_ff, oscillator, echo,
                       pattern_generator, coincidence_detector, one_shot,
                       pair_detector, temporal_xor, ordered_sequence, veto_gate,

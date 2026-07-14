@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import queue
 import random
 import sys
 import tempfile
+import threading
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -13,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evo_runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
                                 default_max_telomere)
 from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
+from evo_runtime.controller import wait_for_resume
 import lut_evo.ga as lut_ga
 import nv_evo.ga as nv_ga
 import snn_evo.ga as snn_ga
@@ -217,18 +220,21 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
 
     original = RunConfig(ga=GAConfig(
         chromosome_count=MAX_CHROMOSOME_COUNT, stagnation_beta=2.5,
-        mutation_limit=12.0))
+        mutation_limit=12.0, recombination_enabled=False))
     rebuilt = RunConfig.from_dict(dataclasses.asdict(original))
     assert rebuilt.ga.chromosome_count == MAX_CHROMOSOME_COUNT
     assert rebuilt.ga.stagnation_beta == 2.5
     assert rebuilt.ga.mutation_limit == 12.0
+    assert rebuilt.ga.recombination_enabled is False
 
     legacy = dataclasses.asdict(original)
     legacy['ga'].pop('chromosome_count')
     legacy['ga'].pop('mutation_limit')
+    legacy['ga'].pop('recombination_enabled')
     legacy_config = RunConfig.from_dict(legacy).ga
     assert legacy_config.chromosome_count is None
     assert legacy_config.mutation_limit == 8.0
+    assert legacy_config.recombination_enabled is True
 
     try:
         GAConfig(chromosome_count=MAX_CHROMOSOME_COUNT + 1)
@@ -327,6 +333,60 @@ def test_nv_reproduction_preserves_configured_count_for_children_and_immigrants(
         mean_mutations=8.0, ga_config=config)
     assert len(children) == len(population)
     assert {len(genome.chromosomes) for genome in children} == {3}
+
+
+def test_recombination_can_be_disabled_without_disabling_reproduction():
+    random.seed(1776)
+
+    nv_population = [random_hex_genome(2) for _ in range(4)]
+    lut_population = [random_lut_genome(2) for _ in range(4)]
+    snn_population = [random_genome(2) for _ in range(4)]
+    fitnesses = [1.0, 0.7, 0.4, 0.1]
+    config = GAConfig(
+        chromosome_count=2, immigrant_fraction=0.0, elite_count=2)
+
+    with mock.patch.object(
+            nv_ga, 'crossover_nv', side_effect=AssertionError('crossover called')):
+        nv_children = nv_ga.next_population(
+            nv_population, fitnesses, mean_mutations=1.0,
+            ga_config=config, recombination=False)
+    with mock.patch.object(
+            lut_ga, 'crossover_lut', side_effect=AssertionError('crossover called')):
+        lut_children = lut_ga.next_population(
+            lut_population, fitnesses, mean_mutations=1.0,
+            ga_config=config, recombination=False)
+    with mock.patch.object(
+            snn_ga, 'crossover', side_effect=AssertionError('crossover called')):
+        snn_children = snn_ga.next_population(
+            snn_population, fitnesses, chromosome_count=2,
+            recombination=False)
+
+    assert len(nv_children) == len(nv_population)
+    assert len(lut_children) == len(lut_population)
+    assert len(snn_children) == len(snn_population)
+    assert all(child is not parent for child in nv_children
+               for parent in nv_population)
+
+
+def test_pause_waits_at_boundary_and_resumes_without_losing_state():
+    pause = threading.Event()
+    stop = threading.Event()
+    messages = queue.Queue()
+    completed = threading.Event()
+    pause.set()
+
+    def run_wait():
+        wait_for_resume(pause, stop, messages)
+        completed.set()
+
+    worker = threading.Thread(target=run_wait)
+    worker.start()
+    assert messages.get(timeout=1.0) == ('paused', True)
+    assert not completed.is_set()
+    pause.clear()
+    worker.join(timeout=1.0)
+    assert completed.is_set()
+    assert messages.get(timeout=1.0) == ('paused', False)
 
 
 def test_lut_cached_immigrant_factory_preserves_requested_chromosome_count():

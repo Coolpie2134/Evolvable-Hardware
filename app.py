@@ -48,7 +48,7 @@ from snn_evo.genome import GRID_SIZE, MAX_STATE
 from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
 from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
                     nervous_case_outputs, circuit_summary_nervous,
-                    ROUTING, temporal_report)
+                    ROUTING, temporal_report, periodic_combinational_target)
 from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
@@ -411,12 +411,16 @@ class App:
         self.q            = queue.Queue()
         self._worker      = None
         self._stop_event  = threading.Event()
+        self._pause_event = threading.Event()
+        self._recombination_event = threading.Event()
+        self._recombination_event.set()
         self._poll_job    = None
         self.best_genome  = None
         self.best_fitness = 0.0
         self._gen_history = []
         self._abs_gen     = 0
         self._custom      = {}     # name -> Target for user-built targets
+        self._periodic_target_cache = {}
         self.target       = get_target(DEFAULT_TARGET)
         # what the display tabs currently reflect (set on Run / Load):
         self._disp_target  = self.target
@@ -467,11 +471,19 @@ class App:
         ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=8)
 
         self._run_btn  = ttk.Button(ctrl, text='Run',        command=self._start_ga)
+        self._pause_btn = ttk.Button(ctrl, text='Pause', command=self._toggle_pause,
+                                     state='disabled')
         self._stop_btn = ttk.Button(ctrl, text='Stop',       command=self._stop_ga, state='disabled')
         self._load_btn = ttk.Button(ctrl, text='Load Saved', command=self._load_saved)
         self._save_btn = ttk.Button(ctrl, text='Save PNGs',  command=self._save_pngs, state='disabled')
-        for b in (self._run_btn, self._stop_btn, self._load_btn, self._save_btn):
+        for b in (self._run_btn, self._pause_btn, self._stop_btn,
+                  self._load_btn, self._save_btn):
             b.pack(side='left', padx=3)
+        self._recombination_var = tk.BooleanVar(value=True)
+        self._recombination_chk = ttk.Checkbutton(
+            ctrl, text='Recombine', variable=self._recombination_var,
+            command=self._sync_recombination)
+        self._recombination_chk.pack(side='left', padx=(6, 0))
 
         # Run settings get their own row so controls remain reachable on laptop
         # screens instead of forcing a >1200 px top bar.
@@ -811,15 +823,23 @@ class App:
         d.update(self._custom)
         return d
 
+    def _periodic_target(self, target):
+        """Return one stable periodic wrapper per combinational target object."""
+        key = id(target)
+        cached = self._periodic_target_cache.get(key)
+        if cached is None:
+            cached = periodic_combinational_target(target)
+            self._periodic_target_cache[key] = cached
+        return cached
+
     def _targets_for_backend(self, backend):
-        """Targets offered in the dropdown for a backend. The LUT substrate is a
-        chaotic recurrent CA that cannot settle to input-dependent combinational
-        logic — it only works for TEMPORAL targets — so combinational targets are
-        hidden when LUT is selected (see lut_evo settling note)."""
-        if backend == 'lut':
-            d = dict(TEMPORAL_TARGETS)
-            d.update({k: v for k, v in self._custom.items()
-                      if getattr(v, 'temporal', False)})
+        """Return static SNN targets or periodic asynchronous targets."""
+        if backend in ('nervous', 'lut'):
+            d = {
+                name: (target if getattr(target, 'temporal', False)
+                       else self._periodic_target(target))
+                for name, target in self._all_targets().items()
+            }
         else:
             d = self._all_targets()
         return {
@@ -839,7 +859,8 @@ class App:
 
     def _on_target_change(self, _evt=None):
         name = self._target_var.get()
-        self.target = self._all_targets().get(name, get_target(DEFAULT_TARGET))
+        self.target = self._targets_for_backend(self._backend()).get(
+            name, get_target(DEFAULT_TARGET))
         self._cur_var.set(str(self.target.high))
         if getattr(self.target, 'temporal', False):
             if self._backend() == 'snn':          # temporal needs nervous or LUT
@@ -914,6 +935,7 @@ class App:
                 stagnation_beta=beta,
                 selection=('lexicase' if bool(self._lexicase_var.get())
                            else 'tournament'),
+                recombination_enabled=bool(self._recombination_var.get()),
                 max_telomere=max_telomere,
                 chromosome_count=chromosome_count),
             pulse=PulseConfig(delay=delay, width=width,
@@ -947,6 +969,9 @@ class App:
 
     def _on_backend_change(self, _evt=None):
         self._reconfigure_for_backend()
+        # The same combinational name maps to static SNN data or a periodic
+        # asynchronous wrapper, so refresh the selected object too.
+        self._on_target_change()
         backend = self._backend()
         if backend == 'nervous':
             self._status.set('Model: Nervous net — coincidence + inhibition + loops; '
@@ -1085,26 +1110,69 @@ class App:
         self._set_tt('Evolving %s …\n' % self.target.name)
 
         self._run_btn.config(state='disabled')
+        self._pause_btn.config(state='normal', text='Pause')
         self._stop_btn.config(state='normal')
         self._load_btn.config(state='disabled')
         self._save_btn.config(state='disabled')
         self._target_picker.set_state('disabled')
         self._backend_cb.config(state='disabled')
+        self._recombination_chk.config(state='disabled')
 
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._recombination_event = threading.Event()
+        if run_config.ga.recombination_enabled:
+            self._recombination_event.set()
         self._worker = threading.Thread(
             target=evolution_worker_entry,
             args=(gens, pop, n_chroms, tries, eff_target, arch, self.q, self._stop_event,
-                  base_seed, backend, run_config, RESULTS_DIR),
+                  base_seed, backend, run_config, RESULTS_DIR, self._pause_event,
+                  self._recombination_event),
             daemon=True)
         self._worker.start()
         self._status.set('Evolving %s [%s] …  pop=%d  gens=%d  tries=%d  seed=%d%s' %
                          (self.target.name, backend, pop, gens, tries, base_seed,
                           '  [graded]' if self._graded_var.get() else ''))
 
+    def _sync_recombination(self):
+        enabled = bool(self._recombination_var.get())
+        if enabled:
+            self._recombination_event.set()
+        else:
+            self._recombination_event.clear()
+        if self._worker is not None:
+            self._active_run_config = dataclasses.replace(
+                self._active_run_config,
+                ga=dataclasses.replace(
+                    self._active_run_config.ga,
+                    recombination_enabled=enabled))
+            state = 'ON' if enabled else 'OFF'
+            self._status.set(
+                'Recombination %s — applies to the next offspring generation.'
+                % state)
+
+    def _toggle_pause(self):
+        if self._worker is None:
+            return
+        if self._pause_event.is_set():
+            self._sync_recombination()
+            self._pause_event.clear()
+            self._pause_btn.config(text='Pause')
+            self._recombination_chk.config(state='disabled')
+            self._work_phase = 'Resuming evolution'
+            self._status.set(self._work_phase + '…')
+        else:
+            self._pause_event.set()
+            self._pause_btn.config(text='Resume')
+            self._recombination_chk.config(state='normal')
+            self._work_phase = 'Pause requested — finishing current evaluation batch'
+            self._status.set(self._work_phase + '…')
+
     def _stop_ga(self):
         self._stop_requested = True
         self._stop_event.set()
+        self._pause_event.clear()
+        self._pause_btn.config(state='disabled', text='Pause')
         self._stop_btn.config(state='disabled')
         self._work_phase = 'Stopping after the current evaluation batch'
         self._status.set(self._work_phase + '…')
@@ -1175,6 +1243,8 @@ class App:
         self._active_run_config = normalized_config
         self._beta_var.set(str(normalized_config.ga.stagnation_beta))
         self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
+        self._recombination_var.set(normalized_config.ga.recombination_enabled)
+        self._sync_recombination()
         self._chroms_var.set(str(actual_chroms))
         self._active_chroms = actual_chroms
         self._disp_backend   = saved_backend
@@ -1264,6 +1334,13 @@ class App:
                     else:
                         self._phase_detail = ('try %d, generation %d, population %d' %
                                               (current, total, amount))
+                elif kind == 'paused':
+                    paused = bool(msg[1])
+                    self._work_phase = ('Paused between generations' if paused
+                                        else 'Resuming evolution')
+                    state = 'ON' if self._recombination_event.is_set() else 'OFF'
+                    self._status.set('%s — recombination %s.' %
+                                     (self._work_phase, state))
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
                     self._n_unique_solvers = n_unique
@@ -1304,10 +1381,13 @@ class App:
                         self._pending_best = None      # final draw supersedes it
                         self._update_all(genome, fit)
                     self._run_btn.config(state='normal')
+                    self._pause_btn.config(state='disabled', text='Pause')
                     self._stop_btn.config(state='disabled')
                     self._load_btn.config(state='normal')
                     self._target_picker.set_state('normal')
                     self._backend_cb.config(state='readonly')
+                    self._recombination_chk.config(state='normal')
+                    self._pause_event.clear()
                     self._save_btn.config(
                         state='normal' if self.best_genome else 'disabled')
                     self._progress.configure(value=self._progress.cget('maximum'))
@@ -1358,6 +1438,7 @@ class App:
     def close(self):
         """Stop background work and scheduled callbacks before closing Tk."""
         self._stop_event.set()
+        self._pause_event.clear()
         for tab in (getattr(self, '_interactive', None),
                     getattr(self, '_designer', None)):
             if tab is not None:

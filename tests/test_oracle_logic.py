@@ -12,7 +12,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo import TEMPORAL_TARGETS                        # noqa: E402
+from nv_evo import (TEMPORAL_TARGETS,                      # noqa: E402
+                    periodic_combinational_target)
 from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            orc_toggle, make_pulse_doubler,
                            orc_period_doubler, orc_period_tripler, ORACLE_SPECS,
@@ -21,6 +22,7 @@ from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            make_collision_serializer,
                            make_watchdog)
 from nv_evo.temporal import TemporalTraces, event_score     # noqa: E402
+from snn_evo.targets import gate_target                     # noqa: E402
 
 
 def _trace(fn, seq):
@@ -29,6 +31,39 @@ def _trace(fn, seq):
         ob, st = fn(inb, st)
         out.append(ob[0])
     return out
+
+
+def test_binary_truth_tables_become_phase_locked_periodic_targets():
+    target = periodic_combinational_target(gate_target('AND'))
+    assert target.temporal
+    assert target.score_mode == 'events'
+    assert target.supported_backends == ('nervous', 'lut')
+    assert len(target.trials) == 4  # two row orders at two phases
+    assert 'tick' not in target.description.lower()
+
+    # Every lane's complete truth-table waveform repeats exactly each cycle.
+    cycle = 4 * 4  # four AND rows, four seconds per row
+    for trial in target.trials:
+        for lane in range(target.n_inputs):
+            events = [second for second, row in enumerate(trial.streams)
+                      if row[lane]]
+            first_cycle = [event for event in events if event < events[0] + cycle]
+            assert events[:len(first_cycle)] == first_cycle
+            assert events[len(first_cycle):2 * len(first_cycle)] == [
+                event + cycle for event in first_cycle]
+
+    role = target.outputs[0].role
+    expected = [trial.expected_events[role] for trial in target.trials]
+    exact = TemporalTraces(
+        {role: [[] for _ in target.trials]}, events={role: expected})
+    assert event_score(exact, target) == 1.0
+
+    # One autonomous oscillator cannot satisfy all rows/phases of an AND gate.
+    oscillator = [[4.0 + 4.0 * index for index in range(5)]
+                  for _ in target.trials]
+    free_running = TemporalTraces(
+        {role: [[] for _ in target.trials]}, events={role: oscillator})
+    assert event_score(free_running, target) < 1.0
 
 
 def test_c_element_is_a_rendezvous():

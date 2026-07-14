@@ -796,7 +796,7 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
 
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, ga_config=None,
-                    chromosome_count=None):
+                    chromosome_count=None, recombination=True):
     """One generation of a steady, exploratory GA — elitism + immigrants +
     recombination/mutation, parents via ε-lexicase when per-case vectors are
     available (temporal targets), else tournament. This operator stays full
@@ -882,7 +882,9 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         return population[first], population[second]
 
     while len(new_pop) < pop:
-        ca, cb = crossover_lut(*parent_pair())
+        pa, pb = parent_pair()
+        ca, cb = (crossover_lut(pa, pb) if recombination else
+                  (clone_genome(pa), clone_genome(pb)))
         max_telomere = (MAX_TELOMERE if ga_config is None
                         else ga_config.max_telomere)
         new_pop.append(mutate_lut(

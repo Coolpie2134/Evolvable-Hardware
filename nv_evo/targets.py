@@ -110,6 +110,88 @@ def describe_target(goal, scoring, tests):
         goal.strip(), scoring.strip(), tests.strip())
 
 
+def periodic_combinational_target(target, period=4, repeats=5, latency=1):
+    """Encode a static binary truth table as asynchronous periodic signals.
+
+    Each input lane emits a point event for a 1 and remains silent for a 0 while
+    the complete truth table repeats. Outputs use the same event encoding. The
+    full-cycle schedule avoids an impossible isolated all-zero trial in the
+    event-driven nervous model, while alternate row orders and phases prevent a
+    fixed oscillator from replacing input-dependent logic.
+    """
+    period = int(period)
+    repeats = int(repeats)
+    latency = int(latency)
+    if period < 2 or repeats < 2 or latency < 0:
+        raise ValueError('period/repeats/latency must be >= 2, >= 2, and >= 0')
+
+    n_inputs = int(target.n_inputs)
+    n_outputs = int(target.n_outputs)
+    span = max(n_inputs, n_outputs, 2)
+    grid_size = max(5, 2 * span + 1)
+    inputs = [(0, 2 * index + 1) for index in range(n_inputs)]
+    output_ys = ([grid_size // 2] if n_outputs == 1 else [
+        int(round(1 + index * (grid_size - 3) / (n_outputs - 1)))
+        for index in range(n_outputs)
+    ])
+    outputs = [OutputTerminal(term.role, (2, output_ys[index]))
+               for index, term in enumerate(target.outputs)]
+
+    cases = list(target.cases)
+    if not cases:
+        raise ValueError('periodic combinational targets require truth-table cases')
+
+    def active_first(rows):
+        """Rotate, without dropping any row, so activity seeds each schedule."""
+        start = next((index for index, (bits, _) in enumerate(rows)
+                      if any(bits)), 0)
+        return rows[start:] + rows[:start]
+
+    schedules = [active_first(cases)]
+    alternate = active_first(list(reversed(cases)))
+    if alternate != schedules[0]:
+        schedules.append(alternate)
+
+    phases = (2, 3)
+    cycle = len(cases) * period
+    T = max(phases) + repeats * cycle + latency + 2
+    trials = []
+    for schedule in schedules:
+        for phase in phases:
+            streams = [[0] * n_inputs for _ in range(T)]
+            expected = {}
+            expected_events = {}
+            for output_index, terminal in enumerate(outputs):
+                events = []
+                for repetition in range(repeats):
+                    for slot, (input_bits, output_bits) in enumerate(schedule):
+                        tick = phase + (repetition * len(schedule) + slot) * period
+                        for lane, bit in enumerate(input_bits):
+                            if bit:
+                                streams[tick][lane] = 1
+                        if output_bits[output_index]:
+                            events.append(float(tick + latency))
+                event_set = set(events)
+                expected[terminal.role] = [
+                    1 if float(tick) in event_set else 0 for tick in range(T)]
+                expected_events[terminal.role] = events
+            trials.append(Trial(
+                [tuple(row) for row in streams], expected, expected_events))
+
+    return TemporalTarget(
+        target.name, inputs, outputs, T, trials,
+        grid_size=grid_size, iters=30, score_mode='events', latency=latency,
+        supported_backends=('nervous', 'lut'),
+        description=describe_target(
+            'Compute the %s binary truth table as a repeating signal: each row '
+            'lasts %d seconds, input 1 emits an event, and input 0 is silent. '
+            'Each output must repeat its corresponding event pattern.'
+            % (target.name, period), EVENT_SCORING,
+            'All %d truth-table rows repeat in full cycles using alternate row '
+            'orders and two phases, preventing a fixed oscillator from replacing '
+            'input-dependent logic.' % len(target.cases)))
+
+
 EVENT_SCORING = (
     'Match output edges one-to-one. One latency offset is shared '
     'by every test; missing and extra edges both reduce fitness.')

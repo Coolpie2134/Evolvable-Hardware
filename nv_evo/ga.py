@@ -602,7 +602,7 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
 
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, selection=None, ga_config=None,
-                    chromosome_count=None):
+                    chromosome_count=None, recombination=True):
     """One generation of a steady, exploratory GA — elitism preserves the best,
     the rest are tournament/ε-lexicase parents recombined and mutated, plus a
     few random immigrants that keep exploration alive.
@@ -721,7 +721,9 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         return population[first], population[second]
 
     while len(new_pop) < pop:
-        ca, cb = crossover_nv(*parent_pair())
+        pa, pb = parent_pair()
+        ca, cb = (crossover_nv(pa, pb) if recombination else
+                  (clone_genome(pa), clone_genome(pb)))
         new_pop.append(mutate_nv(
             ca, mean_mutations,
             max_telomere=(MAX_TELOMERE if ga_config is None

@@ -324,7 +324,8 @@ def tournament(population, fitnesses):
     idx = random.sample(range(len(population)), min(TOURNAMENT_K, len(population)))
     return population[max(idx, key=lambda i: rank_key(population[i], fitnesses[i]))]
 
-def next_population(population, fitnesses, chromosome_count=None):
+def next_population(population, fitnesses, chromosome_count=None,
+                    recombination=True):
     """One generation of offspring only.
 
     Elites are a recombination parent pool, not verbatim survivors.  The
@@ -379,7 +380,9 @@ def next_population(population, fitnesses, chromosome_count=None):
 
     new_pop = []
     while len(new_pop) < pop:
-        ca, cb = crossover(*parent_pair())
+        pa, pb = parent_pair()
+        ca, cb = (crossover(pa, pb) if recombination else
+                  (clone_genome(pa), clone_genome(pb)))
         new_pop.append(mutate(ca, chromosome_count=chromosome_count))
         if len(new_pop) < pop:
             new_pop.append(mutate(cb, chromosome_count=chromosome_count))

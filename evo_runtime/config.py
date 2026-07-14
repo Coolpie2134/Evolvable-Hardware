@@ -26,6 +26,9 @@ class GAConfig:
     mutation_decay: float = 0.997
     stagnation_beta: float = DEFAULT_STAGNATION_BETA
     selection: str = 'tournament'
+    # When false, selected parents are cloned separately and then mutated;
+    # crossover is skipped without turning mutation or immigration off.
+    recombination_enabled: bool = True
     max_telomere: int = DEFAULT_MAX_TELOMERE
     # ``None`` keeps the legacy/direct-API behaviour where chromosome count may
     # evolve. GUI runs set this explicitly: the "Chroms" option is a structural
@@ -53,6 +56,8 @@ class GAConfig:
             raise ValueError('stagnation_beta must be between 0 and 10')
         if self.selection not in ('tournament', 'lexicase'):
             raise ValueError('selection must be tournament or lexicase')
+        if not isinstance(self.recombination_enabled, bool):
+            raise ValueError('recombination_enabled must be boolean')
         if self.max_telomere < 1 or self.cache_size < 1:
             raise ValueError('max_telomere and cache_size must be positive')
         if (self.chromosome_count is not None
