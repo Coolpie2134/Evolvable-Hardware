@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nv_evo import TEMPORAL_TARGETS                        # noqa: E402
 from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            orc_toggle, make_pulse_doubler,
-                           orc_period_doubler, ORACLE_SPECS,
+                           orc_period_doubler, orc_period_tripler, ORACLE_SPECS,
                            make_refractory_filter,
                            make_a_first_rendezvous,
                            make_collision_serializer,
@@ -108,6 +108,113 @@ def test_period_doubler_bank_mixes_periods():
     assert silent >= 1
     assert 'Period doubler (oracle)' in ORACLE_SPECS
     assert 'Pulse doubler (oracle)' in ORACLE_SPECS   # width variant kept available
+
+
+def test_period_tripler_has_three_times_the_input_period():
+    for period in (2, 3, 4):
+        seq = [(1 if tick % period == 0 else 0,)
+               for tick in range(6 * period + 1)]
+        fired = [tick for tick, value in enumerate(
+            _trace(orc_period_tripler, seq)) if value]
+        assert fired == [0, 3 * period, 6 * period], (period, fired)
+    assert sum(_trace(orc_period_tripler, [(0,)] * 10)) == 0
+
+
+def test_period_tripler_bank_mixes_periods_and_has_silent_guard():
+    target = TEMPORAL_TARGETS['Period tripler (3x)']
+    assert target.score_mode == 'events'
+    periods, silent = set(), 0
+    for trial in target.trials:
+        ticks = [tick for tick, bits in enumerate(trial.streams) if bits[0]]
+        if not ticks:
+            silent += 1
+            assert not trial.expected_events['Q']
+            continue
+        gaps = {right - left for left, right in zip(ticks, ticks[1:])}
+        assert len(gaps) == 1
+        period = gaps.pop()
+        periods.add(period)
+        output = trial.expected_events['Q']
+        assert all(right - left == 3 * period
+                   for left, right in zip(output, output[1:]))
+    assert len(periods) >= 2 and silent >= 1
+    assert 'Period tripler (oracle)' in ORACLE_SPECS
+
+
+def test_period_halver_measures_then_emits_at_half_period():
+    target = TEMPORAL_TARGETS['Period halver (1/2x)']
+    assert target.score_mode == 'events'
+    periods, silent = set(), 0
+    for trial in target.trials:
+        ticks = [tick for tick, bits in enumerate(trial.streams) if bits[0]]
+        output = trial.expected_events['Q']
+        if not ticks:
+            silent += 1
+            assert not output
+            continue
+        input_gaps = {right - left for left, right in zip(ticks, ticks[1:])}
+        assert len(input_gaps) == 1
+        period = input_gaps.pop()
+        periods.add(period)
+        assert period >= 4 and period % 2 == 0
+        assert output[0] == ticks[1] + target.latency
+        assert all(right - left == period / 2
+                   for left, right in zip(output, output[1:]))
+    assert len(periods) >= 2 and silent >= 1
+    assert 'Period halver (oracle)' in ORACLE_SPECS
+
+
+def test_temporal_sum_encodes_delta_a_plus_delta_b():
+    name = 'Temporal sum (ΔA + ΔB)'
+    target = TEMPORAL_TARGETS[name]
+    assert target.score_mode == 'events' and target.n_inputs == 2
+    sums, positive, guards = set(), 0, 0
+    for trial in target.trials:
+        a_ticks = [tick for tick, bits in enumerate(trial.streams) if bits[0]]
+        b_ticks = [tick for tick, bits in enumerate(trial.streams) if bits[1]]
+        output = trial.expected_events['Q']
+        if len(a_ticks) == len(b_ticks) == 2:
+            gap_a = a_ticks[1] - a_ticks[0]
+            gap_b = b_ticks[1] - b_ticks[0]
+            assert len(output) == 2
+            assert output[1] - output[0] == gap_a + gap_b
+            assert output[0] == max(a_ticks[1], b_ticks[1]) + target.latency
+            sums.add(gap_a + gap_b)
+            positive += 1
+        else:
+            assert not output
+            guards += 1
+    assert positive >= 8 and guards >= 4 and len(sums) >= 4
+    assert 'Temporal sum (oracle)' in ORACLE_SPECS
+    fresh = ORACLE_SPECS['Temporal sum (oracle)'](seed=404)
+    assert [trial.streams for trial in target.trials] != [
+        trial.streams for trial in fresh.trials]
+
+
+def test_new_interval_targets_reject_direct_wires_and_fixed_oscillators():
+    names = (
+        'Period tripler (3x)',
+        'Period halver (1/2x)',
+        'Temporal sum (ΔA + ΔB)',
+    )
+    for name in names:
+        target = TEMPORAL_TARGETS[name]
+        direct = [[
+            float(tick + target.latency)
+            for tick, bits in enumerate(trial.streams)
+            if bits[0] and tick + target.latency < target.T
+        ] for trial in target.trials]
+        oscillator = [[float(tick) for tick in range(2, target.T, 4)]
+                      for _trial in target.trials]
+
+        def score(events):
+            traces = TemporalTraces(
+                {'Q': [[] for _trial in target.trials]},
+                events={'Q': events})
+            return event_score(traces, target)
+
+        assert score(direct) < 0.75, (name, score(direct))
+        assert score(oscillator) < 0.70, (name, score(oscillator))
 
 
 def test_pair_gap_two_widths_is_physical_and_relative():

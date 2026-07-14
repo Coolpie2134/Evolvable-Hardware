@@ -147,6 +147,14 @@ def orc_period_doubler(inb, st):
     return (0,), parity
 
 
+def orc_period_tripler(inb, st):
+    """Divide the input edge rate by three: emit on edge 1, 4, 7, ... ."""
+    phase = st or 0
+    if inb[0]:
+        return (1 if phase == 0 else 0,), (phase + 1) % 3
+    return (0,), phase
+
+
 def make_c_element():
     """Muller C-element in transition signalling — a 2-input rendezvous / join.
 
@@ -401,6 +409,18 @@ def _event_bank_target(name, oracle, inputs, pulse_banks, T, latency,
         name, list(inputs), [OutputTerminal('Q', out_pos)], T, trials,
         grid_size=grid_size, iters=30, description=description,
         score_mode='events', latency=latency)
+
+
+def _explicit_event_trial(T, n_inputs, pulses, output_events):
+    """Build one dense-display/raw-event trial from integer event times."""
+    ons = {index: set(map(int, ticks)) for index, ticks in pulses.items()}
+    streams = [tuple(1 if tick in ons.get(index, ()) else 0
+                     for index in range(n_inputs))
+               for tick in range(T)]
+    events = sorted(float(tick) for tick in output_events if 0 <= tick < T)
+    event_set = set(events)
+    expected = [1 if float(tick) in event_set else 0 for tick in range(T)]
+    return Trial(streams, {'Q': expected}, {'Q': events})
 
 
 def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None):
@@ -726,6 +746,127 @@ def period_doubler_oracle(seed=20260702, periods=(2, 3, 4)):
         score_mode='events', latency=latency)
 
 
+def period_tripler_oracle(seed=20260702, periods=(2, 3, 4)):
+    """Mixed-period edge trains whose output interval must be exactly 3p."""
+    periods = tuple(int(period) for period in periods)
+    if not periods or any(period < 2 for period in periods):
+        raise ValueError('period tripler requires input periods of at least 2')
+    T, latency, rng = 42, 1, random.Random(seed)
+    trials = []
+
+    def add(ticks):
+        on = set(ticks)
+        streams = [(1 if tick in on else 0,) for tick in range(T)]
+        exp = label_trace(orc_period_tripler, streams, T, latency)
+        events = [float(tick) for tick, value in enumerate(exp) if value == 1]
+        trials.append(Trial(streams, {'Q': exp}, {'Q': events}))
+
+    for period in periods:
+        for _ in range(3):
+            phase = rng.randint(1, period + 2)
+            add([phase + index * period
+                 for index in range((T - 2 - phase) // period + 1)])
+    add([])
+    return TemporalTarget(
+        'Period tripler (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
+        T, trials, grid_size=5, iters=30,
+        description=describe_target(
+            'Triple the input period: for a periodic input of period p, emit '
+            'every third input edge so consecutive Q events are separated by '
+            '3p seconds.', EVENT_SCORING,
+            'Three phase-varied schedules for each input period in %s plus a '
+            'silent guard. Mixed periods prevent a fixed oscillator from '
+            'matching the bank.' % (periods,)),
+        score_mode='events', latency=latency)
+
+
+def period_halver_oracle(seed=20260702, periods=(4, 6, 8)):
+    """Measure p, then insert a midpoint edge to produce output period p/2.
+
+    The first input interval is a causal measurement window and produces no
+    scored output. From the second edge onward, Q fires at each input edge and
+    halfway to the next one using the measured period. Period 2 is excluded:
+    halving it would create an edge every second, which wired-OR represents as
+    one held level rather than a periodic edge train.
+    """
+    periods = tuple(int(period) for period in periods)
+    if (not periods
+            or any(period < 4 or period % 2 for period in periods)):
+        raise ValueError('period halver requires even input periods >= 4')
+    T, latency, rng = 50, 1, random.Random(seed)
+    trials = []
+    for period in periods:
+        for _ in range(3):
+            phase = rng.randint(1, period + 1)
+            ticks = [phase + index * period
+                     for index in range((T - 3 - phase) // period + 1)]
+            output = []
+            for edge in ticks[1:]:              # first interval measures p
+                output.extend((edge + latency,
+                               edge + period // 2 + latency))
+            trials.append(_explicit_event_trial(
+                T, 1, {0: ticks}, output))
+    trials.append(_explicit_event_trial(T, 1, {}, []))
+    return TemporalTarget(
+        'Period halver (oracle)', [(0, 2)], [OutputTerminal('Q', (2, 2))],
+        T, trials, grid_size=5, iters=30,
+        description=describe_target(
+            'Halve the input period: after measuring one complete interval p, '
+            'emit Q at the input cadence and at each midpoint so consecutive '
+            'Q events are p/2 seconds apart.', EVENT_SCORING,
+            'Three phase-varied schedules for each even period in %s plus a '
+            'silent guard. The mixed periods require measurement rather than '
+            'a fixed-rate oscillator.' % (periods,)),
+        score_mode='events', latency=latency)
+
+
+def temporal_sum_oracle(seed=20260702):
+    """Encode ΔA + ΔB as the interval between two output events.
+
+    Each positive trial supplies exactly two A events and two B events. Once
+    both input intervals are complete, Q emits a start event and a finish event
+    separated by their sum. Incomplete and silent trials require no output.
+    """
+    T, latency, rng = 48, 1, random.Random(seed)
+    interval_pairs = [
+        (2, 3), (3, 4), (4, 2), (5, 3), (2, 6),
+        (4, 5), (3, 6), (5, 2), (6, 4),
+    ]
+    rng.shuffle(interval_pairs)
+    trials = []
+    for gap_a, gap_b in interval_pairs:
+        start_a = rng.randint(2, 7)
+        start_b = rng.randint(2, 7)
+        a_ticks = [start_a, start_a + gap_a]
+        b_ticks = [start_b, start_b + gap_b]
+        complete = max(a_ticks[-1], b_ticks[-1])
+        first_q = complete + latency
+        trials.append(_explicit_event_trial(
+            T, 2, {0: a_ticks, 1: b_ticks},
+            [first_q, first_q + gap_a + gap_b]))
+
+    # Neither lane alone, one unmeasurable event per lane, nor silence defines
+    # two intervals, so all of these must remain quiet.
+    trials.extend([
+        _explicit_event_trial(T, 2, {0: [3, 7]}, []),
+        _explicit_event_trial(T, 2, {1: [4, 9]}, []),
+        _explicit_event_trial(T, 2, {0: [3], 1: [6]}, []),
+        _explicit_event_trial(T, 2, {}, []),
+    ])
+    return TemporalTarget(
+        'Temporal sum (oracle)', [(0, 1), (0, 3)],
+        [OutputTerminal('Q', (2, 2))], T, trials,
+        grid_size=5, iters=30,
+        description=describe_target(
+            'Measure the interval ΔA between two A events and ΔB between two B '
+            'events, then emit two Q events separated by ΔA + ΔB seconds.',
+            EVENT_SCORING,
+            'Nine seeded schedules vary both intervals and lane ordering. '
+            'A-only, B-only, incomplete, and silent guards forbid direct '
+            'connections and fixed bursts.'),
+        score_mode='events', latency=latency)
+
+
 def c_element_oracle(seed=20260702):
     """Balanced rendezvous schedules that require influence from both inputs.
 
@@ -932,6 +1073,9 @@ ORACLE_SPECS = {
     'One-shot (oracle)':          one_shot_oracle,
     'Pulse doubler (oracle)':     pulse_doubler_oracle,
     'Period doubler (oracle)':    period_doubler_oracle,
+    'Period tripler (oracle)':    period_tripler_oracle,
+    'Period halver (oracle)':     period_halver_oracle,
+    'Temporal sum (oracle)':      temporal_sum_oracle,
     'Pair detector (oracle)':     pair_oracle,
     'Pair gap 2x width (oracle)': pair_two_widths_oracle,
     'Period stepper (oracle)':    period_stepper_oracle,
