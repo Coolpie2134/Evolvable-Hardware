@@ -11,8 +11,9 @@ its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
     optional inhibitory veto. States 0-15 are the paper's Fig. 3 table (op = AND;
     each a buffer or an AND, the paper has no disjunction); states 16-31 are OR
     twins (op = OR, fire on either excitatory input) — a non-paper extension;
-  * dynamics are asynchronous edge-triggered pulses (pulse.py): a triggered
-    node emits a fixed-width pulse after a fixed delay; inputs are injected
+  * dynamics are asynchronous edge-triggered pulses (pulse.py): the paper model
+    emits fixed-width pulses after fixed delay, while optional node models evolve
+    width or preserve the incoming waveform with an evolved delay; inputs inject
     onto the perimeter nets (wired-OR). Nothing happens without an input, and
     memory / oscillation are a pulse circulating around a loop of buffers
     "until stopped by application of an inhibitory input" (delay-line memory);

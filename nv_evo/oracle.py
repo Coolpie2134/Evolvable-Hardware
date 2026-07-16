@@ -155,6 +155,42 @@ def orc_period_tripler(inb, st):
     return (0,), phase
 
 
+def make_a_parity_query():
+    """Count A edges modulo two; B queries the retained parity.
+
+    B does not clear the count, so repeated B queries return the same answer
+    until another A edge changes parity. If A and B coincide, A is counted
+    before that B query.
+    """
+    def f(inb, st):
+        odd = bool(st)
+        if inb[0]:
+            odd = not odd
+        return (1 if inb[1] and odd else 0,), odd
+    return f
+
+
+def make_a_mod3_query():
+    """B emits when at least three A edges have occurred and count(A) % 3 = 0."""
+    def f(inb, st):
+        count = st or 0
+        if inb[0]:
+            count += 1
+        return (1 if inb[1] and count > 0 and count % 3 == 0 else 0,), count
+    return f
+
+
+def make_a_batch_parity_query():
+    """B queries whether the A count since the previous B is odd, then clears."""
+    def f(inb, st):
+        odd = bool(st)
+        if inb[0]:
+            odd = not odd
+        output = 1 if inb[1] and odd else 0
+        return (output,), False if inb[1] else odd
+    return f
+
+
 def make_c_element():
     """Muller C-element in transition signalling — a 2-input rendezvous / join.
 
@@ -411,6 +447,47 @@ def _event_bank_target(name, oracle, inputs, pulse_banks, T, latency,
         score_mode='events', latency=latency)
 
 
+# A widened pulse must FALL strictly before the next event on the same lane
+# rises: at zero clearance the models disagree (the legacy engine emits a new
+# edge at a touch, width-preserving transport unions touching drives into one
+# waveform), and any overlap merges two labelled stimulus events into ONE
+# physical edge — unreachable expected output in every model.
+_WIDTH_CLEARANCE = 0.5
+
+
+def _mix_event_widths(target, rng):
+    """Give every event-bank input varied physical widths without moving edges.
+
+    Widths are clamped so a widened pulse can never reach the next event on its
+    lane (see _WIDTH_CLEARANCE). Today's banks keep same-lane spacing >= 3 so
+    the clamp is a no-op; it exists so a future tighter bank cannot silently
+    erase input edges the reference oracle already counted.
+    """
+    widths = (0.5, 0.75, 1.0, 1.25, 1.75, 2.25)
+    offset = rng.randrange(len(widths))
+    serial = 0
+    for trial in target.trials:
+        lanes = []
+        for input_index in range(target.n_inputs):
+            ticks = [tick for tick, row in enumerate(trial.streams)
+                     if row[input_index]]
+            events = []
+            for position, tick in enumerate(ticks):
+                width = widths[(offset + serial) % len(widths)]
+                serial += 1
+                if position + 1 < len(ticks):
+                    gap = float(ticks[position + 1] - tick)
+                    width = min(width, gap - _WIDTH_CLEARANCE)
+                if width <= 0:
+                    raise ValueError(
+                        'event bank spacing too tight to widen pulses on lane '
+                        '%d of %r' % (input_index, target.name))
+                events.append((float(tick), width))
+            lanes.append(events)
+        trial.input_events = lanes
+    return target
+
+
 def _explicit_event_trial(T, n_inputs, pulses, output_events):
     """Build one dense-display/raw-event trial from integer event times."""
     ons = {index: set(map(int, ticks)) for index, ticks in pulses.items()}
@@ -423,18 +500,30 @@ def _explicit_event_trial(T, n_inputs, pulses, output_events):
     return Trial(streams, {'Q': expected}, {'Q': events})
 
 
-def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None):
+def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None,
+                  physics_from=None):
     """Score fresh schedules with training readout and alignment frozen.
     The spec's default target supplies training schedules; ``seed`` supplies
-    validation schedules. Pass ``fitted`` to reuse one training fit."""
+    validation schedules. Pass ``fitted`` to reuse one training fit.
+
+    ``physics_from`` is the training target carrying the run's physics config
+    (pulse/lut); it is copied onto the freshly built spec targets so validation
+    runs under the SAME node-timing model as training (else a non-default model
+    would be scored under the default uniform physics — see certification.py)."""
     from .evaluation import fit_readout, score_frozen
+    from .certification import carry_physics
+
+    def build(**kwargs):
+        target = spec(**kwargs)
+        return target if physics_from is None else carry_physics(physics_from, target)
+
     if fitted is None:
-        fitted = fit_readout(genome, spec(), backend=backend)
+        fitted = fit_readout(genome, build(), backend=backend)
     if fitted is None:
         return 0.0
     if fitted.backend != backend:
         raise ValueError('fitted readout backend does not match holdout backend')
-    return score_frozen(genome, spec(seed=seed), fitted)
+    return score_frozen(genome, build(seed=seed), fitted)
 
 
 # ── preset oracle targets (input-driven relations) ──────────────────────────────
@@ -584,6 +673,7 @@ def pair_two_widths_oracle(seed=20260702, pulse_width=None):
         event_tolerance=0.15 * width,
         event_max_shift=max(12.0, 12.0 * width),
         supported_backends=('nervous', 'lut'),
+        category='Pulse width & duration',
         description=describe_target(
             'Emit Q when two physical input-pulse leading edges are separated by '
             'exactly twice the input pulse width (2w).',
@@ -703,7 +793,234 @@ def pulse_doubler_oracle(seed=20260702, widths=(1, 2, 3)):
             % (tuple(widths),), PERSISTENCE_SCORING,
             'Seeded single- and double-pulse schedules across every width plus '
             'a silent guard trial.'),
-        score_mode='trace', latency=latency)
+        score_mode='trace', latency=latency,
+        category='Pulse width & duration')
+
+
+def pulse_width_sum_oracle(seed=20260716):
+    """Emit one Q pulse whose duration is width(A) + width(B).
+
+    One shared output-latency offset is fitted across the whole bank. Fitness is
+    therefore about accumulating the two durations into Q, not choosing one
+    topology-specific absolute response time.
+    """
+    rng = random.Random(seed)
+    pairs = ((0.5, 1.0), (1.5, 0.75), (2.5, 1.25),
+             (0.75, 2.25), (1.0, 3.0), (2.0, 0.5))
+    trials = []
+    for index, (width_a, width_b) in enumerate(pairs):
+        phase = rng.uniform(1.0, 2.5)
+        offset = (0.0, 0.4, 1.1)[index % 3]
+        events = [[(phase, width_a)], [(phase + offset, width_b)]]
+        start = max(phase, phase + offset) + 1.0
+        expected = [(start, start + width_a + width_b)]
+        trials.append(Trial(
+            [(0, 0)] * 24, {'Q': [0] * 24}, input_events=events,
+            expected_intervals={'Q': expected}))
+    # Missing-input and silence guards: addition requires one pulse from both.
+    trials.extend([
+        Trial([(0, 0)] * 24, {'Q': [0] * 24},
+              input_events=[[(2.0, 1.5)], []],
+              expected_intervals={'Q': []}),
+        Trial([(0, 0)] * 24, {'Q': [0] * 24},
+              input_events=[[], [(2.0, 1.5)]],
+              expected_intervals={'Q': []}),
+        Trial([(0, 0)] * 24, {'Q': [0] * 24}, input_events=[[], []],
+              expected_intervals={'Q': []}),
+    ])
+    return TemporalTarget(
+        'Pulse width sum (oracle)', [(0, 1), (0, 3)],
+        [OutputTerminal('Q', (2, 2))], 24, trials,
+        grid_size=5, iters=30, score_mode='waveform', fit_latency=True,
+        waveform_tolerance=0.20, supported_backends=('nervous',),
+        supported_models=('pulse_delay',),
+        category='Pulse width & duration',
+        waveform_contract='width_sum',
+        description=describe_target(
+            'For one A pulse and one B pulse, emit one Q pulse whose '
+            'width equals width(A) + width(B).',
+            'Score the complete Q interval. One shared response-latency offset '
+            'is fitted, but its measured duration must equal the width sum.',
+            'Six fractional-phase width pairs vary both widths and overlap; '
+            'A-only, B-only, and silent trials guard false output.'))
+
+
+def odd_pulse_selector_oracle(seed=20260716):
+    """Pass the 1st, 3rd, 5th... A pulse, preserving each selected width."""
+    rng = random.Random(seed)
+    width_banks = (
+        (), (0.5,), (1.75, 0.75), (2.5, 0.5, 1.25),
+        (0.75, 2.0, 0.5, 1.5), (1.0, 2.25, 0.75, 1.75, 0.5),
+    )
+    trials = []
+
+    def add(events):
+        expected = [(start + 1.0, start + 1.0 + width)
+                    for index, (start, width) in enumerate(events)
+                    if index % 2 == 0]
+        last = max((start + width for start, width in events), default=0.0)
+        T = max(24, int(math.ceil(last + 4.0)))
+        trials.append(Trial(
+            [(0,)] * T, {'Q': [0] * T}, input_events=[events],
+            expected_intervals={'Q': expected}))
+
+    for widths in width_banks:
+        cursor = rng.uniform(1.0, 2.0)
+        events = []
+        for width in widths:
+            events.append((cursor, width))
+            cursor += width + rng.uniform(1.0, 1.75)
+        add(events)
+
+    # ANTI-TIMING banks. The plain banks alone do NOT enforce index counting:
+    # every start-to-start gap there is shorter than any two chained gaps, so a
+    # parity-free REFRACTORY FILTER with one fixed dead time reproduced every
+    # schedule exactly (measured: D ~= 4.1 scored 1.0). These three schedules
+    # make every fixed dead time fail on SEVERAL trials at once: 2nd pulses
+    # must be SUPPRESSED across long >= 5.75s gaps (any filter still passing
+    # there needs D beyond them), while 3rd pulses must be PASSED only ~3s or
+    # ~1.5s after the previous accepted one (needs D below that, start- or
+    # end-referenced). Only counting the input index satisfies all banks; the
+    # best fixed dead time now measures ~0.87, safely below the 0.90
+    # certification bar (see tests/test_pulse_models.py).
+    start = rng.uniform(1.0, 2.0)
+    add([(start, 0.5),
+         (start + rng.uniform(5.75, 7.0), rng.choice((0.75, 1.0, 1.25)))])
+    start = rng.uniform(1.0, 2.0)
+    first_gap, second_gap = rng.uniform(1.3, 1.6), rng.uniform(1.3, 1.6)
+    add([(start, 0.5), (start + first_gap, 0.5),
+         (start + first_gap + second_gap, 0.75)])
+    start = rng.uniform(1.0, 2.0)
+    long_a, long_b = rng.uniform(5.75, 7.0), rng.uniform(5.75, 7.0)
+    quick = rng.uniform(1.3, 1.6)
+    add([(start, 0.5), (start + long_a, 0.75),
+         (start + long_a + quick, 0.75),
+         (start + long_a + quick + long_b, 0.5)])
+
+    horizon = max(len(trial.streams) for trial in trials)
+    for trial in trials:
+        trial.streams.extend([(0,)] * (horizon - len(trial.streams)))
+        trial.expected['Q'].extend([0] * (horizon - len(trial.expected['Q'])))
+    return TemporalTarget(
+        'Odd pulse selector (oracle)', [(0, 2)],
+        [OutputTerminal('Q', (2, 2))], horizon, trials,
+        grid_size=5, iters=30, score_mode='waveform', fit_latency=True,
+        waveform_tolerance=0.20, supported_backends=('nervous',),
+        supported_models=('pulse_delay',),
+        category='Pulse width & duration',
+        waveform_contract='odd_selector',
+        description=describe_target(
+            'Pass A pulses numbered 1, 3, 5, ... to Q, suppress pulses numbered '
+            '2, 4, 6, ... and preserve every passed pulse width.',
+            'Score every complete Q interval, so both parity selection and the '
+            'rise-to-fall duration of each selected pulse must be correct.',
+            'Banks contain zero through five pulses with mixed widths, fractional '
+            'phases, and varied gaps; the empty bank guards autonomous output. '
+            'Two adversarial schedules (a suppressed pulse after a long gap, an '
+            'accepted third pulse after quick ones) defeat fixed dead-time '
+            'refractory filters, so only counting the pulse index passes.'))
+
+
+def a_parity_query_oracle(seed=20260716):
+    """B emits Q exactly when the cumulative number of A edges is odd."""
+    rng = random.Random(seed)
+    banks = []
+    # Each mixed schedule queries initial even parity, queries odd parity twice
+    # (proving B does not reset it), returns to even, adds two more A edges
+    # (still even), then returns to odd. Only the timings vary across trials.
+    operations = ('B', 'A', 'B', 'B', 'A', 'B', 'A', 'A', 'B', 'A', 'B')
+    for _ in range(10):
+        cursor = rng.randint(2, 3)
+        a_ticks, b_ticks = [], []
+        for operation in operations:
+            (a_ticks if operation == 'A' else b_ticks).append(cursor)
+            cursor += rng.randint(3, 4)
+        banks.append({0: a_ticks, 1: b_ticks})
+    guard = rng.randint(2, 4)
+    banks.extend([
+        {0: [guard, guard + 4, guard + 8, guard + 13]},
+        {1: [guard, guard + 4, guard + 9, guard + 14]},
+        {},
+    ])
+    target = _event_bank_target(
+        'A parity query (oracle)', make_a_parity_query(),
+        [(0, 1), (0, 3)], banks, T=48, latency=2,
+        description=describe_target(
+            'Count input A events cumulatively. Whenever B fires, emit Q if '
+            'the number of A events seen so far is odd; remain silent if it is '
+            'even.', EVENT_SCORING,
+            'Ten seeded schedules query both parities, repeat B without changing '
+            'the count, and add consecutive A events. A-only, B-only, and silent '
+            'guards reject direct echoes and autonomous output. B does not reset '
+            'the retained parity. Pulse widths vary from 0.5 to 2.25 seconds; '
+            'each pulse counts once regardless of its duration.'))
+    return _mix_event_widths(target, rng)
+
+
+def a_mod3_query_oracle(seed=20260716):
+    """B queries whether the cumulative A count is a positive multiple of 3."""
+    rng = random.Random(seed)
+    operations = ('B', 'A', 'B', 'A', 'B', 'A', 'B', 'B',
+                  'A', 'B', 'A', 'A', 'B')
+    banks = []
+    for _ in range(10):
+        cursor = rng.randint(2, 3)
+        a_ticks, b_ticks = [], []
+        for operation in operations:
+            (a_ticks if operation == 'A' else b_ticks).append(cursor)
+            cursor += rng.randint(3, 4)
+        banks.append({0: a_ticks, 1: b_ticks})
+    guard = rng.randint(2, 4)
+    banks.extend([
+        {0: [guard, guard + 4, guard + 8, guard + 13, guard + 17]},
+        {1: [guard, guard + 4, guard + 9, guard + 14]},
+        {},
+    ])
+    target = _event_bank_target(
+        'A modulo-3 query (oracle)', make_a_mod3_query(),
+        [(0, 1), (0, 3)], banks, T=56, latency=2,
+        description=describe_target(
+            'Count A events cumulatively. Emit Q when B fires and the positive '
+            'A count is divisible by three; otherwise remain silent.',
+            EVENT_SCORING,
+            'Schedules query counts 0, 1, 2, 3, 4, and 6, including repeated B '
+            'queries at count 3. A-only, B-only, and silent guards reject echoes '
+            'and autonomous output. Mixed 0.5-to-2.25-second pulse widths ensure '
+            'the circuit counts edges rather than high-time.'))
+    return _mix_event_widths(target, rng)
+
+
+def a_batch_parity_query_oracle(seed=20260716):
+    """B reports odd A parity since the preceding B and starts a new batch."""
+    rng = random.Random(seed)
+    operations = ('B', 'A', 'B', 'B', 'A', 'A', 'B',
+                  'A', 'A', 'A', 'B', 'B')
+    banks = []
+    for _ in range(10):
+        cursor = rng.randint(2, 3)
+        a_ticks, b_ticks = [], []
+        for operation in operations:
+            (a_ticks if operation == 'A' else b_ticks).append(cursor)
+            cursor += rng.randint(3, 4)
+        banks.append({0: a_ticks, 1: b_ticks})
+    guard = rng.randint(2, 4)
+    banks.extend([
+        {0: [guard, guard + 4, guard + 8, guard + 13]},
+        {1: [guard, guard + 4, guard + 9, guard + 14]},
+        {},
+    ])
+    target = _event_bank_target(
+        'A batch parity query (oracle)', make_a_batch_parity_query(),
+        [(0, 1), (0, 3)], banks, T=52, latency=2,
+        description=describe_target(
+            'Count A events since the previous B. When B fires, emit Q if that '
+            'batch count is odd, then clear the parity and begin a new batch.',
+            EVENT_SCORING,
+            'Schedules query empty, one-A, two-A, and three-A batches, with '
+            'back-to-back empty queries. A-only, B-only, and silent guards plus '
+            'mixed 0.5-to-2.25-second widths test edge counting, clearing, and '
+            'retained parity.'))
+    return _mix_event_widths(target, rng)
 
 
 def period_doubler_oracle(seed=20260702, periods=(2, 3, 4)):
@@ -1061,6 +1378,11 @@ def watchdog_oracle(seed=20260702, timeout=5):
 
 
 ORACLE_SPECS = {
+    'Pulse width sum (oracle)':    pulse_width_sum_oracle,
+    'Odd pulse selector (oracle)': odd_pulse_selector_oracle,
+    'A parity query (oracle)':     a_parity_query_oracle,
+    'A modulo-3 query (oracle)':   a_mod3_query_oracle,
+    'A batch parity query (oracle)': a_batch_parity_query_oracle,
     'SR latch (oracle)':          sr_latch_oracle,
     'C-element (oracle)':         c_element_oracle,
     'Refractory filter (oracle)': refractory_filter_oracle,

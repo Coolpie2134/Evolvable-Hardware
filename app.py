@@ -463,7 +463,7 @@ class App:
         self._target_var = tk.StringVar(value=DEFAULT_TARGET)
         self._target_picker = TargetPicker(
             ctrl, self._targets_for_backend(self._backend()), variable=self._target_var,
-            command=self._on_target_change, target_width=19)
+            command=self._on_target_change, target_width=31)
         self._target_picker.pack(side='left')
         self._target_cb = self._target_picker.target_cb
         ttk.Button(ctrl, text='Custom…', command=self._open_custom).pack(side='left', padx=3)
@@ -614,6 +614,28 @@ class App:
         self._delay_var = aentry(self._pulse_frame, 'Delay:', _D, width=4)
         self._width_var = aentry(self._pulse_frame, 'Width:', _W, width=4)
         self._coinc_var = aentry(self._pulse_frame, 'Coinc:', _C, width=4)
+        # node-timing MODEL: the architecture variants (see nv_evo/pulse.py
+        # NODE_MODELS). 'Uniform' is the paper; 'Evolved width' lets each node
+        # type's pulse width mutate; 'Width-preserving' transports both edges of
+        # the incoming pulse after a per-node-type delay — with the delay either
+        # evolvable or fixed (the ablation isolating width preservation from
+        # delay evolvability). Each label maps to (pulse model, evolve_width,
+        # evolve_delay); None = the model's default mutation pairing.
+        ttk.Label(self._pulse_frame, text='Node:').pack(side='left', padx=(6, 2))
+        self._NODE_MODEL_LABELS = {
+            'Uniform (paper)': ('uniform', None, None),
+            'Evolved width':   ('evolved_width', None, None),
+            'Width-preserving + evolved delay': ('pulse_delay', None, None),
+            'Width-preserving (fixed delay)':   ('pulse_delay', None, False)}
+        self._node_model_var = tk.StringVar(value='Uniform (paper)')
+        self._node_model_cb = ttk.Combobox(
+            self._pulse_frame, textvariable=self._node_model_var, width=28,
+            state='readonly', values=list(self._NODE_MODEL_LABELS))
+        self._node_model_cb.pack(side='left')
+        # model-restricted targets (e.g. waveform contracts needing width
+        # preservation) come and go with the node-model selection
+        self._node_model_cb.bind('<<ComboboxSelected>>',
+                                 self._on_node_model_change)
         self._pulse_sep = ttk.Separator(ctrl3, orient='vertical')
         self._pulse_sep.pack(side='left', fill='y', padx=8)
         self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
@@ -842,10 +864,20 @@ class App:
             }
         else:
             d = self._all_targets()
+        # model-restricted targets (supported_models) are physically
+        # unattainable under other node-timing models — a waveform contract
+        # needs width-preserving transport, so hide it rather than let a
+        # 'uniform' run silently cap below 1.0. The node model only exists on
+        # the nervous backend; elsewhere the restriction does not apply.
+        node_model = (self._selected_node_model()[0]
+                      if backend == 'nervous' else None)
         return {
             name: target for name, target in d.items()
             if (not getattr(target, 'supported_backends', ())
                 or backend in target.supported_backends)
+            if (node_model is None
+                or not getattr(target, 'supported_models', ())
+                or node_model in target.supported_models)
         }
 
     def _refresh_target_list(self):
@@ -903,6 +935,8 @@ class App:
         self._elite_var.set(str(d['elite']))
         self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
+        if hasattr(self, '_node_model_var'):
+            self._node_model_var.set('Uniform (paper)')   # the paper's node
         if hasattr(self, '_lexicase_var'):
             self._lexicase_var.set(False)    # tournament is the tuned default
 
@@ -917,10 +951,13 @@ class App:
             max_telomere = int(self._maxtel_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coincidence = float(self._coinc_var.get())
+            node_model, evolve_width, evolve_delay = self._selected_node_model()
             if (mut < 0 or not (0 <= imm < 1) or tournament < 1
                     or not (0 < alpha <= 1) or not (0 <= beta <= 10)
                     or mutation_limit < 1
                     or elite < 0 or max_telomere < 2
+                    or not all(math.isfinite(value) for value in
+                               (delay, width, coincidence))
                     or delay <= 0 or width <= 0 or coincidence < 0):
                 raise ValueError
         except ValueError:
@@ -937,9 +974,15 @@ class App:
                            else 'tournament'),
                 recombination_enabled=bool(self._recombination_var.get()),
                 max_telomere=max_telomere,
+                # node_model must agree with pulse.model: the GA reads it to turn
+                # the width-mutation on for 'evolved_width'. The explicit
+                # toggles (None = model pairing) carry the fixed-delay ablation.
+                node_model=node_model,
+                evolve_width=evolve_width, evolve_delay=evolve_delay,
                 chromosome_count=chromosome_count),
             pulse=PulseConfig(delay=delay, width=width,
-                              coincidence=coincidence))
+                              coincidence=coincidence,
+                              model=node_model))
 
     def _backend(self):
         v = self._backend_var.get().lower()
@@ -948,6 +991,17 @@ class App:
         if v.startswith('lut'):
             return 'lut'
         return 'snn'
+
+    def _selected_node_model(self):
+        """(pulse model, evolve_width, evolve_delay) for the Node dropdown."""
+        if not hasattr(self, '_node_model_var'):
+            return 'uniform', None, None
+        return self._NODE_MODEL_LABELS.get(
+            self._node_model_var.get(), ('uniform', None, None))
+
+    def _on_node_model_change(self, _evt=None):
+        """Model-restricted targets appear/disappear with the node model."""
+        self._refresh_target_list()
 
     def _sync_telomere_backend(self, backend=None):
         """Swap in the remembered growth ceiling for the selected backend.
@@ -1244,6 +1298,20 @@ class App:
         self._beta_var.set(str(normalized_config.ga.stagnation_beta))
         self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
         self._recombination_var.set(normalized_config.ga.recombination_enabled)
+        self._delay_var.set(str(normalized_config.pulse.delay))
+        self._width_var.set(str(normalized_config.pulse.width))
+        self._coinc_var.set(str(normalized_config.pulse.coincidence))
+        saved_entry = (normalized_config.pulse.model,
+                       getattr(normalized_config.ga, 'evolve_width', None),
+                       getattr(normalized_config.ga, 'evolve_delay', None))
+        pulse_label = next(
+            (label for label, entry in self._NODE_MODEL_LABELS.items()
+             if entry == saved_entry),
+            # older checkpoints carry no toggles; fall back to the model alone
+            next((label for label, entry in self._NODE_MODEL_LABELS.items()
+                  if entry[0] == normalized_config.pulse.model),
+                 'Uniform (paper)'))
+        self._node_model_var.set(pulse_label)
         self._sync_recombination()
         self._chroms_var.set(str(actual_chroms))
         self._active_chroms = actual_chroms

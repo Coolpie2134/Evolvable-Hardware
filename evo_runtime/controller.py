@@ -75,11 +75,15 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
+        # Resolve the timing-mutation toggles once so diversification mutates
+        # under exactly the same operator set as the main GA loop.
+        evolve_width, evolve_delay = config.ga.timing_mutations()
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,
             max_telomere=config.ga.max_telomere,
             chromosome_count=chromosome_count,
+            evolve_width=evolve_width, evolve_delay=evolve_delay,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     elif backend == 'lut':

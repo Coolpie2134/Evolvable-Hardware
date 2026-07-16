@@ -32,9 +32,41 @@ With the default constants (DELAY = WIDTH = TICK, COINC < TICK) behaviour on
 the integer tick lattice matches the earlier synchronous engine — that engine
 was the quantization of this one. The constants can now be varied to study
 sub-tick timing (unequal delays, edge alignment, incommensurate loop periods).
+
+NODE-TIMING MODELS (PulseConfig.model). The paper's node regenerates ONE fixed
+pulse width after ONE fixed delay, so an input pulse's LENGTH is discarded the
+moment the first node fires (every internal wire has a single driver, so no
+merging ever restores it). That throws away a degree of freedom, so alongside
+the paper's node this module offers two variants that give width a role:
+
+  * 'uniform'       — the paper: width WIDTH, delay DELAY, every node. (default)
+  * 'evolved_width' — each node's emitted pulse width is under genetic control
+                      (an evolvable per-node-type multiplier of WIDTH), passed
+                      in as a {cell: width} map. Delay stays DELAY. Pulse width
+                      becomes a heritable trait selection can tune.
+  * 'pulse_delay'   — retained as the checkpoint/API identifier for the
+                      width-preserving model: both edges are transported after
+                      the firing node's evolvable delay d, so [t, t+w) becomes
+                      [t+d, t+d+w). A neutral genome uses DELAY everywhere.
+
+All three coincide when every pulse is one WIDTH wide and evolved widths are
+neutral. Legacy runs remain byte-identical under the default 'uniform' model.
+
+REFRACTORY DIVERGENCE ON WIDE PULSES. A node's refractory period is its own
+output-pulse duration in every model — but under width preservation that
+duration follows the INPUT: a 'pulse_delay' node transporting a pulse of width
+w is busy for delay + w, while a 'uniform' node regenerating the same edge is
+refractory for only DELAY + WIDTH. So on stimulus wider than WIDTH (e.g. the
+mixed 0.5-2.25s oracle event banks) a NEUTRAL width-preserving genome can drop
+a following edge that uniform passes (delay 1.0, width 2.25, next edge 3 later:
+busy until t+3.25). This is deliberate physics, not a bug — evolution recovers
+the edge by shortening the node's delay (any d <= gap - w) — but it means
+neutral 'pulse_delay' starts measurably harder than 'uniform' on wide-pulse
+banks, which matters when reading cross-model learning curves.
 """
 from __future__ import annotations
 import heapq
+import math
 from dataclasses import dataclass
 
 from .hexgrid import hex_dirs
@@ -47,6 +79,19 @@ COINC = 0.5   # excitatory coincidence window
 TICK  = 1.0     # sampling period of the scoring layer (one target tick)
 
 
+# The three node-timing MODELS (the paper's node is 'uniform'; the other two
+# are this project's variants that give pulse WIDTH a role instead of letting
+# every node regenerate one fixed width — see the module docstring above and
+# tests/test_pulse_models.py):
+#   'uniform'       — every node emits width WIDTH after delay DELAY (the paper).
+#   'evolved_width' — each node's emitted pulse width is genetic: an evolvable
+#                     per-node-type (routing state) multiplier of WIDTH, supplied
+#                     as a {cell: width} map. Delay stays DELAY.
+#   'pulse_delay'   — historical identifier for evolved-delay, width-preserving
+#                     edge transport: [t, t+w) -> [t+d_node, t+d_node+w).
+NODE_MODELS = ('uniform', 'evolved_width', 'pulse_delay')
+
+
 @dataclass(frozen=True)
 class PulseConfig:
     """Immutable paper-model timing parameters carried with one run."""
@@ -54,11 +99,18 @@ class PulseConfig:
     width: float = WIDTH
     coincidence: float = COINC
     event_cap: int = 2048
+    # Node-timing variant (see NODE_MODELS). 'uniform' remains the paper/legacy
+    # behavior; old development configs are migrated by RunConfig.from_dict.
+    model: str = 'uniform'
 
     def __post_init__(self):
-        if (self.delay <= 0 or self.width <= 0 or self.coincidence < 0
+        if (not all(math.isfinite(v) for v in
+                    (self.delay, self.width, self.coincidence))
+                or self.delay <= 0 or self.width <= 0 or self.coincidence < 0
                 or self.event_cap < 1):
             raise ValueError('delay/width/event_cap must be positive and coincidence non-negative')
+        if self.model not in NODE_MODELS:
+            raise ValueError('model must be one of %s' % (NODE_MODELS,))
 
 _NEG = float('-inf')
 
@@ -73,10 +125,18 @@ class PulseSim:
     their wire has pulsed at all (the combinational "did it fire" read-out).
     """
 
-    def __init__(self, grid, routing, max_events=None, config=None):
+    def __init__(self, grid, routing, max_events=None, config=None, widths=None,
+                 delays=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or PulseConfig()
+        # node-timing model, resolved once. widths {cell: pulse_width} is used
+        # only by the 'evolved_width' model; absent/None cells fall back to
+        # config.width, so an empty map reproduces 'uniform' exactly. delays is
+        # the analogous per-cell map for evolved-delay width preservation.
+        self._model  = self.config.model
+        self._widths = widths or {}
+        self._delays = delays or {}
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
         # watch[u] = cells that read u on an excitatory input.
         self.src   = {}
@@ -104,11 +164,31 @@ class PulseSim:
         # Tick samples remain a playback convenience, not the source of truth
         # for event-based fitness.
         self.rise_times  = {c: [] for c in grid}
+        # The COMPLETE output waveform per wire: [start, end] per pulse, in
+        # time order. ``end`` is float('inf') while a width-preserving
+        # aggregate is still high (closed when it falls). Rise-only scoring
+        # keeps using rise_times; interval-aware scoring (real falls, real
+        # widths) reads this instead of reconstructing falls from samples.
+        self.pulse_intervals = {c: [] for c in grid}
         self.max_events  = None if max_events is None else max(1, int(max_events))
         self.event_count = 0
         self.overflow    = False
         self._heap = []                               # (time, seq, cell, pulse_end)
         self._seq  = 0
+        # The width-preserving model transports drive rises and falls
+        # independently. ``uniform`` and ``evolved_width`` never touch this
+        # state and continue through the legacy interval heap above.
+        self._edge_heap = []                          # (time, seq, kind, cell, drive)
+        self._drive_seq = 0
+        self._aggregate_seq = 0
+        self._active_drives = {c: set() for c in grid}
+        self._aggregate_id = {c: None for c in grid}
+        self._drive_owner = {}                        # generated drive -> node
+        self._busy_drive = {c: None for c in grid}
+        self._followers = {}                          # source pulse -> group ids
+        self._transport_groups = {}
+        self._group_seq = 0
+        self._or_group = {}                           # OR node -> open union group
         self._tick = 0                                # next tick index
         self._prev = {}                               # input cell -> previous bit
 
@@ -124,6 +204,12 @@ class PulseSim:
         heapq.heappush(self._heap, (t, self._seq, cell, end))
 
     def _run_until(self, t_end):
+        if self._model == 'pulse_delay':
+            self._run_width_preserving_until(t_end)
+            return
+        self._run_legacy_until(t_end)
+
+    def _run_legacy_until(self, t_end):
         """Process events chronologically. Events sharing a timestamp are
         applied in two phases — first every wire rise, then every edge
         notification — so e.g. an inhibitory pulse arriving simultaneously
@@ -138,6 +224,7 @@ class PulseSim:
                 if self._high(cell, t):                       # wired-OR merge:
                     if end > self.pulse_until[cell]:          # already high ->
                         self.pulse_until[cell] = end          # extend, no edge
+                        self.pulse_intervals[cell][-1][1] = float(end)
                 else:
                     if (self.max_events is not None
                             and self.event_count >= self.max_events):
@@ -151,11 +238,204 @@ class PulseSim:
                     self.pulse_until[cell] = end
                     self.ever[cell] = 1
                     self.rise_times[cell].append(float(t))
+                    self.pulse_intervals[cell].append([float(t), float(end)])
                     self.event_count += 1
                     new_edges.append(cell)
             for u in new_edges:
                 for v in self.watch[u]:
                     self._consider(v, u, t)
+
+    def _new_drive(self, owner=None):
+        self._drive_seq += 1
+        drive = self._drive_seq
+        if owner is not None:
+            self._drive_owner[drive] = owner
+        return drive
+
+    def _edge_push(self, t, kind, cell, drive):
+        self._seq += 1
+        heapq.heappush(self._edge_heap,
+                       (float(t), self._seq, kind, cell, drive))
+
+    def _source_key(self, cell):
+        pulse_id = self._aggregate_id.get(cell)
+        return None if pulse_id is None else (cell, pulse_id)
+
+    def _add_group_source(self, group_id, source_key):
+        group = self._transport_groups.get(group_id)
+        if group is None or source_key is None or source_key in group['pending']:
+            return
+        group['pending'].add(source_key)
+        self._followers.setdefault(source_key, set()).add(group_id)
+
+    def _accept_transport(self, v, source_keys, t, policy='all', or_group=False):
+        """Start one generated drive and bind its fall to source pulse(s).
+
+        ``policy='all'`` preserves a single pulse or an OR union (last carrier
+        fall). ``policy='first'`` preserves simultaneous coincidence overlap
+        (first carrier fall). Both edges receive the same selected node delay.
+        """
+        keys = {key for key in source_keys if key is not None}
+        if not keys or self._busy_drive[v] is not None:
+            return None
+        drive = self._new_drive(owner=v)
+        self._busy_drive[v] = drive
+        self.refr_until[v] = float('inf')
+        delay = self._delays.get(v, self.config.delay)
+        self._edge_push(t + delay, 'rise', v, drive)
+        self._group_seq += 1
+        group_id = self._group_seq
+        self._transport_groups[group_id] = {
+            'dest': v, 'drive': drive, 'policy': policy, 'pending': set(),
+            'delay': delay,
+            'or_node': v if or_group else None,
+        }
+        for key in keys:
+            self._add_group_source(group_id, key)
+        if or_group:
+            self._or_group[v] = group_id
+        return group_id
+
+    def _resolve_transport(self, group_id, source_fall):
+        group = self._transport_groups.pop(group_id, None)
+        if group is None:
+            return
+        end = float(source_fall) + group['delay']
+        self._edge_push(end, 'fall', group['dest'], group['drive'])
+        self.refr_until[group['dest']] = end
+        or_node = group['or_node']
+        if or_node is not None and self._or_group.get(or_node) == group_id:
+            self._or_group.pop(or_node, None)
+
+    def _source_fell(self, source_key, t):
+        for group_id in tuple(self._followers.pop(source_key, ())):
+            group = self._transport_groups.get(group_id)
+            if group is None:
+                continue
+            group['pending'].discard(source_key)
+            if group['policy'] == 'first' or not group['pending']:
+                self._resolve_transport(group_id, t)
+
+    def _record_width_preserving_rise(self, cell, t):
+        if (self.max_events is not None
+                and self.event_count >= self.max_events):
+            self.overflow = True
+            self._edge_heap.clear()
+            self._heap.clear()
+            return False
+        self._aggregate_seq += 1
+        self._aggregate_id[cell] = self._aggregate_seq
+        self.pulse_start[cell] = t
+        self.pulse_until[cell] = float('inf')
+        self.ever[cell] = 1
+        self.rise_times[cell].append(float(t))
+        self.pulse_intervals[cell].append([float(t), float('inf')])
+        self.event_count += 1
+        return True
+
+    def _notify_width_preserving_rises(self, new_rises, t):
+        """Evaluate a complete simultaneous rise batch deterministically."""
+        affected = {}
+        for u in new_rises:
+            for v in self.watch[u]:
+                affected.setdefault(v, set()).add(u)
+
+        for v in sorted(affected):
+            if self._busy_drive[v] is not None:
+                continue
+            s1, s2, si = self.src[v]
+            if si is not None and self._high(si, t):
+                continue
+            rising = affected[v]
+            if s1 == s2:
+                if s1 in rising:
+                    self._accept_transport(v, [self._source_key(s1)], t)
+                continue
+            if self.op[v] == 'or':
+                # If an accepted OR waveform is already open, this edge was
+                # attached to it before source-fall resolution. Otherwise begin
+                # one deterministic union of every excitatory source high now.
+                if v not in self._or_group:
+                    carriers = [self._source_key(s) for s in (s1, s2)
+                                if s is not None and self._high(s, t)]
+                    self._accept_transport(v, carriers, t, policy='all',
+                                           or_group=True)
+                continue
+
+            # Coincidence: update all simultaneous edges before testing. A tie
+            # transports their overlap (first fall); a unique later edge carries
+            # its own width, exactly as the legacy leading-edge rule selects it.
+            for source in rising:
+                self.last_edge[v][source] = t
+            tied = s1 in rising and s2 in rising
+            if tied:
+                self._accept_transport(
+                    v, [self._source_key(s1), self._source_key(s2)], t,
+                    policy='first')
+                continue
+            source = s1 if s1 in rising else s2
+            other = s2 if source == s1 else s1
+            if (source is not None and
+                    t - self.last_edge[v].get(other, _NEG)
+                    <= self.config.coincidence):
+                self._accept_transport(v, [self._source_key(source)], t)
+
+    def _run_width_preserving_until(self, t_end):
+        """Transport aggregate waveform edges by one evolved delay per node.
+
+        Each scheduled interval owns a drive identity. A wire rises only when
+        its active-drive set changes from empty to non-empty and falls only when
+        the set becomes empty. Applying a complete timestamp batch atomically
+        makes overlapping/touching intervals a single physical waveform and
+        makes simultaneous inhibition independent of submission order.
+        """
+        while self._edge_heap and self._edge_heap[0][0] <= t_end:
+            t = self._edge_heap[0][0]
+            batch = []
+            while self._edge_heap and self._edge_heap[0][0] == t:
+                batch.append(heapq.heappop(self._edge_heap))
+
+            touched = {item[3] for item in batch}
+            was_high = {cell: bool(self._active_drives[cell]) for cell in touched}
+            for _, _, kind, cell, drive in batch:
+                if kind == 'rise':
+                    self._active_drives[cell].add(drive)
+            for _, _, kind, cell, drive in batch:
+                if kind != 'fall':
+                    continue
+                self._active_drives[cell].discard(drive)
+                owner = self._drive_owner.pop(drive, None)
+                if owner is not None and self._busy_drive.get(owner) == drive:
+                    self._busy_drive[owner] = None
+
+            new_rises = []
+            fallen = []
+            for cell in sorted(touched):
+                is_high = bool(self._active_drives[cell])
+                if not was_high[cell] and is_high:
+                    if not self._record_width_preserving_rise(cell, t):
+                        return
+                    new_rises.append(cell)
+                elif was_high[cell] and not is_high:
+                    source_key = self._source_key(cell)
+                    self.pulse_until[cell] = t
+                    self.pulse_intervals[cell][-1][1] = float(t)
+                    fallen.append(source_key)
+
+            # Attach a newly-rising OR carrier before same-time source falls
+            # resolve a group. Thus A ending exactly as B starts keeps the
+            # transported OR waveform continuous, with no boundary glitch.
+            for u in new_rises:
+                source_key = self._source_key(u)
+                for v in self.watch[u]:
+                    if self.op.get(v) == 'or' and v in self._or_group:
+                        self._add_group_source(self._or_group[v], source_key)
+            for source_key in fallen:
+                if source_key is not None:
+                    self._source_fell(source_key, t)
+                    self._aggregate_id[source_key[0]] = None
+
+            self._notify_width_preserving_rises(new_rises, t)
 
     def advance_to(self, when):
         """Process queued events through an absolute physical time.
@@ -180,7 +460,15 @@ class PulseSim:
         sub-tick) times. Events are queued; call ``advance_to`` to process them."""
         if cell in self.grid:
             w = self.config.width if width is None else float(width)
-            self._push(float(t), cell, float(t) + w)
+            start = float(t)
+            if not math.isfinite(start) or not math.isfinite(w) or w <= 0:
+                raise ValueError('pulse start must be finite and width must be positive')
+            if self._model == 'pulse_delay':
+                drive = self._new_drive()
+                self._edge_push(start, 'rise', cell, drive)
+                self._edge_push(start + w, 'fall', cell, drive)
+            else:
+                self._push(start, cell, start + w)
 
     def _consider(self, v, u, t):
         """Cell v sees a pulse edge from neighbour u at time t."""
@@ -198,9 +486,16 @@ class PulseSim:
             other = s2 if u == s1 else s1
             trig = (t - self.last_edge[v].get(other, _NEG)) <= self.config.coincidence
         if trig:
-            self.refr_until[v] = t + self.config.delay + self.config.width
-            self._push(t + self.config.delay, v,
-                       t + self.config.delay + self.config.width)
+            # This is deliberately the unchanged legacy path used only by
+            # uniform and evolved_width. Width-preserving edge transport is
+            # handled by _run_width_preserving_until instead.
+            if self._model == 'evolved_width':
+                width_v = self._widths.get(v, self.config.width)
+            else:
+                width_v = self.config.width
+            delay_v = self.config.delay
+            self.refr_until[v] = t + delay_v + width_v
+            self._push(t + delay_v, v, t + delay_v + width_v)
 
     # ── the per-tick interface used by scoring / playback ────────────────────
 
@@ -213,8 +508,21 @@ class PulseSim:
         for c, b in input_vals.items():
             b = 1 if b else 0
             if b:
-                if self._prev.get(c, 0) and self.pulse_until[c] >= t0:
-                    self.pulse_until[c] = max(self.pulse_until[c], t0 + TICK)
+                if self._model == 'pulse_delay':
+                    # Later asserted ticks add one touching drive interval. The
+                    # active-drive union extends the same aggregate waveform and
+                    # exactly matches one pre-injected held interval.
+                    width = (TICK if self._prev.get(c, 0)
+                             else max(self.config.width, TICK))
+                    self.inject_pulse(c, t0, width)
+                elif self._prev.get(c, 0) and self.pulse_until[c] >= t0:
+                    extended = max(self.pulse_until[c], t0 + TICK)
+                    if extended > self.pulse_until[c]:
+                        self.pulse_until[c] = extended
+                        if self.pulse_intervals[c]:
+                            self.pulse_intervals[c][-1][1] = float(extended)
+                    else:
+                        self.pulse_until[c] = extended
                 else:
                     self._push(t0, c, t0 + max(self.config.width, TICK))
             self._prev[c] = b

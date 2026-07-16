@@ -110,7 +110,22 @@ class InteractiveTab:
         for w in self._inbar.winfo_children():
             w.destroy()
         self._inputs = []
+        self._case_cb = None
         if backend in ('nervous', 'lut'):
+            # every stored test case is loadable, not just trial 0: pick one
+            # from the dropdown to see exactly what fitness scored, then edit
+            # the timeline freely (the box flips to '(custom schedule)').
+            if getattr(target, 'trials', None):
+                ttk.Label(self._inbar, text='Case:').pack(side='left',
+                                                          padx=(4, 2))
+                self._case_var = tk.StringVar()
+                self._case_cb = ttk.Combobox(
+                    self._inbar, textvariable=self._case_var, state='readonly',
+                    width=34, values=self._case_labels(target))
+                self._case_cb.current(0)
+                self._case_cb.pack(side='left', padx=(0, 6))
+                self._case_cb.bind('<<ComboboxSelected>>',
+                                   self._on_case_selected)
             ttk.Label(self._inbar, text='pulses: click the timeline',
                       foreground='#888').pack(side='left', padx=4)
             ttk.Button(self._inbar, text='Clear', width=6,
@@ -130,10 +145,21 @@ class InteractiveTab:
             self._grid = grow_nervous(c['genome'], seeds=tuple(target.inputs),
                                       grid_size=target.grid_size, iters=target.iters)
             self._routing, self._in_pos, self._out_pos = interpret_nervous(self._grid, target)
+            # 'evolved_width' model: the champion's per-node pulse widths, used by
+            # BOTH the trace-matched placement (so the highlighted output cell is
+            # the one fitness actually read) and the playback engine below.
+            # node_widths returns None off that model, so this is uniform-safe.
+            from nv_evo.nervous import node_widths, node_delays
+            pulse_config = getattr(target, 'pulse_config', None)
+            self._nv_widths = node_widths(
+                c['genome'], self._grid, pulse_config)
+            self._nv_delays = node_delays(
+                c['genome'], self._grid, pulse_config)
             if getattr(target, 'temporal', False):
                 # show the same output cell the fitness reads (trace-matched)
                 self._out_pos, _ = place_outputs_by_trace(
-                    self._grid, self._routing, self._in_pos, target)
+                    self._grid, self._routing, self._in_pos, target,
+                    widths=self._nv_widths, delays=self._nv_delays)
             self._setup_async(target)
             self._playback_controls(
                 '   (click the timeline to place input pulses; Step/Run in real time)')
@@ -178,29 +204,77 @@ class InteractiveTab:
         labels = [chr(65 + i) if i < 26 else 'i%d' % i
                   for i in range(len(self._in_pos))]
         horizon = float(max(24, getattr(target, 'T', 24) or 24))
+        pulse_config = getattr(target, 'pulse_config', None)
+        default_width = getattr(pulse_config, 'width', None)
         self.fig.clf()
-        gs = self.fig.add_gridspec(2, 2, height_ratios=[0.55, 1.0],
-                                   width_ratios=[1.1, 1.0], hspace=0.6, wspace=0.25)
+        gs = self.fig.add_gridspec(3, 2, height_ratios=[0.55, 0.5, 0.5],
+                                   width_ratios=[1.1, 1.0], hspace=0.85,
+                                   wspace=0.25)
         self._ax_lanes = self.fig.add_subplot(gs[0, :])
-        self._axg = self.fig.add_subplot(gs[1, 0])
+        self._axg = self.fig.add_subplot(gs[1:, 0])
         self._axt = self.fig.add_subplot(gs[1, 1])
+        self._axw = self.fig.add_subplot(gs[2, 1])
         self._editor = PulseLaneEditor(self._ax_lanes, self.canvas, labels,
                                        horizon=horizon, snap=0.5,
-                                       on_change=self._nv_schedule_changed)
+                                       on_change=self._nv_schedule_changed,
+                                       default_width=default_width)
         self._editor.set_pulses(pulses_from_trial(target, len(self._in_pos)))
         if self._backend == 'nervous':
+            config = pulse_config
+            # per-node pulse widths ('evolved_width' model) computed once in
+            # sync() and shared with the trace-matched placement, so playback and
+            # the highlighted output cell agree on the physics.
             self._player = NervousPlayer(
                 self._grid, self._routing, horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048),
-                config=getattr(target, 'pulse_config', None))
+                config=config, widths=getattr(self, '_nv_widths', None),
+                delays=getattr(self, '_nv_delays', None))
         else:                                  # LUT — same player, level engine
             self._player = LutPlayer(
                 self._grid, horizon=horizon,
                 config=getattr(target, 'lut_config', None))
         self._player.set_schedule(self._editor.schedule(self._in_pos))
 
+    def _case_labels(self, target):
+        """One dropdown row per stored test case: 'Case k/N: A[times] ...'."""
+        n_inputs = len(target.inputs)
+        count = len(target.trials)
+        labels = []
+        for index in range(count):
+            lanes = pulses_from_trial(target, n_inputs, index)
+            parts = []
+            for lane, events in enumerate(lanes):
+                if not events:
+                    continue
+                name = chr(65 + lane) if lane < 26 else 'i%d' % lane
+                times = ', '.join('%g' % round(start, 2)
+                                  for start, _ in events)
+                parts.append('%s[%s]' % (name, times))
+            labels.append('Case %d/%d: %s'
+                          % (index + 1, count,
+                             '  '.join(parts) if parts else 'silent'))
+        return labels
+
+    def _on_case_selected(self, _evt=None):
+        if not self._circuit or getattr(self, '_editor', None) is None:
+            return
+        index = self._case_cb.current()
+        if index < 0:
+            return
+        self._loading_case = True
+        try:
+            self._editor.set_pulses(pulses_from_trial(
+                self._circuit['target'], len(self._in_pos), index))
+            self._nv_schedule_changed()   # set_schedule resets playback to t=0
+        finally:
+            self._loading_case = False
+
     def _nv_schedule_changed(self):
         self._stop()
+        # A hand edit means the timeline no longer matches the selected case.
+        if (getattr(self, '_case_cb', None) is not None
+                and not getattr(self, '_loading_case', False)):
+            self._case_var.set('(custom schedule)')
         self._player.set_schedule(self._editor.schedule(self._in_pos))
         self._draw_async()
 
@@ -228,6 +302,7 @@ class InteractiveTab:
                          in_pos=in_pos, out_pos=self._out_pos, show_edges=True,
                          title=title)
         self._draw_event_strip(self._axt)
+        self._draw_width_strip(self._axw)
         self.canvas.draw_idle()
         self._status.set('t = %.1f time units   output edges: %s' % (
             self._player.cursor, self._nv_output_summary()))
@@ -246,8 +321,52 @@ class InteractiveTab:
         axt.set_yticks(range(len(target.outputs)))
         axt.set_yticklabels([t.role[:6] for t in target.outputs], fontsize=8)
         axt.set_title('output pulse edges (real time)', fontsize=9)
-        axt.set_xlabel('continuous time (tick units)', fontsize=8)
+        # the width strip directly below carries the shared time axis label
         axt.tick_params(labelsize=7)
+
+    def _output_spans(self, cell):
+        """[(start, end, still_open)] pulses of one output wire, clipped to the
+        playback cursor. Both engines expose ``pulse_intervals`` (PulseSim
+        natively, AsyncLutSim via its rise/fall logs); an interval whose fall
+        has not happened yet reads as open-ended at the cursor."""
+        raw = getattr(self._player.sim, 'pulse_intervals', None)
+        if raw is None or cell is None:
+            return []
+        cursor = self._player.cursor
+        spans = []
+        for start, end in raw.get(cell, ()):
+            if start > cursor:
+                continue
+            spans.append((float(start), float(min(end, cursor)), end > cursor))
+        return spans
+
+    def _draw_width_strip(self, axw):
+        """Second output view: the LEVEL waveform under the edge strip, each
+        pulse drawn as a bar labelled with its physical width — so
+        width-semantics targets (width sum, odd selector, doubler) can be read
+        directly instead of inferred from edge spacing."""
+        target = self._circuit['target']
+        axw.clear()
+        for k, term in enumerate(target.outputs):
+            cell = self._out_pos.get(term.role)
+            for start, end, open_ended in self._output_spans(cell):
+                axw.broken_barh([(start, max(end - start, 0.05))],
+                                (k - 0.35, 0.7),
+                                facecolors='#7cb8f2' if open_ended else '#1a6fd0',
+                                edgecolors='#0d4a94', linewidth=0.6)
+                width = end - start
+                label = ('%.2g…' % width) if open_ended else ('%.2g' % width)
+                if width >= 0.01:
+                    axw.text((start + end) / 2, k, label, ha='center',
+                             va='center', fontsize=7, color='white')
+        axw.axvline(self._player.cursor, color='#e8a33d', lw=1.4, alpha=0.9)
+        axw.set_xlim(0, self._player.horizon)
+        axw.set_ylim(-0.6, max(1, len(target.outputs)) - 0.4)
+        axw.set_yticks(range(len(target.outputs)))
+        axw.set_yticklabels([t.role[:6] for t in target.outputs], fontsize=8)
+        axw.set_title('output pulse widths (level view)', fontsize=9)
+        axw.set_xlabel('continuous time (tick units)', fontsize=8)
+        axw.tick_params(labelsize=7)
 
     def _nv_output_summary(self):
         target = self._circuit['target']

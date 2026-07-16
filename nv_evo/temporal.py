@@ -29,13 +29,22 @@ from __future__ import annotations
 from bisect import bisect_left
 import math
 
-from .nervous import grow_nervous, interpret_nervous
+from .nervous import (grow_nervous, interpret_nervous, node_widths,
+                      node_delays)
 from .hexgrid import hex_dirs
 from . import pulse as pulse_engine
 from .pulse import TICK
 from .simulation import create_simulator
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
                       sr_latch, toggle_ff, oscillator, echo)
+
+
+class PhysicalEvents(dict):
+    """Leading-edge map carrying the matching complete physical intervals."""
+
+    def __init__(self, *args, intervals=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.intervals = intervals or {}
 
 
 class TemporalTraces(dict):
@@ -47,13 +56,16 @@ class TemporalTraces(dict):
     count exceeded the target's deterministic safety cap.
     """
 
-    def __init__(self, *args, events=None, overflow=False, **kwargs):
+    def __init__(self, *args, events=None, intervals=None, overflow=False,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.events = events or {}
+        self.intervals = intervals or {}
         self.overflow = bool(overflow)
         self._event_result = None
         self._cadence_result = None
         self._stepper_result = None
+        self._waveform_result = None
 
 
 # ── dynamics (asynchronous pulse engine, sampled per tick) ──────────────────────
@@ -103,7 +115,8 @@ def _inject_physical_events(sim, in_pos, input_events):
 
 
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
-                 max_events=None, sample=True, config=None, input_events=None):
+                 max_events=None, sample=True, config=None, input_events=None,
+                 widths=None, delays=None):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -113,6 +126,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         traces : {role: [0/1 over T]}
     `prune` restricts the simulation to the input cone (exact for the nervous
     net); off-cone cells are absent from `states` and read as 0 by callers.
+    `widths` ({cell: pulse_width}) drives only the 'evolved_width' model;
+    width-preserving transport derives each output width from its input.
     """
     sub = grid
     if prune:
@@ -120,38 +135,45 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         if len(cone) < len(grid):
             sub = {c: grid[c] for c in cone}
     sim    = create_simulator(sub, routing, max_events=max_events,
-                              config=config)
+                              config=config, widths=widths, delays=delays)
+    # Queue one physical schedule for both sampled and event scoring. The
+    # width-preserving engine transports rising and falling edges causally, so
+    # it also agrees with incremental ``step`` input; pre-queuing here simply
+    # avoids maintaining two stimulus paths.
     if input_events is not None:
         _inject_physical_events(sim, in_pos, input_events)
+    else:
+        _inject_stream_edges(sim, in_pos, streams, T)
     if not sample:
         # Event/cadence fitness needs edges, not O(T*cells) display snapshots.
-        if input_events is None:
-            _inject_stream_edges(sim, in_pos, streams, T)
         sim.advance_to(T * TICK)
-        return [], {role: [] for role in out_pos}, sim.rise_times, sim.overflow
+        events = PhysicalEvents(
+            sim.rise_times,
+            intervals={cell: [tuple(v) for v in values]
+                       for cell, values in sim.pulse_intervals.items()})
+        return [], {role: [] for role in out_pos}, events, sim.overflow
     states = []
     traces = {role: [] for role in out_pos}
     for t in range(T):
-        # run past the end of the input streams with zero input (padding), so a
-        # circuit that responds at a DELAY is still observed — its late events
-        # fall in [len(streams), T) instead of off the end (see _obs_len).
-        if input_events is None:
-            row = streams[t] if t < len(streams) else (0,) * len(in_pos)
-            state = sim.step({in_pos[i]: row[i] for i in range(len(in_pos))})
-        else:
-            sample_time = (t + 0.5) * TICK
-            sim.advance_to(sample_time)
-            state = sim.activity_at(sample_time)
+        # sample past the end of the input streams (padding), so a circuit that
+        # responds at a DELAY is still observed — its late events fall in
+        # [len(streams), T) instead of off the end (see _obs_len).
+        sample_time = (t + 0.5) * TICK
+        sim.advance_to(sample_time)
+        state = sim.activity_at(sample_time)
         states.append(state)
         for role, p in out_pos.items():
             traces[role].append(state.get(p, 0) if p else 0)
         if sim.overflow:
             break
-    # ``step`` stops at the midpoint used for display.  Flush the remaining
-    # physical half-tick so scoring retains every edge in the requested horizon.
+    # Flush the remaining physical horizon so scoring retains every edge.
     if not sim.overflow:
         sim.advance_to(T * TICK)
-    return states, traces, sim.rise_times, sim.overflow
+    events = PhysicalEvents(
+        sim.rise_times,
+        intervals={cell: [tuple(v) for v in values]
+                   for cell, values in sim.pulse_intervals.items()})
+    return states, traces, events, sim.overflow
 
 
 def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
@@ -169,7 +191,7 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
 
 def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                        max_events=None, sample=True, config=None,
-                       input_events=None):
+                       input_events=None, widths=None, delays=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
     ``rise_times`` maps every simulated cell to its continuous leading-edge
@@ -177,7 +199,8 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
-                        config=config, input_events=input_events)
+                        config=config, input_events=input_events, widths=widths,
+                        delays=delays)
 
 
 # ── temporal scoring ───────────────────────────────────────────────────────────
@@ -563,6 +586,119 @@ def event_score(traces, ttarget, shift=None):
         pairs, float(getattr(ttarget, 'event_tolerance', 0.5)), shift)
 
 
+# ── complete physical-waveform scoring ───────────────────────────────────────
+
+def _role_intervals(traces, role, trial_index):
+    seqs = getattr(traces, 'intervals', {}).get(role, ())
+    if trial_index >= len(seqs):
+        return []
+    return [(float(start), float(end)) for start, end in seqs[trial_index]
+            if math.isfinite(start) and end > start]
+
+
+def _interval_case_score(actual, expected, tolerance=0.25):
+    """Ordered full-waveform similarity with exact 1.0 only at both boundaries.
+
+    Start and width are scored separately. Extra/missing intervals enlarge the
+    denominator, preventing a correct first pulse from hiding waveform clutter.
+    The exponential boundary gradient remains useful to evolution without
+    granting a perfect score to an incorrect duration.
+    """
+    actual = sorted((float(a), float(b)) for a, b in actual)
+    expected = sorted((float(a), float(b)) for a, b in expected)
+    count = max(len(actual), len(expected))
+    if not count:
+        return 1.0
+    scale = max(1e-9, float(tolerance))
+    score = 0.0
+    for (a0, a1), (e0, e1) in zip(actual, expected):
+        start_quality = math.exp(-abs(a0 - e0) / scale)
+        width_quality = math.exp(-abs((a1 - a0) - (e1 - e0)) / scale)
+        score += 0.5 * (start_quality + width_quality)
+    return score / count
+
+
+def _waveform_expected(ttarget, trial, role):
+    contract = getattr(ttarget, 'waveform_contract', '')
+    config = getattr(ttarget, 'pulse_config', None) or pulse_engine.PulseConfig()
+    expected = trial.expected_intervals.get(role, ())
+    if contract and trial.input_events:
+        delay = config.delay * float(ttarget.waveform_delay_multiplier)
+        if contract == 'width_sum':
+            lanes = trial.input_events
+            if len(lanes) >= 2 and lanes[0] and lanes[1]:
+                pulses = [lanes[0][0], lanes[1][0]]
+                anchor = max(start for start, _ in pulses)
+                width = sum(width for _, width in pulses)
+                expected = [(anchor + delay, anchor + delay + width)]
+            else:
+                expected = []
+        elif contract == 'odd_selector':
+            source = sorted(trial.input_events[0])
+            expected = [(start + delay, start + delay + width)
+                        for index, (start, width) in enumerate(source)
+                        if index % 2 == 0]
+        elif contract == 'preserve':       # compatibility with brief V3 targets
+            source = trial.input_events[0]
+            expected = [(start + delay, start + delay + width)
+                        for start, width in source]
+        else:
+            source = trial.input_events[0]
+            width = config.width * float(ttarget.waveform_width_multiplier)
+            expected = [(start + delay, start + delay + width)
+                        for start, _ in source]
+    return expected
+
+
+def _waveform_at_shift(traces, ttarget, shift):
+    cases = []
+    tolerance = float(getattr(ttarget, 'waveform_tolerance', 0.25))
+    for ti, trial in enumerate(ttarget.trials):
+        for role in trial.expected:
+            expected = [(start + shift, end + shift)
+                        for start, end in _waveform_expected(
+                            ttarget, trial, role)]
+            cases.append(_interval_case_score(
+                _role_intervals(traces, role, ti),
+                expected, tolerance))
+    return ((sum(cases) / len(cases)) if cases else 0.0, tuple(cases))
+
+
+def _best_waveform_shift(traces, ttarget):
+    cached = getattr(traces, '_waveform_result', None)
+    if cached is not None:
+        return cached
+    if not getattr(ttarget, 'fit_latency', True):
+        score, cases = _waveform_at_shift(traces, ttarget, 0.0)
+        return 0.0, score, cases
+    limit = float(getattr(ttarget, 'event_max_shift', ttarget.T))
+    candidates = {0.0}
+    for ti, trial in enumerate(ttarget.trials):
+        for role in trial.expected:
+            actual = _role_intervals(traces, role, ti)
+            expected = _waveform_expected(ttarget, trial, role)
+            for a_start, _ in actual:
+                for e_start, _ in expected:
+                    shift = a_start - e_start
+                    if -limit <= shift <= limit:
+                        candidates.add(round(shift, 9))
+    best = (0.0, -1.0, ())
+    for shift in sorted(candidates, key=lambda value: (abs(value), value < 0.0)):
+        score, cases = _waveform_at_shift(traces, ttarget, shift)
+        if score > best[1] + 1e-12:
+            best = (shift, score, cases)
+    traces._waveform_result = best
+    return best
+
+
+def waveform_score(traces, ttarget, shift=None):
+    """Score complete intervals under one shared response-latency offset."""
+    if shift is None:
+        _, score, cases = _best_waveform_shift(traces, ttarget)
+        return score, cases
+    return _waveform_at_shift(traces, ttarget, float(shift))
+
+
 # ── cadence semantics for autonomous oscillators/patterns ────────────────────
 
 def _input_edges(streams, input_index=0):
@@ -831,7 +967,7 @@ OUT_RADIUS = 12
 
 
 def _score_output_candidate(sampled, events, expected, role, target,
-                            overflow=False, tol=1):
+                            overflow=False, tol=1, intervals=None):
     """Score one prospective output and return ``(score, reusable result)``.
     `tol` = the substrate's hold coverage (0 strict for LUT, 1 ring for nv)."""
     if not sampled:
@@ -839,7 +975,9 @@ def _score_output_candidate(sampled, events, expected, role, target,
     mode = getattr(target, 'score_mode', 'trace')
     if mode == 'period_stepper':
         return period_stepper_score({role: sampled}, target)[0], None
+    intervals = intervals or [[] for _ in sampled]
     bundle = TemporalTraces({role: sampled}, events={role: events},
+                            intervals={role: intervals},
                             overflow=overflow)
     if mode == 'events':
         result = _best_event_shift(bundle, target)
@@ -847,6 +985,8 @@ def _score_output_candidate(sampled, events, expected, role, target,
     if mode == 'cadence':
         result = _best_cadence_latency(bundle, target)
         return result[1], result
+    if mode == 'waveform':
+        return waveform_score(bundle, target)[0], None
     return _placement_score(sampled, expected, target, tol), None
 
 
@@ -857,13 +997,16 @@ def _output_candidates(grid, in_set, term):
     return cands[:OUT_RADIUS]
 
 
-def place_outputs_by_trace(grid, routing, in_pos, ttarget):
+def place_outputs_by_trace(grid, routing, in_pos, ttarget, widths=None,
+                           delays=None):
     """Assign each output role the live non-input cell — among those nearest its
     terminal (see OUT_RADIUS) — whose activity trace best matches the expected
     trace across ALL trials (ties broken by distance to the terminal, then cell
     order). Evolution builds the computation and lands it near the read-out.
 
-    Returns (out_pos {role: (x,y)|None}, traces {role: [trace per trial]}).
+    ``widths`` ({cell: pulse_width}) drives the 'evolved_width' timing model;
+    None leaves the engine uniform. Returns (out_pos {role: (x,y)|None},
+    traces {role: [trace per trial]}).
     """
     in_set = set(in_pos)
     out_pos = {term.role: None for term in ttarget.outputs}
@@ -874,7 +1017,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     # output's late events are captured; every cell's trace falls out of the states
     obs = _obs_len(ttarget)
     mode = getattr(ttarget, 'score_mode', 'trace')
-    need_samples = mode not in ('events', 'cadence')
+    need_samples = mode not in ('events', 'cadence', 'waveform')
     config = getattr(ttarget, 'pulse_config', None)
     # Topology is identical across trials.  Computing the exact reachable cone
     # once avoids rebuilding the signal graph for every stimulus schedule.
@@ -884,10 +1027,12 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
                 sub, routing, in_pos, {}, tr.streams, obs, prune=False,
                 max_events=getattr(ttarget, 'max_events', 2048),
                 sample=need_samples, config=config,
-                input_events=getattr(tr, 'input_events', None))
+                input_events=getattr(tr, 'input_events', None), widths=widths,
+                delays=delays)
             for tr in ttarget.trials]
     trial_states = [run[0] for run in runs]
     trial_events = [run[2] for run in runs]
+    trial_intervals = [getattr(run[2], 'intervals', {}) for run in runs]
     traces.overflow = any(run[3] for run in runs)
     used = set()
     for term in ttarget.outputs:
@@ -896,7 +1041,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
         for c in _output_candidates(grid, in_set, term):
             if c in used:
                 continue
-            ctr, cevents, cexp = [], [], []
+            ctr, cevents, cintervals, cexp = [], [], [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
@@ -909,17 +1054,20 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
                 ctr.append([si[t].get(c, 0) if t < len(si) else 0
                             for t in range(obs)] if need_samples else [])
                 cevents.append(list(trial_events[ti].get(c, ())))
+                cintervals.append(list(trial_intervals[ti].get(c, ())))
                 cexp.append(exp)
             if not ctr:
                 s, aux = 0.0, None
             else:
-                source = cevents if mode in ('events', 'cadence') else ctr
+                source = (cintervals if mode == 'waveform' else
+                          cevents if mode in ('events', 'cadence') else ctr)
                 signature = tuple(tuple(seq) for seq in source)
                 cached = score_cache.get(signature)
                 s, aux = cached if cached is not None else (None, None)
             if ctr and s is None:
                 s, aux = _score_output_candidate(
-                    ctr, cevents, cexp, term.role, ttarget, traces.overflow)
+                    ctr, cevents, cexp, term.role, ttarget,
+                    traces.overflow, intervals=cintervals)
             if ctr:
                 score_cache[signature] = (s, aux)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
@@ -936,6 +1084,9 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
             for ti in range(len(ttarget.trials))]
         traces.events[term.role] = [list(trial_events[ti].get(best, ()))
                                     for ti in range(len(ttarget.trials))]
+        traces.intervals[term.role] = [
+            list(trial_intervals[ti].get(best, ()))
+            for ti in range(len(ttarget.trials))]
         if len(ttarget.outputs) == 1 and mode == 'events':
             traces._event_result = best_aux
         elif len(ttarget.outputs) == 1 and mode == 'cadence':
@@ -943,7 +1094,8 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget):
     return out_pos, traces
 
 
-def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
+def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, widths=None,
+                        delays=None):
     """Run target trials at already-selected nervous-net output cells.
 
     Unlike :func:`place_outputs_by_trace`, this function performs no search.
@@ -954,7 +1106,7 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
         return None
     obs = _obs_len(ttarget)
     mode = getattr(ttarget, 'score_mode', 'trace')
-    need_samples = mode not in ('events', 'cadence')
+    need_samples = mode not in ('events', 'cadence', 'waveform')
     config = getattr(ttarget, 'pulse_config', None)
     cone = input_cone(grid, routing, in_pos)
     sub = grid if len(cone) == len(grid) else {c: grid[c] for c in cone}
@@ -962,12 +1114,16 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget):
                 sub, routing, in_pos, out_pos, trial.streams, obs,
                 prune=False, max_events=getattr(ttarget, 'max_events', 2048),
                 sample=need_samples, config=config,
-                input_events=getattr(trial, 'input_events', None))
+                input_events=getattr(trial, 'input_events', None), widths=widths,
+                delays=delays)
             for trial in ttarget.trials]
     traces = TemporalTraces(
         {role: [run[1].get(role, []) for run in runs] for role in out_pos},
         events={role: [list(run[2].get(pos, ())) for run in runs]
                 for role, pos in out_pos.items()},
+        intervals={role: [list(getattr(run[2], 'intervals', {}).get(pos, ()))
+                          for run in runs]
+                   for role, pos in out_pos.items()},
         overflow=any(run[3] for run in runs))
     return traces
 
@@ -984,7 +1140,14 @@ def prepare_net(genome, ttarget):
     routing, in_pos, _ = interpret_nervous(grid, ttarget)
     if any(p not in grid for p in in_pos):
         return None
-    out_pos, traces = place_outputs_by_trace(grid, routing, in_pos, ttarget)
+    # 'evolved_width' timing model: build the per-cell pulse widths from the
+    # genome's node-type width vector (node_widths returns None for every other
+    # model; width-preserving transport derives widths from its waveforms).
+    config = getattr(ttarget, 'pulse_config', None)
+    widths = node_widths(genome, grid, config)
+    delays = node_delays(genome, grid, config)
+    out_pos, traces = place_outputs_by_trace(grid, routing, in_pos, ttarget,
+                                             widths=widths, delays=delays)
     if any(out_pos[t.role] is None for t in ttarget.outputs):
         return None
     return grid, routing, in_pos, out_pos, traces
@@ -1004,6 +1167,8 @@ def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
     mode = getattr(ttarget, 'score_mode', 'trace')
     if mode == 'events':
         return event_score(traces, ttarget, shift=shift)
+    if mode == 'waveform':
+        return waveform_score(traces, ttarget, shift=shift)[0]
     if mode == 'cadence':
         return cadence_score(traces, ttarget)[0]
     if mode == 'period_stepper':
@@ -1053,6 +1218,13 @@ def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
         used = None if alignment is _REFIT_ALIGNMENT else alignment
         return 0.0, (0.0,) * n_cases, used
     mode = getattr(ttarget, 'score_mode', 'trace')
+    if mode == 'waveform':
+        if alignment is _REFIT_ALIGNMENT:
+            used, score, cases = _best_waveform_shift(traces, ttarget)
+        else:
+            used = float(alignment)
+            score, cases = waveform_score(traces, ttarget, shift=used)
+        return score, tuple(cases), used
     if mode == 'period_stepper':
         if alignment is _REFIT_ALIGNMENT:
             used, score, cases = _best_stepper_shift(traces, ttarget)
@@ -1130,6 +1302,42 @@ def temporal_report(ttarget, genome=None):
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
+    if getattr(ttarget, 'score_mode', 'trace') == 'waveform':
+        lines += ['', 'Backend detail: scoring compares physical rise/fall intervals.']
+        prep = None if genome is None else prepare_net(genome, ttarget)
+        traces = prep[4] if prep is not None else None
+        if prep is not None:
+            for term in ttarget.outputs:
+                lines.append("out '%s' read at %s" %
+                             (term.role, prep[3][term.role]))
+        shift = 0.0
+        total = None
+        if traces is not None:
+            shift, total, _ = _best_waveform_shift(traces, ttarget)
+            lines.append('fitted shared response latency: %s' %
+                         _display_time(shift))
+        for ti, trial in enumerate(ttarget.trials):
+            lines.append('')
+            for role in trial.expected:
+                expected = [(start + shift, end + shift)
+                            for start, end in _waveform_expected(
+                                ttarget, trial, role)]
+                lines.append('Test %d: expect %s intervals %s' %
+                             (ti + 1, role, expected))
+                if traces is not None:
+                    actual = _role_intervals(traces, role, ti)
+                    score = _interval_case_score(
+                        actual, expected,
+                        getattr(ttarget, 'waveform_tolerance', 0.25))
+                    lines.append('        actual %s  waveform score %.3f %s' %
+                                 (actual, score,
+                                  'PASS' if score >= 0.999 else 'FAIL'))
+        if traces is not None:
+            lines += ['', '=> waveform score %.4f%s' %
+                      (total, '   SOLVED' if total >= 0.999 else '')]
+        elif genome is None:
+            lines += ['', '(run the GA or Load Saved to inspect a circuit)']
+        return '\n'.join(lines)
     if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
         lines += ['', 'Backend detail: nervous-net transition phase may be sub-second.']
         if genome is None:

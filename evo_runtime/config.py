@@ -29,6 +29,20 @@ class GAConfig:
     # When false, selected parents are cloned separately and then mutated;
     # crossover is skipped without turning mutation or immigration off.
     recombination_enabled: bool = True
+    # Nervous-net node-timing model (mirrors PulseConfig.model; must agree with
+    # it). 'evolved_width' turns on pulse-width mutation; 'pulse_delay' turns on
+    # per-node delay mutation while preserving transported width.
+    node_model: str = 'uniform'
+    # Timing-mutation toggles, decoupled from the model name for ablations.
+    # ``None`` keeps the model's pairing (evolved_width <-> width mutation,
+    # pulse_delay <-> delay mutation). An explicit False disables the paired
+    # mutation — e.g. node_model='pulse_delay' with evolve_delay=False is
+    # width-preserving transport at the FIXED base delay, isolating width
+    # preservation from delay evolvability. True is only valid under the
+    # matching model: the engine ignores the vectors everywhere else, so
+    # enabling the mutation there would silently evolve dead genes.
+    evolve_width: bool | None = None
+    evolve_delay: bool | None = None
     max_telomere: int = DEFAULT_MAX_TELOMERE
     # ``None`` keeps the legacy/direct-API behaviour where chromosome count may
     # evolve. GUI runs set this explicitly: the "Chroms" option is a structural
@@ -56,6 +70,17 @@ class GAConfig:
             raise ValueError('stagnation_beta must be between 0 and 10')
         if self.selection not in ('tournament', 'lexicase'):
             raise ValueError('selection must be tournament or lexicase')
+        if self.node_model not in ('uniform', 'evolved_width', 'pulse_delay'):
+            raise ValueError('node_model must be uniform, evolved_width or pulse_delay')
+        for name, model in (('evolve_width', 'evolved_width'),
+                            ('evolve_delay', 'pulse_delay')):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, bool):
+                raise ValueError('%s must be None (model pairing) or boolean' % name)
+            if value is True and self.node_model != model:
+                raise ValueError(
+                    "%s=True requires node_model='%s' (the mutated vector is "
+                    'ignored under every other model)' % (name, model))
         if not isinstance(self.recombination_enabled, bool):
             raise ValueError('recombination_enabled must be boolean')
         if self.max_telomere < 1 or self.cache_size < 1:
@@ -67,6 +92,17 @@ class GAConfig:
         if self.evaluation_chunk_multiplier < 1:
             raise ValueError('evaluation_chunk_multiplier must be positive')
 
+    def timing_mutations(self):
+        """Resolved ``(evolve_width, evolve_delay)`` booleans for the GA.
+
+        ``None`` toggles fall back to the node model's pairing, so existing
+        configs and checkpoints keep today's behaviour unchanged."""
+        width = (self.node_model == 'evolved_width'
+                 if self.evolve_width is None else self.evolve_width)
+        delay = (self.node_model == 'pulse_delay'
+                 if self.evolve_delay is None else self.evolve_delay)
+        return width, delay
+
     @classmethod
     def from_dict(cls, values):
         return cls(**(values or {}))
@@ -77,8 +113,23 @@ class RunConfig:
     ga: GAConfig = GAConfig()
     pulse: PulseConfig = PulseConfig()
 
+    def __post_init__(self):
+        if self.ga.node_model != self.pulse.model:
+            raise ValueError('ga.node_model must match pulse.model')
+
     @classmethod
     def from_dict(cls, values):
         values = values or {}
-        return cls(ga=GAConfig.from_dict(values.get('ga')),
-                   pulse=PulseConfig(**values.get('pulse', {})))
+        pulse_values = dict(values.get('pulse', {}))
+        # Development-era pulse-delay checkpoints carried a width-to-delay Gain.
+        # Delay is now an evolved genome vector, so discard that obsolete global
+        # coupling while retaining the base delay and other run physics.
+        pulse_values.pop('delay_gain', None)
+        ga_values = dict(values.get('ga') or {})
+        # Older checkpoints stored the timing model only with pulse physics.
+        # Promote that value so loading a width/delay-evolving run cannot quietly
+        # disable its mutation operator.
+        ga_values['node_model'] = pulse_values.get(
+            'model', ga_values.get('node_model', 'uniform'))
+        return cls(ga=GAConfig.from_dict(ga_values),
+                   pulse=PulseConfig(**pulse_values))

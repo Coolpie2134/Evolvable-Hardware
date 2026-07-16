@@ -8,6 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from designer import DesignerTab
 from app import App
+from nv_evo.targets import TEMPORAL_TARGETS
+from nv_evo.pulse import PulseConfig
 
 
 class _Player:
@@ -62,6 +64,108 @@ def test_designer_run_stops_cleanly_at_the_horizon():
     assert tab._run_btn.text == 'Run'
     assert not tab.parent.callbacks
     assert statuses[-1] == 'Playback complete at 1.0 seconds.'
+
+
+def test_designer_prefers_loaded_target_physics_over_registry_copy():
+    key, registered = next(
+        (key, target) for key, target in TEMPORAL_TARGETS.items()
+        if key != target.name)
+    loaded = type('LoadedTarget', (), {})()
+    loaded.name = registered.name
+    loaded.pulse_config = PulseConfig(
+        model='pulse_delay', delay=0.4, width=1.7)
+
+    tab = DesignerTab.__new__(DesignerTab)
+    tab.backend = 'nervous'
+    tab._loaded_target = loaded
+    tab._target_var = type('Var', (), {'get': lambda _self: key})()
+
+    assert DesignerTab._current_target(tab) is loaded
+
+
+def test_interactive_case_dropdown_loads_each_trial():
+    """The Interactive tab exposes EVERY stored test case, not just trial 0:
+    selecting a case loads exactly that trial's physical schedule into the
+    timeline, and a subsequent hand edit flips the box to '(custom schedule)'
+    instead of silently claiming to still show the case."""
+    from interactive import InteractiveTab
+    from nv_evo.playback import pulses_from_trial
+
+    target = TEMPORAL_TARGETS['Odd pulse selector']
+    n_inputs = len(target.inputs)
+
+    tab = InteractiveTab.__new__(InteractiveTab)
+    tab._circuit = {'target': target}
+    tab._in_pos = list(target.inputs)
+    tab._running = False
+
+    labels = InteractiveTab._case_labels(tab, target)
+    assert len(labels) == len(target.trials)
+    assert labels[0] == 'Case 1/%d: silent' % len(target.trials)   # empty bank
+    assert labels[1].startswith('Case 2/%d: A[' % len(target.trials))
+
+    class _Editor:
+        pulses = None
+
+        def set_pulses(self, pulses):
+            self.pulses = pulses
+
+        def schedule(self, _cells):
+            return {}
+
+    class _Player:
+        schedule = None
+
+        def set_schedule(self, schedule):
+            self.schedule = schedule
+
+    class _Var:
+        value = None
+
+        def set(self, value):
+            self.value = value
+
+    tab._editor = _Editor()
+    tab._player = _Player()
+    tab._case_var = _Var()
+    tab._draw_async = lambda: None
+
+    for index in (1, 4, len(target.trials) - 1):
+        tab._case_cb = type('Box', (), {'current': lambda _self: index})()
+        InteractiveTab._on_case_selected(tab)
+        expected = [[(float(s), float(w)) for s, w in lane]
+                    for lane in target.trials[index].input_events]
+        assert tab._editor.pulses == expected
+        assert tab._editor.pulses == pulses_from_trial(target, n_inputs, index)
+        # loading a case must not mark the timeline as hand-edited
+        assert tab._case_var.value is None
+
+    # a manual timeline edit (editor on_change) flips the label to custom
+    InteractiveTab._nv_schedule_changed(tab)
+    assert tab._case_var.value == '(custom schedule)'
+
+
+def test_interactive_width_strip_clips_open_intervals_to_cursor():
+    """The width panel reads the engine's waveform log: closed pulses keep
+    their real span, a still-high pulse is clipped to the cursor and marked
+    open, not-yet-started pulses are hidden, and engines without a waveform
+    log degrade to an empty panel instead of crashing."""
+    from interactive import InteractiveTab
+
+    tab = InteractiveTab.__new__(InteractiveTab)
+
+    class _Sim:
+        pulse_intervals = {(2, 2): [[1.0, 2.5], [4.0, float('inf')],
+                                    [9.0, 10.0]]}
+
+    tab._player = type('P', (), {'sim': _Sim(), 'cursor': 5.5})()
+    assert InteractiveTab._output_spans(tab, (2, 2)) == [
+        (1.0, 2.5, False), (4.0, 5.5, True)]
+    assert InteractiveTab._output_spans(tab, None) == []
+    assert InteractiveTab._output_spans(tab, (0, 0)) == []   # unlogged wire
+
+    tab._player = type('P', (), {'sim': object(), 'cursor': 5.5})()
+    assert InteractiveTab._output_spans(tab, (2, 2)) == []
 
 
 class _Line:

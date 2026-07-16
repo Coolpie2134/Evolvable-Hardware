@@ -39,6 +39,11 @@ class Trial:
     # evaluation uses this instead of ``streams``; the sampled stream remains as
     # a compatibility/display fallback for clocked backends.
     input_events: Optional[List[List[Tuple[float, float]]]] = None
+    # Optional complete output waveforms. Each interval is ``(rise, fall)``;
+    # waveform targets score both boundaries so equal rise times with different
+    # pulse widths are no longer treated as equivalent.
+    expected_intervals: Dict[str, List[Tuple[float, float]]] = field(
+        default_factory=dict)
 
 
 @dataclass
@@ -55,9 +60,11 @@ class TemporalTarget:
     description:     str = ''             # human explanation, shown in the GUI
     # Scoring is semantic: ``events`` matches point events, ``cadence`` measures
     # a free-running rhythm, legacy ``trace`` retains persistence-window
-    # semantics, and ``period_stepper`` measures its command/cadence invariant.
+    # semantics, ``waveform`` compares physical rise/fall intervals, and
+    # ``period_stepper`` measures its command/cadence invariant.
     score_mode:      str = 'trace'
     event_tolerance: float = 0.5
+    waveform_tolerance: float = 0.25
     event_max_shift: float = 12.0
     # Most behaviors care about relative timing and fit one shared propagation
     # offset. Precision-delay targets such as Echo set this False because their
@@ -77,10 +84,27 @@ class TemporalTarget:
     stepper_settle: int = 2
     stepper_min_events: int = 4
     stepper_max_delay: int = 8
+    # Optional physical-waveform relation. Width-sensitive targets derive their
+    # expected intervals from explicit input pulses and the run's base delay.
+    waveform_contract: str = ''
+    waveform_delay_multiplier: float = 1.0
+    waveform_width_multiplier: float = 1.0
     # Empty means no additional restriction. Physical floating-time targets can
     # opt into the asynchronous backends (nervous, lut) only, so clocked
     # backends do not silently quantize them.
     supported_backends: Tuple[str, ...] = ()
+    # Empty means every nervous node-timing model (see nv_evo/pulse.NODE_MODELS)
+    # can attempt the target. Waveform-contract targets demand input-DEPENDENT
+    # output durations, which 'uniform' / 'evolved_width' nodes physically
+    # cannot emit (regenerated widths, single-driver wires) — they declare
+    # ('pulse_delay',) so a run under the wrong model is filtered out instead
+    # of silently capping below 1.0. Only consulted for the nervous backend.
+    supported_models: Tuple[str, ...] = ()
+    # Optional explicit GUI folder (see target_ui.target_category). Empty means
+    # "derive from score-mode semantics". Set where semantics would mislead:
+    # periodic truth-table wrappers are combinational despite scoring as
+    # events, and pulse-width targets are about durations, not edge timing.
+    category: str = ''
 
     @property
     def n_inputs(self):  return len(self.inputs)
@@ -182,6 +206,7 @@ def periodic_combinational_target(target, period=4, repeats=5, latency=1):
         target.name, inputs, outputs, T, trials,
         grid_size=grid_size, iters=30, score_mode='events', latency=latency,
         supported_backends=('nervous', 'lut'),
+        category='Combinational logic',
         description=describe_target(
             'Compute the %s binary truth table as a repeating signal: each row '
             'lasts %d seconds, input 1 emits an event, and input 0 is silent. '
@@ -680,6 +705,11 @@ TEMPORAL_TARGETS = {
 # Exposed so held-out certification can recover the reference state machine that
 # defines a given target and re-sample fresh validation schedules from it.
 ORACLE_KEY_TO_SPEC = {
+    'Pulse width sum (A+B)': 'Pulse width sum (oracle)',
+    'Odd pulse selector':    'Odd pulse selector (oracle)',
+    'A-count parity queried by B': 'A parity query (oracle)',
+    'A-count multiple-of-3 queried by B': 'A modulo-3 query (oracle)',
+    'Odd A batch closed by B': 'A batch parity query (oracle)',
     'SR latch':              'SR latch (oracle)',
     'C-element (2-in join)': 'C-element (oracle)',
     'Refractory filter (3 seconds)': 'Refractory filter (oracle)',

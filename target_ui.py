@@ -6,22 +6,32 @@ from tkinter import ttk
 
 
 ALL_TARGETS = 'All targets'
+COMBINATIONAL = 'Combinational logic'
+PULSE_WIDTH = 'Pulse width & duration'
 CATEGORY_ORDER = (
     ALL_TARGETS,
-    'Logic gates',
-    'Arithmetic',
-    'Routing & decisions',
+    COMBINATIONAL,
     'Timed events',
     'Memory & state',
     'Cadence & patterns',
-    'Custom / imported',
+    PULSE_WIDTH,
 )
 
 
 def target_category(name, target):
-    """Return a stable user-facing category from a target's semantics."""
+    """Return a stable user-facing category from a target's semantics.
+
+    A target may pin itself with an explicit ``category`` attribute — used by
+    the periodic combinational wrappers (temporal encodings of truth tables,
+    which would otherwise sort under 'Timed events') and the pulse-width
+    targets (whose fitness is about physical durations, not just edge times).
+    Everything else falls back to score-mode semantics; every non-temporal
+    target is a truth table, i.e. combinational."""
     if target is None:
         return ALL_TARGETS
+    explicit = getattr(target, 'category', '')
+    if explicit:
+        return explicit
     if getattr(target, 'temporal', False):
         mode = getattr(target, 'score_mode', 'trace')
         if mode in ('cadence', 'period_stepper'):
@@ -29,15 +39,7 @@ def target_category(name, target):
         if mode == 'events':
             return 'Timed events'
         return 'Memory & state'
-
-    upper = name.upper()
-    if any(word in upper for word in ('ADDER', 'MULTIPLIER')):
-        return 'Arithmetic'
-    if any(word in upper for word in ('MUX', 'DECODER', 'COMPARATOR', 'MAJORITY')):
-        return 'Routing & decisions'
-    if upper in {'AND', 'OR', 'XOR', 'NAND', 'NOR', 'XNOR'} or 'PARITY' in upper:
-        return 'Logic gates'
-    return 'Custom / imported'
+    return COMBINATIONAL
 
 
 class TargetPicker(ttk.Frame):
@@ -53,7 +55,7 @@ class TargetPicker(ttk.Frame):
 
         self.category_var = tk.StringVar(self, value=ALL_TARGETS)
         self.category_cb = ttk.Combobox(
-            self, textvariable=self.category_var, state='readonly', width=19)
+            self, textvariable=self.category_var, state='readonly', width=22)
         self.category_cb.pack(side='left', padx=(0, 3))
         self.category_cb.bind('<<ComboboxSelected>>', self._on_category)
 
@@ -122,8 +124,12 @@ class TargetPicker(ttk.Frame):
         self._targets = dict(targets)
         categories = {target_category(name, target)
                       for name, target in self._targets.items()}
-        self.category_cb['values'] = [c for c in CATEGORY_ORDER
-                                      if c == ALL_TARGETS or c in categories]
+        ordered = [c for c in CATEGORY_ORDER
+                   if c == ALL_TARGETS or c in categories]
+        # explicit categories outside the standard order (e.g. from imported
+        # targets) still get a folder rather than becoming unreachable
+        ordered += sorted(categories - set(CATEGORY_ORDER))
+        self.category_cb['values'] = ordered
         if self.category_var.get() not in self.category_cb['values']:
             self.category_var.set(ALL_TARGETS)
         self._refresh_values()

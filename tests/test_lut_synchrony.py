@@ -240,6 +240,42 @@ def test_float_time_target_runs_on_lut_backend():
     assert f1 == f2 and c1 == c2
 
 
+def test_pulse_intervals_log_pairs_rises_with_falls():
+    """AsyncLutSim.pulse_intervals reconstructs the complete waveform in the
+    PulseSim dialect: one [rise, fall] pair per pulse, inf while still high,
+    identical between the event loop and the lattice fast path."""
+    grid = _shift_lines()
+    width = 2.5
+    sim = AsyncLutSim(grid)
+    sim.inject_pulse((0, 0), 1.25, width)
+    sim.advance_to(30.0)
+    delay = sim.config.delay
+    for x in range(1, 8):
+        intervals = sim.pulse_intervals[(x, 0)]
+        start = 1.25 + x * delay
+        assert len(intervals) == 1, (x, intervals)
+        assert abs(intervals[0][0] - start) <= TOL
+        assert abs(intervals[0][1] - (start + width)) <= TOL
+
+    # a wire still high at the frontier reads as an open-ended pulse
+    open_sim = AsyncLutSim(grid)
+    open_sim.inject_pulse((0, 0), 0.0, 10.0)
+    open_sim.advance_to(2.25)
+    assert open_sim.pulse_intervals[(1, 0)] == [[1.0, float('inf')]]
+
+    # lattice fast path (pristine run_bits) logs the same waveform as the
+    # event loop given the same on-lattice stimulus
+    T = 20
+    streams = [(1,)] * 3 + [(0,)] * (T - 3)
+    lattice = AsyncLutSim(grid)
+    lattice.run_bits(streams, [(0, 0)], T)
+    event = AsyncLutSim(grid)
+    event.inject_pulse((0, 0), 0.0, 3.0)
+    event.advance_to(float(T))
+    for x in range(1, 8):
+        assert lattice.pulse_intervals[(x, 0)] == event.pulse_intervals[(x, 0)]
+
+
 # ── standalone runner (pytest not required) ──────────────────────────────────────
 
 def _main():

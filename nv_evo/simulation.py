@@ -23,11 +23,17 @@ from . import pulse
 from .pulse import PulseSim
 
 
-def create_simulator(grid, routing, max_events=None, config=None):
-    """Construct the paper-faithful simulator used by every Nervous consumer."""
+def create_simulator(grid, routing, max_events=None, config=None, widths=None,
+                     delays=None):
+    """Construct the paper-faithful simulator used by every Nervous consumer.
+
+    ``widths`` ({cell: pulse_width}) is consumed only by the 'evolved_width'
+    model. ``delays`` is consumed only by width-preserving transport; its output
+    width is still derived dynamically from the incoming waveform."""
     if max_events is None and config is not None:
         max_events = config.event_cap
-    return PulseSim(grid, routing, max_events=max_events, config=config)
+    return PulseSim(grid, routing, max_events=max_events, config=config,
+                    widths=widths, delays=delays)
 
 
 def normalize(schedule):
@@ -78,17 +84,27 @@ def streams_to_schedule(streams, n_inputs, T, config=None):
 
 
 def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
-                 max_events=None, config=None):
+                 max_events=None, config=None, widths=None, delays=None,
+                 return_intervals=False):
     """Inject `schedule` at float times and run the event-driven sim to
     `horizon`, enforcing `max_events` (overflow ⇒ the run is invalid, exactly as
     in scoring). Returns ({cell: [leading-edge times]}, overflow) for `out_cells`
-    (all live cells if None) — continuous, no tick quantisation."""
-    sim = create_simulator(grid, routing, max_events=max_events, config=config)
+    (all live cells if None) — continuous, no tick quantisation.
+
+    ``widths`` drives evolved width; ``delays`` drives evolved-delay,
+    width-preserving transport. Set ``return_intervals`` to receive complete
+    physical output intervals instead of leading edges."""
+    sim = create_simulator(grid, routing, max_events=max_events, config=config,
+                           widths=widths, delays=delays)
     for i, cell in enumerate(in_pos):
         for (t, w) in schedule[i]:
             sim.inject_pulse(cell, float(t), float(w))
     sim.advance_to(float(horizon))
     cells = list(grid) if out_cells is None else out_cells
+    if return_intervals:
+        return ({c: [tuple(interval) for interval in
+                     sim.pulse_intervals.get(c, ())]
+                 for c in cells}, sim.overflow)
     return {c: list(sim.rise_times.get(c, [])) for c in cells}, sim.overflow
 
 

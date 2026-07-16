@@ -59,7 +59,8 @@ from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGeno
                            random_hex_gene, random_hex_genome,
                            MAX_STATE, MAX_TELOMERE as NV_MAX_TEL)
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
-                            circuit_summary_nervous, SEED_STATE as NV_SEED_STATE)
+                            circuit_summary_nervous, node_widths, node_delays,
+                            SEED_STATE as NV_SEED_STATE)
 from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
 from nv_evo.playback import NervousPlayer, PulseLaneEditor, pulses_from_trial
 from nv_evo.temporal import (run_nervous_events,
@@ -458,7 +459,7 @@ class DesignerTab:
         self._target_var = tk.StringVar(value='(none)')
         self._target_picker = TargetPicker(
             top, {}, variable=self._target_var, command=self._on_target_selected,
-            include_none=True, target_width=20)
+            include_none=True, target_width=31)
         self._target_picker.pack(side='left', padx=(2, 4))
         self._target_cb = self._target_picker.target_cb
         b = ttk.Button(top, text='Adopt target I/O', command=self._adopt_target_io)
@@ -691,7 +692,11 @@ class DesignerTab:
         self._refresh_all()
 
     def _refresh_target_list(self):
-        targets = dict(TEMPORAL_TARGETS)
+        targets = {
+            name: target for name, target in TEMPORAL_TARGETS.items()
+            if (not getattr(target, 'supported_backends', ())
+                or self.backend in target.supported_backends)
+        }
         if self.backend == 'nervous':
             targets.update(COMB_TARGETS)
         loaded = getattr(self, '_loaded_target', None)
@@ -710,15 +715,23 @@ class DesignerTab:
 
     def _current_target(self):
         name = self._target_var.get()
+        # Prefer the imported instance when it has the selected name. It carries
+        # the saved run physics (including width-preserving PulseConfig), whereas
+        # the registry target with the same name is only a clean definition.
+        lt = getattr(self, '_loaded_target', None)
+        if lt is not None:
+            registered = TEMPORAL_TARGETS.get(name)
+            if registered is None and self.backend == 'nervous':
+                registered = COMB_TARGETS.get(name)
+            if (name == lt.name or
+                    (registered is not None and registered.name == lt.name)):
+                return lt
         if name in TEMPORAL_TARGETS:
             return TEMPORAL_TARGETS[name]
         if self.backend == 'nervous' and name in COMB_TARGETS:
             return COMB_TARGETS[name]
         # an imported target whose .name is not a registry KEY (e.g. a custom
         # target, or 'Oscillator (period 2)' vs the key 'Oscillator')
-        lt = getattr(self, '_loaded_target', None)
-        if lt is not None and name == lt.name:
-            return lt
         return None
 
     def _adopt_target_io(self):
@@ -936,23 +949,39 @@ class DesignerTab:
             if self.backend == 'nervous':
                 routing = {p: ROUTING_HEX[state & 0x1F]
                            for p, state in grid.items()}
+                # Score under the SAME physics evolution uses: the run's node
+                # model config, its physical input schedules, and — for
+                # 'evolved_width' — the genome's per-node pulse widths
+                # (node_widths returns None off that model / with no genome).
+                config = getattr(target, 'pulse_config', None)
+                widths = (None if self.genome is None
+                          else node_widths(self.genome, grid, config))
+                delays = (None if self.genome is None
+                          else node_delays(self.genome, grid, config))
                 if use_manual:
                     out_pos = manual
                     traces = TemporalTraces({role: [] for role in roles},
-                                            events={role: [] for role in roles})
+                                            events={role: [] for role in roles},
+                                            intervals={role: [] for role in roles})
                     for trial in target.trials:
                         _, sampled, raw, overflow = run_nervous_events(
                             grid, routing, list(self.in_pos), out_pos,
                             trial.streams, obs,
-                            max_events=getattr(target, 'max_events', 2048))
+                            max_events=getattr(target, 'max_events', 2048),
+                            config=config,
+                            input_events=getattr(trial, 'input_events', None),
+                            widths=widths, delays=delays)
                         traces.overflow = traces.overflow or overflow
                         for role in roles:
                             traces[role].append(sampled[role])
                             traces.events[role].append(
                                 list(raw.get(out_pos[role], ())))
+                            traces.intervals[role].append(
+                                list(raw.intervals.get(out_pos[role], ())))
                 else:
                     out_pos, traces = place_outputs_by_trace(
-                        grid, routing, list(self.in_pos), target)
+                        grid, routing, list(self.in_pos), target,
+                        widths=widths, delays=delays)
             else:
                 if use_manual:
                     # pinned outputs, asynchronous engine — real edge times,
@@ -1617,6 +1646,9 @@ class DesignerTab:
 
     def _build_pulse_timeline(self):
         labels = [chr(65 + i) if i < 26 else 'i%d' % i for i in range(len(self.in_pos))]
+        target = self._current_target()
+        pulse_config = getattr(target, 'pulse_config', None)
+        default_width = getattr(pulse_config, 'width', None)
         # Keep the timeline legible when the surrounding Designer pane expands.
         # Width follows the pane; height reserves enough room for lane labels,
         # title, ticks, and click targets instead of collapsing to an 80 px strip.
@@ -1628,10 +1660,11 @@ class DesignerTab:
         self._editor = PulseLaneEditor(self._tl_ax, self._tl_canvas,
                                        labels or ['(no inputs)'],
                                        horizon=self._sim_horizon(), snap=0.5,
-                                       on_change=self._nv_schedule_changed)
-        t = self._current_target()
-        if t is not None and self.in_pos:
-            self._editor.set_pulses(pulses_from_trial(t, len(self.in_pos)))
+                                       on_change=self._nv_schedule_changed,
+                                       default_width=default_width)
+        if target is not None and self.in_pos:
+            self._editor.set_pulses(
+                pulses_from_trial(target, len(self.in_pos)))
         else:
             self._editor.draw()
         ttk.Button(self._input_actions, text='Clear pulses',
@@ -1646,10 +1679,18 @@ class DesignerTab:
         target = self._current_target()          # may be None (free playback)
         if self.backend == 'nervous':
             routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+            config = getattr(target, 'pulse_config', None)
+            # 'evolved_width' model: play back with the genome's per-node pulse
+            # widths (node_widths returns None off that model or with no genome —
+            # a hand-built grid stays uniform).
+            widths = (None if self.genome is None
+                      else node_widths(self.genome, self.grid, config))
+            delays = (None if self.genome is None
+                      else node_delays(self.genome, self.grid, config))
             self._player = NervousPlayer(
                 self.grid, routing, horizon=self._sim_horizon(),
                 max_events=getattr(target, 'max_events', 2048),
-                config=getattr(target, 'pulse_config', None))
+                config=config, widths=widths, delays=delays)
         else:                                    # LUT — same player, level engine
             self._player = LutPlayer(
                 self.grid, horizon=self._sim_horizon(),
@@ -1779,24 +1820,37 @@ class DesignerTab:
         obs = _obs_len(t)                    # observe past T so a delayed Q is seen
         if self.backend == 'nervous':
             routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+            # identical physics to evolution: model config + ('evolved_width')
+            # the genome's per-node pulse widths (None off-model / no genome)
+            config = getattr(t, 'pulse_config', None)
+            widths = (None if self.genome is None
+                      else node_widths(self.genome, self.grid, config))
+            delays = (None if self.genome is None
+                      else node_delays(self.genome, self.grid, config))
             if use_manual:
                 out_pos = manual
                 traces = TemporalTraces({r: [] for r in roles},
-                                        events={r: [] for r in roles})
+                                        events={r: [] for r in roles},
+                                        intervals={r: [] for r in roles})
                 for trial in t.trials:
                     _, trs, raw, overflow = run_nervous_events(
                         self.grid, routing, list(self.in_pos), out_pos,
                         trial.streams, obs,
                         max_events=getattr(t, 'max_events', 2048),
-                        config=getattr(t, 'pulse_config', None),
-                        input_events=getattr(trial, 'input_events', None))
+                        config=config,
+                        input_events=getattr(trial, 'input_events', None),
+                        widths=widths, delays=delays)
                     traces.overflow = traces.overflow or overflow
                     for r in roles:
                         traces[r].append(trs[r])
                         traces.events[r].append(list(raw.get(out_pos[r], ())))
+                        traces.intervals[r].append(
+                            list(raw.intervals.get(out_pos[r], ())))
             else:
                 out_pos, traces = place_outputs_by_trace(self.grid, routing,
-                                                         list(self.in_pos), t)
+                                                         list(self.in_pos), t,
+                                                         widths=widths,
+                                                         delays=delays)
         else:
             if use_manual:
                 # pinned outputs, asynchronous engine — real edge times,

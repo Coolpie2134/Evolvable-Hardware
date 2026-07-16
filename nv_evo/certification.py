@@ -59,6 +59,25 @@ def oracle_spec_for(target):
     return ORACLE_SPECS.get(spec_name) if spec_name else None
 
 
+# The run's physics config lives on the (mutable) training target the controller
+# built (setattr'd pulse_config / lut_config). Fresh spec-built holdout targets
+# start WITHOUT it, so without carrying it forward a champion evolved under a
+# non-default node-timing model (evolved_width / pulse_delay) would be certified
+# under the default uniform physics — every such run would read as OVERFIT. Copy
+# it onto each spec target so fit + holdout run under the SAME physics as training.
+_PHYSICS_ATTRS = ('pulse_config', 'lut_config')
+
+
+def carry_physics(src_target, dst_target):
+    """Copy the run's physics config from the training target onto a freshly
+    built spec target (returns dst)."""
+    for attr in _PHYSICS_ATTRS:
+        cfg = getattr(src_target, attr, None)
+        if cfg is not None:
+            setattr(dst_target, attr, cfg)
+    return dst_target
+
+
 def certify(genome, target, train=None, backend='nervous',
             seeds=DEFAULT_HOLDOUT_SEEDS, threshold=0.90, kind='certify'):
     """Certify a winning genome against fresh held-out stimulus.
@@ -79,13 +98,15 @@ def certify(genome, target, train=None, backend='nervous',
         result['verdict'] = classify(train or 0.0, None, threshold, kind=kind)
         return result
 
-    fitted = fit_readout(genome, spec(), backend=backend)   # fit once, reuse
+    # fit once (under the run's physics), reuse for every held-out seed
+    fitted = fit_readout(genome, carry_physics(target, spec()), backend=backend)
     if fitted is None:
         result['holdouts'] = [0.0] * len(seeds)
         result['holdout'] = 0.0
         result['verdict'] = classify(train or 0.0, 0.0, threshold, kind=kind)
         return result
-    holdouts = [holdout_score(genome, spec, backend=backend, seed=s, fitted=fitted)
+    holdouts = [holdout_score(genome, spec, backend=backend, seed=s, fitted=fitted,
+                              physics_from=target)
                 for s in seeds]
     mean_ho = sum(holdouts) / len(holdouts)
     result['holdouts'] = holdouts

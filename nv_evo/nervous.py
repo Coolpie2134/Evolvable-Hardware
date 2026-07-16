@@ -204,6 +204,50 @@ def _place_outputs(grid, target):
     return out_pos
 
 
+def node_widths(genome, grid, config=None):
+    """Per-cell pulse widths for the 'evolved_width' node-timing model, or None.
+
+    A grown cell's pulse width is its node TYPE's evolvable multiplier (indexed
+    by the cell's 5-bit routing state, see Genome.state_widths) times the run's
+    base width (PulseConfig.width). Returns ``{cell: width}`` for PulseSim.
+
+    Returns None unless ALL of: the run is on the 'evolved_width' model, and the
+    genome carries a width vector. The model gate lives here (not at each call
+    site), ensuring uniform / pulse_delay runs ignore any genome width vector
+    and every scoring path is width-consistent by construction. Width is
+    orthogonal to routing, so this is a pure lookup on the already-grown grid —
+    no re-growth, no extra associative pass."""
+    if config is None or getattr(config, 'model', 'uniform') != 'evolved_width':
+        return None
+    mult = getattr(genome, 'state_widths', None)
+    if not mult:
+        return None
+    base = config.width
+    n = len(mult)
+    return {pos: base * mult[state & 0x1F]
+            for pos, state in grid.items()
+            if (state & 0x1F) < n}
+
+
+def node_delays(genome, grid, config=None):
+    """Per-cell delays for evolved-delay width-preserving transport, or None.
+
+    Delay is indexed by the same 5-bit routing state as width evolution. The
+    helper owns the model gate so uniform/evolved-width paths cannot
+    accidentally consume a dormant delay vector from a checkpoint.
+    """
+    if config is None or getattr(config, 'model', 'uniform') != 'pulse_delay':
+        return None
+    mult = getattr(genome, 'state_delays', None)
+    if not mult:
+        return None
+    base = config.delay
+    n = len(mult)
+    return {pos: base * mult[state & 0x1F]
+            for pos, state in grid.items()
+            if (state & 0x1F) < n}
+
+
 def interpret_nervous(grid, target=None):
     """Return (routing {pos:(e1,e2,i1,op)}, input_pos, output_pos {role:(x,y)|None})."""
     routing = {pos: ROUTING_HEX[state & 0x1F] for pos, state in grid.items()}

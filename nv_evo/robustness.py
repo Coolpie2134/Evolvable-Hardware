@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from . import pulse
 from . import simulation as ae
-from .nervous import grow_nervous, interpret_nervous
+from .nervous import grow_nervous, interpret_nervous, node_widths, node_delays
 from .temporal import _obs_len
 
 # ── predeclared scoring constants (a state-1 hold rings with period ~D+W) ────────
@@ -284,6 +284,8 @@ def semantic_trial_scores(genome, target, fitted, schedules):
     cell = fitted.output_positions[target.outputs[0].role]
     if cell not in grid:
         return [0.0] * len(schedules)
+    widths = node_widths(genome, grid, getattr(target, 'pulse_config', None))
+    delays = node_delays(genome, grid, getattr(target, 'pulse_config', None))
     offset = total_offset(target, fitted)
     # Judge over the TRAINED observation window (_obs_len): this is a JITTER-
     # robustness test, not a hold-duration test. (Separately noted: this winner's
@@ -294,7 +296,8 @@ def semantic_trial_scores(genome, target, fitted, schedules):
     for sched in schedules:
         res, overflow = ae.run_schedule(grid, routing, in_pos, sched, horizon,
                                         [cell], max_events=target.max_events,
-                                        config=getattr(target, 'pulse_config', None))
+                                        config=getattr(target, 'pulse_config', None),
+                                        widths=widths, delays=delays)
         if overflow:
             out.append(0.0)
             continue

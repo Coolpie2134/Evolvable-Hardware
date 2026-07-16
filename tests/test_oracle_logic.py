@@ -20,7 +20,8 @@ from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            make_refractory_filter,
                            make_a_first_rendezvous,
                            make_collision_serializer,
-                           make_watchdog)
+                           make_watchdog, make_a_parity_query,
+                           make_a_mod3_query, make_a_batch_parity_query)
 from nv_evo.temporal import TemporalTraces, event_score     # noqa: E402
 from snn_evo.targets import gate_target                     # noqa: E402
 
@@ -31,6 +32,87 @@ def _trace(fn, seq):
         ob, st = fn(inb, st)
         out.append(ob[0])
     return out
+
+
+def test_a_parity_query_counts_a_and_b_only_reads_state():
+    f = make_a_parity_query()
+    seq = [
+        (0, 1),                    # zero A: even, no Q
+        (1, 0), (0, 1), (0, 1),  # one A: repeated B queries both emit
+        (1, 0), (0, 1),          # two A: even, no Q
+        (1, 0), (1, 0), (0, 1),  # four A: still even
+        (1, 0), (0, 1),          # five A: odd, emit
+    ]
+    assert _trace(f, seq) == [0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 1]
+
+
+def test_a_parity_query_target_is_registered_and_labels_every_b_query():
+    display = 'A-count parity queried by B'
+    spec = 'A parity query (oracle)'
+    assert display in TEMPORAL_TARGETS
+    assert spec in ORACLE_SPECS
+    target = ORACLE_SPECS[spec](seed=515)
+    assert target.score_mode == 'events'
+    assert len(target.inputs) == 2
+    for trial in target.trials:
+        parity = 0
+        expected = []
+        for tick, (a_edge, b_edge) in enumerate(trial.streams):
+            if a_edge:
+                parity ^= 1
+            if b_edge and parity:
+                expected.append(float(tick + target.latency))
+        assert trial.expected_events['Q'] == expected
+
+    fresh = ORACLE_SPECS[spec](seed=616)
+    assert [trial.streams for trial in target.trials] != \
+        [trial.streams for trial in fresh.trials]
+
+
+def test_related_a_count_query_state_machines():
+    mod3 = make_a_mod3_query()
+    # B at counts 0/1/2 is quiet; count 3 and a repeated query both emit;
+    # count 4 is quiet; count 6 emits again.
+    mod3_seq = [(0, 1), (1, 0), (0, 1), (1, 0), (0, 1),
+                (1, 0), (0, 1), (0, 1), (1, 0), (0, 1),
+                (1, 0), (1, 0), (0, 1)]
+    assert _trace(mod3, mod3_seq) == \
+        [0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1]
+
+    batch = make_a_batch_parity_query()
+    # Each B queries and clears: empty=0, one A=1, empty=0, two A=0,
+    # three A=1, then the immediately repeated empty query is 0.
+    batch_seq = [(0, 1), (1, 0), (0, 1), (0, 1),
+                 (1, 0), (1, 0), (0, 1),
+                 (1, 0), (1, 0), (1, 0), (0, 1), (0, 1)]
+    assert _trace(batch, batch_seq) == \
+        [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+
+
+def test_a_count_query_targets_use_mixed_pulse_lengths():
+    pairs = {
+        'A-count parity queried by B': 'A parity query (oracle)',
+        'A-count multiple-of-3 queried by B': 'A modulo-3 query (oracle)',
+        'Odd A batch closed by B': 'A batch parity query (oracle)',
+    }
+    for display, spec in pairs.items():
+        assert display in TEMPORAL_TARGETS
+        assert spec in ORACLE_SPECS
+        target = ORACLE_SPECS[spec](seed=717)
+        widths = {
+            width
+            for trial in target.trials
+            for lane in trial.input_events
+            for _, width in lane
+        }
+        assert widths == {0.5, 0.75, 1.0, 1.25, 1.75, 2.25}
+        # Physical pulse durations must not alter the reference edge labels.
+        for trial in target.trials:
+            assert trial.input_events is not None
+            for lane_index, lane in enumerate(trial.input_events):
+                assert [start for start, _ in lane] == [
+                    float(tick) for tick, row in enumerate(trial.streams)
+                    if row[lane_index]]
 
 
 def test_binary_truth_tables_become_phase_locked_periodic_targets():

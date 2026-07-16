@@ -23,7 +23,7 @@ them in that same continuous time instead of a synchronous tick lattice:
 from __future__ import annotations
 
 from . import pulse as pulse_engine
-from .simulation import create_simulator
+from .simulation import create_simulator, streams_to_schedule
 
 DEFAULT_DT      = 0.5     # playback resolution (sub-tick; WIDTH defaults to 1 TICK)
 DEFAULT_HORIZON = 40.0    # physical-time window shown / played
@@ -99,39 +99,50 @@ class NervousPlayer(AsyncPlayer):
     """Continuous-time playback of one grown nervous net."""
 
     def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
-                 pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None):
+                 pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None,
+                 widths=None, delays=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config
         self.max_events = max_events
+        # Per-cell pulse widths for 'evolved_width'. Width-preserving transport
+        # ignores this map and copies the incoming waveform dynamically.
+        self.widths  = widths
+        self.delays  = delays
         default_width = (pulse_engine.WIDTH if config is None else config.width)
         super().__init__(horizon=horizon, dt=dt, pulse_width=pulse_width,
                          default_width=default_width)
 
     def _make_sim(self):
         return create_simulator(self.grid, self.routing,
-                                max_events=self.max_events, config=self.config)
+                                max_events=self.max_events, config=self.config,
+                                widths=self.widths, delays=self.delays)
 
 
-def pulses_from_trial(target, n_inputs):
-    """Leading-edge times of each input in the target's first trial — a sensible
-    default schedule to prefill the pulse timeline with. Returns n_inputs lists."""
+def pulses_from_trial(target, n_inputs, trial_index=0):
+    """Physical input intervals from one stored trial (default: the first).
+
+    ``trial_index`` selects which test case to load (clamped to the stored
+    range), so playback UIs can step through the whole bank instead of only
+    ever showing trial 0. Widths are retained so width-preserving playback
+    receives the same waveform used by scoring rather than silently
+    substituting the global default width.
+    """
     out = [[] for _ in range(n_inputs)]
     trials = getattr(target, 'trials', None) if target is not None else None
     if not trials:
         return out
-    physical = getattr(trials[0], 'input_events', None)
+    trial = trials[max(0, min(int(trial_index), len(trials) - 1))]
+    physical = getattr(trial, 'input_events', None)
     if physical is not None:
         for i in range(n_inputs):
-            out[i] = ([float(start) for start, _width in physical[i]]
+            out[i] = ([(float(start), float(width)) for start, width in physical[i]]
                       if i < len(physical) else [])
         return out
-    streams = trials[0].streams
-    for i in range(n_inputs):
-        out[i] = [float(t) for t in range(len(streams))
-                  if i < len(streams[t]) and streams[t][i]
-                  and (t == 0 or not streams[t - 1][i])]
-    return out
+    streams = trial.streams
+    return streams_to_schedule(
+        streams, n_inputs, len(streams),
+        config=getattr(target, 'pulse_config', None))
 
 
 def toggle_pulse(times, t, snap):
@@ -151,13 +162,15 @@ class PulseLaneEditor:
     """A clickable per-input pulse timeline drawn on a matplotlib axis."""
 
     def __init__(self, ax, canvas, labels, horizon=DEFAULT_HORIZON, snap=0.5,
-                 on_change=None):
+                 on_change=None, default_width=None):
         self.ax        = ax
         self.canvas    = canvas
         self.labels    = list(labels)
         self.horizon   = float(horizon)
         self.snap      = float(snap)
         self.on_change = on_change
+        self.default_width = float(
+            pulse_engine.WIDTH if default_width is None else default_width)
         self.pulses    = [[] for _ in self.labels]   # per-input (start, width)
         self.cursor    = 0.0
         self._cursor_artist = None
@@ -167,7 +180,7 @@ class PulseLaneEditor:
             'button_release_event', self._on_release)
 
     def schedule(self, in_cells):
-        """Map lane pulses onto their grid cells: {cell: [times]}."""
+        """Map lane pulses onto their grid cells: {cell: [(start, width)]}."""
         return {in_cells[i]: list(self.pulses[i])
                 for i in range(min(len(in_cells), len(self.pulses)))}
 
@@ -179,7 +192,7 @@ class PulseLaneEditor:
                 if isinstance(item, (tuple, list)) and len(item) == 2:
                     normalized.append((float(item[0]), float(item[1])))
                 else:
-                    normalized.append((float(item), float(pulse_engine.WIDTH)))
+                    normalized.append((float(item), self.default_width))
             self.pulses.append(sorted(normalized))
         while len(self.pulses) < len(self.labels):
             self.pulses.append([])
@@ -231,7 +244,7 @@ class PulseLaneEditor:
             if release_lane == lane:
                 end = max(0.0, round(ev.xdata / self.snap) * self.snap)
         width = (end - start if end > start + self.snap * 0.5
-                 else float(pulse_engine.WIDTH))
+                 else self.default_width)
         width = max(self.snap, min(width, self.horizon - start))
         self.pulses[lane].append((start, width))
         self.pulses[lane].sort()

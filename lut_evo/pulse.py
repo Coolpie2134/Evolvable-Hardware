@@ -126,7 +126,9 @@ class AsyncLutSim:
         self._tick    = 0                             # next step() tick index
         self._ever    = np.zeros(n, dtype=bool)
         self._rise_log  = []                          # [(t, ndarray of columns)]
+        self._fall_log  = []                          # [(t, ndarray of columns)]
         self._rise_dict = None
+        self._interval_dict = None
         self._out_dict  = None
         self.event_count = 0
         self.wave_count  = 0
@@ -214,12 +216,19 @@ class AsyncLutSim:
             cols = np.nonzero(rising)[0]
             self._rise_log.append((t, cols))
             self._rise_dict = None
+            self._interval_dict = None
             self._ever[cols] = True
             self.event_count += len(cols)
             if (self.max_events is not None
                     and self.event_count > self.max_events):
                 self._overflow_now()
                 return
+        falling = changed & (wire != 0) & (new_wire == 0)
+        if falling.any():
+            # trailing edges complete the waveform log (pulse_intervals);
+            # nibble-to-nibble changes that stay high are neither edge
+            self._fall_log.append((t, np.nonzero(falling)[0]))
+            self._interval_dict = None
         wire[...] = new_wire
         self._out_dict = None
         self.wave_count += 1
@@ -294,6 +303,29 @@ class AsyncLutSim:
                     d[cells[i]].append(t)
             self._rise_dict = d
         return self._rise_dict
+
+    @property
+    def pulse_intervals(self):
+        """{cell: [[start, end]]} — the complete per-wire waveform log, in the
+        PulseSim dialect: one [rise, fall] pair per pulse, ``end`` is
+        float('inf') while the wire is still high. Level logic alternates
+        rise/fall strictly per wire, so pairing the k-th rise with the k-th
+        fall reconstructs the waveform exactly."""
+        if self._interval_dict is None:
+            rises = {c: [] for c in self._cells}
+            falls = {c: [] for c in self._cells}
+            cells = self._cells
+            for t, cols in self._rise_log:
+                for i in cols:
+                    rises[cells[i]].append(t)
+            for t, cols in self._fall_log:
+                for i in cols:
+                    falls[cells[i]].append(t)
+            self._interval_dict = {
+                c: [[start, falls[c][k] if k < len(falls[c]) else float('inf')]
+                    for k, start in enumerate(rises[c])]
+                for c in cells}
+        return self._interval_dict
 
     def rise_trains(self, cells):
         """{cell: [leading-edge times]} for just the requested cells."""
@@ -402,6 +434,7 @@ class AsyncLutSim:
                     last_inj = cols
             new_wire = logic | injor
             rising = (wire == 0) & (new_wire != 0)
+            falling = (wire != 0) & (new_wire == 0)
             wire[...] = new_wire
             B[t] = new_wire != 0
             if rising.any():
@@ -413,6 +446,9 @@ class AsyncLutSim:
                         and self.event_count > self.max_events):
                     self._overflow_now()
                     break
+            if falling.any():
+                self._fall_log.append((t * TICK, np.nonzero(falling)[0]))
+                self._interval_dict = None
             self.wave_count += 1
             if self.wave_count > self.config.wave_cap:
                 self._overflow_now()

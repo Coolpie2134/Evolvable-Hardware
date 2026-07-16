@@ -33,6 +33,8 @@ def genome_to_dict(genome, backend):
         count = len(chromosome.genes)
         return (0 if count < 2 else
                 max(1, min(int(chromosome.split), count - 1)))
+    sw = getattr(genome, 'state_widths', None)     # nervous 'evolved_width' model
+    sd = getattr(genome, 'state_delays', None)     # nervous width-preserving model
     return {
         'tag': int(genome.tag), 'gene_fields': list(fields),
         'chromosomes': [
@@ -40,6 +42,8 @@ def genome_to_dict(genome, backend):
              'telomere': int(getattr(c, 'telomere', 1)),
              'genes': [[int(getattr(g, f)) for f in fields] for g in c.genes]}
             for c in genome.chromosomes],
+        'state_widths': ([float(x) for x in sw] if sw else None),
+        'state_delays': ([float(x) for x in sd] if sd else None),
     }
 
 
@@ -55,7 +59,14 @@ def genome_from_dict(data, backend):
         chroms.append(Chromosome(
             genes=genes, split=split,
             tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1))))
-    return Genome(chromosomes=chroms, tag=int(data.get('tag', 0)))
+    genome = Genome(chromosomes=chroms, tag=int(data.get('tag', 0)))
+    sw = data.get('state_widths')                  # nervous 'evolved_width' model
+    if sw and backend == 'nervous':
+        genome.state_widths = [float(x) for x in sw]
+    sd = data.get('state_delays')                  # evolved-delay preservation
+    if sd and backend == 'nervous':
+        genome.state_delays = [float(x) for x in sd]
+    return genome
 
 
 def _target_to_dict(target):
@@ -87,7 +98,10 @@ def _target_from_dict(item):
             expected_events=t.get('expected_events', {}),
             input_events=(None if t.get('input_events') is None else
                           [[tuple(event) for event in events]
-                           for events in t['input_events']]))
+                           for events in t['input_events']]),
+            expected_intervals={
+                role: [tuple(interval) for interval in intervals]
+                for role, intervals in t.get('expected_intervals', {}).items()})
                           for t in data['trials']]
         target = TemporalTarget(**data)
         for name, value in item.get('extras', {}).items():
