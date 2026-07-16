@@ -62,7 +62,8 @@ from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, node_widths, node_delays,
                             SEED_STATE as NV_SEED_STATE)
 from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
-from nv_evo.playback import NervousPlayer, PulseLaneEditor, pulses_from_trial
+from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
+                             charge_levels)
 from nv_evo.temporal import (run_nervous_events,
                              place_outputs_by_trace, TemporalTraces,
                              windowed_score, exact_tick_accuracy,
@@ -451,9 +452,19 @@ class DesignerTab:
                           state='readonly')
         cb.pack(side='left', padx=(2, 8))
         cb.bind('<<ComboboxSelected>>', self._on_backend_change)
-        _Tip(cb, "The paper's two substrates: Architecture 1 = honeycomb nervous "
-                 "net (coincidence + inhibition, pulse dynamics); Architecture 2 = "
-                 "square array of four 16-bit LUTs per cell, asynchronous level logic.")
+        self._backend_cb = cb
+        if self.get_circuit is not None:
+            # Embedded in the app: the designer FOLLOWS the main window's
+            # Model selector (see App._reconfigure_for_backend), so its own
+            # architecture box is a read-only indicator, not a control.
+            cb.configure(state='disabled')
+            _Tip(cb, 'Follows the Model selector at the top of the main '
+                     'window (the designer supports the nervous net and the '
+                     'LUT array; it is hidden for SNN runs).')
+        else:
+            _Tip(cb, "The paper's two substrates: Architecture 1 = honeycomb nervous "
+                     "net (coincidence + inhibition, pulse dynamics); Architecture 2 = "
+                     "square array of four 16-bit LUTs per cell, asynchronous level logic.")
 
         ttk.Label(top, text='Target:').pack(side='left')
         self._target_var = tk.StringVar(value='(none)')
@@ -676,6 +687,16 @@ class DesignerTab:
         self._guide.delete('1.0', 'end')
         self._guide.insert('end', text)
         self._guide.config(state='disabled')
+
+    def follow_backend(self, backend):
+        """Track the app's Model selector: switch the designer's architecture
+        to ``backend`` ('nervous' | 'lut'; anything else is ignored). A real
+        switch clears the working design exactly like a manual change."""
+        if backend not in ('nervous', 'lut') or backend == self.backend:
+            return
+        self._backend_var.set('LUT array (Arch 2)' if backend == 'lut'
+                              else 'Nervous net (Arch 1)')
+        self._on_backend_change()
 
     def _on_backend_change(self, _evt=None):
         backend = 'lut' if self._backend_var.get().startswith('LUT') else 'nervous'
@@ -1743,9 +1764,13 @@ class DesignerTab:
         self._player.step()
         self._nv_playing = True
         self._tick = 1                            # marks "simulating" for _refresh_canvas
-        self._state = self._player.activity()
         if self.backend == 'lut':
+            self._state = self._player.activity()
             self._nibbles = self._player.nibbles()   # Fig. 14 wedge activity
+        else:
+            # capacitor-style playback: charge while pulsing, fade after
+            self._state = (charge_levels(self._player.sim, self._player.cursor)
+                           or self._player.activity())
         if getattr(self, '_editor', None) is not None:
             self._editor.set_cursor(self._player.cursor)
         self._tick_lbl.config(text='t = %.1f%s' % (

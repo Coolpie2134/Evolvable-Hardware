@@ -34,7 +34,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from snn_evo import grow_snn, interpret_grid, simulate_trace, draw_snn_net, N_STEPS, DT
 from nv_evo import grow_nervous, interpret_nervous, place_outputs_by_trace
 from nv_evo.viz import draw_hex_net
-from nv_evo.playback import NervousPlayer, PulseLaneEditor, pulses_from_trial
+from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
+                             charge_levels)
 from lut_evo import grow_lut
 from lut_evo.playback import LutPlayer
 
@@ -291,10 +292,14 @@ class InteractiveTab:
                                 '   (event cap hit)' if self._player.overflow
                                 else '')
         if self._backend == 'nervous':
+            # capacitor-style playback: nodes charge while pulsing and fade
+            # after the pulse ends (display only — physics stays binary)
+            activity = (charge_levels(self._player.sim, self._player.cursor)
+                        or self._player.activity())
             draw_hex_net(self._axg, self._grid, target.grid_size,
                          routing=self._routing,
                          in_pos=self._in_pos, out_pos=self._out_pos,
-                         activity=self._player.activity(), show_edges=True,
+                         activity=activity, show_edges=True,
                          title=title)
         else:
             in_pos = [p for p in self._in_pos if p in self._grid]
@@ -347,6 +352,10 @@ class InteractiveTab:
         directly instead of inferred from edge spacing."""
         target = self._circuit['target']
         axw.clear()
+        # A label is only drawn when it actually fits inside its bar, else the
+        # text spills across neighbouring pulses. One character is roughly this
+        # much of the time axis at the strip's font size.
+        char_span = 0.012 * max(self._player.horizon, 1e-9)
         for k, term in enumerate(target.outputs):
             cell = self._out_pos.get(term.role)
             for start, end, open_ended in self._output_spans(cell):
@@ -356,7 +365,7 @@ class InteractiveTab:
                                 edgecolors='#0d4a94', linewidth=0.6)
                 width = end - start
                 label = ('%.2g…' % width) if open_ended else ('%.2g' % width)
-                if width >= 0.01:
+                if width >= len(label) * char_span:
                     axw.text((start + end) / 2, k, label, ha='center',
                              va='center', fontsize=7, color='white')
         axw.axvline(self._player.cursor, color='#e8a33d', lw=1.4, alpha=0.9)

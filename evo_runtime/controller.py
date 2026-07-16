@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import os
 import random
+import statistics
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 
@@ -186,7 +187,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 best_fit, best_genome, best_rank = (
                     run_fit, copy.deepcopy(champion), run_rank)
             messages.put(('gen', try_i, 0, best_fit,
-                          sum(fitnesses) / len(fitnesses), run_fit, base_rate))
+                          sum(fitnesses) / len(fitnesses), run_fit, base_rate,
+                          statistics.pstdev(fitnesses)))
             stagnation, mutation_rate = 0, base_rate
             for generation in range(1, gens + 1):
                 if stop_event.is_set():
@@ -231,7 +233,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                             run_fit, copy.deepcopy(champion), run_rank)
                 messages.put(('gen', try_i, generation, best_fit,
                               sum(fitnesses) / len(fitnesses), offspring_best,
-                              actual_rate))
+                              actual_rate, statistics.pstdev(fitnesses)))
             if best_fit >= 1.0:
                 break
 

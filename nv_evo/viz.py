@@ -50,6 +50,20 @@ def _arrow(ax, src, dst, col):
                                  lw=1.7, alpha=0.95, zorder=3))
 
 
+_IDLE_RGB   = (0xe6, 0xe9, 0xee)
+_ACTIVE_RGB = (0x18, 0xb3, 0x4a)
+
+
+def _activity_color(level):
+    """Idle-grey -> active-green node fill. Accepts the legacy binary 0/1 and
+    graded 0..1 charge levels (capacitor-style playback), interpolated
+    linearly so a discharging node visibly fades instead of snapping off."""
+    level = max(0.0, min(1.0, float(level)))
+    return '#%02x%02x%02x' % tuple(
+        int(round(idle + (active - idle) * level))
+        for idle, active in zip(_IDLE_RGB, _ACTIVE_RGB))
+
+
 def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
                  activity=None, show_edges=True, title=None):
     """
@@ -57,7 +71,8 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
     routing    : {(x,y): (e1,e2,i1[,op])} (for arrows / node-type colour)
     in_pos     : list of input positions (labelled A, B, …)
     out_pos    : {role: (x,y)}  outputs (labelled)
-    activity   : {(x,y): 0/1}   if given, nodes coloured by activity not type
+    activity   : {(x,y): level} if given, nodes coloured by activity not type;
+                 level may be binary 0/1 or a graded 0..1 charge
     """
     in_pos  = in_pos or []
     out_pos = out_pos or {}
@@ -94,7 +109,7 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
     for (x, y), state in grid.items():
         px, py = hex_pixel(x, y)
         if activity is not None:
-            fc = '#18b34a' if activity.get((x, y), 0) else '#e6e9ee'
+            fc = _activity_color(activity.get((x, y), 0))
         elif routing is not None:
             fc = _KIND_FC[routing_kind(ROUTING_HEX[state & 0x1F])]
         else:

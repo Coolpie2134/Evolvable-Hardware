@@ -22,6 +22,8 @@ them in that same continuous time instead of a synchronous tick lattice:
 """
 from __future__ import annotations
 
+import math
+
 from . import pulse as pulse_engine
 from .simulation import create_simulator, streams_to_schedule
 
@@ -117,6 +119,47 @@ class NervousPlayer(AsyncPlayer):
         return create_simulator(self.grid, self.routing,
                                 max_events=self.max_events, config=self.config,
                                 widths=self.widths, delays=self.delays)
+
+
+# Display-only RC constants for capacitor-style playback (charge_levels).
+# Fast charge while a wire pulses, slower visible discharge after it falls —
+# these shape the ANIMATION only; the scored physics stays the binary pulse.
+CHARGE_TAU    = 0.30
+DISCHARGE_TAU = 0.90
+
+
+def charge_levels(sim, t, charge_tau=CHARGE_TAU, discharge_tau=DISCHARGE_TAU):
+    """{cell: 0..1} capacitor-style charge of every wire at time ``t``.
+
+    Models each node as an RC follower of its own binary waveform: charge
+    rises toward 1 while the wire is high (time constant ``charge_tau``) and
+    decays toward 0 after it falls (``discharge_tau``), so playback shows
+    nodes charging and discharging like the paper's capacitively-coupled
+    hardware instead of snapping on/off. Purely cosmetic — reads the engine's
+    ``pulse_intervals`` waveform log and never touches the simulation.
+    Returns None when the simulator has no waveform log."""
+    intervals = getattr(sim, 'pulse_intervals', None)
+    if intervals is None:
+        return None
+    t = float(t)
+    levels = {}
+    for cell, pulses in intervals.items():
+        charge, frontier = 0.0, None
+        for start, end in pulses:
+            start = float(start)
+            if start > t:
+                break
+            if frontier is not None and start > frontier:
+                charge *= math.exp(-(start - frontier) / discharge_tau)
+            high_until = min(float(end), t)
+            if high_until > start:
+                charge = 1.0 + (charge - 1.0) * math.exp(
+                    -(high_until - start) / charge_tau)
+            frontier = high_until
+        if frontier is not None and t > frontier:
+            charge *= math.exp(-(t - frontier) / discharge_tau)
+        levels[cell] = charge
+    return levels
 
 
 def pulses_from_trial(target, n_inputs, trial_index=0):

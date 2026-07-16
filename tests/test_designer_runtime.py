@@ -168,6 +168,34 @@ def test_interactive_width_strip_clips_open_intervals_to_cursor():
     assert InteractiveTab._output_spans(tab, (2, 2)) == []
 
 
+def test_charge_levels_follow_the_waveform_like_a_capacitor():
+    """Playback nodes charge toward 1 while their wire is high and decay
+    exponentially after it falls (display-only RC follower of the binary
+    waveform); engines without a waveform log return None."""
+    import math
+    from nv_evo.playback import charge_levels, CHARGE_TAU, DISCHARGE_TAU
+
+    class _Sim:
+        pulse_intervals = {'w': [[1.0, 3.0], [6.0, float('inf')]]}
+
+    sim = _Sim()
+    assert charge_levels(object(), 5.0) is None          # no waveform log
+    assert charge_levels(sim, 0.5)['w'] == 0.0           # before any pulse
+    # mid-pulse: charging toward 1
+    q2 = charge_levels(sim, 2.0)['w']
+    assert abs(q2 - (1.0 - math.exp(-1.0 / CHARGE_TAU))) <= 1e-9
+    # after the fall: exponential discharge from the level at the fall
+    q_fall = charge_levels(sim, 3.0)['w']
+    q4 = charge_levels(sim, 4.0)['w']
+    assert abs(q4 - q_fall * math.exp(-1.0 / DISCHARGE_TAU)) <= 1e-9
+    assert 0.0 < q4 < q_fall
+    # an open-ended pulse keeps charging monotonically
+    assert charge_levels(sim, 8.0)['w'] > charge_levels(sim, 6.5)['w']
+    # levels always stay inside [0, 1] for the colour interpolation
+    for t in (0.0, 1.5, 3.0, 5.0, 7.0, 40.0):
+        assert 0.0 <= charge_levels(sim, t)['w'] <= 1.0
+
+
 class _Line:
     def __init__(self):
         self.x = self.y = None
@@ -198,14 +226,15 @@ class _Text:
 def test_fitness_chart_reports_effective_mutation_rate():
     app = App.__new__(App)
     app._gen_history = [
-        (1, 0.40, 0.20, 0.35, 4.0),
-        (2, 0.45, 0.22, 0.42, 3.5),
-        (3, 0.45, 0.21, 0.40, 5.0),
+        (1, 0.40, 0.20, 0.35, 4.0, 0.08),
+        (2, 0.45, 0.22, 0.42, 3.5, 0.11),
+        (3, 0.45, 0.21, 0.40, 5.0, 0.09),
     ]
     app._best_line = _Line()
     app._mean_line = _Line()
     app._genbest_line = _Line()
     app._mutation_line = _Line()
+    app._std_line = _Line()
     app._fit_ax = _Axis()
     app._mut_ax = _Axis()
     app._mutation_text = _Text()
@@ -214,5 +243,6 @@ def test_fitness_chart_reports_effective_mutation_rate():
     App._redraw_fit_chart(app)
 
     assert app._mutation_line.y == [4.0, 3.5, 5.0]
+    assert app._std_line.y == [0.08, 0.11, 0.09]
     assert app._mutation_text.value == 'Mutation: 5.000'
     assert app._mut_ax.limits[1] > 5.0

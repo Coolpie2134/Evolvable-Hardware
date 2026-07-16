@@ -655,7 +655,8 @@ class App:
         self._build_genome_tab(nb)
         self._interactive = InteractiveTab(self._add_tab(nb, 'Interactive'),
                                            self.current_circuit)
-        self._designer = DesignerTab(self._add_tab(nb, 'Designer'),
+        self._designer_frame = self._add_tab(nb, 'Designer')
+        self._designer = DesignerTab(self._designer_frame,
                                      get_circuit=self.current_circuit)
 
         self._status = tk.StringVar(
@@ -727,6 +728,18 @@ class App:
                     w.configure(state=st)
                 except tk.TclError:
                     pass
+        # the Designer edits grown hardware, which only the two asynchronous
+        # substrates have — hide its tab for SNN runs, and keep its
+        # architecture in lockstep with the Model selector otherwise
+        if hasattr(self, '_designer'):
+            try:
+                if backend == 'snn':
+                    self._nb.hide(self._designer_frame)
+                else:
+                    self._nb.add(self._designer_frame)   # restore if hidden
+                    self._designer.follow_backend(backend)
+            except tk.TclError:
+                pass
         # dropdown offers only backend-valid targets (LUT hides combinational)
         if hasattr(self, '_target_cb'):
             self._refresh_target_list()
@@ -754,6 +767,9 @@ class App:
         self._genbest_line, = self._fit_ax.plot([], [], color='#1ea64a', lw=1.0,
                                                 label='Best new offspring', alpha=0.85)
         self._mean_line, = self._fit_ax.plot([], [], 'r--', lw=1.0, label='Mean', alpha=0.7)
+        self._std_line, = self._fit_ax.plot(
+            [], [], color='#e67e22', linestyle=':', lw=1.2,
+            label='Population fitness σ', alpha=0.9)
         self._mut_ax = self._fit_ax.twinx()
         self._mut_ax.set_ylabel('Effective mutation rate', color='#7d3c98')
         self._mut_ax.tick_params(axis='y', labelcolor='#7d3c98', labelsize=8)
@@ -767,7 +783,7 @@ class App:
             bbox=dict(facecolor='white', edgecolor='#7d3c98', alpha=0.75,
                       boxstyle='round,pad=0.2'))
         chart_lines = [self._best_line, self._genbest_line, self._mean_line,
-                       self._mutation_line]
+                       self._std_line, self._mutation_line]
         self._fit_ax.legend(chart_lines, [line.get_label() for line in chart_lines],
                             fontsize=8, loc='best')
         self._fit_fig.tight_layout()
@@ -1155,6 +1171,7 @@ class App:
         self._progress.configure(maximum=max(1, tries * (gens + 1)), value=0)
         self._best_line.set_data([], [])
         self._mean_line.set_data([], [])
+        self._std_line.set_data([], [])
         self._genbest_line.set_data([], [])
         self._mutation_line.set_data([], [])
         self._mutation_text.set_text('Mutation: —')
@@ -1354,7 +1371,8 @@ class App:
         if not hist:
             return
         series = ((self._best_line, 1), (self._mean_line, 2),
-                  (self._genbest_line, 3), (self._mutation_line, 4))
+                  (self._genbest_line, 3), (self._mutation_line, 4),
+                  (self._std_line, 5))
         if len(hist) <= max_pts:
             xs = [d[0] for d in hist]
             for line, col in series:
@@ -1386,13 +1404,15 @@ class App:
                 msg  = self.q.get_nowait()
                 kind = msg[0]
                 if kind == 'gen':
-                    _, try_n, gen, best_f, mean_f, offspring_best, mutation_rate = msg
+                    (_, try_n, gen, best_f, mean_f, offspring_best,
+                     mutation_rate, fitness_std) = msg
                     self._abs_gen += 1
                     self._gen_history.append(
-                        (self._abs_gen, best_f, mean_f, offspring_best, mutation_rate))
+                        (self._abs_gen, best_f, mean_f, offspring_best,
+                         mutation_rate, fitness_std))
                     self._progress.configure(value=self._abs_gen)
                     last_gen = (try_n, gen, best_f, mean_f, offspring_best,
-                                mutation_rate)
+                                mutation_rate, fitness_std)
                 elif kind == 'phase':
                     _, phase, current, total, amount = msg
                     self._work_phase = phase
@@ -1478,10 +1498,12 @@ class App:
         if last_gen is not None:               # redraw the fitness chart once per poll
             self._redraw_fit_chart()
         if last_gen is not None and not finished:
-            try_n, gen, best_f, mean_f, offspring_best, mutation_rate = last_gen
-            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  offspring-best=%.4f  mean=%.4f  mutation=%.3f' %
+            (try_n, gen, best_f, mean_f, offspring_best,
+             mutation_rate, fitness_std) = last_gen
+            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  offspring-best=%.4f  mean=%.4f  σ=%.4f  mutation=%.3f' %
                              (self.target.name, getattr(self, '_active_seed', 0),
-                              try_n, gen, best_f, offspring_best, mean_f, mutation_rate))
+                              try_n, gen, best_f, offspring_best, mean_f,
+                              fitness_std, mutation_rate))
         # Full circuit/traces rendering touches every hidden tab and can take
         # longer than an evaluation batch.  Keep the main loop responsive while
         # evolving; the final champion is rendered once on completion.
