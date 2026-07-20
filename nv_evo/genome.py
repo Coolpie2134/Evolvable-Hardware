@@ -32,6 +32,26 @@ MAX_GENES    = 24
 MAX_CHROMS   = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
 
+# ── tile architectures ─────────────────────────────────────────────────────────
+# 'single' — the legacy engine: ONE Fig. 3 circuit per tile (5-bit state, one
+#            output net that every listening neighbour reads).
+# 'tri3'   — the paper's actual tile: THREE independent Fig. 3 circuits per
+#            tile, one per output direction (L/R/D). The 12-bit state packs
+#            three 4-bit channel configurations (chan L | chan R << 4 |
+#            chan D << 8), each indexing the paper's 16 useful routing
+#            combinations. Because the channels occupy disjoint bit fields,
+#            Hamming context matching and single-bit mutation both act on one
+#            channel at a time — the genome exposes three independently
+#            mutable 4-bit channels, not one flat 4096-way categorical value.
+TILE_ARCHS     = ('single', 'tri3')
+TRI_STATE_MAX  = 4096    # 12-bit tri-tile state; 0 = all three channels off (dead)
+ARCH_STATE_MAX = {'single': MAX_STATE, 'tri3': TRI_STATE_MAX}
+# Random tri genes keep the single-circuit death probability (1/32), not the
+# raw alphabet's 1/4096 — otherwise pruning states are essentially unreachable
+# in random immigrants (the LUT genome seeds its zero rules explicitly for the
+# same reason).
+_TRI_DEATH_P   = 1.0 / 32.0
+
 
 @dataclass
 class HexGene:
@@ -86,6 +106,9 @@ class Genome:
     # is preserved while propagation speed becomes heritable. ``None`` is the
     # neutral all-1.0 vector and therefore retains the configured fixed delay.
     state_delays: List[float] = None
+    # Tile architecture this genome's states are written in (see TILE_ARCHS).
+    # Old pickles predate the field: always read via getattr(g,'arch','single').
+    arch: str = 'single'
 
 
 # Evolvable pulse-width multiplier bounds (of PulseConfig.width). The floor is
@@ -109,13 +132,25 @@ def default_state_delays():
     return [1.0] * MAX_STATE
 
 
-def random_hex_gene() -> HexGene:
+def random_hex_gene(arch='single') -> HexGene:
     # self_in == 0 makes a GROWTH rule: it matches empty cells and is the only
     # kind that can bring an empty cell to life under the sim6 empty-cell guard
     # (division is further gated by the parent's Hayflick telomere). Random
     # genomes need a healthy share of them or nothing ever grows — sim6 gets this
     # for free because table_create manufactures a gene for every empty-cell
     # context it meets.
+    if arch not in TILE_ARCHS:
+        raise ValueError('unknown tile architecture: %r' % (arch,))
+    if arch == 'tri3':
+        m = TRI_STATE_MAX
+        return HexGene(
+            ctx_l    = random.randrange(m),
+            ctx_r    = random.randrange(m),
+            ctx_d    = random.randrange(m),
+            self_in  = 0 if random.random() < 0.25 else random.randrange(m),
+            self_out = (0 if random.random() < _TRI_DEATH_P
+                        else random.randrange(1, m)),
+        )
     return HexGene(
         ctx_l    = random.randrange(MAX_STATE),
         ctx_r    = random.randrange(MAX_STATE),
@@ -125,20 +160,26 @@ def random_hex_gene() -> HexGene:
     )
 
 
-def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE) -> Chromosome:
+def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE,
+                          arch='single') -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
-        genes = [random_hex_gene() for _ in range(n_genes)],
+        genes = [random_hex_gene(arch) for _ in range(n_genes)],
         split = random.randint(1, max(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         telomere = random.randint(2, min(5, max_telomere)),
     )
 
 
-def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE) -> Genome:
+def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
+                      arch='single') -> Genome:
+    if arch not in TILE_ARCHS:
+        raise ValueError('unknown tile architecture: %r' % (arch,))
     return Genome(
-        chromosomes = [random_hex_chromosome(max_telomere=max_telomere)
+        chromosomes = [random_hex_chromosome(max_telomere=max_telomere,
+                                             arch=arch)
                        for _ in range(n_chroms)],
         tag = random.randint(0, 9999),
+        arch = arch,
     )

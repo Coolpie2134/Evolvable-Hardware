@@ -23,6 +23,7 @@ import math
 from matplotlib.patches import Circle, FancyArrowPatch
 
 from .hexgrid import hex_dirs, hex_pixel, routing_kind, ROUTING_HEX
+from .tritile import channel_configs
 
 _KIND_FC = {'buffer': '#8fb3e0', 'coincidence': '#2f6fc0', 'or': '#7b52c4',
             'inhibited': '#e0902e', 'off': '#e8e8e8'}
@@ -65,7 +66,7 @@ def _activity_color(level):
 
 
 def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
-                 activity=None, show_edges=True, title=None):
+                 activity=None, show_edges=True, title=None, arch='single'):
     """
     grid       : {(x,y): state}
     routing    : {(x,y): (e1,e2,i1[,op])} (for arrows / node-type colour)
@@ -73,6 +74,9 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
     out_pos    : {role: (x,y)}  outputs (labelled)
     activity   : {(x,y): level} if given, nodes coloured by activity not type;
                  level may be binary 0/1 or a graded 0..1 charge
+    arch       : 'single' (5-bit broadcast node) or 'tri3' (three packed
+                 directional circuits). Tri tiles are labelled L/R/D in hex
+                 and never shown with a fictitious single routing arrow.
     """
     in_pos  = in_pos or []
     out_pos = out_pos or {}
@@ -93,7 +97,7 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
                         zorder=0, solid_capstyle='round')
 
     # routed signals as direction arrows (source -> reader)
-    if show_edges and routing:
+    if show_edges and routing and arch == 'single':
         for (x, y), entry in routing.items():
             e1, e2, i1 = entry[0], entry[1], entry[2]
             px, py = hex_pixel(x, y); nb = hex_dirs(x, y)
@@ -110,6 +114,17 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
         px, py = hex_pixel(x, y)
         if activity is not None:
             fc = _activity_color(activity.get((x, y), 0))
+        elif arch == 'tri3':
+            configs = channel_configs(state)
+            kinds = [routing_kind(ROUTING_HEX[value]) for value in configs]
+            if all(kind == 'off' for kind in kinds):
+                fc = _KIND_FC['off']
+            elif any(kind == 'inhibited' for kind in kinds):
+                fc = _KIND_FC['inhibited']
+            elif all(kind == 'buffer' for kind in kinds):
+                fc = _KIND_FC['buffer']
+            else:
+                fc = _KIND_FC['coincidence']
         elif routing is not None:
             fc = _KIND_FC[routing_kind(ROUTING_HEX[state & 0x1F])]
         else:
@@ -118,8 +133,11 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
         ax.add_patch(Circle((px, py), radius=_R, facecolor=fc, alpha=0.95,
                             edgecolor='#b02020' if inp else '#5b6b7d',
                             lw=2.0 if inp else 0.7, zorder=2))
-        # state number: maps the colour/type back to the genome's 0-31 states
-        ax.text(px, py - 0.13, str(state & 0x1F), ha='center', va='center',
+        # State label maps the colour/type back to the encoded routing. Tri3
+        # shows the three channel nibbles in L/R/D order instead of truncating.
+        label = (''.join('%X' % value for value in channel_configs(state))
+                 if arch == 'tri3' else str(state & 0x1F))
+        ax.text(px, py - 0.13, label, ha='center', va='center',
                 fontsize=4.5, color='#3a4450', zorder=4)
 
     for i, (x, y) in enumerate(in_pos):

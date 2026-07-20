@@ -6,10 +6,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from designer import DesignerTab
+from designer import DesignerTab, _genome_to_dict, _genome_from_dict
 from app import App
 from nv_evo.targets import TEMPORAL_TARGETS
 from nv_evo.pulse import PulseConfig
+from nv_evo.genome import random_hex_genome
+from evo_runtime.config import (NV_NEW_RUN_PROFILES, GAConfig,
+                                is_current_nv_profile,
+                                validate_new_nv_profile)
 
 
 class _Player:
@@ -39,6 +43,110 @@ class _Parent:
 
     def after(self, _delay, callback):
         self.callbacks.append(callback)
+
+
+def test_app_exposes_only_the_current_nv_profiles():
+    assert NV_NEW_RUN_PROFILES == {
+        'legacy': ('single', 'pulse_delay', None, None),
+        'digital_tri': ('tri3', 'uniform', None, None),
+        'analog_tri': ('tri3', 'paper_analog', None, None),
+    }
+    assert is_current_nv_profile(GAConfig(
+        tile_arch='single', node_model='pulse_delay'))
+    assert is_current_nv_profile(GAConfig(
+        tile_arch='tri3', node_model='uniform'))
+    assert is_current_nv_profile(GAConfig(
+        tile_arch='tri3', node_model='paper_analog'))
+    assert not is_current_nv_profile(GAConfig(
+        tile_arch='single', node_model='uniform'))
+
+    app = App.__new__(App)
+    app._NV_PROFILE_LABELS = {
+        'Legacy': NV_NEW_RUN_PROFILES['legacy'],
+        'Analog': NV_NEW_RUN_PROFILES['analog_tri'],
+    }
+    app._nv_profile_var = type(
+        'Var', (), {'get': lambda self: self.value})()
+    app._nv_profile_var.value = 'Legacy'
+    assert App._selected_tile_arch(app) == 'single'
+    assert App._selected_node_model(app) == ('pulse_delay', None, None)
+    app._nv_profile_var.value = 'Analog'
+    assert App._selected_tile_arch(app) == 'tri3'
+    assert App._selected_node_model(app) == ('paper_analog', None, None)
+
+
+def test_new_nv_run_validation_rejects_every_retired_pairing():
+    validate_new_nv_profile(GAConfig(
+        tile_arch='single', node_model='pulse_delay'))
+    validate_new_nv_profile(GAConfig(
+        tile_arch='tri3', node_model='uniform'))
+    validate_new_nv_profile(GAConfig(
+        tile_arch='tri3', node_model='paper_analog'))
+    for config in (
+            GAConfig(tile_arch='single', node_model='uniform'),
+            GAConfig(tile_arch='single', node_model='evolved_width'),
+            GAConfig(tile_arch='single', node_model='paper_analog'),
+            GAConfig(tile_arch='single', node_model='pulse_delay',
+                     evolve_delay=False)):
+        try:
+            validate_new_nv_profile(config)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('retired NV pairing was accepted: %r' %
+                                 (config,))
+
+
+def test_analog_profile_relabels_and_locks_irrelevant_controls():
+    class Widget:
+        def __init__(self):
+            self.options = {}
+
+        def configure(self, **options):
+            self.options.update(options)
+
+    class RowWidget(Widget):
+        def __init__(self):
+            super().__init__()
+            self.packed = False
+
+        def pack(self, **_kw):
+            self.packed = True
+
+        def pack_forget(self):
+            self.packed = False
+
+    app = App.__new__(App)
+    app._NV_PROFILE_LABELS = {
+        'Analog': NV_NEW_RUN_PROFILES['analog_tri'],
+    }
+    app._nv_profile_var = type('Var', (), {'get': lambda self: 'Analog'})()
+    app._pulse_entries = [Widget(), Widget(), Widget()]
+    app._pulse_labels = [Widget(), Widget(), Widget()]
+    app._nv_profile_cb = Widget()
+    app._tune_reset_btn = Widget()
+    app._nv_controls_locked = False
+    app._analog_row = RowWidget()
+    app._analog_entries = [Widget(), Widget(), Widget(), Widget()]
+    app._backend_var = type('Var', (), {'get': lambda self: 'Nervous'})()
+    app._nb = object()
+
+    App._sync_nv_profile_controls(app)
+    assert [w.options['text'] for w in app._pulse_labels] == [
+        'Propagation delay:', 'Input width:', 'Coinc (emergent):']
+    assert [w.options['state'] for w in app._pulse_entries] == [
+        'normal', 'normal', 'disabled']
+    assert app._nv_profile_cb.options['state'] == 'readonly'
+    assert app._analog_row.packed
+    assert all(w.options['state'] == 'normal' for w in app._analog_entries)
+
+    App._set_nv_controls_locked(app, True)
+    assert all(w.options['state'] == 'disabled' for w in app._pulse_entries)
+    assert app._nv_profile_cb.options['state'] == 'disabled'
+    assert app._tune_reset_btn.options['state'] == 'disabled'
+    # the analog row stays visible during a run but its constants lock
+    assert app._analog_row.packed
+    assert all(w.options['state'] == 'disabled' for w in app._analog_entries)
 
 
 def test_designer_run_stops_cleanly_at_the_horizon():
@@ -81,6 +189,14 @@ def test_designer_prefers_loaded_target_physics_over_registry_copy():
     tab._target_var = type('Var', (), {'get': lambda _self: key})()
 
     assert DesignerTab._current_target(tab) is loaded
+
+
+def test_designer_json_roundtrip_preserves_tri_tile_architecture():
+    genome = random_hex_genome(2, arch='tri3')
+    restored = _genome_from_dict(
+        _genome_to_dict(genome, 'nervous'), 'nervous')
+    assert restored.arch == 'tri3'
+    assert restored.chromosomes == genome.chromosomes
 
 
 def test_interactive_case_dropdown_loads_each_trial():

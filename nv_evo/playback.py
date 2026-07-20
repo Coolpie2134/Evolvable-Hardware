@@ -12,8 +12,8 @@ them in that same continuous time instead of a synchronous tick lattice:
     ``overflow``): it injects pulse intervals at their real times and advances
     a physical-time cursor, reporting wire activity and the real leading-edge
     times of any cell. No GUI dependency.
-  * NervousPlayer builds it over the paper-faithful PulseSim — the same event
-    engine used by Nervous evolution. The LUT twin (lut_evo.playback.LutPlayer)
+  * NervousPlayer builds it over the configured digital or analog simulator —
+    the same engine used by Nervous evolution. The LUT twin (lut_evo.playback.LutPlayer)
     builds it over AsyncLutSim.
   * PulseLaneEditor binds a matplotlib axis to editable input pulses: click for
     the default width, drag for a custom width, or click one to remove it. It draws
@@ -102,7 +102,7 @@ class NervousPlayer(AsyncPlayer):
 
     def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
                  pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None,
-                 widths=None, delays=None):
+                 widths=None, delays=None, arch='single', inputs=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config
@@ -111,11 +111,19 @@ class NervousPlayer(AsyncPlayer):
         # ignores this map and copies the incoming waveform dynamically.
         self.widths  = widths
         self.delays  = delays
+        self.arch    = arch
+        self.inputs  = list(inputs or ())
         default_width = (pulse_engine.WIDTH if config is None else config.width)
         super().__init__(horizon=horizon, dt=dt, pulse_width=pulse_width,
                          default_width=default_width)
 
     def _make_sim(self):
+        if self.arch == 'tri3':
+            from .tritile import TriSim
+            return TriSim(self.grid, self.inputs, config=self.config,
+                          max_events=self.max_events)
+        if self.arch != 'single':
+            raise ValueError('unknown tile architecture: %r' % (self.arch,))
         return create_simulator(self.grid, self.routing,
                                 max_events=self.max_events, config=self.config,
                                 widths=self.widths, delays=self.delays)

@@ -1,0 +1,3 @@
+# Repository files are LF; stop core.autocrlf from converting on checkout so
+# git quits warning "LF will be replaced by CRLF" on every touched file.
+* text=auto eol=lf

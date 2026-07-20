@@ -9,6 +9,36 @@ from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
 
+# The only NV Net substrates exposed for NEW runs. Older node models remain in
+# the engine solely so existing checkpoints and controlled comparisons load.
+NV_NEW_RUN_PROFILES = {
+    'legacy': ('single', 'pulse_delay', None, None),
+    # digital_tri isolates the tile-topology variable: the paper's three-circuit
+    # tile under the frozen digital node abstraction. With analog_tri and legacy
+    # it completes the topology-vs-physics ablation pair.
+    'digital_tri': ('tri3', 'uniform', None, None),
+    'analog_tri': ('tri3', 'paper_analog', None, None),
+}
+
+
+def is_current_nv_profile(ga_config):
+    profile = (ga_config.tile_arch, ga_config.node_model,
+               ga_config.evolve_width, ga_config.evolve_delay)
+    return profile in NV_NEW_RUN_PROFILES.values()
+
+
+def validate_new_nv_profile(ga_config):
+    """Reject unsupported architecture/physics pairings for fresh NV runs.
+
+    GAConfig itself remains permissive because retired configurations must
+    still deserialize for checkpoint playback and controlled comparisons.
+    """
+    if not is_current_nv_profile(ga_config):
+        raise ValueError(
+            'new nervous-net runs require one of the current profiles: legacy '
+            '(single-tile width-preserving/evolved-delay), digital tri-circuit '
+            'or analog tri-circuit')
+
 
 def default_max_telomere(backend):
     """Backend-specific growth ceiling used by fresh GUI runs."""
@@ -29,10 +59,16 @@ class GAConfig:
     # When false, selected parents are cloned separately and then mutated;
     # crossover is skipped without turning mutation or immigration off.
     recombination_enabled: bool = True
-    # Nervous-net node-timing model (mirrors PulseConfig.model; must agree with
-    # it). 'evolved_width' turns on pulse-width mutation; 'pulse_delay' turns on
-    # per-node delay mutation while preserving transported width.
+    # Nervous-net node-timing model (mirrors PulseConfig.model). The dataclass
+    # default remains 'uniform' for checkpoint/API compatibility; fresh GUI runs
+    # use one of NV_NEW_RUN_PROFILES instead.
     node_model: str = 'uniform'
+    # Nervous-net TILE architecture (nv_evo/genome.py TILE_ARCHS):
+    # 'single' — one Fig. 3 circuit per tile. 'tri3' — the paper's
+    #            three-circuit tile (three independent L/R/D outputs per tile).
+    # Tri3 supports the fixed digital abstraction and paper_analog physics; the
+    # per-node-type width/delay vectors are single-tile features.
+    tile_arch: str = 'single'
     # Timing-mutation toggles, decoupled from the model name for ablations.
     # ``None`` keeps the model's pairing (evolved_width <-> width mutation,
     # pulse_delay <-> delay mutation). An explicit False disables the paired
@@ -70,8 +106,20 @@ class GAConfig:
             raise ValueError('stagnation_beta must be between 0 and 10')
         if self.selection not in ('tournament', 'lexicase'):
             raise ValueError('selection must be tournament or lexicase')
-        if self.node_model not in ('uniform', 'evolved_width', 'pulse_delay'):
-            raise ValueError('node_model must be uniform, evolved_width or pulse_delay')
+        if self.node_model not in ('uniform', 'evolved_width', 'pulse_delay',
+                                   'paper_analog'):
+            raise ValueError('node_model must be uniform, evolved_width, '
+                             'pulse_delay or paper_analog')
+        if self.tile_arch not in ('single', 'tri3'):
+            raise ValueError("tile_arch must be 'single' or 'tri3'")
+        # tri3 evolves routing only, so it pairs with the routing-only engines:
+        # 'uniform' (digital) or 'paper_analog' (analog). The width/delay vectors
+        # are single-tile node-type features and have no tri3 meaning.
+        if self.tile_arch == 'tri3' and self.node_model not in ('uniform',
+                                                                'paper_analog'):
+            raise ValueError("tri3 tile_arch supports node_model 'uniform' or "
+                             "'paper_analog' (width/delay vectors are "
+                             'single-tile features)')
         for name, model in (('evolve_width', 'evolved_width'),
                             ('evolve_delay', 'pulse_delay')):
             value = getattr(self, name)

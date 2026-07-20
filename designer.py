@@ -8,9 +8,9 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     (grow_nervous / grow_lut) and REPLACES the working grid — this direction
     is exact and deterministic.
   * the CIRCUIT (the organism): the working grid itself is a first-class,
-    directly editable artifact — place/delete cells, set each nv cell's
-    routing state (the 32-entry ROUTING_HEX vocabulary: 0-15 AND, 16-31 OR;
-    neighbours resolved
+    directly editable artifact — place/delete cells, set each legacy nv cell's
+    routing state (the 32-entry ROUTING_HEX vocabulary: 0-15 AND, 16-31 OR) or
+    edit a tri3 tile's three independent 4-bit directional channels; neighbours resolved
     through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
     output roles. Both PulseSim and AsyncLutSim run on a bare grid, so a
@@ -57,7 +57,10 @@ from matplotlib.lines import Line2D
 from nv_evo.hexgrid import hex_dirs, hex_pixel, ROUTING_HEX
 from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGenome,
                            random_hex_gene, random_hex_genome,
-                           MAX_STATE, MAX_TELOMERE as NV_MAX_TEL)
+                           MAX_STATE, TRI_STATE_MAX,
+                           MAX_TELOMERE as NV_MAX_TEL)
+from nv_evo.tritile import (TRI_SEED_STATE, TRI_DIRS, channel_configs,
+                            pack_channels)
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, node_widths, node_delays,
                             SEED_STATE as NV_SEED_STATE)
@@ -66,13 +69,8 @@ from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
                              charge_levels)
 from nv_evo.temporal import (run_nervous_events,
                              place_outputs_by_trace, TemporalTraces,
-                             windowed_score, exact_tick_accuracy,
-                             _pr_counts, _f1, _best_shift, _obs_len,
-                             _best_event_shift, _event_case_score,
-                             _expected_events, _role_events,
-                             cadence_score,
-                             trial_input_summary, expected_window_summary,
-                             event_list_summary, period_stepper_score)
+                             _obs_len)
+from nv_evo.scoring import score_report_lines
 from nv_evo.targets import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
 
@@ -139,12 +137,16 @@ DESIGN_FORMAT = 'evohw-design-v1'
 
 def _genome_to_dict(genome, backend):
     fields = _NV_GENE_FIELDS if backend == 'nervous' else _LUT_GENE_FIELDS
-    return {'tag': genome.tag,
-            'gene_fields': list(fields),
-            'chromosomes': [{'tag': c.tag, 'split': c.split,
-                             'telomere': getattr(c, 'telomere', None),
-                             'genes': [[getattr(g, f) for f in fields] for g in c.genes]}
-                            for c in genome.chromosomes]}
+    doc = {'tag': genome.tag,
+           'gene_fields': list(fields),
+           'chromosomes': [{'tag': c.tag, 'split': c.split,
+                            'telomere': getattr(c, 'telomere', None),
+                            'genes': [[getattr(g, f) for f in fields]
+                                      for g in c.genes]}
+                           for c in genome.chromosomes]}
+    if backend == 'nervous':
+        doc['arch'] = getattr(genome, 'arch', 'single')
+    return doc
 
 
 def _genome_from_dict(d, backend):
@@ -160,7 +162,10 @@ def _genome_from_dict(d, backend):
         if c.get('telomere') is not None:
             kw['telomere'] = int(c['telomere'])
         chroms.append(Chrom(**kw))
-    return Gen(chromosomes=chroms, tag=int(d.get('tag', 0)))
+    kwargs = {'chromosomes': chroms, 'tag': int(d.get('tag', 0))}
+    if backend == 'nervous':
+        kwargs['arch'] = d.get('arch', 'single')
+    return Gen(**kwargs)
 
 
 def _grid_to_dict(grid, backend):
@@ -339,79 +344,12 @@ def _routed_neighbours(idx, x, y):
 
 
 def _traces_report(ttarget, traces, out_pos, label):
-    """Semantic score report for a manually edited working grid."""
+    """Semantic score report for a manually edited working grid: the shared
+    scoring.score_report_lines body under a designer header, with no
+    backend-detail notes (the designer shows the working grid itself)."""
     lines = ['Target: %s   [%s — designer working grid]' % (ttarget.name, label)]
-    mode = getattr(ttarget, 'score_mode', 'trace')
-    if mode == 'period_stepper':
-        total, cases = period_stepper_score(traces, ttarget)
-        for term in ttarget.outputs:
-            lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
-        for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
-            lines.append('Test %d: %s  cadence-step score %.3f %s' % (
-                ti, trial_input_summary(trial, ttarget.n_inputs), score,
-                'PASS' if score >= 0.999 else 'FAIL'))
-        lines += ['', '=> cadence-stepper score %.4f%s' % (
-            total, '   SOLVED' if total >= 0.999 else '')]
-        return total, '\n'.join(lines)
-    if mode == 'cadence':
-        total, cases = cadence_score(traces, ttarget)
-        for term in ttarget.outputs:
-            lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
-        for ti, score in enumerate(cases):
-            role = ttarget.outputs[0].role
-            lines.append('Test %d: %s  output edges@%s  cadence %.3f %s' % (
-                ti + 1, trial_input_summary(ttarget.trials[ti], ttarget.n_inputs),
-                event_list_summary(_role_events(traces, role, ti)), score,
-                'PASS' if score >= 0.999 else 'FAIL'))
-        lines += ['', '=> cadence score %.4f%s' % (
-            total, '   SOLVED' if total >= 0.999 else '')]
-        return total, '\n'.join(lines)
-    if mode == 'events':
-        best_s, total = _best_event_shift(traces, ttarget)
-        for term in ttarget.outputs:
-            lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
-        if getattr(ttarget, 'fit_latency', True):
-            lines.append('measured output latency offset: %+.3f seconds' % best_s)
-        else:
-            lines.append('fixed timing: required delay %g seconds; no offset fitted'
-                         % getattr(ttarget, 'latency', 0))
-        for ti, trial in enumerate(ttarget.trials):
-            for role in trial.expected:
-                score = _event_case_score(traces, ttarget, ti, role, best_s)
-                lines += ['', 'Test %d: %s' % (
-                    ti + 1, trial_input_summary(trial, ttarget.n_inputs)),
-                    '  expect %s edges@%s' % (
-                        role, event_list_summary(_expected_events(trial, role))),
-                    '  actual edges@%s  F1 %.3f %s' % (
-                        event_list_summary(_role_events(traces, role, ti)), score,
-                        'PASS' if score >= 0.999 else 'FAIL')]
-        lines += ['', '=> event score %.4f%s' % (
-            total, '   SOLVED' if total >= 0.999 else '')]
-        return total, '\n'.join(lines)
-    best_s = _best_shift(traces, ttarget)[0]    # latency-invariant: one global shift
-    for term in ttarget.outputs:
-        lines.append("out '%s' read at %s" % (term.role, out_pos.get(term.role)))
-    lines.append('measured output latency offset: %+d second(s)' % best_s)
-    for ti, trial in enumerate(ttarget.trials):
-        lines += ['', 'Test %d: %s' % (
-            ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
-        for role, exp in trial.expected.items():
-            lines.append('  expect %s%s' % (
-                expected_window_summary(exp),
-                ' (%s)' % role if len(trial.expected) > 1 else ''))
-            tr = traces.get(role, [])
-            tr_i = tr[ti] if ti < len(tr) else []
-            tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
-            s = _f1(tp_rec, n_exp, tp_prec, n_act)
-            lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
-                         % (''.join(str(v) for v in tr_i), s,
-                            'PASS' if s >= 0.999 else 'FAIL',
-                            tp_rec, n_exp, tp_prec, n_act))
-    total = windowed_score(traces, ttarget, shift=best_s)
-    lines += ['', '=> behavioural score %.4f%s   (exact per-second %.4f)'
-              % (total, '   SOLVED' if total >= 0.999 else '',
-                 exact_tick_accuracy(traces, ttarget))]
-    return total, '\n'.join(lines)
+    total, body = score_report_lines(ttarget, traces, out_pos)
+    return (0.0 if total is None else total), '\n'.join(lines + body)
 
 
 class DesignerTab:
@@ -772,13 +710,27 @@ class DesignerTab:
                          '(or assign them in Output mode).' % (len(self.in_pos), t.name))
 
     def _default_cell(self):
-        return NV_SEED_STATE if self.backend == 'nervous' else LUT_SEED_STATE
+        if self.backend == 'nervous':
+            return TRI_SEED_STATE if self._nv_arch() == 'tri3' else NV_SEED_STATE
+        return LUT_SEED_STATE
+
+    def _nv_arch(self):
+        return (getattr(self.genome, 'arch', 'single')
+                if self.backend == 'nervous' and self.genome is not None
+                else 'single')
+
+    def _nv_routing(self, grid=None):
+        grid = self.grid if grid is None else grid
+        if self._nv_arch() == 'tri3':
+            return {}
+        return {p: ROUTING_HEX[state & 0x1F]
+                for p, state in grid.items()}
 
     # ── genome operations ───────────────────────────────────────────────────────
 
     def _random_genome(self):
         if self.backend == 'nervous':
-            self.genome = random_hex_genome(2)
+            self.genome = random_hex_genome(2, arch=self._nv_arch())
             note = 'random nervous genome'
         else:
             # LUT seeds are dense sim6-style ontogeny biomorphs (rich, irregular
@@ -827,6 +779,10 @@ class DesignerTab:
         into the Genome tab (not yet grown): the working grid is left untouched so
         the hand-built phenotype is preserved; press Grow to realise the genome,
         Score to confirm the outputs still match."""
+        if self._nv_arch() == 'tri3':
+            self._status.set('Reverse synthesis currently supports the legacy '
+                             'single-output encoding only; the tri3 grid was left unchanged.')
+            return
         if not self.grid:
             self._status.set('Empty grid — build or grow a circuit before reversing '
                              'it to a genome.')
@@ -968,16 +924,16 @@ class DesignerTab:
         if getattr(target, 'temporal', False):
             obs = _obs_len(target)
             if self.backend == 'nervous':
-                routing = {p: ROUTING_HEX[state & 0x1F]
-                           for p, state in grid.items()}
+                arch = self._nv_arch()
+                routing = self._nv_routing(grid)
                 # Score under the SAME physics evolution uses: the run's node
                 # model config, its physical input schedules, and — for
                 # 'evolved_width' — the genome's per-node pulse widths
                 # (node_widths returns None off that model / with no genome).
                 config = getattr(target, 'pulse_config', None)
-                widths = (None if self.genome is None
+                widths = (None if self.genome is None or arch == 'tri3'
                           else node_widths(self.genome, grid, config))
-                delays = (None if self.genome is None
+                delays = (None if self.genome is None or arch == 'tri3'
                           else node_delays(self.genome, grid, config))
                 if use_manual:
                     out_pos = manual
@@ -991,7 +947,7 @@ class DesignerTab:
                             max_events=getattr(target, 'max_events', 2048),
                             config=config,
                             input_events=getattr(trial, 'input_events', None),
-                            widths=widths, delays=delays)
+                            widths=widths, delays=delays, arch=arch)
                         traces.overflow = traces.overflow or overflow
                         for role in roles:
                             traces[role].append(sampled[role])
@@ -1002,7 +958,7 @@ class DesignerTab:
                 else:
                     out_pos, traces = place_outputs_by_trace(
                         grid, routing, list(self.in_pos), target,
-                        widths=widths, delays=delays)
+                        widths=widths, delays=delays, arch=arch)
             else:
                 if use_manual:
                     # pinned outputs, asynchronous engine — real edge times,
@@ -1020,17 +976,19 @@ class DesignerTab:
 
         if self.backend != 'nervous':
             return None
-        routing = {p: ROUTING_HEX[state & 0x1F] for p, state in grid.items()}
+        arch = self._nv_arch()
+        routing = self._nv_routing(grid)
         out_pos = manual
         if not use_manual:
-            _, _, out_pos = interpret_nervous(grid, target)
+            _, _, out_pos = interpret_nervous(grid, target, arch=arch)
         if any(out_pos.get(role) is None for role in roles):
             return None
         correct = total = 0
         for in_bits, expected in target.cases:
             invals = {self.in_pos[i]: in_bits[i]
                       for i in range(len(self.in_pos))}
-            actual = evaluate_nervous(grid, routing, invals, target.grid_size)
+            actual = evaluate_nervous(grid, routing, invals, target.grid_size,
+                                      arch=arch)
             for i, role in enumerate(roles):
                 total += 1
                 correct += actual.get(out_pos[role], 0) == expected[i]
@@ -1131,7 +1089,9 @@ class DesignerTab:
                 ttk.Label(row, text='->', font=(self._mono, 8),
                           foreground='#666').pack(side='left', padx=(3, 1))
             if nv:
-                self._int_spin(row, None, gene, f, 0, MAX_STATE - 1, width=3)
+                hi = TRI_STATE_MAX - 1 if self._nv_arch() == 'tri3' else MAX_STATE - 1
+                self._int_spin(row, None, gene, f, 0, hi,
+                               width=4 if hi > 99 else 3)
             else:
                 self._hex_entry(row, gene, f)
         ttk.Button(row, text='rnd', width=4,
@@ -1196,14 +1156,16 @@ class DesignerTab:
         ttk.Button(parent, text='▦', width=2, command=bind_editor).pack(side='left')
 
     def _add_gene(self, chrom):
-        chrom.genes.append(random_hex_gene() if self.backend == 'nervous'
+        chrom.genes.append(random_hex_gene(self._nv_arch())
+                           if self.backend == 'nervous'
                            else random_lut_gene())
         self._genome_edited = True
         self._rebuild_genome_panel()
         self._refresh_sync()
 
     def _randomize_gene(self, chrom, gi):
-        chrom.genes[gi] = (random_hex_gene() if self.backend == 'nervous'
+        chrom.genes[gi] = (random_hex_gene(self._nv_arch())
+                           if self.backend == 'nervous'
                            else random_lut_gene())
         self._genome_edited = True
         self._rebuild_genome_panel()
@@ -1225,7 +1187,7 @@ class DesignerTab:
     def _add_chrom(self):
         if self.genome is None:
             return
-        c = (NvChromosome(genes=[random_hex_gene()], split=0, tag=0)
+        c = (NvChromosome(genes=[random_hex_gene(self._nv_arch())], split=0, tag=0)
              if self.backend == 'nervous'
              else LutChromosome(genes=[random_lut_gene()], split=0, tag=0))
         self.genome.chromosomes.append(c)
@@ -1400,9 +1362,41 @@ class DesignerTab:
 
     def _nv_inspector(self, pos):
         x, y = pos
-        state = self.grid[pos] & 0x1F
         nb = hex_dirs(x, y)
         orient = 'up-oriented' if (x + y) % 2 == 0 else 'down-oriented'
+        if self._nv_arch() == 'tri3':
+            ttk.Label(
+                self._insp_body,
+                text=('Paper tile at %s: three independent directional output circuits.\n'
+                      'Each channel selects one of the 16 Fig. 3 routes.' % (pos,)),
+                font=(self._mono, 8), justify='left').pack(anchor='w', pady=(2, 4))
+            current = channel_configs(self.grid[pos])
+            route_values = [_route_text(i, x, y) for i in range(16)]
+            for channel_index, direction in enumerate(TRI_DIRS):
+                row = ttk.Frame(self._insp_body)
+                row.pack(fill='x', pady=2)
+                ttk.Label(row, text='%s out' % direction, width=6,
+                          font=(self._mono, 9)).pack(side='left')
+                var = tk.StringVar(value=route_values[current[channel_index]])
+                picker = ttk.Combobox(row, textvariable=var, state='readonly',
+                                      values=route_values, width=48)
+                picker.pack(side='left', fill='x', expand=True)
+
+                def commit(_evt=None, idx=channel_index, variable=var):
+                    try:
+                        value = route_values.index(variable.get())
+                    except ValueError:
+                        return
+                    channels = list(channel_configs(self.grid[pos]))
+                    channels[idx] = value
+                    self.grid[pos] = pack_channels(*channels)
+                    self._mark_grid_edit()
+                    self._refresh_canvas()
+                    self._refresh_sync()
+                picker.bind('<<ComboboxSelected>>', commit)
+            return
+
+        state = self.grid[pos] & 0x1F
         ttk.Label(self._insp_body,
                   text='%s node — its L/R/D resolve to (Fig. 4 rotation):\n'
                        '  L->%s   R->%s   D->%s'
@@ -1505,20 +1499,22 @@ class DesignerTab:
         if self._tick > 0:
             activity = self._nibbles if self.backend == 'lut' else self._state
         title = ('%s  —  %s' % (self.backend,
-                 circuit_summary_nervous(self.grid) if self.backend == 'nervous'
+                 circuit_summary_nervous(self.grid, arch=self._nv_arch())
+                 if self.backend == 'nervous'
                  else '%d cells' % len(self.grid)))
         if self.backend == 'nervous':
-            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
-            if preview:
+            arch = self._nv_arch()
+            routing = self._nv_routing()
+            if preview and arch == 'single':
                 routing[preview[0]] = ROUTING_HEX[preview[1]]
             draw_hex_net(ax, self.grid, 7, routing=routing, in_pos=self.in_pos,
                          out_pos=self.out_pos, activity=activity,
-                         show_edges=True, title=title)
+                         show_edges=(arch == 'single'), title=title, arch=arch)
             if self._selected and self._selected in self.grid:
                 px, py = hex_pixel(*self._selected)
                 ax.add_patch(Circle((px, py), radius=0.36, fill=False,
                                     edgecolor='#e6a817', lw=2.2, zorder=6))
-            if preview:
+            if preview and arch == 'single':
                 exc, veto = _routed_neighbours(preview[1], *preview[0])
                 for p in exc:
                     if p in self.grid:
@@ -1699,19 +1695,21 @@ class DesignerTab:
     def _build_player(self):
         target = self._current_target()          # may be None (free playback)
         if self.backend == 'nervous':
-            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+            arch = self._nv_arch()
+            routing = self._nv_routing()
             config = getattr(target, 'pulse_config', None)
             # 'evolved_width' model: play back with the genome's per-node pulse
             # widths (node_widths returns None off that model or with no genome —
             # a hand-built grid stays uniform).
-            widths = (None if self.genome is None
+            widths = (None if self.genome is None or arch == 'tri3'
                       else node_widths(self.genome, self.grid, config))
-            delays = (None if self.genome is None
+            delays = (None if self.genome is None or arch == 'tri3'
                       else node_delays(self.genome, self.grid, config))
             self._player = NervousPlayer(
                 self.grid, routing, horizon=self._sim_horizon(),
                 max_events=getattr(target, 'max_events', 2048),
-                config=config, widths=widths, delays=delays)
+                config=config, widths=widths, delays=delays,
+                arch=arch, inputs=self.in_pos)
         else:                                    # LUT — same player, level engine
             self._player = LutPlayer(
                 self.grid, horizon=self._sim_horizon(),
@@ -1844,13 +1842,14 @@ class DesignerTab:
         use_manual = use_manual and all(manual[r] for r in roles)
         obs = _obs_len(t)                    # observe past T so a delayed Q is seen
         if self.backend == 'nervous':
-            routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+            arch = self._nv_arch()
+            routing = self._nv_routing()
             # identical physics to evolution: model config + ('evolved_width')
             # the genome's per-node pulse widths (None off-model / no genome)
             config = getattr(t, 'pulse_config', None)
-            widths = (None if self.genome is None
+            widths = (None if self.genome is None or arch == 'tri3'
                       else node_widths(self.genome, self.grid, config))
-            delays = (None if self.genome is None
+            delays = (None if self.genome is None or arch == 'tri3'
                       else node_delays(self.genome, self.grid, config))
             if use_manual:
                 out_pos = manual
@@ -1864,7 +1863,7 @@ class DesignerTab:
                         max_events=getattr(t, 'max_events', 2048),
                         config=config,
                         input_events=getattr(trial, 'input_events', None),
-                        widths=widths, delays=delays)
+                        widths=widths, delays=delays, arch=arch)
                     traces.overflow = traces.overflow or overflow
                     for r in roles:
                         traces[r].append(trs[r])
@@ -1875,7 +1874,8 @@ class DesignerTab:
                 out_pos, traces = place_outputs_by_trace(self.grid, routing,
                                                          list(self.in_pos), t,
                                                          widths=widths,
-                                                         delays=delays)
+                                                         delays=delays,
+                                                         arch=arch)
         else:
             if use_manual:
                 # pinned outputs, asynchronous engine — real edge times,
@@ -1902,17 +1902,18 @@ class DesignerTab:
             self._status.set('Target needs %d input(s); the grid has %d designated.'
                              % (len(t.inputs), len(self.in_pos)))
             return
-        routing = {p: ROUTING_HEX[s & 0x1F] for p, s in self.grid.items()}
+        arch = self._nv_arch()
+        routing = self._nv_routing()
         roles = [o.role for o in t.outputs]
         out_pos = {r: self.out_pos.get(r) for r in roles}
         if not all(out_pos[r] in self.grid for r in roles if out_pos[r]) \
                 or not all(out_pos[r] for r in roles):
-            _, _, out_pos = interpret_nervous(self.grid, t)
+            _, _, out_pos = interpret_nervous(self.grid, t, arch=arch)
         if any(out_pos.get(r) is None for r in roles):
             self._status.set('Could not place all outputs.')
             return
         lines = ['Target: %s   [nervous — designer working grid]' % t.name,
-                 'Circuit: ' + circuit_summary_nervous(self.grid)]
+                 'Circuit: ' + circuit_summary_nervous(self.grid, arch=arch)]
         for r in roles:
             lines.append("  out '%s': pos=%s" % (r, out_pos[r]))
         in_hdr = ' '.join('i%d' % i for i in range(len(t.inputs)))
@@ -1922,7 +1923,8 @@ class DesignerTab:
         correct = total = 0
         for in_bits, out_bits in t.cases:
             invals = {self.in_pos[i]: in_bits[i] for i in range(len(self.in_pos))}
-            outs = evaluate_nervous(self.grid, routing, invals, t.grid_size)
+            outs = evaluate_nervous(self.grid, routing, invals, t.grid_size,
+                                    arch=arch)
             cells, row_ok = [], True
             for i, r in enumerate(roles):
                 act = outs.get(out_pos[r], 0)

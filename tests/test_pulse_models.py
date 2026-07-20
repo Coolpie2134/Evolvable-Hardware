@@ -102,8 +102,8 @@ def _inhibited_buffer():
 
 # ── V1: uniform is unchanged ─────────────────────────────────────────────────────
 
-def test_uniform_is_the_paper_default():
-    """Default config is the 'uniform' model; a buffer fires once at delay=1,
+def test_uniform_is_the_legacy_default():
+    """Default config is the legacy 'uniform' abstraction; a buffer fires once at delay=1,
     width=1 regardless of input pulse length (widths are regenerated)."""
     grid, routing, a, b = _buffer_pair()
     assert PulseConfig().model == 'uniform'

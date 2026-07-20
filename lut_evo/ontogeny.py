@@ -26,7 +26,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .genome import (LutGene, Chromosome, Genome, LUT_STATES, MAX_CHROMS)
+from .genome import (LutGene, Chromosome, Genome, MAX_CHROMS)
 
 MAX_ITER = 20                      # sim6 MAX_ITER: growth iterations per biomorph
 Pos      = Tuple[int, int]

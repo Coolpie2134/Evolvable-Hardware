@@ -143,24 +143,27 @@ class InteractiveTab:
         for w in self._ctrl.winfo_children():
             w.destroy()
         if backend == 'nervous':
+            self._nv_arch = getattr(c['genome'], 'arch', 'single')
             self._grid = grow_nervous(c['genome'], seeds=tuple(target.inputs),
                                       grid_size=target.grid_size, iters=target.iters)
-            self._routing, self._in_pos, self._out_pos = interpret_nervous(self._grid, target)
+            self._routing, self._in_pos, self._out_pos = interpret_nervous(
+                self._grid, target, arch=self._nv_arch)
             # 'evolved_width' model: the champion's per-node pulse widths, used by
             # BOTH the trace-matched placement (so the highlighted output cell is
             # the one fitness actually read) and the playback engine below.
             # node_widths returns None off that model, so this is uniform-safe.
             from nv_evo.nervous import node_widths, node_delays
             pulse_config = getattr(target, 'pulse_config', None)
-            self._nv_widths = node_widths(
-                c['genome'], self._grid, pulse_config)
-            self._nv_delays = node_delays(
-                c['genome'], self._grid, pulse_config)
+            self._nv_widths = (None if self._nv_arch == 'tri3' else
+                               node_widths(c['genome'], self._grid, pulse_config))
+            self._nv_delays = (None if self._nv_arch == 'tri3' else
+                               node_delays(c['genome'], self._grid, pulse_config))
             if getattr(target, 'temporal', False):
                 # show the same output cell the fitness reads (trace-matched)
                 self._out_pos, _ = place_outputs_by_trace(
                     self._grid, self._routing, self._in_pos, target,
-                    widths=self._nv_widths, delays=self._nv_delays)
+                    widths=self._nv_widths, delays=self._nv_delays,
+                    arch=self._nv_arch)
             self._setup_async(target)
             self._playback_controls(
                 '   (click the timeline to place input pulses; Step/Run in real time)')
@@ -229,7 +232,8 @@ class InteractiveTab:
                 self._grid, self._routing, horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048),
                 config=config, widths=getattr(self, '_nv_widths', None),
-                delays=getattr(self, '_nv_delays', None))
+                delays=getattr(self, '_nv_delays', None),
+                arch=getattr(self, '_nv_arch', 'single'), inputs=self._in_pos)
         else:                                  # LUT — same player, level engine
             self._player = LutPlayer(
                 self._grid, horizon=horizon,
@@ -299,7 +303,9 @@ class InteractiveTab:
             draw_hex_net(self._axg, self._grid, target.grid_size,
                          routing=self._routing,
                          in_pos=self._in_pos, out_pos=self._out_pos,
-                         activity=activity, show_edges=True,
+                         activity=activity,
+                         show_edges=(getattr(self, '_nv_arch', 'single') == 'single'),
+                         arch=getattr(self, '_nv_arch', 'single'),
                          title=title)
         else:
             in_pos = [p for p in self._in_pos if p in self._grid]

@@ -40,14 +40,13 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
-                     simulate_trace,
-                     circuit_summary, score,
+                     simulate_trace, circuit_summary,
                      TARGETS, DEFAULT_TARGET, get_target, truth_table_target,
                      Arch, DEFAULT_ARCH)
-from snn_evo.genome import GRID_SIZE, MAX_STATE
-from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS, REFRAC_STEPS, EPSC_STEPS
+from snn_evo.genome import GRID_SIZE
+from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS
 from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
-                    nervous_case_outputs, circuit_summary_nervous,
+                    nervous_case_outputs,
                     ROUTING, temporal_report, periodic_combinational_target)
 from nv_evo import TEMPORAL_TARGETS
 from nv_evo.viz import draw_hex_net
@@ -56,7 +55,7 @@ from interactive import InteractiveTab
 from designer import DesignerTab
 from target_ui import TargetPicker
 import ui_compat
-from evo_runtime.config import (GAConfig, RunConfig,
+from evo_runtime.config import (GAConfig, RunConfig, NV_NEW_RUN_PROFILES,
                                 MAX_CHROMOSOME_COUNT as MAX_CHROMS,
                                 default_max_telomere)
 from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
@@ -517,8 +516,12 @@ class App:
         ctrl2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl2.pack(fill='x', side='top')
 
-        def aentry(parent, label, default, width=5, store=None):
-            ttk.Label(parent, text=label).pack(side='left', padx=(6, 2))
+        def aentry(parent, label, default, width=5, store=None,
+                   label_store=None):
+            label_widget = ttk.Label(parent, text=label)
+            label_widget.pack(side='left', padx=(6, 2))
+            if label_store is not None:
+                label_store.append(label_widget)
             v = tk.StringVar(value=str(default))
             e = ttk.Entry(parent, textvariable=v, width=width)
             e.pack(side='left')
@@ -611,36 +614,76 @@ class App:
         self._pulse_frame = ttk.Frame(ctrl3)
         self._pulse_frame.pack(side='left')
         ttk.Label(self._pulse_frame, text='Pulse:').pack(side='left', padx=(2, 0))
-        self._delay_var = aentry(self._pulse_frame, 'Delay:', _D, width=4)
-        self._width_var = aentry(self._pulse_frame, 'Width:', _W, width=4)
-        self._coinc_var = aentry(self._pulse_frame, 'Coinc:', _C, width=4)
-        # node-timing MODEL: the architecture variants (see nv_evo/pulse.py
-        # NODE_MODELS). 'Uniform' is the paper; 'Evolved width' lets each node
-        # type's pulse width mutate; 'Width-preserving' transports both edges of
-        # the incoming pulse after a per-node-type delay — with the delay either
-        # evolvable or fixed (the ablation isolating width preservation from
-        # delay evolvability). Each label maps to (pulse model, evolve_width,
-        # evolve_delay); None = the model's default mutation pairing.
-        ttk.Label(self._pulse_frame, text='Node:').pack(side='left', padx=(6, 2))
-        self._NODE_MODEL_LABELS = {
-            'Uniform (paper)': ('uniform', None, None),
-            'Evolved width':   ('evolved_width', None, None),
-            'Width-preserving + evolved delay': ('pulse_delay', None, None),
-            'Width-preserving (fixed delay)':   ('pulse_delay', None, False)}
-        self._node_model_var = tk.StringVar(value='Uniform (paper)')
-        self._node_model_cb = ttk.Combobox(
-            self._pulse_frame, textvariable=self._node_model_var, width=28,
-            state='readonly', values=list(self._NODE_MODEL_LABELS))
-        self._node_model_cb.pack(side='left')
-        # model-restricted targets (e.g. waveform contracts needing width
-        # preservation) come and go with the node-model selection
-        self._node_model_cb.bind('<<ComboboxSelected>>',
-                                 self._on_node_model_change)
+        self._pulse_entries = []
+        self._pulse_labels = []
+        self._delay_var = aentry(
+            self._pulse_frame, 'Delay:', _D, width=4,
+            store=self._pulse_entries, label_store=self._pulse_labels)
+        self._width_var = aentry(
+            self._pulse_frame, 'Width:', _W, width=4,
+            store=self._pulse_entries, label_store=self._pulse_labels)
+        self._coinc_var = aentry(
+            self._pulse_frame, 'Coinc:', _C, width=4,
+            store=self._pulse_entries, label_store=self._pulse_labels)
+        # New NV runs expose only the current coherent substrate profiles.
+        # Experimental engines remain internal solely so older checkpoints can
+        # still load. Digital tri isolates tile topology (paper tile, frozen
+        # digital node) so analog_tri wins can be attributed to topology vs
+        # physics.
+        ttk.Label(self._pulse_frame, text='NV profile:').pack(
+            side='left', padx=(6, 2))
+        self._NV_PROFILE_LABELS = {
+            'Legacy: width-preserving + evolved delay':
+                NV_NEW_RUN_PROFILES['legacy'],
+            'Digital tri-circuit (3-output)':
+                NV_NEW_RUN_PROFILES['digital_tri'],
+            'Analog tri-circuit (3-output)':
+                NV_NEW_RUN_PROFILES['analog_tri'],
+        }
+        self._nv_profile_var = tk.StringVar(
+            value='Legacy: width-preserving + evolved delay')
+        self._nv_profile_cb = ttk.Combobox(
+            self._pulse_frame, textvariable=self._nv_profile_var, width=39,
+            state='readonly', values=list(self._NV_PROFILE_LABELS))
+        self._nv_profile_cb.pack(side='left')
+        self._nv_profile_cb.bind('<<ComboboxSelected>>',
+                                 self._on_nv_profile_change)
         self._pulse_sep = ttk.Separator(ctrl3, orient='vertical')
         self._pulse_sep.pack(side='left', fill='y', padx=8)
         self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
                                            command=self._reset_tuning)
         self._tune_reset_btn.pack(side='left', padx=4)
+
+        # Analog node constants (paper_analog profile only). Their own row so
+        # the pulse row cannot overflow; packed/hidden before the notebook by
+        # _sync_nv_profile_controls. Defaults are the frozen PulseConfig values,
+        # so an untouched row reproduces the audited physics exactly.
+        from nv_evo.pulse import PulseConfig as _PulseConfig
+        _AC = _PulseConfig()
+        self._analog_defaults = dict(vth=_AC.analog_threshold,
+                                     step=_AC.analog_step,
+                                     tau=_AC.analog_tau_leak,
+                                     hyst=_AC.analog_hysteresis)
+        self._analog_row = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        ttk.Label(self._analog_row, text='Analog node:').pack(
+            side='left', padx=(2, 0))
+        self._analog_entries = []
+        self._athr_var = aentry(self._analog_row, 'Vth:',
+                                _AC.analog_threshold, width=5,
+                                store=self._analog_entries)
+        self._astep_var = aentry(self._analog_row, 'Step:',
+                                 _AC.analog_step, width=5,
+                                 store=self._analog_entries)
+        self._atau_var = aentry(self._analog_row, 'Tau leak:',
+                                _AC.analog_tau_leak, width=5,
+                                store=self._analog_entries)
+        self._ahyst_var = aentry(self._analog_row, 'Hysteresis:',
+                                 _AC.analog_hysteresis, width=5,
+                                 store=self._analog_entries)
+        ttk.Label(self._analog_row,
+                  text='(two edges must fire, one must not: '
+                       '(1-Vth)/2 < Step < 1-Vth; Vth+Hysteresis < 1)').pack(
+            side='left', padx=(8, 0))
 
         # Fix a natural size on the notebook and stop it from resizing to fit
         # whichever tab is shown. On X11 a matplotlib canvas in a freshly-mapped
@@ -688,10 +731,28 @@ class App:
             self._arch_sep.pack_forget()
             self._graded_chk.state(['disabled'])
             if backend == 'nervous':
-                note = ('Nervous net — HEX array; each tile has 3 independent L/R/D '
-                        'Figure-3 circuits (coincidence/buffer + inhibition). Loops '
+                tri = self._selected_tile_arch() == 'tri3'
+                model = self._selected_node_model()[0]
+                tile_note = ('three independent L/R/D Figure-3 circuits'
+                             if tri else 'one legacy broadcast circuit')
+                if model == 'paper_analog':
+                    physics_note = (
+                        'Analog charge/leak/comparator physics; output width '
+                        'and coincidence are emergent. Width only sets the '
+                        'default external stimulus length; Coinc is ignored.')
+                elif model == 'uniform':
+                    physics_note = (
+                        "The paper's fixed digital abstraction: every node "
+                        'regenerates a Width-long pulse after Delay; Coinc '
+                        'sets the coincidence window.')
+                else:
+                    physics_note = (
+                        'Both waveform edges are preserved and propagation '
+                        'delay evolves by routing state.')
+                note = ('Nervous net: HEX array; each tile has %s. %s Loops '
                         'circulate injected pulses as memory. Substrate '
-                        '(Vth/Syn/Input) and Graded do not apply.')
+                        '(Vth/Syn/Input) and Graded do not apply.'
+                        % (tile_note, physics_note))
             else:
                 note = ('LUT array — SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
                         '4 directional 16-bit lookup tables per cell, asynchronous level logic '
@@ -714,9 +775,12 @@ class App:
                 self._pulse_frame.pack(side='left', before=self._tune_reset_btn)
                 self._pulse_sep.pack(side='left', fill='y', padx=8,
                                      before=self._tune_reset_btn)
+                self._sync_nv_profile_controls()   # analog row follows profile
             else:
                 self._pulse_frame.pack_forget()
                 self._pulse_sep.pack_forget()
+                if hasattr(self, '_analog_row'):
+                    self._analog_row.pack_forget()
         # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
         # feeds the nervous & LUT GAs only; the SNN GA uses its own fixed constants
         # and ignores them — so disable the whole row for SNN rather than let it look
@@ -951,10 +1015,21 @@ class App:
         self._elite_var.set(str(d['elite']))
         self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
-        if hasattr(self, '_node_model_var'):
-            self._node_model_var.set('Uniform (paper)')   # the paper's node
+        if hasattr(self, '_analog_defaults'):
+            a = self._analog_defaults
+            self._athr_var.set(str(a['vth']))
+            self._astep_var.set(str(a['step']))
+            self._atau_var.set(str(a['tau']))
+            self._ahyst_var.set(str(a['hyst']))
+        if hasattr(self, '_nv_profile_var'):
+            self._nv_profile_var.set(
+                'Legacy: width-preserving + evolved delay')
+            self._sync_nv_profile_controls()
         if hasattr(self, '_lexicase_var'):
             self._lexicase_var.set(False)    # tournament is the tuned default
+        if hasattr(self, '_target_picker'):
+            self._reconfigure_for_backend()
+            self._refresh_target_list()
 
     def _read_run_config(self, chromosome_count=None):
         """Parse controls into an immutable, process-safe run configuration."""
@@ -968,6 +1043,16 @@ class App:
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coincidence = float(self._coinc_var.get())
             node_model, evolve_width, evolve_delay = self._selected_node_model()
+            tile_arch = self._selected_tile_arch()
+            # Analog constants are read only under the analog profile; other
+            # profiles keep the frozen PulseConfig defaults untouched.
+            analog_kwargs = {}
+            if node_model == 'paper_analog':
+                analog_kwargs = dict(
+                    analog_threshold=float(self._athr_var.get()),
+                    analog_step=float(self._astep_var.get()),
+                    analog_tau_leak=float(self._atau_var.get()),
+                    analog_hysteresis=float(self._ahyst_var.get()))
             if (mut < 0 or not (0 <= imm < 1) or tournament < 1
                     or not (0 < alpha <= 1) or not (0 <= beta <= 10)
                     or mutation_limit < 1
@@ -979,6 +1064,14 @@ class App:
         except ValueError:
             return None
         from nv_evo.pulse import PulseConfig
+        try:
+            pulse_config = PulseConfig(delay=delay, width=width,
+                                       coincidence=coincidence,
+                                       model=node_model, **analog_kwargs)
+        except ValueError:
+            # PulseConfig enforces the analog coupling constraints (e.g. step
+            # inside ((1-Vth)/2, 1-Vth)); report as invalid tuning, not a crash.
+            return None
         return RunConfig(
             ga=GAConfig(
                 mean_mutations=mut, immigrant_fraction=imm,
@@ -990,15 +1083,13 @@ class App:
                            else 'tournament'),
                 recombination_enabled=bool(self._recombination_var.get()),
                 max_telomere=max_telomere,
-                # node_model must agree with pulse.model: the GA reads it to turn
-                # the width-mutation on for 'evolved_width'. The explicit
-                # toggles (None = model pairing) carry the fixed-delay ablation.
+                # The selected profile owns the architecture/physics pairing.
+                # node_model must still mirror pulse.model for worker processes.
                 node_model=node_model,
                 evolve_width=evolve_width, evolve_delay=evolve_delay,
+                tile_arch=tile_arch,
                 chromosome_count=chromosome_count),
-            pulse=PulseConfig(delay=delay, width=width,
-                              coincidence=coincidence,
-                              model=node_model))
+            pulse=pulse_config)
 
     def _backend(self):
         v = self._backend_var.get().lower()
@@ -1009,15 +1100,55 @@ class App:
         return 'snn'
 
     def _selected_node_model(self):
-        """(pulse model, evolve_width, evolve_delay) for the Node dropdown."""
-        if not hasattr(self, '_node_model_var'):
-            return 'uniform', None, None
-        return self._NODE_MODEL_LABELS.get(
-            self._node_model_var.get(), ('uniform', None, None))
+        """(pulse model, evolve_width, evolve_delay) for the NV profile."""
+        _, model, evolve_width, evolve_delay = self._selected_nv_profile()
+        return model, evolve_width, evolve_delay
 
-    def _on_node_model_change(self, _evt=None):
-        """Model-restricted targets appear/disappear with the node model."""
+    def _selected_tile_arch(self):
+        return self._selected_nv_profile()[0]
+
+    def _selected_nv_profile(self):
+        default = ('single', 'pulse_delay', None, None)
+        if not hasattr(self, '_nv_profile_var'):
+            return default
+        return self._NV_PROFILE_LABELS.get(
+            self._nv_profile_var.get(), default)
+
+    def _on_nv_profile_change(self, _evt=None):
+        self._sync_nv_profile_controls()
+        self._reconfigure_for_backend()
         self._refresh_target_list()
+
+    def _sync_nv_profile_controls(self):
+        """Keep labels and editability honest for the selected NV physics."""
+        if not hasattr(self, '_pulse_entries'):
+            return
+        analog = self._selected_node_model()[0] == 'paper_analog'
+        labels = (('Propagation delay:', 'Input width:', 'Coinc (emergent):')
+                  if analog else ('Delay:', 'Width:', 'Coinc:'))
+        for widget, text in zip(self._pulse_labels, labels):
+            widget.configure(text=text)
+        locked = bool(getattr(self, '_nv_controls_locked', False))
+        for index, widget in enumerate(self._pulse_entries):
+            widget.configure(state=('disabled'
+                                    if locked or (analog and index == 2)
+                                    else 'normal'))
+        self._nv_profile_cb.configure(
+            state='disabled' if locked else 'readonly')
+        self._tune_reset_btn.configure(
+            state='disabled' if locked else 'normal')
+        if hasattr(self, '_analog_row'):
+            for widget in self._analog_entries:
+                widget.configure(state='disabled' if locked else 'normal')
+            if (analog and hasattr(self, '_nb')
+                    and self._backend() == 'nervous'):
+                self._analog_row.pack(fill='x', side='top', before=self._nb)
+            else:
+                self._analog_row.pack_forget()
+
+    def _set_nv_controls_locked(self, locked):
+        self._nv_controls_locked = bool(locked)
+        self._sync_nv_profile_controls()
 
     def _sync_telomere_backend(self, backend=None):
         """Swap in the remembered growth ceiling for the selected backend.
@@ -1142,7 +1273,9 @@ class App:
                              'Tournament>=1, Elites>=0, 0<α<=1, 0<=β<=10, '
                              'Mutation cap>=1, '
                              'Max telomere>=2, '
-                             'Delay/Width>0, Coinc>=0.')
+                             'Delay/Width>0, Coinc>=0; analog: 0<Vth<1, '
+                             '(1-Vth)/2<Step<1-Vth, Tau>0, Hyst>=0, '
+                             'Vth+Hyst<1.')
             return
 
         backend = self._backend()
@@ -1188,6 +1321,7 @@ class App:
         self._target_picker.set_state('disabled')
         self._backend_cb.config(state='disabled')
         self._recombination_chk.config(state='disabled')
+        self._set_nv_controls_locked(True)
 
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -1201,8 +1335,12 @@ class App:
                   self._recombination_event),
             daemon=True)
         self._worker.start()
+        backend_note = (('%s/%s/%s' %
+                         (backend, run_config.ga.tile_arch,
+                          run_config.pulse.model))
+                        if backend == 'nervous' else backend)
         self._status.set('Evolving %s [%s] …  pop=%d  gens=%d  tries=%d  seed=%d%s' %
-                         (self.target.name, backend, pop, gens, tries, base_seed,
+                         (self.target.name, backend_note, pop, gens, tries, base_seed,
                           '  [graded]' if self._graded_var.get() else ''))
 
     def _sync_recombination(self):
@@ -1279,14 +1417,23 @@ class App:
                 self._status.set('Saved run configuration is invalid: %s' % exc)
                 return
         configured_chroms = loaded_config.ga.chromosome_count
+        loaded_backend = state.get('backend', 'snn')
+        actual_tile_arch = getattr(loaded_genome, 'arch', 'single')
         chrom_warn = ''
         if configured_chroms is not None and configured_chroms != actual_chroms:
             chrom_warn = ('   — saved Chroms=%d disagreed with the genome; '
                           'using its actual count %d' %
                           (configured_chroms, actual_chroms))
+        arch_warn = ''
+        if (loaded_backend == 'nervous'
+                and loaded_config.ga.tile_arch != actual_tile_arch):
+            arch_warn = ('   — saved tile setting disagreed with the genome; '
+                         'using %s' % actual_tile_arch)
         normalized_config = dataclasses.replace(
             loaded_config, ga=dataclasses.replace(
-                loaded_config.ga, chromosome_count=actual_chroms))
+                loaded_config.ga, chromosome_count=actual_chroms,
+                tile_arch=(actual_tile_arch if loaded_backend == 'nervous'
+                           else loaded_config.ga.tile_arch)))
 
         self.best_genome  = loaded_genome
         self.best_fitness = state['best_fitness']
@@ -1310,7 +1457,7 @@ class App:
         if saved_seed is not None:
             self._seed_var.set(str(saved_seed))
             self._active_seed = saved_seed
-        saved_backend = state.get('backend', 'snn')
+        saved_backend = loaded_backend
         self._active_run_config = normalized_config
         self._beta_var.set(str(normalized_config.ga.stagnation_beta))
         self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
@@ -1318,17 +1465,33 @@ class App:
         self._delay_var.set(str(normalized_config.pulse.delay))
         self._width_var.set(str(normalized_config.pulse.width))
         self._coinc_var.set(str(normalized_config.pulse.coincidence))
-        saved_entry = (normalized_config.pulse.model,
-                       getattr(normalized_config.ga, 'evolve_width', None),
-                       getattr(normalized_config.ga, 'evolve_delay', None))
-        pulse_label = next(
-            (label for label, entry in self._NODE_MODEL_LABELS.items()
-             if entry == saved_entry),
-            # older checkpoints carry no toggles; fall back to the model alone
-            next((label for label, entry in self._NODE_MODEL_LABELS.items()
-                  if entry[0] == normalized_config.pulse.model),
-                 'Uniform (paper)'))
-        self._node_model_var.set(pulse_label)
+        if hasattr(self, '_analog_defaults'):
+            a = self._analog_defaults
+            loaded_pulse = normalized_config.pulse
+            self._athr_var.set(str(getattr(
+                loaded_pulse, 'analog_threshold', a['vth'])))
+            self._astep_var.set(str(getattr(
+                loaded_pulse, 'analog_step', a['step'])))
+            self._atau_var.set(str(getattr(
+                loaded_pulse, 'analog_tau_leak', a['tau'])))
+            self._ahyst_var.set(str(getattr(
+                loaded_pulse, 'analog_hysteresis', a['hyst'])))
+        saved_profile = (
+            normalized_config.ga.tile_arch,
+            normalized_config.pulse.model,
+            getattr(normalized_config.ga, 'evolve_width', None),
+            getattr(normalized_config.ga, 'evolve_delay', None))
+        profile_label = next(
+            (label for label, profile in self._NV_PROFILE_LABELS.items()
+             if profile == saved_profile), None)
+        profile_warn = ''
+        if profile_label is None:
+            profile_label = 'Legacy: width-preserving + evolved delay'
+            if loaded_backend == 'nervous':
+                profile_warn = ('   — loaded retired NV physics for playback; '
+                                'new runs use one of the current profiles')
+        self._nv_profile_var.set(profile_label)
+        self._sync_nv_profile_controls()
         self._sync_recombination()
         self._chroms_var.set(str(actual_chroms))
         self._active_chroms = actual_chroms
@@ -1351,7 +1514,8 @@ class App:
                 if hand_edited else '')
         self._status.set('Loaded %s  fitness=%.4f  syn_w=%.2f%s' %
                          (saved_target.name, self.best_fitness,
-                          saved_arch.syn_weight, warn + chrom_warn))
+                          saved_arch.syn_weight,
+                          warn + chrom_warn + arch_warn + profile_warn))
         self._update_all(self.best_genome, self.best_fitness)
         self._save_btn.config(state='normal')
 
@@ -1480,6 +1644,7 @@ class App:
                         state='normal' if self.best_genome else 'disabled')
                     self._progress.configure(value=self._progress.cget('maximum'))
                     self._worker = None
+                    self._set_nv_controls_locked(False)
                     if getattr(self, '_ga_error', None):
                         self._status.set('GA stopped on error: %s  (controls re-enabled)'
                                          % self._ga_error)
@@ -1660,10 +1825,13 @@ class App:
         try:
             snaps = grow_nervous_snapshots(genome, seeds=tuple(target.inputs),
                                            grid_size=target.grid_size, iters=target.iters)
-            routing, in_pos, out_pos = interpret_nervous(snaps[-1], target)
+            arch = getattr(genome, 'arch', 'single')
+            routing, in_pos, out_pos = interpret_nervous(
+                snaps[-1], target, arch=arch)
             if getattr(target, 'temporal', False):
                 from nv_evo import place_outputs_by_trace
-                out_pos, _ = place_outputs_by_trace(snaps[-1], routing, in_pos, target)
+                out_pos, _ = place_outputs_by_trace(
+                    snaps[-1], routing, in_pos, target, arch=arch)
         except Exception:
             return
         fig = self._growth_fig
@@ -1678,10 +1846,12 @@ class App:
         axes  = fig.subplots(nrows, ncols, squeeze=False)
         flat  = [a for row in axes for a in row]
         for idx, snap in enumerate(snaps):
-            rt   = {p: ROUTING[s & 0x1F] for p, s in snap.items()}
+            rt = ({} if arch == 'tri3' else
+                  {p: ROUTING[s & 0x1F] for p, s in snap.items()})
             last = (idx == n - 1)
             draw_hex_net(flat[idx], snap, gs, routing=rt, in_pos=in_pos,
                          out_pos=(out_pos if last else {}), show_edges=last,
+                         arch=arch,
                          title=('Iter %d (%d)' % (idx, len(snap))) if idx else 'Seed (%d)' % len(snap))
         for idx in range(n, len(flat)):
             flat[idx].set_visible(False)
@@ -1972,7 +2142,8 @@ class App:
 
         gs      = target.grid_size
         cases   = cases[:MAX_VOLT_CASES]
-        routing = interpret_nervous(grid, target)[0]
+        arch = getattr(genome, 'arch', 'single')
+        routing = interpret_nervous(grid, target, arch=arch)[0]
         self._volt_fig.clf()
         extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
                 '  (first %d of %d)' % (MAX_VOLT_CASES, len(target.cases))
@@ -1986,7 +2157,9 @@ class App:
             res = '  '.join('%s %d/%d' % (t.role, case['out_bits'][i], case['acts'][t.role])
                             for i, t in enumerate(target.outputs))
             draw_hex_net(axes[ci], grid, gs, routing=routing, in_pos=in_pos, out_pos=out_pos,
-                         activity=case['node_outputs'], show_edges=True,
+                         activity=case['node_outputs'],
+                         show_edges=(arch == 'single'),
+                         arch=arch,
                          title='in=%s\n%s  %s' % (''.join(map(str, case['in_bits'])), res,
                                                   'OK' if all_ok else 'FAIL'))
             axes[ci].set_title(axes[ci].get_title(),

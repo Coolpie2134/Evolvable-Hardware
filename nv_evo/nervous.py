@@ -18,9 +18,16 @@ from __future__ import annotations
 
 from .hexgrid import hex_dirs, hex_frontier_cells, ROUTING_HEX, routing_kind
 from .genome import germline_telomere
+from .tritile import TRI_SEED_STATE
 
 ROUTING    = ROUTING_HEX       # back-compat name (used by the GUI colourer)
 SEED_STATE = 1
+
+
+def _seed_state(genome):
+    """The seed/germline state for this genome's tile architecture."""
+    return (TRI_SEED_STATE if getattr(genome, 'arch', 'single') == 'tri3'
+            else SEED_STATE)
 
 # 5-bit popcount for the Hamming-distance gene lookup (state is 0..31: 0-15 AND
 # routing, 16-31 OR — the growth match must see the 5th bit to tell them apart).
@@ -52,9 +59,17 @@ def _h4(a, b):
 
 def _lookup_nv(genome, sL, sR, sD, si):
     """Associative next-state lookup (min Hamming). No time/telomere term — the
-    telomere now gates DIVISION per cell in _grow_step, not which genes exist."""
+    telomere now gates DIVISION per cell in _grow_step, not which genes exist.
+
+    The single-tile alphabet is 5-bit; the tri-tile alphabet (three packed 4-bit
+    channels) is 12-bit. Both are compared by Hamming distance over the whole
+    state — and because the tri channels occupy DISJOINT bit fields, a 12-bit
+    Hamming is exactly the sum of the three per-channel Hammings, so context
+    matching is per-channel for free."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
         return 0
+    if getattr(genome, 'arch', 'single') == 'tri3':
+        return _lookup_nv_tri(genome, sL, sR, sD, si)
     pc = _PC4                      # local ref + inlined popcount: this loop ran
     best_gene, best_dist = None, 1 << 30   # ~3.4M times/200 evals — the _h4 call
     for chrom in genome.chromosomes:       # overhead was ~15% of eval (sim6 did
@@ -70,6 +85,26 @@ def _lookup_nv(genome, sL, sR, sD, si):
     return best_gene.self_out                      # 0 = off / death (native)
 
 
+def _popcount12(v):
+    return bin(v & 0xFFF).count('1')
+
+
+def _lookup_nv_tri(genome, sL, sR, sD, si):
+    """12-bit Hamming lookup for the tri-tile alphabet (see _lookup_nv)."""
+    best_gene, best_dist = None, 1 << 30
+    for chrom in genome.chromosomes:
+        for gene in chrom.genes:
+            d = (_popcount12(gene.ctx_l ^ sL) + _popcount12(gene.ctx_r ^ sR) +
+                 _popcount12(gene.ctx_d ^ sD) + _popcount12(gene.self_in ^ si))
+            if d < best_dist:
+                best_dist, best_gene = d, gene
+    if best_gene is None:
+        return 0
+    if si == 0 and best_gene.self_in != 0:
+        return 0
+    return best_gene.self_out
+
+
 def _next_state(genome, sL, sR, sD, si, cache):
     """Cached _lookup_nv keyed on context alone (telomere no longer affects the
     lookup, so the cache is valid for the whole run — sim6 table_lookup_cached)."""
@@ -81,7 +116,7 @@ def _next_state(genome, sL, sR, sD, si, cache):
     return ns
 
 
-def _grow_step(genome, grid, tel, seeds, L, cache):
+def _grow_step(genome, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
     """One development step. `grid` = {pos: state}, `tel` = {pos: remaining
     telomere}. Returns (next_grid, next_tel).
 
@@ -118,7 +153,7 @@ def _grow_step(genome, grid, tel, seeds, L, cache):
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = parent_tel - 1
     for pos in seeds:
-        nxt[pos] = SEED_STATE
+        nxt[pos] = seed_state
         nxt_tel[pos] = L
     return nxt, nxt_tel
 
@@ -147,11 +182,12 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
     Size and duration are bounded by the genome's telomere ALONE — `grid_size`
     and `iters` are ignored (see note above)."""
     L = germline_telomere(genome)
-    grid = {pos: SEED_STATE for pos in seeds}
+    seed_state = _seed_state(genome)
+    grid = {pos: seed_state for pos in seeds}
     tel  = {pos: L for pos in seeds}
     prev, cache = None, {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache)
+        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache, seed_state)
         if nxt == grid or nxt == prev:      # fixed point (mature) or 2-cycle
             return nxt
         prev, grid, tel = grid, nxt, nxt_tel
@@ -160,12 +196,13 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
 
 def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
     L = germline_telomere(genome)
-    snaps = [{pos: SEED_STATE for pos in seeds}]
+    seed_state = _seed_state(genome)
+    snaps = [{pos: seed_state for pos in seeds}]
     grid = dict(snaps[0])
     tel  = {pos: L for pos in seeds}
     prev, cache = None, {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache)
+        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache, seed_state)
         snaps.append(dict(nxt))
         if nxt == grid or nxt == prev:
             break
@@ -248,9 +285,18 @@ def node_delays(genome, grid, config=None):
             if (state & 0x1F) < n}
 
 
-def interpret_nervous(grid, target=None):
+def interpret_nervous(grid, target=None, arch='single'):
     """Return (routing {pos:(e1,e2,i1,op)}, input_pos, output_pos {role:(x,y)|None})."""
-    routing = {pos: ROUTING_HEX[state & 0x1F] for pos, state in grid.items()}
+    if arch == 'single':
+        routing = {pos: ROUTING_HEX[state & 0x1F]
+                   for pos, state in grid.items()}
+    elif arch == 'tri3':
+        # TriSim expands each tile into three directional circuit nodes itself.
+        # Returning no legacy routing prevents UIs/analyses from drawing a
+        # fictitious single broadcast arrow decoded from the low five bits.
+        routing = {}
+    else:
+        raise ValueError('unknown tile architecture: %r' % (arch,))
     if target is not None:
         input_pos  = list(target.inputs)
         output_pos = _place_outputs(grid, target)
@@ -260,7 +306,7 @@ def interpret_nervous(grid, target=None):
 
 
 def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
-                     config=None):
+                     config=None, arch='single'):
     """Evaluate one combinational case on the asynchronous pulse engine.
     Input levels are held for the whole horizon (one long pulse on each driven
     input net — a single edge). Returns {pos: 0/1} where 1 means the cell's
@@ -269,7 +315,13 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
     from .simulation import create_simulator
     if steps is None:
         steps = 2 * grid_size + 4
-    sim = create_simulator(grid, routing, config=config)
+    if arch == 'tri3':
+        from .tritile import TriSim
+        sim = TriSim(grid, input_vals.keys(), config=config)
+    elif arch == 'single':
+        sim = create_simulator(grid, routing, config=config)
+    else:
+        raise ValueError('unknown tile architecture: %r' % (arch,))
     held = {c: int(b) for c, b in input_vals.items()}
     for _ in range(steps):
         sim.step(held)
@@ -281,7 +333,8 @@ def score_nervous(genome, target):
                         grid_size=target.grid_size, iters=target.iters)
     if len(grid) <= target.n_inputs:
         return 0.0
-    routing, in_pos, out_pos = interpret_nervous(grid, target)
+    arch = getattr(genome, 'arch', 'single')
+    routing, in_pos, out_pos = interpret_nervous(grid, target, arch=arch)
     if any(out_pos[t.role] is None for t in target.outputs):
         return 0.0
     live = set(grid)
@@ -295,7 +348,7 @@ def score_nervous(genome, target):
         invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
-            config=getattr(target, 'pulse_config', None))
+            config=getattr(target, 'pulse_config', None), arch=arch)
         for i, term in enumerate(target.outputs):
             if outs.get(out_pos[term.role], 0) == out_bits[i]:
                 correct += 1
@@ -305,7 +358,8 @@ def score_nervous(genome, target):
 def nervous_case_outputs(genome, target):
     grid = grow_nervous(genome, seeds=tuple(target.inputs),
                         grid_size=target.grid_size, iters=target.iters)
-    routing, in_pos, out_pos = interpret_nervous(grid, target)
+    arch = getattr(genome, 'arch', 'single')
+    routing, in_pos, out_pos = interpret_nervous(grid, target, arch=arch)
     cases = []
     if len(grid) <= target.n_inputs or any(out_pos[t.role] is None for t in target.outputs):
         return grid, in_pos, out_pos, cases
@@ -313,15 +367,26 @@ def nervous_case_outputs(genome, target):
         invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
-            config=getattr(target, 'pulse_config', None))
+            config=getattr(target, 'pulse_config', None), arch=arch)
         acts   = {t.role: outs.get(out_pos[t.role], 0) for t in target.outputs}
         cases.append({'in_bits': in_bits, 'out_bits': out_bits,
                       'node_outputs': outs, 'acts': acts})
     return grid, in_pos, out_pos, cases
 
 
-def circuit_summary_nervous(grid):
+def circuit_summary_nervous(grid, arch='single'):
     kinds = {'off': 0, 'buffer': 0, 'coincidence': 0, 'or': 0, 'inhibited': 0}
+    if arch == 'tri3':
+        from .tritile import channel_configs
+        for state in grid.values():
+            for config in channel_configs(state):
+                kinds[routing_kind(ROUTING_HEX[config])] += 1
+        return ('%d tiles / %d directional circuits  '
+                '(%d buffer, %d coincidence, %d inhibited, %d off)'
+                % (len(grid), 3 * len(grid), kinds['buffer'],
+                   kinds['coincidence'], kinds['inhibited'], kinds['off']))
+    if arch != 'single':
+        raise ValueError('unknown tile architecture: %r' % (arch,))
     for state in grid.values():
         kinds[routing_kind(ROUTING_HEX[state & 0x1F])] += 1
     return ('%d nodes  (%d buffer, %d coincidence, %d OR, %d inhibited, %d off)'
@@ -331,8 +396,9 @@ def circuit_summary_nervous(grid):
 
 def nervous_truth_table(genome, target):
     grid, in_pos, out_pos, cases = nervous_case_outputs(genome, target)
+    arch = getattr(genome, 'arch', 'single')
     lines = ['Target: ' + target.name + '   [hex nervous net]',
-             'Circuit: ' + circuit_summary_nervous(grid)]
+             'Circuit: ' + circuit_summary_nervous(grid, arch=arch)]
     for term in target.outputs:
         p = out_pos.get(term.role)
         lines.append("  out '%s': %s" % (term.role, ('pos=%s' % (p,)) if p else '(not found)'))

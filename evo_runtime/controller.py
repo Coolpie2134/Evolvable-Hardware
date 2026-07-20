@@ -10,7 +10,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from .cache import LRUCache
 from .checkpoint import save_population
-from .config import RunConfig, MAX_CHROMOSOME_COUNT
+from .config import RunConfig, MAX_CHROMOSOME_COUNT, validate_new_nv_profile
 from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
@@ -38,6 +38,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                             rank_key as snn_rank_key)
 
     config = run_config or RunConfig()
+    if backend == 'nervous':
+        validate_new_nv_profile(config.ga)
     chromosome_count = (config.ga.chromosome_count
                         if config.ga.chromosome_count is not None else n_chroms)
     if not 1 <= chromosome_count <= MAX_CHROMOSOME_COUNT:
@@ -67,7 +69,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
         make_genome = lambda: random_hex_genome(
-            chromosome_count, max_telomere=config.ga.max_telomere)
+            chromosome_count, max_telomere=config.ga.max_telomere,
+            arch=getattr(config.ga, 'tile_arch', 'single'))
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         step = lambda p, f, c, mm, recombine: next_population(

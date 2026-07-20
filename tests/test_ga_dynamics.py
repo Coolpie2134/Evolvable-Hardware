@@ -273,6 +273,15 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
         else:
             raise AssertionError('checkpoint accepted a count/config mismatch')
 
+        try:
+            save_checkpoint(
+                path, random_hex_genome(2, arch='tri3'), 0.5, target,
+                None, 12, 'nervous', config)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('checkpoint accepted a tile-architecture mismatch')
+
 
 def test_fixed_chromosome_count_survives_each_backend_mutation_operator():
     random.seed(1201)

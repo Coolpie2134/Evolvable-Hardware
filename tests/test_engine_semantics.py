@@ -1,5 +1,5 @@
 """
-tests/test_engine_semantics.py — paper-faithful pulse-engine semantics.
+tests/test_engine_semantics.py — deterministic event-pulse engine semantics.
 
 Geometry-free checks of the invariants the asynchronous model rests on, so a
 refactor of nv_evo.pulse / nv_evo.simulation cannot silently change them:

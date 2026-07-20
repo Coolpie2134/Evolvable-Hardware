@@ -1,9 +1,10 @@
 """
-nv_evo/pulse.py — asynchronous, edge-triggered pulse dynamics (paper Fig. 1).
+nv_evo/pulse.py — deterministic event-level pulse abstraction.
 
 The nervous net is "a continuous-time, asynchronous system with binary-valued
 output. It propagates a pulse arriving at its input with a fixed delay" (§3).
-This module is an event-driven simulation of exactly that:
+This module preserves those digital interface semantics, but it is not a
+transistor- or charge-level reproduction of Fig. 1:
 
   * a WIRE (each cell's output net) is idle or carries a pulse [start, end);
   * all action is precipitated by a pulse EDGE (the pulse's leading edge —
@@ -21,10 +22,10 @@ This module is an event-driven simulation of exactly that:
     driving the physical perimeter wire). A held-high input is one long pulse
     — one edge — not a train of edges.
 
-Hardware mapping is 1:1 with the paper's circuit: DELAY is the node's fixed
-propagation delay, WIDTH the pulse width set by the leak transistor (the
-"time constant"), COINC the integration window of the capacitively-coupled
-excitatory inputs. Every leading edge is retained in ``rise_times`` for
+DELAY, WIDTH, and COINC are independent behavioural parameters in this
+abstraction. In the physical circuit those behaviours are coupled through the
+charge/leak/comparator dynamics implemented separately by ``paper_analog``.
+Every leading edge is retained in ``rise_times`` for
 continuous-time fitness; wires are also sampled once per TICK for playback and
 legacy persistence-window targets.
 
@@ -33,13 +34,13 @@ the integer tick lattice matches the earlier synchronous engine — that engine
 was the quantization of this one. The constants can now be varied to study
 sub-tick timing (unequal delays, edge alignment, incommensurate loop periods).
 
-NODE-TIMING MODELS (PulseConfig.model). The paper's node regenerates ONE fixed
-pulse width after ONE fixed delay, so an input pulse's LENGTH is discarded the
+NODE-TIMING MODELS (PulseConfig.model). The baseline abstraction regenerates ONE
+fixed pulse width after ONE fixed delay, so an input pulse's LENGTH is discarded the
 moment the first node fires (every internal wire has a single driver, so no
 merging ever restores it). That throws away a degree of freedom, so alongside
-the paper's node this module offers two variants that give width a role:
+the baseline this module offers two variants that give width a role:
 
-  * 'uniform'       — the paper: width WIDTH, delay DELAY, every node. (default)
+  * 'uniform'       — fixed WIDTH and DELAY at every node (legacy default)
   * 'evolved_width' — each node's emitted pulse width is under genetic control
                       (an evolvable per-node-type multiplier of WIDTH), passed
                       in as a {cell: width} map. Delay stays DELAY. Pulse width
@@ -79,17 +80,60 @@ COINC = 0.5   # excitatory coincidence window
 TICK  = 1.0     # sampling period of the scoring layer (one target tick)
 
 
-# The three node-timing MODELS (the paper's node is 'uniform'; the other two
+# The digital node-timing MODELS ('uniform' is the legacy abstraction; the other two
 # are this project's variants that give pulse WIDTH a role instead of letting
 # every node regenerate one fixed width — see the module docstring above and
 # tests/test_pulse_models.py):
-#   'uniform'       — every node emits width WIDTH after delay DELAY (the paper).
+#   'uniform'       — every node emits width WIDTH after delay DELAY.
 #   'evolved_width' — each node's emitted pulse width is genetic: an evolvable
 #                     per-node-type (routing state) multiplier of WIDTH, supplied
 #                     as a {cell: width} map. Delay stays DELAY.
 #   'pulse_delay'   — historical identifier for evolved-delay, width-preserving
 #                     edge transport: [t, t+w) -> [t+d_node, t+d_node+w).
-NODE_MODELS = ('uniform', 'evolved_width', 'pulse_delay')
+# 'paper_analog' selects the analog Fig. 1 node engine (nv_evo/analog.py):
+# charge/leak/comparator/hysteresis, from which coincidence width, output width
+# and refractory EMERGE instead of being fixed constants. It is a distinct
+# ENGINE, not a timing tweak of this one, but shares the model slot so the run
+# pipeline selects it uniformly. Routing-only evolution (no width/delay vectors).
+NODE_MODELS = ('uniform', 'evolved_width', 'pulse_delay', 'paper_analog')
+
+
+# ── model families (reference plan's point 5) ───────────────────────────────────
+# Readable family names for the four clearly-separated substrates, mapped to the
+# internal node_model that drives them. The legacy identifiers are KEPT as the
+# canonical values (every checkpoint and test still uses them), so these are
+# additive aliases for UI/description, not a rename:
+#   paper_event        — the current deterministic digital abstraction, retained
+#                        unchanged for checkpoints and comparisons ('uniform').
+#   paper_analog       — charge / leak / comparator / hysteresis analog node
+#                        (nv_evo/analog.py); with tri3 tiles, the closest paper
+#                        model available here, still using normalised constants.
+#   waveform_transport — width-preserving evolved-delay transport ('pulse_delay'),
+#                        explicitly a DIFFERENT substrate (not the Fig. 1 node).
+#   extended_analog    — RESERVED: programmable capacitor weights, per-direction
+#                        leak bias, bounded thresholds, each carrying an
+#                        area/energy cost so evolution cannot buy unlimited analog
+#                        precision for free. Not yet implemented.
+MODEL_FAMILIES = {
+    'paper_event':        'uniform',
+    'paper_analog':       'paper_analog',
+    'waveform_transport': 'pulse_delay',
+    'extended_analog':    None,          # reserved — see above
+}
+
+
+def resolve_model_family(name):
+    """Map a family name (or a raw node_model) to its node_model. Raises for the
+    reserved-but-unimplemented families so a run can't silently select nothing."""
+    if name in NODE_MODELS:
+        return name
+    if name in MODEL_FAMILIES:
+        model = MODEL_FAMILIES[name]
+        if model is None:
+            raise NotImplementedError(
+                "model family '%s' is reserved but not yet implemented" % name)
+        return model
+    raise ValueError('unknown model family or node_model: %r' % (name,))
 
 
 @dataclass(frozen=True)
@@ -99,18 +143,36 @@ class PulseConfig:
     width: float = WIDTH
     coincidence: float = COINC
     event_cap: int = 2048
-    # Node-timing variant (see NODE_MODELS). 'uniform' remains the paper/legacy
+    # Node-timing variant (see NODE_MODELS). 'uniform' remains the legacy digital
     # behavior; old development configs are migrated by RunConfig.from_dict.
     model: str = 'uniform'
+    # Fixed physical constants for the paper_analog model.  They live on the
+    # run configuration (rather than being hidden AnalogConfig defaults) so a
+    # checkpoint reproduces the same circuit.  Digital models ignore them.
+    analog_threshold: float = 0.5
+    analog_step: float = 0.34
+    analog_tau_leak: float = 1.10
+    analog_hysteresis: float = 0.08
 
     def __post_init__(self):
+        analog_values = (self.analog_threshold, self.analog_step,
+                         self.analog_tau_leak, self.analog_hysteresis)
         if (not all(math.isfinite(v) for v in
-                    (self.delay, self.width, self.coincidence))
+                    (self.delay, self.width, self.coincidence) + analog_values)
                 or self.delay <= 0 or self.width <= 0 or self.coincidence < 0
                 or self.event_cap < 1):
             raise ValueError('delay/width/event_cap must be positive and coincidence non-negative')
         if self.model not in NODE_MODELS:
             raise ValueError('model must be one of %s' % (NODE_MODELS,))
+        if not (0 < self.analog_threshold < 1.0):
+            raise ValueError('analog_threshold must lie strictly between 0 and 1')
+        gap = 1.0 - self.analog_threshold
+        if not (gap / 2.0 < self.analog_step < gap):
+            raise ValueError('analog_step must let two terminal edges fire but not one')
+        if self.analog_tau_leak <= 0 or self.analog_hysteresis < 0:
+            raise ValueError('analog_tau_leak must be positive and analog_hysteresis non-negative')
+        if self.analog_threshold + self.analog_hysteresis >= 1.0:
+            raise ValueError('analog threshold plus hysteresis must remain below rest (1.0)')
 
 _NEG = float('-inf')
 
@@ -126,7 +188,7 @@ class PulseSim:
     """
 
     def __init__(self, grid, routing, max_events=None, config=None, widths=None,
-                 delays=None):
+                 delays=None, sources=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or PulseConfig()
@@ -139,6 +201,13 @@ class PulseSim:
         self._delays = delays or {}
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
         # watch[u] = cells that read u on an excitatory input.
+        #
+        # ``sources`` PRE-RESOLVES those feeder cells for every node, bypassing
+        # the single-tile hex_dirs decode. The tri-tile substrate (tritile.py)
+        # uses it: each hex tile becomes THREE sub-nodes whose inputs cross tile
+        # boundaries, so a node key is no longer a bare (x,y) with hex_dirs
+        # neighbours. When ``sources`` is None the single-circuit path below is
+        # byte-identical to before, so every existing run is unaffected.
         self.src   = {}
         self.op    = {}                               # v -> 'and' | 'or'
         self.watch = {c: [] for c in grid}
@@ -147,10 +216,13 @@ class PulseSim:
                 continue
             e1, e2, i1 = entry[0], entry[1], entry[2]
             self.op[v] = entry[3] if len(entry) > 3 else 'and'
-            nb = hex_dirs(*v)
-            s1 = nb[e1] if e1 is not None else None
-            s2 = nb[e2] if e2 is not None else None
-            si = nb[i1] if i1 is not None else None
+            if sources is not None:
+                s1, s2, si = sources.get(v, (None, None, None))
+            else:
+                nb = hex_dirs(*v)
+                s1 = nb[e1] if e1 is not None else None
+                s2 = nb[e2] if e2 is not None else None
+                si = nb[i1] if i1 is not None else None
             self.src[v] = (s1, s2, si)
             for s in {s1, s2}:
                 if s is not None and s in self.watch:

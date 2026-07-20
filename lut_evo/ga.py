@@ -14,19 +14,13 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from itertools import combinations
 from evo_runtime.cache import LRUCache
-from evo_runtime.mutation import (STRESS_MAX_MULT, STRESS_PATIENCE,
-                                  adaptive_mutation_rate)
+from evo_runtime.mutation import adaptive_mutation_rate
 from evo_runtime.parallel import map_ordered
 
-from nv_evo.temporal import (_pr_counts, _f1,
-                             _best_shift, _obs_len, _output_candidates,
-                             windowed_score, exact_tick_accuracy,
-                             period_stepper_score, TemporalTraces,
-                             event_score, _best_event_shift,
-                             _event_case_score, _expected_events, _role_events,
-                             cadence_score, score_temporal_bundle,
-                             _score_output_candidate, trial_input_summary,
-                             expected_window_summary, event_list_summary)
+from nv_evo.temporal import (_obs_len, _output_candidates, TemporalTraces,
+                             score_temporal_bundle, _score_output_candidate)
+from nv_evo.scoring import (relation_spec, needs_samples, score_report_lines,
+                            LUT_REPORT_NOTES)
 from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome)
@@ -72,8 +66,7 @@ def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
     physical ``input_events`` schedule is injected at its real (possibly
     sub-tick) times — the LUT backend no longer quantises such targets."""
     obs = _obs_len(ttarget)                  # observe past T to catch delayed events
-    mode = getattr(ttarget, 'score_mode', 'trace')
-    need_samples = mode not in ('events', 'cadence')
+    need_samples = needs_samples(ttarget)
     sim = AsyncLutSim(grid, config=getattr(ttarget, 'lut_config', None))
     trial_B, trial_events, overflow = [], [], False
     first = True
@@ -120,7 +113,7 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
         grid, in_pos, ttarget, watch)
     traces.overflow = overflow
     cidx = sim._cidx
-    need_samples = mode not in ('events', 'cadence')
+    need_samples = needs_samples(ttarget)
     used = set()
     for term in ttarget.outputs:
         best, best_key, best_aux = None, None, None
@@ -173,8 +166,7 @@ def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
     """Run LUT trials at pre-selected output cells without validation search."""
     if any(pos not in grid for pos in out_pos.values()):
         return None
-    mode = getattr(ttarget, 'score_mode', 'trace')
-    need_samples = mode not in ('events', 'cadence')
+    need_samples = needs_samples(ttarget)
     watch = sorted(set(out_pos.values()))
     sim, trial_B, trial_events, overflow = _run_lut_trials(
         grid, in_pos, ttarget, watch)
@@ -1010,117 +1002,31 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
 # ── GUI report ───────────────────────────────────────────────────────────────────
 
 def lut_report(ttarget, genome=None):
-    """Temporal-target report for the LUT model (mirrors nv temporal_report)."""
+    """Temporal-target report for the LUT model. The report body is the shared
+    scoring.score_report_lines; only growth/prep is LUT-specific here."""
     lines = ['Target: %s   [LUT array]' % ttarget.name]
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
-    if getattr(ttarget, 'score_mode', 'trace') == 'period_stepper':
-        lines += ['', 'Backend detail: LUT cadence transitions may occur at sub-second times.']
+    spec = relation_spec(ttarget)
+    prep = None if genome is None else prepare_lut(genome, ttarget)
+    if spec.family == 'rhythm':
+        # rhythm modes measure real output; no expectation-only preview exists
+        note = LUT_REPORT_NOTES.get(getattr(ttarget, 'score_mode', 'trace'))
+        pre = ['', note] if note else []
         if genome is None:
-            return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
-        prep = prepare_lut(genome, ttarget)
+            return '\n'.join(lines + pre + [
+                '', '(run the GA or Load Saved to inspect a circuit)'])
         if prep is None:
-            return '\n'.join(lines + ['', '(circuit incomplete - grew too little or inputs dead)'])
-        _, out_pos, traces = prep
-        total, cases = period_stepper_score(traces, ttarget)
-        for term in ttarget.outputs:
-            lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
-        for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
-            lines.append('Test %d: %s  cadence score %.3f %s' % (
-                ti, trial_input_summary(trial, ttarget.n_inputs), score,
-                'PASS' if score >= 0.999 else 'FAIL'))
-        lines.append('')
-        lines.append('=> cadence-stepper score %.4f%s' % (
-            total, '   SOLVED' if total >= 0.999 else ''))
-        return '\n'.join(lines)
-    if getattr(ttarget, 'score_mode', 'trace') == 'cadence':
-        lines += ['', 'Backend detail: cadence uses raw LUT wire edge timestamps.']
-        if genome is None:
-            return '\n'.join(lines + ['', '(run the GA or Load Saved to inspect a circuit)'])
-        prep = prepare_lut(genome, ttarget)
-        if prep is None:
-            return '\n'.join(lines + ['', '(circuit incomplete - grew too little or inputs dead)'])
-        _, out_pos, traces = prep
-        total, cases = cadence_score(traces, ttarget)
-        for term in ttarget.outputs:
-            lines.append("out '%s' read at %s" % (term.role, out_pos[term.role]))
-        for ti, score in enumerate(cases):
-            events = _role_events(traces, ttarget.outputs[0].role, ti)
-            lines.append('Test %d: %s  output edges@%s  cadence score %.3f %s' % (
-                ti + 1, trial_input_summary(ttarget.trials[ti], ttarget.n_inputs),
-                event_list_summary(events), score,
-                'PASS' if score >= 0.999 else 'FAIL'))
-        lines += ['', '=> cadence score %.4f%s' % (
-            total, '   SOLVED' if total >= 0.999 else '')]
-        return '\n'.join(lines)
-    if getattr(ttarget, 'score_mode', 'trace') == 'events':
-        lines += ['', 'Backend detail: raw LUT wire timestamps retain sub-second edges.']
-        prep = None if genome is None else prepare_lut(genome, ttarget)
-        traces = prep[2] if prep is not None else None
-        best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0
-        if prep is not None:
-            for term in ttarget.outputs:
-                lines.append("out '%s' read at %s" % (term.role, prep[1][term.role]))
-            if getattr(ttarget, 'fit_latency', True):
-                lines.append('measured output latency offset: %+.3f seconds' % best_s)
-            else:
-                lines.append('fixed timing: required delay %g seconds; no offset fitted'
-                             % getattr(ttarget, 'latency', 0))
-        for ti, trial in enumerate(ttarget.trials):
-            for role in trial.expected:
-                lines.append('Test %d: %s' % (
-                    ti + 1, trial_input_summary(trial, ttarget.n_inputs)))
-                lines.append('  expect %s edges@%s' % (
-                    role, event_list_summary(_expected_events(trial, role))))
-                if traces is not None:
-                    score = _event_case_score(traces, ttarget, ti, role, best_s)
-                    lines.append('        actual edges@%s  F1 %.3f %s' % (
-                        event_list_summary(_role_events(traces, role, ti)), score,
-                        'PASS' if score >= 0.999 else 'FAIL'))
-        if traces is not None:
-            total = event_score(traces, ttarget, shift=best_s)
-            lines += ['', '=> event score %.4f%s' % (
-                total, '   SOLVED' if total >= 0.999 else '')]
-        return '\n'.join(lines)
-    lines += ['',
-              'Scored as persistent behaviour in active and quiet windows.',
-              'A one-second phase tolerance allows recurrent outputs to ring.',
-              'One shared input-to-output latency is used across every test/output.',
-              'The exact per-second value is diagnostic only and ignores tolerance.']
-    traces = None
-    best_s = 0
-    if genome is not None:
-        prep = prepare_lut(genome, ttarget)
-        if prep is None:
-            lines += ['', '(circuit incomplete — grew too little or inputs dead)']
-        else:
-            _, out_pos, traces = prep
-            best_s = _best_shift(traces, ttarget)[0]
-            for t in ttarget.outputs:
-                lines.append("out '%s' read at %s" % (t.role, out_pos[t.role]))
-            lines.append('measured output latency offset: %+d second(s)' % best_s)
-    for ti, trial in enumerate(ttarget.trials):
-        lines += ['', 'Test %d: %s' % (
-            ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
-        for role, exp in trial.expected.items():
-            lines.append('  expect %s%s' % (
-                expected_window_summary(exp),
-                ' (%s)' % role if len(trial.expected) > 1 else ''))
-            if traces is not None:
-                tr = traces.get(role, [])
-                tr_i = tr[ti] if ti < len(tr) else []
-                # per-trial F1 at the genome's global latency shift (matches the
-                # latency-invariant score; mirrors nv temporal_report)
-                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
-                s = _f1(tp_rec, n_exp, tp_prec, n_act)
-                lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
-                             % (''.join(str(v) for v in tr_i), s,
-                                'PASS' if s >= 0.999 else 'FAIL',
-                                tp_rec, n_exp, tp_prec, n_act))
-    if traces is not None:
-        s = windowed_score(traces, ttarget, shift=best_s)
-        lines += ['', '=> behavioural score %.4f%s   (exact per-second %.4f)'
-                  % (s, '   SOLVED' if s >= 0.999 else '',
-                     exact_tick_accuracy(traces, ttarget))]
+            return '\n'.join(lines + pre + [
+                '', '(circuit incomplete - grew too little or inputs dead)'])
+    if genome is not None and prep is None:
+        lines += ['', '(circuit incomplete — grew too little or inputs dead)']
+    traces = prep[2] if prep is not None else None
+    out_pos = prep[1] if prep is not None else None
+    _, body = score_report_lines(ttarget, traces, out_pos,
+                                 notes=LUT_REPORT_NOTES)
+    lines += body
+    if traces is None and genome is None:
+        lines += ['', '(run the GA or Load Saved to inspect a circuit)']
     return '\n'.join(lines)

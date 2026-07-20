@@ -54,11 +54,10 @@ import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from evo_runtime.cache import LRUCache
-from evo_runtime.mutation import (STRESS_MAX_MULT, STRESS_PATIENCE,
-                                  adaptive_mutation_rate)
+from evo_runtime.mutation import adaptive_mutation_rate
 from evo_runtime.parallel import map_ordered
 
-from .genome import (MAX_STATE, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
+from .genome import (MAX_STATE, TRI_STATE_MAX, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
                      WIDTH_MULT_MIN, WIDTH_MULT_MAX, default_state_widths,
                      DELAY_MULT_MIN, DELAY_MULT_MAX, default_state_delays,
                      Genome, Chromosome, germline_telomere,
@@ -81,8 +80,12 @@ def clone_genome(genome):
                      for c in genome.chromosomes],
         tag=genome.tag,
         state_widths=(sw[:] if sw else None),
-        state_delays=(sd[:] if sd else None))
-from .temporal import prepare_net, score_temporal_bundle, loop_profile
+        state_delays=(sd[:] if sd else None),
+        arch=getattr(genome, 'arch', 'single'))
+from .temporal import (prepare_net, score_temporal_bundle, loop_profile,
+                       cycle_nodes, _reachable)
+from .scoring import relation_spec
+from .tritile import interpret_tri
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT set
@@ -131,6 +134,31 @@ def _loop_bonus(grid, routing, in_pos, out_pos):
     return 0.3 + 0.7 * min(1.0, prof['n_relevant'] / 4.0)
 
 
+def _loop_bonus_tri(grid, in_pos, out_pos):
+    """The tri-tile twin of _loop_bonus, measured on the expanded sub-node graph
+    (a tile's three circuits form loops the tile-level routing can't express)."""
+    info = interpret_tri(grid, in_pos)
+    edges = {n: set() for n in info['nodes']}
+    for v, (s1, s2, si) in info['sources'].items():
+        for u in (s1, s2, si):
+            if u is not None and u in edges:
+                edges[u].add(v)
+    cyc = cycle_nodes(edges)
+    if not cyc:
+        return 0.0
+    in_nodes = list(info['in_nodes'].values())
+    out_nodes = [n for role, tile in out_pos.items() if tile is not None
+                 for n in info['tile_nodes'].get(tile, ())]
+    from_in = _reachable(edges, in_nodes)
+    rev = {c: set() for c in edges}
+    for u, vs in edges.items():
+        for v in vs:
+            rev[v].add(u)
+    to_out = _reachable(rev, out_nodes)
+    n_relevant = len(cyc & from_in & to_out)
+    return 0.3 + 0.7 * min(1.0, n_relevant / 4.0)
+
+
 def evaluate_nv_full(genome, target):
     """(scalar fitness, per-case score vector). Cases are the individual
     (trial, role) traces — the units ε-lexicase selection streams over. For
@@ -138,11 +166,11 @@ def evaluate_nv_full(genome, target):
     selection falls back to tournament."""
     if not getattr(target, 'temporal', False):
         return score_nervous(genome, target), None
-    retention_mode = getattr(target, 'score_mode', '')
-    if retention_mode == 'retention':
+    evaluator = relation_spec(target).evaluator
+    if evaluator == 'retention':
         from .persistence import evaluate_retention    # event-native memory fitness
         return evaluate_retention(genome, target)
-    if retention_mode == 'sr_retention':
+    if evaluator == 'sr_retention':
         from .persistence import evaluate_sr_retention
         return evaluate_sr_retention(genome, target)
     n_cases = sum(len(tr.expected) for tr in target.trials)
@@ -154,7 +182,10 @@ def evaluate_nv_full(genome, target):
         return 0.0, (0.0,) * n_cases
     s, cases, _ = score_temporal_bundle(traces, target)
     if s < 1.0:
-        s = s + (1.0 - s) * LOOP_WEIGHT * _loop_bonus(grid, routing, in_pos, out_pos)
+        bonus = (_loop_bonus_tri(grid, in_pos, out_pos)
+                 if getattr(genome, 'arch', 'single') == 'tri3'
+                 else _loop_bonus(grid, routing, in_pos, out_pos))
+        s = s + (1.0 - s) * LOOP_WEIGHT * bonus
     return s, cases
 
 
@@ -174,7 +205,10 @@ def genome_signature(genome):
         for c in genome.chromosomes)
     sw = getattr(genome, 'state_widths', None)
     sd = getattr(genome, 'state_delays', None)
-    return (chroms, tuple(sw) if sw else None, tuple(sd) if sd else None)
+    # arch is part of identity: the same integer fields decode to different
+    # hardware under 'single' vs 'tri3', so they must never share a cache slot.
+    return (chroms, tuple(sw) if sw else None, tuple(sd) if sd else None,
+            getattr(genome, 'arch', 'single'))
 
 
 def eval_batch_cases(genomes, target, cache=None, executor=None,
@@ -241,6 +275,19 @@ def _poisson(lam):
 
 _GENE_FIELDS = ["ctx_l", "ctx_r", "ctx_d", "self_in", "self_out"]
 _STATE_BITS = (MAX_STATE - 1).bit_length()
+# Tri-tile states are 12-bit (three packed 4-bit channels). Single-bit flips on
+# 12 bits act on ONE channel at a time (disjoint fields), giving the paper's
+# per-channel mutability for free.
+_TRI_STATE_BITS = (TRI_STATE_MAX - 1).bit_length()
+
+
+def _arch_bits(genome):
+    return _TRI_STATE_BITS if getattr(genome, 'arch', 'single') == 'tri3' else _STATE_BITS
+
+
+def _arch_random_gene(genome):
+    return random_hex_gene('tri3' if getattr(genome, 'arch', 'single') == 'tri3'
+                           else 'single')
 
 
 def _normalize_split(chromosome):
@@ -281,28 +328,30 @@ def _recombine_gene_fields(gene_a, gene_b):
 
 def _recombination_signature(genome):
     """Alleles crossover can actually exchange (not slot/object identity)."""
-    return tuple(
+    return (getattr(genome, 'arch', 'single'), tuple(
         tuple(tuple(getattr(gene, field) for field in _GENE_FIELDS)
               for gene in chromosome.genes)
-        for chromosome in genome.chromosomes)
+        for chromosome in genome.chromosomes))
 
 
-def _other_state(value):
-    """Flip one physical SRAM bit in a 4-bit core-circuit configuration."""
-    return int(value) ^ (1 << random.randrange(_STATE_BITS))
+def _other_state(value, bits=_STATE_BITS):
+    """Flip one physical SRAM bit in a core-circuit configuration (single tile:
+    5 bits; tri tile: 12 bits, one flip landing within a single channel)."""
+    return int(value) ^ (1 << random.randrange(bits))
 
 
-def _state_excluding(*values):
+def _state_excluding(*values, bits=_STATE_BITS):
     """Choose a one-bit neighbour excluding the supplied values when possible."""
+    state_max = 1 << bits
     excluded = sorted({int(value) for value in values
-                       if value is not None and 0 <= int(value) < MAX_STATE})
+                       if value is not None and 0 <= int(value) < state_max})
     base = int(values[0]) if values and values[0] is not None else 0
-    nearby = [base ^ (1 << bit) for bit in range(_STATE_BITS)
+    nearby = [base ^ (1 << bit) for bit in range(bits)
               if (base ^ (1 << bit)) not in excluded]
     if nearby:
         return random.choice(nearby)
     # Defensive fallback when exclusions cover every one-bit neighbour.
-    pick = random.randrange(MAX_STATE - len(excluded))
+    pick = random.randrange(state_max - len(excluded))
     for value in excluded:
         if pick >= value:
             pick += 1
@@ -317,13 +366,15 @@ def _force_nonparent_tweak(genome, parent):
     transaction cannot net back to a clone.  It is constructive; no offspring is
     generated and rejected/retried by signature.
     """
+    bits = _arch_bits(genome)
     with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
                   if chromosome.genes]
     if not with_genes:
         if not genome.chromosomes:
-            genome.chromosomes.append(random_hex_chromosome())
+            genome.chromosomes.append(_arch_random_chromosome(genome))
         else:
-            random.choice(genome.chromosomes).genes.append(random_hex_gene())
+            random.choice(genome.chromosomes).genes.append(
+                _arch_random_gene(genome))
         with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
                       if chromosome.genes]
     ci = random.choice(with_genes)
@@ -334,17 +385,24 @@ def _force_nonparent_tweak(genome, parent):
     if (ci < len(parent.chromosomes)
             and gi < len(parent.chromosomes[ci].genes)):
         parent_value = getattr(parent.chromosomes[ci].genes[gi], field)
-    setattr(gene, field, _state_excluding(getattr(gene, field), parent_value))
+    setattr(gene, field,
+            _state_excluding(getattr(gene, field), parent_value, bits=bits))
     genome.chromosomes[ci].genes[gi] = gene
 
 
-def _tweak_gene(gene):
+def _arch_random_chromosome(genome, max_telomere=MAX_TELOMERE):
+    return random_hex_chromosome(
+        max_telomere=max_telomere,
+        arch='tri3' if getattr(genome, 'arch', 'single') == 'tri3' else 'single')
+
+
+def _tweak_gene(gene, bits=_STATE_BITS):
     g   = copy.copy(gene)
     fld = random.choice(_GENE_FIELDS)
     if fld == 'self_in' and g.self_in != 0 and random.random() < 0.2:
         g.self_in = 0                     # keep growth rules reachable
     else:
-        setattr(g, fld, _other_state(getattr(g, fld)))
+        setattr(g, fld, _other_state(getattr(g, fld), bits=bits))
     return g
 
 
@@ -393,9 +451,9 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
     ``evolve_width`` (the 'evolved_width' timing model, V2) adds a mutation that
     tunes a node type's pulse width. It is off for the paper's 'uniform' node
     and for 'pulse_delay', which instead enables ``evolve_delay``."""
+    bits = _arch_bits(genome)
     if not genome.chromosomes:
-        genome.chromosomes.append(random_hex_chromosome(
-            max_telomere=max_telomere))
+        genome.chromosomes.append(_arch_random_chromosome(genome, max_telomere))
         return
 
     chroms = genome.chromosomes
@@ -440,20 +498,20 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
     elif op == 'tweak':
         chrom = random.choice(with_genes)
         idx = random.randrange(len(chrom.genes))
-        chrom.genes[idx] = _tweak_gene(chrom.genes[idx])
+        chrom.genes[idx] = _tweak_gene(chrom.genes[idx], bits=bits)
     elif op == 'duplicate':
         chrom = random.choice([c for c in chroms
                                if c.genes and len(c.genes) < MAX_GENES])
         chrom.genes.insert(random.randrange(len(chrom.genes) + 1),
-                           _tweak_gene(random.choice(chrom.genes)))
+                           _tweak_gene(random.choice(chrom.genes), bits=bits))
     elif op == 'add_gene':
         random.choice([c for c in chroms if len(c.genes) < MAX_GENES]).genes.append(
-            random_hex_gene())
+            _arch_random_gene(genome))
     elif op == 'del_gene':
         chrom = random.choice([c for c in chroms if len(c.genes) > 1])
         chrom.genes.pop(random.randrange(len(chrom.genes)))
     elif op == 'add_chrom':
-        chroms.append(random_hex_chromosome(max_telomere=max_telomere))
+        chroms.append(_arch_random_chromosome(genome, max_telomere))
     elif op == 'del_chrom':
         chroms.remove(min(chroms, key=lambda c: len(c.genes)))
     elif op == 'split':
@@ -524,6 +582,10 @@ def crossover_nv(pa, pb):
     common homolog has only one gene, recombine that rule's fields instead, so a
     minimal chromosome still has useful sexual recombination.
     """
+    arch_a = getattr(pa, 'arch', 'single')
+    arch_b = getattr(pb, 'arch', 'single')
+    if arch_a != arch_b:
+        raise ValueError('cannot crossover different tile architectures')
     ca, cb = clone_genome(pa), clone_genome(pb)
     used_b = set()
     for i, chrom_a in enumerate(ca.chromosomes):
@@ -698,6 +760,14 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                           else ga_config.immigrant_fraction)
     tournament_size = (TOURNAMENT_K if ga_config is None
                        else ga_config.tournament_size)
+    population_archs = {getattr(genome, 'arch', 'single')
+                        for genome in population}
+    if len(population_archs) > 1:
+        raise ValueError('population mixes tile architectures')
+    pop_arch = next(iter(population_archs), 'single')
+    if (ga_config is not None
+            and getattr(ga_config, 'tile_arch', pop_arch) != pop_arch):
+        raise ValueError('population violates configured tile architecture')
     if ga_config is not None and ga_config.chromosome_count is not None:
         chromosome_count = ga_config.chromosome_count
     if chromosome_count is not None:
@@ -708,7 +778,11 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                for genome in population):
             raise ValueError('population violates configured chromosome count')
     if make_genome is None:
-        make_genome = lambda: random_hex_genome(chromosome_count or 2)
+        # Immigrants must match the population's tile architecture, or a 'single'
+        # immigrant would pollute a tri3 run (and vice-versa) — different hardware
+        # under the same integer genome.
+        make_genome = lambda: random_hex_genome(chromosome_count or 2,
+                                                arch=pop_arch)
     # Enable the timing mutation belonging to the selected node model. Explicit
     # arguments win; otherwise read the run configuration — its evolve_width /
     # evolve_delay toggles override the model pairing (None = paired).
@@ -836,6 +910,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             and any(len(genome.chromosomes) != chromosome_count
                     for genome in new_pop)):
         raise ValueError('genome factory violated configured chromosome count')
+    if any(getattr(genome, 'arch', 'single') != pop_arch for genome in new_pop):
+        raise ValueError('genome factory violated configured tile architecture')
     return new_pop[:pop]
 
 
@@ -843,7 +919,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 
 def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                    seed=None, seed_genomes=None, selection=None,
-                   return_population=False):
+                   return_population=False, tile_arch='single'):
     # Reproducibility: fitness evaluation is deterministic (grow + score, no RNG),
     # so seeding the main-process RNG that drives the genetic operators pins the
     # whole evolutionary trajectory. Pass a seed for any result meant to be re-run.
@@ -851,7 +927,21 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         random.seed(seed)
     if not 1 <= n_chroms <= MAX_CHROMS:
         raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
-    make_genome = lambda: random_hex_genome(n_chroms)
+    if tile_arch not in ('single', 'tri3'):
+        raise ValueError("tile_arch must be 'single' or 'tri3'")
+    # This is also a fresh-run entry point, so apply the same two-profile
+    # contract as the desktop controller. With no explicit target physics,
+    # choose the current profile belonging to the requested architecture.
+    from evo_runtime.config import GAConfig, validate_new_nv_profile
+    from .pulse import PulseConfig
+    pulse_config = getattr(target, 'pulse_config', None)
+    if pulse_config is None:
+        pulse_config = PulseConfig(
+            model=('paper_analog' if tile_arch == 'tri3' else 'pulse_delay'))
+        setattr(target, 'pulse_config', pulse_config)
+    validate_new_nv_profile(GAConfig(
+        tile_arch=tile_arch, node_model=pulse_config.model))
+    make_genome = lambda: random_hex_genome(n_chroms, arch=tile_arch)
     cache       = LRUCache(FITNESS_CACHE_MAX)
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
     try:                                                       # (avoids per-gen respawn)
@@ -861,6 +951,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         seeds = list(seed_genomes or [])[:pop]
         if any(len(g.chromosomes) != n_chroms for g in seeds):
             raise ValueError('warm-start genomes must match n_chroms')
+        if any(getattr(g, 'arch', 'single') != tile_arch for g in seeds):
+            raise ValueError('warm-start genomes must match tile_arch')
         population  = [clone_genome(g) for g in seeds]
         population += [make_genome() for _ in range(pop - len(population))]
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)

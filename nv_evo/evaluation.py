@@ -29,8 +29,9 @@ class FittedReadout:
 
 def fit_readout(genome, target, backend='nervous'):
     """Fit output cells and one shared alignment on training schedules."""
+    from .scoring import relation_spec
     if (backend == 'nervous'
-            and getattr(target, 'score_mode', '') == 'sr_retention'):
+            and relation_spec(target).evaluator == 'sr_retention'):
         from .persistence import fit_sr_readout
         return fit_sr_readout(genome, target)
     if backend == 'nervous':
@@ -57,8 +58,9 @@ def fit_readout(genome, target, backend='nervous'):
 
 def score_frozen(genome, target, fitted):
     """Score fresh schedules without changing the fitted cell or alignment."""
+    from .scoring import relation_spec
     if (fitted.backend == 'nervous'
-            and getattr(target, 'score_mode', '') == 'sr_retention'):
+            and relation_spec(target).evaluator == 'sr_retention'):
         from .persistence import score_sr_frozen
         return score_sr_frozen(genome, target, fitted)
     out_pos = fitted.output_positions
@@ -74,18 +76,19 @@ def score_frozen(genome, target, fitted):
                             grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return 0.0
-        routing, in_pos, _ = interpret_nervous(grid, target)
+        arch = getattr(genome, 'arch', 'single')
+        routing, in_pos, _ = interpret_nervous(grid, target, arch=arch)
         if any(pos not in grid for pos in in_pos):
             return 0.0
         # carry the evolved per-node pulse widths into validation too, so a
         # fitted 'evolved_width' champion is scored on the same physics
         # (node_widths returns None off that model).
         config = getattr(target, 'pulse_config', None)
-        widths = node_widths(genome, grid, config)
-        delays = node_delays(genome, grid, config)
+        widths = None if arch == 'tri3' else node_widths(genome, grid, config)
+        delays = None if arch == 'tri3' else node_delays(genome, grid, config)
         traces = trace_fixed_outputs(
             grid, routing, in_pos, out_pos, target, widths=widths,
-            delays=delays)
+            delays=delays, arch=arch)
     elif fitted.backend == 'lut':
         from lut_evo.lut import grow_lut
         from lut_evo.ga import trace_fixed_outputs

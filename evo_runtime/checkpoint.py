@@ -44,6 +44,7 @@ def genome_to_dict(genome, backend):
             for c in genome.chromosomes],
         'state_widths': ([float(x) for x in sw] if sw else None),
         'state_delays': ([float(x) for x in sd] if sd else None),
+        'arch': getattr(genome, 'arch', 'single'),      # nervous tile architecture
     }
 
 
@@ -66,6 +67,8 @@ def genome_from_dict(data, backend):
     sd = data.get('state_delays')                  # evolved-delay preservation
     if sd and backend == 'nervous':
         genome.state_delays = [float(x) for x in sd]
+    if backend == 'nervous':                       # tri3 vs single tile decode
+        genome.arch = data.get('arch', 'single')
     return genome
 
 
@@ -144,6 +147,11 @@ def save_checkpoint(path, genome, fitness, target, arch, seed, backend,
     if (configured_count is not None
             and len(genome.chromosomes) != configured_count):
         raise ValueError('checkpoint genome violates configured chromosome count')
+    configured_arch = getattr(
+        getattr(run_config, 'ga', None), 'tile_arch', None)
+    if (backend == 'nervous' and configured_arch is not None
+            and getattr(genome, 'arch', 'single') != configured_arch):
+        raise ValueError('checkpoint genome violates configured tile architecture')
     document = {
         'format': FORMAT, 'backend': backend, 'fitness': float(fitness),
         'seed': seed, 'genome': genome_to_dict(genome, backend),
@@ -158,12 +166,22 @@ def save_checkpoint(path, genome, fitness, target, arch, seed, backend,
 
 def save_population(path, genomes, target, backend, valid, run_config=None,
                    certification=None):
+    if (backend == 'nervous'
+            and len({getattr(genome, 'arch', 'single')
+                     for genome in genomes}) > 1):
+        raise ValueError('checkpoint population mixes tile architectures')
     configured_count = getattr(
         getattr(run_config, 'ga', None), 'chromosome_count', None)
     if (configured_count is not None
             and any(len(genome.chromosomes) != configured_count
                     for genome in genomes)):
         raise ValueError('checkpoint population violates configured chromosome count')
+    configured_arch = getattr(
+        getattr(run_config, 'ga', None), 'tile_arch', None)
+    if (backend == 'nervous' and configured_arch is not None
+            and any(getattr(genome, 'arch', 'single') != configured_arch
+                    for genome in genomes)):
+        raise ValueError('checkpoint population violates configured tile architecture')
     _atomic_json(path, {
         'format': FORMAT + '-population', 'backend': backend,
         'valid': float(valid), 'target': _target_to_dict(target),
