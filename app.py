@@ -65,6 +65,7 @@ from evo_runtime.controller import worker_entry as evolution_worker_entry
 RESULTS_DIR = os.path.join(ROOT, 'results')
 CKPT        = os.path.join(RESULTS_DIR, 'best_genome.json')
 SOLVER_POP  = os.path.join(RESULTS_DIR, 'solver_generation.json')
+LATEST_POP  = os.path.join(RESULTS_DIR, 'latest_population.json')
 LEGACY_CKPT = os.path.join(RESULTS_DIR, 'best_genome.pkl')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -708,9 +709,15 @@ class App:
         # Designer. Analysis is opt-in — it is far too slow to run on every
         # redraw.
         self._diversity_frame = self._add_tab(nb, 'Diversity')
+        # Updated after each run: unsuccessful/stopped runs point at their full
+        # latest evaluated generation; successful post-solve diversification
+        # points at the solver-only population instead.
+        self._diversity_population_path = (
+            LATEST_POP if os.path.exists(LATEST_POP) else SOLVER_POP)
         self._diversity = DiversityTab(
             self._diversity_frame,
-            get_population_path=lambda: SOLVER_POP, mono=self._mono)
+            get_population_path=lambda: self._diversity_population_path,
+            mono=self._mono)
 
         self._status = tk.StringVar(
             value='Ready — pick a model and target, set parameters, click Run (or Load Saved).')
@@ -1317,6 +1324,7 @@ class App:
         self._certification = None
         self._ga_error = None
         self._solver_save_error = None
+        self._population_save_error = None
         self._stop_requested = False
         self._run_started = time.monotonic()
         self._work_phase = 'Starting worker processes'
@@ -1615,6 +1623,7 @@ class App:
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
                     self._n_unique_solvers = n_unique
+                    self._diversity_population_path = SOLVER_POP
                     self._status.set('Diversifying — built %d genotypically UNIQUE '
                                      'solvers (each ≥ %.3f) → results/solver_generation.json'
                                      % (n_unique, valid))
@@ -1629,8 +1638,24 @@ class App:
                         '%s solver snapshot saved: %d valid genomes '
                         '(each >= %.3f) -> results/solver_generation.json'
                         % (status.capitalize(), n_valid, valid))
+                    # Keep the Diversity tab on the full evaluated generation.
+                    # Successful post-solve diversification has its own
+                    # 'diverse' message, which deliberately selects the solver
+                    # population instead.
+                elif kind == 'population_saved':
+                    _, count, status, path = msg
+                    self._diversity_population_path = path
                     if getattr(self, '_diversity', None) is not None:
-                        self._diversity.notify_population(SOLVER_POP)
+                        self._diversity.notify_population(path)
+                    self._status.set(
+                        '%s population saved for Diversity: %d genomes -> %s'
+                        % (status.capitalize(), count,
+                           os.path.basename(path)))
+                elif kind == 'population_save_error':
+                    _, tb = msg
+                    lines = tb.strip().splitlines()
+                    self._population_save_error = (
+                        lines[-1] if lines else 'unknown save error')
                 elif kind == 'solver_save_error':
                     _, tb = msg
                     lines = tb.strip().splitlines()
@@ -1656,19 +1681,29 @@ class App:
                 elif kind == 'done':
                     finished = True
                     _, genome, fit = msg
+                    completion_error = None
                     if genome is not None and not self._ga_error:
                         self.best_genome  = genome
                         self.best_fitness = fit
                         save_target = getattr(self, '_active_target', self.target)
                         save_arch   = getattr(self, '_active_arch', DEFAULT_ARCH)
-                        save_checkpoint(
-                            CKPT, genome, fit, save_target, save_arch,
-                            getattr(self, '_active_seed', None),
-                            getattr(self, '_active_backend', 'snn'),
-                            getattr(self, '_active_run_config', None),
-                            getattr(self, '_certification', None))
-                        self._pending_best = None      # final draw supersedes it
-                        self._update_all(genome, fit)
+                        try:
+                            save_checkpoint(
+                                CKPT, genome, fit, save_target, save_arch,
+                                getattr(self, '_active_seed', None),
+                                getattr(self, '_active_backend', 'snn'),
+                                getattr(self, '_active_run_config', None),
+                                getattr(self, '_certification', None))
+                            self._update_all(genome, fit)
+                        except Exception as exc:
+                            # Never strand the application in its locked
+                            # running state because final persistence or a
+                            # display refresh failed. The champion remains in
+                            # memory and all controls are released below.
+                            completion_error = '%s: %s' % (
+                                type(exc).__name__, exc)
+                        finally:
+                            self._pending_best = None
                     self._run_btn.config(state='normal')
                     self._pause_btn.config(state='disabled', text='Pause')
                     self._stop_btn.config(state='disabled')
@@ -1682,7 +1717,11 @@ class App:
                     self._progress.configure(value=self._progress.cget('maximum'))
                     self._worker = None
                     self._set_nv_controls_locked(False)
-                    if getattr(self, '_ga_error', None):
+                    if completion_error:
+                        self._status.set(
+                            'Run finished, but final save/display failed: %s  '
+                            '(controls re-enabled)' % completion_error)
+                    elif getattr(self, '_ga_error', None):
                         self._status.set('GA stopped on error: %s  (controls re-enabled)'
                                          % self._ga_error)
                     else:
@@ -1694,11 +1733,15 @@ class App:
                         solver_error = getattr(self, '_solver_save_error', None)
                         sv = ('  |  solver snapshot NOT saved: %s' % solver_error
                               if solver_error else '')
+                        population_error = getattr(
+                            self, '_population_save_error', None)
+                        pv = ('  |  diversity population NOT saved: %s'
+                              % population_error if population_error else '')
                         outcome = 'Stopped' if getattr(self, '_stop_requested', False) else 'Done'
-                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s%s' %
+                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s%s%s' %
                                          (outcome, self.target.name, fit,
                                           getattr(self, '_active_seed', 0),
-                                          saved, div, cv, sv))
+                                          saved, div, cv, sv, pv))
         except queue.Empty:
             pass
         if last_gen is not None:               # redraw the fitness chart once per poll

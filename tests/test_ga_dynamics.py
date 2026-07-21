@@ -15,8 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evo_runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
                                 default_max_telomere)
 from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
-from evo_runtime.controller import (run_evolution, save_solver_generation,
-                                    wait_for_resume)
+from evo_runtime.controller import (run_evolution, save_evaluated_generation,
+                                    save_solver_generation, wait_for_resume)
 import lut_evo.ga as lut_ga
 import nv_evo.ga as nv_ga
 import snn_evo.ga as snn_ga
@@ -504,6 +504,32 @@ def test_solver_generation_snapshot_overwrites_and_records_latest_generation():
         assert os.listdir(directory) == ['solver_generation.json']
 
 
+def test_evaluated_generation_snapshot_retains_failed_population():
+    """Diversity must have real genomes to analyse when none is a solver."""
+    random.seed(7012)
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig()
+    population = [random_hex_genome(2) for _ in range(3)]
+    fitnesses = [0.72, 0.31, 0.08]
+
+    with tempfile.TemporaryDirectory() as directory:
+        path, count = save_evaluated_generation(
+            directory, population, fitnesses, target, 'nervous', config,
+            status='complete', source_try=1, source_generation=9)
+        snapshot = load_checkpoint(path)
+
+    assert os.path.basename(path) == 'latest_population.json'
+    assert count == len(population)
+    assert len(snapshot['genomes']) == len(population)
+    assert snapshot['fitnesses'] == fitnesses
+    assert snapshot['metadata'] == {
+        'status': 'complete',
+        'source': 'latest-fully-evaluated-generation',
+        'try': 1,
+        'generation': 9,
+    }
+
+
 def test_stop_saves_the_latest_fully_evaluated_solver_generation():
     target = TEMPORAL_TARGETS['Veto gate']
     config = RunConfig(
@@ -513,9 +539,11 @@ def test_stop_saves_the_latest_fully_evaluated_solver_generation():
     stop = threading.Event()
     messages = queue.Queue()
 
+    shutdown_args = []
+
     class FakePool:
-        def shutdown(self, **_kwargs):
-            pass
+        def shutdown(self, **kwargs):
+            shutdown_args.append(kwargs)
 
     def complete_initial_evaluation(genomes, *_args, **_kwargs):
         # Stop arrives after this whole generation has scores, so it is the
@@ -534,16 +562,59 @@ def test_stop_saves_the_latest_fully_evaluated_solver_generation():
             backend='nervous', run_config=config, results_dir=directory)
         snapshot = load_checkpoint(
             os.path.join(directory, 'solver_generation.json'))
+        full_snapshot = load_checkpoint(
+            os.path.join(directory, 'latest_population.json'))
 
     assert len(snapshot['genomes']) == 1
     assert snapshot['fitnesses'] == [1.0]
     assert snapshot['metadata']['status'] == 'stopped'
     assert snapshot['metadata']['try'] == 1
     assert snapshot['metadata']['generation'] == 0
+    assert len(full_snapshot['genomes']) == 3
+    assert full_snapshot['fitnesses'] == [1.0, 0.5, 0.25]
+    assert shutdown_args == [{'wait': True, 'cancel_futures': True}]
     queued = list(messages.queue)
+    assert any(message[:3] == ('population_saved', 3, 'stopped')
+               for message in queued)
     assert any(message[:4] == ('solver_saved', 1, 0.999, 'stopped')
                for message in queued)
     assert queued[-1][0] == 'done'
+
+
+def test_stop_before_initial_evaluation_still_finishes_and_releases_pool():
+    """An immediate Stop has no complete generation, but it must still emit a
+    terminal message and fully close its executor so the next Run is safe."""
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(
+        ga=GAConfig(chromosome_count=2, tile_arch='tri3',
+                    node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
+    stop = threading.Event()
+    stop.set()
+    messages = queue.Queue()
+    shutdown_args = []
+
+    class FakePool:
+        def shutdown(self, **kwargs):
+            shutdown_args.append(kwargs)
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch.object(nv_ga, 'eval_batch_cases') as evaluate:
+        run_evolution(
+            gens=4, pop=3, n_chroms=2, tries=1, target=target, arch=None,
+            messages=messages, stop_event=stop, base_seed=17,
+            backend='nervous', run_config=config, results_dir=directory)
+        full_snapshot = load_checkpoint(
+            os.path.join(directory, 'latest_population.json'))
+
+    evaluate.assert_not_called()
+    assert full_snapshot['genomes'] == []
+    assert shutdown_args == [{'wait': True, 'cancel_futures': True}]
+    queued = list(messages.queue)
+    assert not any(message[0] == 'error' for message in queued)
+    assert queued[-1] == ('done', None, 0.0)
 
 
 def test_terminal_survivor_selection_retains_solver_and_case_alignment():

@@ -1,18 +1,18 @@
 """
-tools/diversity_report.py — characterise a SOLVED population.
+tools/diversity_report.py — characterise an evaluated population.
 
 Fitness spread is zero once everyone solves, so this reports structure instead:
 the four-level collapse funnel (nv_evo/diversity.py) and, optionally, the
 mutational-robustness panel.
 
-    py tools/diversity_report.py results/solver_generation.json
+    py tools/diversity_report.py results/latest_population.json
     py tools/diversity_report.py results/solver_generation.json --robustness
-    py tools/diversity_report.py results/solver_generation.json --samples 16
+    py tools/diversity_report.py results/latest_population.json --samples 16
 
-The input is a population checkpoint written by the controller's diversify
-phase (``save_population``). Measure the GA's own post-solve population and the
-diversify() output SEPARATELY: diversify enforces rule-signature uniqueness by
-construction, so its genotype counts describe the tool, not the substrate.
+The input is a population checkpoint written by the controller. Measure the
+GA's own ``latest_population.json`` and the post-solve diversify() output
+SEPARATELY: diversify enforces rule-signature uniqueness by construction, so
+its genotype counts describe the tool, not the substrate.
 """
 import argparse
 import os
@@ -26,7 +26,7 @@ from nv_evo import diversity as dv                          # noqa: E402
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description='Diversity funnel for a solved population.')
+        description='Diversity funnel for an evaluated population.')
     parser.add_argument('path', help='population checkpoint JSON')
     parser.add_argument('--robustness', action='store_true',
                         help='also sample the mutational neighbourhood '
@@ -48,10 +48,13 @@ def main(argv=None):
     state = load_checkpoint(args.path)
     if 'genomes' not in state:
         parser.error('%s is a single-genome checkpoint; this tool wants a '
-                     'population (results/solver_generation.json)' % args.path)
+                     'population checkpoint' % args.path)
     genomes = state['genomes']
     if args.limit:
         genomes = genomes[:args.limit]
+    if not genomes:
+        parser.error('%s contains 0 genomes; use the latest fully evaluated '
+                     'population (results/latest_population.json)' % args.path)
     target = state['target']
     backend = state['backend']
     config = state.get('run_config')
@@ -61,6 +64,18 @@ def main(argv=None):
     report = dv.diversity_funnel(genomes, backend, target, config,
                                  probe_target=probe)
     report.probe_seed = args.probe_seed
+    fitnesses = state.get('fitnesses')
+    if fitnesses is not None and len(fitnesses) >= len(genomes):
+        fitnesses = fitnesses[:len(genomes)]
+        metadata = state.get('metadata') or {}
+        print('Snapshot: %s, try %s, generation %s' % (
+            metadata.get('status', 'unknown'), metadata.get('try', '?'),
+            metadata.get('generation', '?')))
+        print('Fitness: min %.4f   mean %.4f   max %.4f   valid %d/%d '
+              '(>= %.3f)\n' % (
+                  min(fitnesses), sum(fitnesses) / len(fitnesses),
+                  max(fitnesses), sum(value >= valid for value in fitnesses),
+                  len(fitnesses), valid))
     print(dv.format_report(report, population=len(genomes),
                            target_name=target.name, valid=valid))
 

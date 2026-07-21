@@ -1,6 +1,6 @@
 """
-diversity_ui.py — the "Diversity" tab: what variety survives in a SOLVED
-population.
+diversity_ui.py — the "Diversity" tab: what variety survives in an evaluated
+population, whether or not it solved the target.
 
 The Evolution chart's spread series (population fitness sigma) is identically
 zero once every genome scores 1.0, so it goes blind exactly where the question
@@ -26,7 +26,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from nv_evo import diversity as dv
 
 POLL_MS = 120
-DEFAULT_POPULATION = os.path.join('results', 'solver_generation.json')
+DEFAULT_POPULATION = os.path.join('results', 'latest_population.json')
+SOLVER_POPULATION = os.path.join('results', 'solver_generation.json')
 
 
 class _Cancelled(Exception):
@@ -73,7 +74,7 @@ class DiversityTab:
         ttk.Entry(top, textvariable=self._limit_var, width=5).pack(side='left')
 
         self._status = tk.StringVar(
-            value='Load a solved population (results/solver_generation.json) '
+            value='Load a population (results/latest_population.json) '
                   'and press Analyse.')
         ttk.Label(self.parent, textvariable=self._status, anchor='w',
                   padding=(8, 2)).pack(fill='x')
@@ -143,12 +144,15 @@ class DiversityTab:
             candidate = self._get_population_path()
             if candidate and os.path.exists(candidate):
                 return candidate
-        return DEFAULT_POPULATION if os.path.exists(DEFAULT_POPULATION) else None
+        for candidate in (DEFAULT_POPULATION, SOLVER_POPULATION):
+            if os.path.exists(candidate):
+                return candidate
+        return None
 
     def choose_population(self):
         initial = os.path.dirname(self._resolve_path() or DEFAULT_POPULATION)
         path = filedialog.askopenfilename(
-            title='Load solved population',
+            title='Load population',
             initialdir=initial or '.',
             filetypes=[('Population checkpoint', '*.json'), ('All files', '*.*')])
         if path:
@@ -163,8 +167,8 @@ class DiversityTab:
             return
         path = self._resolve_path()
         if path is None:
-            self._status.set('No population file found. Run the GA to a solve '
-                             '(it writes results/solver_generation.json), or '
+            self._status.set('No population file found. Run the GA '
+                             '(it writes results/latest_population.json), or '
                              'use Load population…')
             return
         try:
@@ -175,6 +179,8 @@ class DiversityTab:
             return
 
         self._stop.clear()
+        self._population_info = None
+        self._population_valid = None
         self._run_btn.config(state='disabled')
         self._load_btn.config(state='disabled')
         self._stop_btn.config(state='normal')
@@ -198,13 +204,39 @@ class DiversityTab:
             if 'genomes' not in state:
                 self._queue.put(('error', 'That file is a single-genome '
                                           'checkpoint; this view needs a '
-                                          'population (solver_generation.json).'))
+                                          'population checkpoint.'))
                 return
-            genomes = state['genomes'][:limit]
+            all_genomes = state['genomes']
+            if not all_genomes:
+                metadata = state.get('metadata') or {}
+                source = metadata.get('source', 'unknown source')
+                raise ValueError(
+                    'This population file contains 0 genomes (%s). An '
+                    'unsuccessful solver-only snapshot is empty by design; '
+                    'analyse results/latest_population.json from a new run '
+                    'instead.' % source)
+            genomes = all_genomes[:limit]
             target = state['target']
             backend = state['backend']
             config = state.get('run_config')
             valid = state.get('valid', 0.999)
+            fitnesses = state.get('fitnesses')
+            metadata = state.get('metadata') or {}
+            if fitnesses is not None and len(fitnesses) >= len(genomes):
+                selected_fitnesses = fitnesses[:len(genomes)]
+                valid_count = sum(value >= valid for value in selected_fitnesses)
+                population_info = (
+                    'Snapshot: %s, try %s, generation %s\n'
+                    'Fitness: min %.4f   mean %.4f   max %.4f   '
+                    'valid %d/%d (>= %.3f)'
+                    % (metadata.get('status', 'unknown'),
+                       metadata.get('try', '?'),
+                       metadata.get('generation', '?'),
+                       min(selected_fitnesses),
+                       sum(selected_fitnesses) / len(selected_fitnesses),
+                       max(selected_fitnesses), valid_count,
+                       len(selected_fitnesses), valid))
+                self._queue.put(('population_info', population_info, valid))
 
             def funnel_progress(level, index, total):
                 if self._stop.is_set():
@@ -243,12 +275,18 @@ class DiversityTab:
                 kind = message[0]
                 if kind == 'progress':
                     self._status.set(message[1])
+                elif kind == 'population_info':
+                    self._population_info = message[1]
+                    self._population_valid = message[2]
                 elif kind == 'funnel':
                     _, report, n, name, backend = message
                     self._report = report
                     self._population = (n, name)
-                    self._set_text(dv.format_report(
-                        report, population=n, target_name=name))
+                    text = dv.format_report(
+                        report, population=n, target_name=name,
+                        valid=getattr(self, '_population_valid', None))
+                    info = getattr(self, '_population_info', None)
+                    self._set_text(('%s\n\n%s' % (info, text)) if info else text)
                     self._draw(report, None)
                     self._status.set('%s — %d genomes, backend %s'
                                      % (name, n, backend))
@@ -267,10 +305,14 @@ class DiversityTab:
                     current = getattr(self, '_report', None)
                     if robustness is not None and current is not None:
                         n, name = getattr(self, '_population', (None, None))
+                        text = dv.format_report(
+                            current, population=n, target_name=name,
+                            valid=getattr(self, '_population_valid', None))
+                        info = getattr(self, '_population_info', None)
+                        if info:
+                            text = '%s\n\n%s' % (info, text)
                         self._set_text('%s\n\n%s' % (
-                            dv.format_report(current, population=n,
-                                             target_name=name),
-                            dv.format_robustness(robustness)))
+                            text, dv.format_robustness(robustness)))
                         self._draw(current, robustness)
                     self._status.set('Analysis complete.')
                     self._finish()
@@ -362,8 +404,9 @@ class DiversityTab:
             rax.set_ylabel('Genomes', fontsize=8, labelpad=2)
             rax.tick_params(labelsize=7)
             rax.yaxis.get_major_locator().set_params(integer=True)
-            rax.set_title('Mutational robustness\nlocal %.2f   '
-                          'novel-valid %.2f'
-                          % (robustness.local, robustness.novel_valid),
-                          fontsize=8.5)
+            rax.set_title('Mutational robustness\nlocal %.2f   effective %.2f'
+                          '\nsilent %.2f   novel-valid %.2f'
+                          % (robustness.local, robustness.effective_local,
+                             robustness.silent, robustness.novel_valid),
+                          fontsize=8.5, linespacing=1.25)
         self._canvas.draw_idle()

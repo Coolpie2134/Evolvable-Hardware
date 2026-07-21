@@ -1,5 +1,5 @@
 """
-tests/test_diversity.py — the solved-population diversity contract
+tests/test_diversity.py — the evaluated-population diversity contract
 (nv_evo/diversity.py).
 
 Fitness spread is identically zero once everyone solves, so these levels are
@@ -232,6 +232,25 @@ def test_funnel_is_monotone_and_reports_every_level():
     assert max(len(line) for line in full.splitlines()) <= 80
 
 
+def test_funnel_accepts_unsolved_nv_analog_tri_population():
+    """The analyser measures structure, so it must not require successful
+    fitness or digital-node physics."""
+    target = TEMPORAL_TARGETS['Coincidence (2-in)']
+    config = RunConfig(
+        ga=GAConfig(chromosome_count=2, tile_arch='tri3',
+                    node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
+    setattr(target, 'pulse_config', config.pulse)
+    random.seed(910)
+    population = [random_hex_genome(2, arch='tri3') for _ in range(4)]
+
+    report = dv.diversity_funnel(population, 'nervous', target, config)
+
+    assert report.backend == 'nervous'
+    for stats in report.levels:
+        assert stats.total + stats.unmeasured == len(population)
+
+
 def test_robustness_reports_kernel_and_bounded_rates():
     target, config = _target()
     random.seed(202)
@@ -253,6 +272,53 @@ def test_robustness_reports_kernel_and_bounded_rates():
     assert dv.ROBUSTNESS_KERNEL.split()[0] in text
     assert max(len(line) for line in text.splitlines()) <= 80
     assert all(ord(char) < 128 for char in text)
+
+
+def test_silent_mutants_are_separated_from_survivors():
+    """The kernel never returns a clone, but a mutation can land on something
+    the phenotype does not express (tag, split point, unexpressed rule,
+    non-maximal telomere) and grow the identical circuit. Those score
+    identically by construction, so they must not pad the survival rate."""
+    target, config = _target()
+    random.seed(404)
+    population = [random_hex_genome(2) for _ in range(3)]
+    report = dv.robustness(population, 'nervous', target, config, samples=6,
+                           valid=0.0, seed=5)
+    # valid=0.0 accepts everything, so BOTH rates are pinned at 1.0 and the
+    # only free quantity is how many samples were silent
+    assert report.local == 1.0
+    assert report.effective_local in (0.0, 1.0)   # 1.0 unless all were silent
+    assert 0.0 <= report.silent <= 1.0
+    assert len(report.per_genome_silent) == len(population)
+    assert len(report.per_genome_effective) == len(population)
+    for value in report.per_genome_effective:
+        assert value is None or 0.0 <= value <= 1.0
+
+    text = dv.format_robustness(report, bins=4)
+    for term in ('Silent rate', 'Local robustness',
+                 'Effective local robustness', 'Novel-valid rate'):
+        assert term in text, term
+    assert max(len(line) for line in text.splitlines()) <= 80
+
+
+def test_a_phenotype_neutral_mutant_counts_as_silent_not_as_survival():
+    """A hand-made 'mutation' that only moves a split point grows the same
+    circuit, so it is silent and contributes nothing to effective robustness."""
+    target, config = _target()
+    random.seed(77)
+    parent = random_hex_genome(3)
+    twin = clone_genome(parent)
+    for chromosome in twin.chromosomes:
+        if len(chromosome.genes) > 2:
+            chromosome.split = (chromosome.split + 1) % len(chromosome.genes)
+    adapter = dv._adapter('nervous')
+    before = dv.phenotype_signature(parent, 'nervous', target, config.pulse,
+                                    adapter=adapter)
+    after = dv.phenotype_signature(twin, 'nervous', target, config.pulse,
+                                   adapter=adapter)
+    assert before == after                     # same grown circuit...
+    assert (dv.exact_signature(parent, 'nervous')
+            != dv.exact_signature(twin, 'nervous'))   # ...different genotype
 
 
 def test_robustness_is_repeatable_for_a_fixed_seed():

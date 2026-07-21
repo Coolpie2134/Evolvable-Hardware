@@ -15,6 +15,35 @@ from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
 SOLVER_VALID = 0.999
+LATEST_POPULATION_NAME = 'latest_population.json'
+SOLVER_POPULATION_NAME = 'solver_generation.json'
+
+
+def save_evaluated_generation(results_dir, population, fitnesses, target,
+                              backend, run_config, *, status, source_try=None,
+                              source_generation=None, certification=None):
+    """Persist the latest *complete* generation, including failed genomes.
+
+    The solver snapshot intentionally contains only genomes above
+    ``SOLVER_VALID``.  It therefore becomes empty after an unsuccessful run and
+    cannot be the Diversity tab's only data source.  This companion snapshot is
+    the honest live population at the last safe generation boundary.
+    """
+    population = list(population)
+    fitnesses = list(fitnesses)
+    if len(population) != len(fitnesses):
+        raise ValueError('population snapshot population/fitness count mismatch')
+    path = os.path.join(results_dir, LATEST_POPULATION_NAME)
+    save_population(
+        path, population, target, backend, SOLVER_VALID, run_config,
+        certification=certification, fitnesses=fitnesses,
+        metadata={
+            'status': status,
+            'source': 'latest-fully-evaluated-generation',
+            'try': source_try,
+            'generation': source_generation,
+        })
+    return path, len(population)
 
 
 def save_solver_generation(results_dir, population, fitnesses, target, backend,
@@ -37,7 +66,7 @@ def save_solver_generation(results_dir, population, fitnesses, target, backend,
     ]
     genomes = [genome for genome, _fitness in valid_pairs]
     solver_fitnesses = [fitness for _genome, fitness in valid_pairs]
-    path = os.path.join(results_dir, 'solver_generation.json')
+    path = os.path.join(results_dir, SOLVER_POPULATION_NAME)
     save_population(
         path, genomes, target, backend, SOLVER_VALID, run_config,
         certification=certification, fitnesses=solver_fitnesses,
@@ -216,6 +245,19 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         except Exception:
             messages.put(('solver_save_error', traceback.format_exc(limit=3)))
 
+    def save_latest_evaluated_generation(status):
+        """Non-fatal full-population persistence for post-run analysis."""
+        try:
+            path, count = save_evaluated_generation(
+                results_dir, latest_population, latest_fitnesses,
+                target, backend, config, status=status,
+                source_try=latest_try, source_generation=latest_generation,
+                certification=certification)
+            messages.put(('population_saved', count, status, path))
+        except Exception:
+            messages.put(('population_save_error',
+                          traceback.format_exc(limit=3)))
+
     try:
         for try_i in range(1, tries + 1):
             if stop_event.is_set():
@@ -311,6 +353,10 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             except Exception:
                 certification = None
 
+        if backend in ('nervous', 'lut'):
+            save_latest_evaluated_generation(
+                'stopped' if stop_event.is_set() else 'complete')
+
         if stop_event.is_set() and backend in ('nervous', 'lut'):
             save_latest_solver_generation('stopped')
         elif (diversify_fn is not None and best_genome is not None
@@ -319,7 +365,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             messages.put(('phase', 'Preparing solved-circuit diversity', 0, 25, 0))
             seeds = [g for g, f in zip(population, fitnesses) if f >= valid] or [best_genome]
             diverse = diversify_fn(seeds, valid)
-            path = os.path.join(results_dir, 'solver_generation.json')
+            path = os.path.join(results_dir, SOLVER_POPULATION_NAME)
             save_population(
                 path, diverse, target, backend, valid, config,
                 certification=certification,
@@ -339,17 +385,20 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             save_latest_solver_generation('complete')
     except EvolutionCancelled:
         if backend in ('nervous', 'lut'):
+            save_latest_evaluated_generation('stopped')
             save_latest_solver_generation('stopped')
     except Exception:
         messages.put(('error', traceback.format_exc(limit=5)))
     finally:
         if pool is not None:
-            # wait=False so a Stop returns immediately: pending genomes are
-            # cancelled and the few in-flight dense-LUT evals finish (and are
-            # discarded) in the background instead of blocking the UI for the
-            # ~2s it took to drain + join the worker processes. Results for a
-            # normal completion were already collected before this point.
-            pool.shutdown(wait=False, cancel_futures=True)
+            # Do not announce completion while evaluation processes from the
+            # stopped run are still alive.  With wait=False the UI enabled Run
+            # immediately, allowing old and new pools to overlap; repeated
+            # mid-generation stops could exhaust Windows process/IPC resources
+            # and leave the app unresponsive. Pending work is cancelled first,
+            # then only the already-running evaluations are allowed to drain.
+            # This happens on the worker thread, so Tk remains responsive.
+            pool.shutdown(wait=True, cancel_futures=True)
         messages.put(('done', copy.deepcopy(best_genome), best_fit))
 
 

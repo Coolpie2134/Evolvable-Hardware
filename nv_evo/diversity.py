@@ -1,5 +1,5 @@
 """
-nv_evo/diversity.py — how much genuine variety is in a SOLVED population?
+nv_evo/diversity.py — how much genuine variety is in an evaluated population?
 
 Once every genome scores 1.0, every fitness-derived spread measure (sigma,
 best-minus-mean, ...) is identically zero: they go blind exactly where the
@@ -97,12 +97,22 @@ METRIC_MEANING = (
                    'no usable readout).'),
 )
 ROBUSTNESS_MEANING = (
-    ('Local robustness', 'Fraction of sampled mutants that still score at or '
-                         'above the validity threshold.'),
+    ('Kernel', 'The mutation applied to draw each sample.'),
+    ('Silent rate', 'Fraction of sampled mutants that grow the parent\'s '
+                    'circuit unchanged. The kernel never returns a clone, but '
+                    'a mutation can land on a chromosome tag, a split point, '
+                    'an unexpressed rule or a non-maximal telomere. Such a '
+                    'mutant scores identically by construction.'),
+    ('Local robustness', 'Fraction of ALL sampled mutants that still score at '
+                         'or above the validity threshold. Includes silent '
+                         'mutants, which always pass.'),
+    ('Effective local robustness',
+     'Fraction of PHENOTYPE-CHANGING mutants that still score valid. Silent '
+     'mutants are excluded, so this measures the circuit rather than the '
+     'mutation kernel.'),
     ('Novel-valid rate', 'Fraction of sampled mutants that still score valid '
                          'AND fall in a phenotype group not present in the '
                          'population.'),
-    ('Kernel', 'The mutation applied to draw each sample.'),
 )
 
 
@@ -399,7 +409,7 @@ class DiversityReport:
 
 def diversity_funnel(genomes, backend, target, config=None, probe_target=None,
                      levels=LEVELS, on_progress=None):
-    """Cluster a solved population at each level and return the collapse.
+    """Cluster an evaluated population at each level and return the collapse.
 
     ``config`` is the run's RunConfig (or anything exposing ``.pulse``/``.ga``);
     it decides which timing vectors are live."""
@@ -535,7 +545,7 @@ def format_report(report, population=None, target_name=None, valid=None):
 # Diversity and robustness are independent axes: a population can be one cloned
 # genotype with a huge neutral neighbourhood, or many genotypes each on an
 # isolated spike. Robustness answers "how much neutral room surrounds each
-# solver", NOT "how many solvers are there".
+# genome", NOT "how many distinct genomes are there".
 
 #: The mutation kernel is part of the measurement and is reported with it.
 #: One call to the backend's own weighted mutation operator at mean 1.0 — which
@@ -553,6 +563,15 @@ class RobustnessReport:
     per_genome_local: Tuple[float, ...]
     per_genome_novel: Tuple[float, ...]
     known_phenotypes: int
+    #: fraction of samples whose PHENOTYPE matched the parent's. The kernel
+    #: never returns a clone, but a mutation can land on a chromosome tag, a
+    #: split point, an unexpressed rule, or a non-maximal telomere and grow the
+    #: identical circuit. Such a sample is guaranteed to score identically, so
+    #: counting it as "survived" measures the kernel, not the circuit.
+    per_genome_silent: Tuple[float, ...] = ()
+    #: fraction of PHENOTYPE-CHANGING samples that stayed valid; None for a
+    #: genome whose every sample was silent.
+    per_genome_effective: Tuple[Optional[float], ...] = ()
 
     @property
     def local(self):
@@ -564,6 +583,17 @@ class RobustnessReport:
         n = len(self.per_genome_novel)
         return sum(self.per_genome_novel) / n if n else 0.0
 
+    @property
+    def silent(self):
+        n = len(self.per_genome_silent)
+        return sum(self.per_genome_silent) / n if n else 0.0
+
+    @property
+    def effective_local(self):
+        """Local robustness over samples that actually changed the circuit."""
+        values = [v for v in self.per_genome_effective if v is not None]
+        return sum(values) / len(values) if values else 0.0
+
     def histogram(self, bins=10):
         counts = [0] * bins
         for value in self.per_genome_local:
@@ -574,14 +604,20 @@ class RobustnessReport:
 
 def robustness(genomes, backend, target, config=None, samples=8, valid=0.999,
                seed=4242, on_progress=None):
-    """Local neutral volume around each solver, plus the rate at which a single
+    """Local valid volume around each genome, plus the rate at which a single
     mutation reaches a DIFFERENT working circuit.
 
-    ``local`` is the fraction of sampled mutants that still solve; ``novel_valid``
-    is the fraction that still solve AND land on a phenotype not already present
-    in the population. The second number is the evolvability-relevant one: a
-    genome whose whole neighbourhood is copies of itself is robust but going
-    nowhere.
+    ``local`` is the fraction of sampled mutants that still solve;
+    ``effective_local`` is that fraction over the mutants that actually changed
+    the circuit, and ``novel_valid`` is the fraction that still solve AND land
+    on a phenotype not already present in the population.
+
+    The split matters: the kernel never returns a clone, but ~1 in 5 one-event
+    mutations lands on something the phenotype does not express (a chromosome
+    tag, a split point, an unexpressed rule, a non-maximal telomere) and grows
+    the identical circuit. Those score identically by construction, so pooling
+    them into ``local`` measures the mutation operator as much as the circuit.
+    ``silent`` reports their share and ``effective_local`` excludes them.
 
     Validity uses the RAW behavioural score (no loop-bonus shaping), so a
     structurally-rewarded genome cannot be counted as a solver.
@@ -600,26 +636,44 @@ def robustness(genomes, backend, target, config=None, samples=8, valid=0.999,
             known.add(signature)
     # mutate_* draw from the process-global RNG, so pin it for repeatability
     random.seed(seed)
-    local, novel = [], []
+    local, novel, silent, effective = [], [], [], []
     for index, genome in enumerate(genomes):
-        hits = new_hits = 0
+        parent = phenotype_signature(genome, backend, target, pulse_config,
+                                     adapter=adapter)
+        hits = new_hits = quiet = changed = changed_hits = 0
         for sample in range(samples):
             if on_progress is not None:
                 on_progress(index, len(genomes), sample, samples)
             mutant = adapter['mutate'](genome, config, chromosome_count)
-            if adapter['score'](mutant, target) < valid:
-                continue
-            hits += 1
             signature = phenotype_signature(mutant, backend, target,
                                             pulse_config, adapter=adapter)
+            # A mutant that grows the parent's circuit is the SAME hardware, so
+            # its score is identical by construction. Track it separately
+            # instead of letting it pad the survival rate.
+            is_silent = (parent is not None and signature is not None
+                         and signature == parent)
+            valid_now = adapter['score'](mutant, target) >= valid
+            if is_silent:
+                quiet += 1
+            else:
+                changed += 1
+            if not valid_now:
+                continue
+            hits += 1
+            if not is_silent:
+                changed_hits += 1
             if signature is not None and signature not in known:
                 new_hits += 1
         local.append(hits / samples if samples else 0.0)
         novel.append(new_hits / samples if samples else 0.0)
+        silent.append(quiet / samples if samples else 0.0)
+        effective.append((changed_hits / changed) if changed else None)
     return RobustnessReport(kernel=ROBUSTNESS_KERNEL, samples=samples,
                             valid_threshold=valid,
                             per_genome_local=tuple(local),
                             per_genome_novel=tuple(novel),
+                            per_genome_silent=tuple(silent),
+                            per_genome_effective=tuple(effective),
                             known_phenotypes=len(known))
 
 
@@ -635,7 +689,10 @@ def format_robustness(report, bins=10):
                                 report.valid_threshold),
               '  %-27s %d' % ('Population phenotypes',
                               report.known_phenotypes),
+              '  %-27s %.3f' % ('Silent rate', report.silent),
               '  %-27s %.3f' % ('Local robustness', report.local),
+              '  %-27s %.3f' % ('Effective local robustness',
+                                report.effective_local),
               '  %-27s %.3f' % ('Novel-valid rate', report.novel_valid),
               '',
               '  Local robustness distribution (genomes per band)',

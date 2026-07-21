@@ -13,6 +13,7 @@ import os
 import queue
 import sys
 import threading
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -117,12 +118,17 @@ def test_funnel_then_done_renders_report_and_plot():
 
     # the funnel arrives first: it names the population and draws immediately,
     # so a long robustness pass does not hide the result that is already known
+    tab._queue.put(('population_info',
+                    'Fitness: min 0.1000   mean 0.4000   max 0.7000   '
+                    'valid 0/3 (>= 0.999)', 0.999))
     tab._queue.put(('funnel', report, 3, 'Toggle flip-flop', 'nervous'))
     tab._poll()
     tab.parent.callbacks.pop()
     assert 'Toggle flip-flop' in tab._status.get()
     assert tab.drawn and tab.drawn[0][0] is report
     assert tab.texts and dv.LEVEL_LABEL['behavior'] in tab.texts[-1]
+    assert 'valid 0/3' in tab.texts[-1]
+    assert 'Validity threshold: 0.999' in tab.texts[-1]
     assert tab._worker is not None            # still running until 'done'
 
     tab._queue.put(('done', None))
@@ -177,3 +183,22 @@ def test_notify_population_ignores_a_path_that_does_not_exist():
     tab = _tab()
     tab.notify_population(os.path.join('nope', 'missing.json'))
     assert tab._path is None
+
+
+def test_empty_solver_snapshot_explains_which_population_to_use():
+    """Old failed-run solver files contain zero genomes; report that clearly
+    instead of drawing an apparently broken all-empty chart."""
+    tab = _tab()
+    state = {
+        'genomes': [],
+        'metadata': {'source': 'latest-fully-evaluated-generation'},
+    }
+    with mock.patch('evo_runtime.checkpoint.load_checkpoint',
+                    return_value=state):
+        tab._work('solver_generation.json', limit=60, samples=8,
+                  want_robustness=False)
+
+    message = tab._queue.get_nowait()
+    assert message[0] == 'error'
+    assert '0 genomes' in message[1]
+    assert 'latest_population.json' in message[1]
