@@ -148,21 +148,19 @@ class InteractiveTab:
                                       grid_size=target.grid_size, iters=target.iters)
             self._routing, self._in_pos, self._out_pos = interpret_nervous(
                 self._grid, target, arch=self._nv_arch)
-            # 'evolved_width' model: the champion's per-node pulse widths, used by
-            # BOTH the trace-matched placement (so the highlighted output cell is
-            # the one fitness actually read) and the playback engine below.
-            # node_widths returns None off that model, so this is uniform-safe.
-            from nv_evo.nervous import node_widths, node_delays
+            # Per-node delays feed BOTH the trace-matched placement (so the
+            # highlighted output cell is the one fitness actually read) and the
+            # playback engine below. node_delays returns None off the
+            # width-preserving model, so this is uniform-safe.
+            from nv_evo.nervous import node_delays
             pulse_config = getattr(target, 'pulse_config', None)
-            self._nv_widths = (None if self._nv_arch == 'tri3' else
-                               node_widths(c['genome'], self._grid, pulse_config))
             self._nv_delays = (None if self._nv_arch == 'tri3' else
                                node_delays(c['genome'], self._grid, pulse_config))
             if getattr(target, 'temporal', False):
                 # show the same output cell the fitness reads (trace-matched)
                 self._out_pos, _ = place_outputs_by_trace(
                     self._grid, self._routing, self._in_pos, target,
-                    widths=self._nv_widths, delays=self._nv_delays,
+                    delays=self._nv_delays,
                     arch=self._nv_arch)
             self._setup_async(target)
             self._playback_controls(
@@ -225,14 +223,12 @@ class InteractiveTab:
         self._editor.set_pulses(pulses_from_trial(target, len(self._in_pos)))
         if self._backend == 'nervous':
             config = pulse_config
-            # per-node pulse widths ('evolved_width' model) computed once in
             # sync() and shared with the trace-matched placement, so playback and
             # the highlighted output cell agree on the physics.
             self._player = NervousPlayer(
                 self._grid, self._routing, horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048),
-                config=config, widths=getattr(self, '_nv_widths', None),
-                delays=getattr(self, '_nv_delays', None),
+                config=config, delays=getattr(self, '_nv_delays', None),
                 arch=getattr(self, '_nv_arch', 'single'), inputs=self._in_pos)
         else:                                  # LUT — same player, level engine
             self._player = LutPlayer(

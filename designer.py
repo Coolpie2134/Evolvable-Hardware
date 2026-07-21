@@ -62,7 +62,7 @@ from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGeno
 from nv_evo.tritile import (TRI_SEED_STATE, TRI_DIRS, channel_configs,
                             pack_channels)
 from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
-                            circuit_summary_nervous, node_widths, node_delays,
+                            circuit_summary_nervous, node_delays,
                             SEED_STATE as NV_SEED_STATE)
 from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
 from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
@@ -928,11 +928,7 @@ class DesignerTab:
                 routing = self._nv_routing(grid)
                 # Score under the SAME physics evolution uses: the run's node
                 # model config, its physical input schedules, and — for
-                # 'evolved_width' — the genome's per-node pulse widths
-                # (node_widths returns None off that model / with no genome).
                 config = getattr(target, 'pulse_config', None)
-                widths = (None if self.genome is None or arch == 'tri3'
-                          else node_widths(self.genome, grid, config))
                 delays = (None if self.genome is None or arch == 'tri3'
                           else node_delays(self.genome, grid, config))
                 if use_manual:
@@ -947,7 +943,7 @@ class DesignerTab:
                             max_events=getattr(target, 'max_events', 2048),
                             config=config,
                             input_events=getattr(trial, 'input_events', None),
-                            widths=widths, delays=delays, arch=arch)
+                            delays=delays, arch=arch)
                         traces.overflow = traces.overflow or overflow
                         for role in roles:
                             traces[role].append(sampled[role])
@@ -958,7 +954,7 @@ class DesignerTab:
                 else:
                     out_pos, traces = place_outputs_by_trace(
                         grid, routing, list(self.in_pos), target,
-                        widths=widths, delays=delays, arch=arch)
+                        delays=delays, arch=arch)
             else:
                 if use_manual:
                     # pinned outputs, asynchronous engine — real edge times,
@@ -1698,17 +1694,13 @@ class DesignerTab:
             arch = self._nv_arch()
             routing = self._nv_routing()
             config = getattr(target, 'pulse_config', None)
-            # 'evolved_width' model: play back with the genome's per-node pulse
-            # widths (node_widths returns None off that model or with no genome —
             # a hand-built grid stays uniform).
-            widths = (None if self.genome is None or arch == 'tri3'
-                      else node_widths(self.genome, self.grid, config))
             delays = (None if self.genome is None or arch == 'tri3'
                       else node_delays(self.genome, self.grid, config))
             self._player = NervousPlayer(
                 self.grid, routing, horizon=self._sim_horizon(),
                 max_events=getattr(target, 'max_events', 2048),
-                config=config, widths=widths, delays=delays,
+                config=config, delays=delays,
                 arch=arch, inputs=self.in_pos)
         else:                                    # LUT — same player, level engine
             self._player = LutPlayer(
@@ -1844,11 +1836,9 @@ class DesignerTab:
         if self.backend == 'nervous':
             arch = self._nv_arch()
             routing = self._nv_routing()
-            # identical physics to evolution: model config + ('evolved_width')
+            # identical physics to evolution: the run model config
             # the genome's per-node pulse widths (None off-model / no genome)
             config = getattr(t, 'pulse_config', None)
-            widths = (None if self.genome is None or arch == 'tri3'
-                      else node_widths(self.genome, self.grid, config))
             delays = (None if self.genome is None or arch == 'tri3'
                       else node_delays(self.genome, self.grid, config))
             if use_manual:
@@ -1863,7 +1853,7 @@ class DesignerTab:
                         max_events=getattr(t, 'max_events', 2048),
                         config=config,
                         input_events=getattr(trial, 'input_events', None),
-                        widths=widths, delays=delays, arch=arch)
+                        delays=delays, arch=arch)
                     traces.overflow = traces.overflow or overflow
                     for r in roles:
                         traces[r].append(trs[r])
@@ -1873,7 +1863,6 @@ class DesignerTab:
             else:
                 out_pos, traces = place_outputs_by_trace(self.grid, routing,
                                                          list(self.in_pos), t,
-                                                         widths=widths,
                                                          delays=delays,
                                                          arch=arch)
         else:
@@ -2015,7 +2004,7 @@ class DesignerTab:
             messagebox.showinfo('Load', 'That solver file contains no genomes.')
             return
         top = tk.Toplevel(self.parent)
-        top.title('Pick a solver (%d unique valid genomes)' % len(genomes))
+        top.title('Pick a solver (%d valid genomes)' % len(genomes))
         top.transient(self.parent)
         lb = tk.Listbox(top, width=44, height=min(20, max(1, len(genomes))),
                         font=(self._mono, 9))

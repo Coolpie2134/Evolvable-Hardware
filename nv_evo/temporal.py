@@ -29,8 +29,7 @@ they are re-exported here for back-compat with older imports and pickles.
 """
 from __future__ import annotations
 
-from .nervous import (grow_nervous, interpret_nervous, node_widths,
-                      node_delays)
+from .nervous import (grow_nervous, interpret_nervous, node_delays)
 from .hexgrid import hex_dirs
 from .pulse import TICK
 from .simulation import create_simulator
@@ -114,7 +113,7 @@ def _inject_physical_events(sim, in_pos, input_events):
 
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
                  max_events=None, sample=True, config=None, input_events=None,
-                 widths=None, delays=None, arch='single'):
+                 delays=None, arch='single'):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -124,8 +123,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         traces : {role: [0/1 over T]}
     `prune` restricts the simulation to the input cone (exact for the nervous
     net); off-cone cells are absent from `states` and read as 0 by callers.
-    `widths` ({cell: pulse_width}) drives only the 'evolved_width' model;
-    width-preserving transport derives each output width from its input.
+    `delays` ({cell: delay}) drives width-preserving transport, which derives
+    each output width from its input.
     `arch='tri3'` runs the three-circuit-per-tile substrate on TriSim, which
     presents the same tile-keyed surface so the rest of this function — stimulus
     injection, sampling, event capture — is architecture-agnostic.
@@ -142,7 +141,7 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
             if len(cone) < len(grid):
                 sub = {c: grid[c] for c in cone}
         sim    = create_simulator(sub, routing, max_events=max_events,
-                                  config=config, widths=widths, delays=delays)
+                                  config=config, delays=delays)
     # Queue one physical schedule for both sampled and event scoring. The
     # width-preserving engine transports rising and falling edges causally, so
     # it also agrees with incremental ``step`` input; pre-queuing here simply
@@ -198,7 +197,7 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
 
 def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                        max_events=None, sample=True, config=None,
-                       input_events=None, widths=None, delays=None,
+                       input_events=None, delays=None,
                        arch='single'):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
@@ -207,8 +206,7 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
-                        config=config, input_events=input_events, widths=widths,
-                        delays=delays, arch=arch)
+                        config=config, input_events=input_events, delays=delays, arch=arch)
 
 
 # The output is read at a cell NEAR the target's terminal, not anywhere in the
@@ -228,16 +226,15 @@ def _output_candidates(grid, in_set, term):
     return cands[:OUT_RADIUS]
 
 
-def place_outputs_by_trace(grid, routing, in_pos, ttarget, widths=None,
-                           delays=None, arch='single'):
+def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='single'):
     """Assign each output role the live non-input cell — among those nearest its
     terminal (see OUT_RADIUS) — whose activity trace best matches the expected
     trace across ALL trials (ties broken by distance to the terminal, then cell
     order). Evolution builds the computation and lands it near the read-out.
 
-    ``widths`` ({cell: pulse_width}) drives the 'evolved_width' timing model;
-    None leaves the engine uniform. Returns (out_pos {role: (x,y)|None},
-    traces {role: [trace per trial]}).
+    ``delays`` ({cell: delay}) drives width-preserving transport; None leaves
+    the engine at its configured fixed delay. Returns (out_pos
+    {role: (x,y)|None}, traces {role: [trace per trial]}).
     """
     in_set = set(in_pos)
     out_pos = {term.role: None for term in ttarget.outputs}
@@ -263,8 +260,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, widths=None,
                 sub, routing, in_pos, {}, tr.streams, obs, prune=False,
                 max_events=getattr(ttarget, 'max_events', 2048),
                 sample=need_samples, config=config,
-                input_events=getattr(tr, 'input_events', None), widths=widths,
-                delays=delays, arch=arch)
+                input_events=getattr(tr, 'input_events', None), delays=delays, arch=arch)
             for tr in ttarget.trials]
     trial_states = [run[0] for run in runs]
     trial_events = [run[2] for run in runs]
@@ -330,8 +326,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, widths=None,
     return out_pos, traces
 
 
-def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, widths=None,
-                        delays=None, arch='single'):
+def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, arch='single'):
     """Run target trials at already-selected nervous-net output cells.
 
     Unlike :func:`place_outputs_by_trace`, this function performs no search.
@@ -352,8 +347,7 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, widths=None,
                 sub, routing, in_pos, out_pos, trial.streams, obs,
                 prune=False, max_events=getattr(ttarget, 'max_events', 2048),
                 sample=need_samples, config=config,
-                input_events=getattr(trial, 'input_events', None), widths=widths,
-                delays=delays, arch=arch)
+                input_events=getattr(trial, 'input_events', None), delays=delays, arch=arch)
             for trial in ttarget.trials]
     traces = TemporalTraces(
         {role: [run[1].get(role, []) for run in runs] for role in out_pos},
@@ -379,16 +373,15 @@ def prepare_net(genome, ttarget):
     routing, in_pos, _ = interpret_nervous(grid, ttarget, arch=arch)
     if any(p not in grid for p in in_pos):
         return None
-    # 'evolved_width' timing model: build the per-cell pulse widths from the
-    # genome's node-type width vector (node_widths returns None for every other
-    # model; width-preserving transport derives widths from its waveforms).
-    # The tri substrate runs only uniform/analog physics (width & delay vectors
-    # are single-tile-node-type features), so it never consults these vectors.
+    # Width-preserving transport: build the per-cell delays from the genome's
+    # node-type delay vector (node_delays returns None for every other model,
+    # and that model derives each output width from its incoming waveform).
+    # The tri substrate runs only uniform/analog physics (the delay vector is a
+    # single-tile node-type feature), so it never consults it.
     config = getattr(ttarget, 'pulse_config', None)
-    widths = None if arch == 'tri3' else node_widths(genome, grid, config)
     delays = None if arch == 'tri3' else node_delays(genome, grid, config)
     out_pos, traces = place_outputs_by_trace(grid, routing, in_pos, ttarget,
-                                             widths=widths, delays=delays,
+                                             delays=delays,
                                              arch=arch)
     if any(out_pos[t.role] is None for t in ttarget.outputs):
         return None

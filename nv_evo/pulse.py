@@ -41,17 +41,17 @@ merging ever restores it). That throws away a degree of freedom, so alongside
 the baseline this module offers two variants that give width a role:
 
   * 'uniform'       — fixed WIDTH and DELAY at every node (legacy default)
-  * 'evolved_width' — each node's emitted pulse width is under genetic control
-                      (an evolvable per-node-type multiplier of WIDTH), passed
-                      in as a {cell: width} map. Delay stays DELAY. Pulse width
-                      becomes a heritable trait selection can tune.
   * 'pulse_delay'   — retained as the checkpoint/API identifier for the
                       width-preserving model: both edges are transported after
                       the firing node's evolvable delay d, so [t, t+w) becomes
                       [t+d, t+d+w). A neutral genome uses DELAY everywhere.
 
-All three coincide when every pulse is one WIDTH wide and evolved widths are
-neutral. Legacy runs remain byte-identical under the default 'uniform' model.
+(A third variant made the emitted width itself a per-node-type genetic trait.
+It has been retired: width is no longer an evolvable genome vector anywhere in
+the substrate.)
+
+Both coincide when every pulse is one WIDTH wide. Legacy runs remain
+byte-identical under the default 'uniform' model.
 
 REFRACTORY DIVERGENCE ON WIDE PULSES. A node's refractory period is its own
 output-pulse duration in every model — but under width preservation that
@@ -85,9 +85,6 @@ TICK  = 1.0     # sampling period of the scoring layer (one target tick)
 # every node regenerate one fixed width — see the module docstring above and
 # tests/test_pulse_models.py):
 #   'uniform'       — every node emits width WIDTH after delay DELAY.
-#   'evolved_width' — each node's emitted pulse width is genetic: an evolvable
-#                     per-node-type (routing state) multiplier of WIDTH, supplied
-#                     as a {cell: width} map. Delay stays DELAY.
 #   'pulse_delay'   — historical identifier for evolved-delay, width-preserving
 #                     edge transport: [t, t+w) -> [t+d_node, t+d_node+w).
 # 'paper_analog' selects the analog Fig. 1 node engine (nv_evo/analog.py):
@@ -95,7 +92,7 @@ TICK  = 1.0     # sampling period of the scoring layer (one target tick)
 # and refractory EMERGE instead of being fixed constants. It is a distinct
 # ENGINE, not a timing tweak of this one, but shares the model slot so the run
 # pipeline selects it uniformly. Routing-only evolution (no width/delay vectors).
-NODE_MODELS = ('uniform', 'evolved_width', 'pulse_delay', 'paper_analog')
+NODE_MODELS = ('uniform', 'pulse_delay', 'paper_analog')
 
 
 # ── model families (reference plan's point 5) ───────────────────────────────────
@@ -187,17 +184,15 @@ class PulseSim:
     their wire has pulsed at all (the combinational "did it fire" read-out).
     """
 
-    def __init__(self, grid, routing, max_events=None, config=None, widths=None,
+    def __init__(self, grid, routing, max_events=None, config=None,
                  delays=None, sources=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or PulseConfig()
-        # node-timing model, resolved once. widths {cell: pulse_width} is used
-        # only by the 'evolved_width' model; absent/None cells fall back to
-        # config.width, so an empty map reproduces 'uniform' exactly. delays is
-        # the analogous per-cell map for evolved-delay width preservation.
+        # node-timing model, resolved once. delays {cell: delay} is the per-cell
+        # map for evolved-delay width preservation; absent/None cells fall back
+        # to config.delay, so an empty map reproduces 'uniform' exactly.
         self._model  = self.config.model
-        self._widths = widths or {}
         self._delays = delays or {}
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
         # watch[u] = cells that read u on an excitatory input.
@@ -248,8 +243,8 @@ class PulseSim:
         self._heap = []                               # (time, seq, cell, pulse_end)
         self._seq  = 0
         # The width-preserving model transports drive rises and falls
-        # independently. ``uniform`` and ``evolved_width`` never touch this
-        # state and continue through the legacy interval heap above.
+        # independently. ``uniform`` never touches this state and continues
+        # through the legacy interval heap above.
         self._edge_heap = []                          # (time, seq, kind, cell, drive)
         self._drive_seq = 0
         self._aggregate_seq = 0
@@ -558,13 +553,10 @@ class PulseSim:
             other = s2 if u == s1 else s1
             trig = (t - self.last_edge[v].get(other, _NEG)) <= self.config.coincidence
         if trig:
-            # This is deliberately the unchanged legacy path used only by
-            # uniform and evolved_width. Width-preserving edge transport is
-            # handled by _run_width_preserving_until instead.
-            if self._model == 'evolved_width':
-                width_v = self._widths.get(v, self.config.width)
-            else:
-                width_v = self.config.width
+            # This is deliberately the unchanged legacy path, used only by
+            # 'uniform'. Width-preserving edge transport is handled by
+            # _run_width_preserving_until instead.
+            width_v = self.config.width
             delay_v = self.config.delay
             self.refr_until[v] = t + delay_v + width_v
             self._push(t + delay_v, v, t + delay_v + width_v)

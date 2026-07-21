@@ -69,8 +69,7 @@ def score_frozen(genome, target, fitted):
         raise ValueError('fitted output roles do not match validation target')
 
     if fitted.backend == 'nervous':
-        from .nervous import (grow_nervous, interpret_nervous, node_widths,
-                              node_delays)
+        from .nervous import (grow_nervous, interpret_nervous, node_delays)
         from .temporal import trace_fixed_outputs, score_temporal_bundle
         grid = grow_nervous(genome, seeds=tuple(target.inputs),
                             grid_size=target.grid_size, iters=target.iters)
@@ -80,15 +79,13 @@ def score_frozen(genome, target, fitted):
         routing, in_pos, _ = interpret_nervous(grid, target, arch=arch)
         if any(pos not in grid for pos in in_pos):
             return 0.0
-        # carry the evolved per-node pulse widths into validation too, so a
-        # fitted 'evolved_width' champion is scored on the same physics
-        # (node_widths returns None off that model).
+        # carry the evolved per-node delays into validation too, so a fitted
+        # width-preserving champion is scored on the same physics
+        # (node_delays returns None off that model).
         config = getattr(target, 'pulse_config', None)
-        widths = None if arch == 'tri3' else node_widths(genome, grid, config)
         delays = None if arch == 'tri3' else node_delays(genome, grid, config)
         traces = trace_fixed_outputs(
-            grid, routing, in_pos, out_pos, target, widths=widths,
-            delays=delays, arch=arch)
+            grid, routing, in_pos, out_pos, target, delays=delays, arch=arch)
     elif fitted.backend == 'lut':
         from lut_evo.lut import grow_lut
         from lut_evo.ga import trace_fixed_outputs

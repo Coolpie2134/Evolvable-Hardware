@@ -102,14 +102,13 @@ class NervousPlayer(AsyncPlayer):
 
     def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
                  pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None,
-                 widths=None, delays=None, arch='single', inputs=None):
+                 delays=None, arch='single', inputs=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config
         self.max_events = max_events
-        # Per-cell pulse widths for 'evolved_width'. Width-preserving transport
-        # ignores this map and copies the incoming waveform dynamically.
-        self.widths  = widths
+        # Per-cell delays for width-preserving transport; that model copies the
+        # incoming waveform's duration dynamically rather than regenerating it.
         self.delays  = delays
         self.arch    = arch
         self.inputs  = list(inputs or ())
@@ -126,7 +125,7 @@ class NervousPlayer(AsyncPlayer):
             raise ValueError('unknown tile architecture: %r' % (self.arch,))
         return create_simulator(self.grid, self.routing,
                                 max_events=self.max_events, config=self.config,
-                                widths=self.widths, delays=self.delays)
+                                delays=self.delays)
 
 
 # Display-only RC constants for capacitor-style playback (charge_levels).

@@ -95,7 +95,7 @@ class TemporalTarget:
     supported_backends: Tuple[str, ...] = ()
     # Empty means every nervous node-timing model (see nv_evo/pulse.NODE_MODELS)
     # can attempt the target. Waveform-contract targets demand input-DEPENDENT
-    # output durations, which 'uniform' / 'evolved_width' nodes physically
+    # output durations, which the fixed-width 'uniform' node physically
     # cannot emit (regenerated widths, single-driver wires) — they declare
     # ('pulse_delay',) so a run under the wrong model is filtered out instead
     # of silently capping below 1.0. Only consulted for the nervous backend.

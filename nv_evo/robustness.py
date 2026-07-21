@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from . import pulse
 from . import simulation as ae
-from .nervous import grow_nervous, interpret_nervous, node_widths, node_delays
+from .nervous import grow_nervous, interpret_nervous, node_delays
 
 # The predeclared coverage constants and every interval/retention scorer now
 # live in nv_evo/scoring.py (the coverage relation of the scoring contract).
@@ -53,8 +53,6 @@ def semantic_trial_scores(genome, target, fitted, schedules):
     cell = fitted.output_positions[target.outputs[0].role]
     if cell not in grid:
         return [0.0] * len(schedules)
-    widths = (None if arch == 'tri3' else
-              node_widths(genome, grid, getattr(target, 'pulse_config', None)))
     delays = (None if arch == 'tri3' else
               node_delays(genome, grid, getattr(target, 'pulse_config', None)))
     offset = total_offset(target, fitted)
@@ -68,7 +66,7 @@ def semantic_trial_scores(genome, target, fitted, schedules):
         res, overflow = ae.run_schedule(grid, routing, in_pos, sched, horizon,
                                         [cell], max_events=target.max_events,
                                         config=getattr(target, 'pulse_config', None),
-                                        widths=widths, delays=delays, arch=arch)
+                                        delays=delays, arch=arch)
         if overflow:
             out.append(0.0)
             continue

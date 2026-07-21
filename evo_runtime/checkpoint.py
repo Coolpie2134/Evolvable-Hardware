@@ -33,7 +33,6 @@ def genome_to_dict(genome, backend):
         count = len(chromosome.genes)
         return (0 if count < 2 else
                 max(1, min(int(chromosome.split), count - 1)))
-    sw = getattr(genome, 'state_widths', None)     # nervous 'evolved_width' model
     sd = getattr(genome, 'state_delays', None)     # nervous width-preserving model
     return {
         'tag': int(genome.tag), 'gene_fields': list(fields),
@@ -42,7 +41,6 @@ def genome_to_dict(genome, backend):
              'telomere': int(getattr(c, 'telomere', 1)),
              'genes': [[int(getattr(g, f)) for f in fields] for g in c.genes]}
             for c in genome.chromosomes],
-        'state_widths': ([float(x) for x in sw] if sw else None),
         'state_delays': ([float(x) for x in sd] if sd else None),
         'arch': getattr(genome, 'arch', 'single'),      # nervous tile architecture
     }
@@ -61,9 +59,10 @@ def genome_from_dict(data, backend):
             genes=genes, split=split,
             tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1))))
     genome = Genome(chromosomes=chroms, tag=int(data.get('tag', 0)))
-    sw = data.get('state_widths')                  # nervous 'evolved_width' model
-    if sw and backend == 'nervous':
-        genome.state_widths = [float(x) for x in sw]
+    # 'state_widths' appears in checkpoints written before width evolution was
+    # retired. It is deliberately ignored: the vector no longer exists on the
+    # genome and no engine reads it (RunConfig.from_dict moves such runs onto
+    # the paper's fixed-width 'uniform' node).
     sd = data.get('state_delays')                  # evolved-delay preservation
     if sd and backend == 'nervous':
         genome.state_delays = [float(x) for x in sd]
@@ -165,7 +164,12 @@ def save_checkpoint(path, genome, fitness, target, arch, seed, backend,
 
 
 def save_population(path, genomes, target, backend, valid, run_config=None,
-                   certification=None):
+                   certification=None, fitnesses=None, metadata=None):
+    genomes = list(genomes)
+    if fitnesses is not None:
+        fitnesses = [float(fitness) for fitness in fitnesses]
+        if len(fitnesses) != len(genomes):
+            raise ValueError('population fitness count does not match genome count')
     if (backend == 'nervous'
             and len({getattr(genome, 'arch', 'single')
                      for genome in genomes}) > 1):
@@ -189,6 +193,10 @@ def save_population(path, genomes, target, backend, valid, run_config=None,
         # Held-out certification verdict for the winning genome (advisory
         # provenance: was the solved fitness a real, generalising circuit?).
         'certification': certification,
+        # Optional snapshot provenance.  In particular, stopped runs record
+        # which fully evaluated generation supplied this fixed-file snapshot.
+        'fitnesses': fitnesses,
+        'metadata': metadata,
         'genomes': [genome_to_dict(g, backend) for g in genomes],
     })
 
@@ -211,7 +219,10 @@ def load_checkpoint(path):
         setattr(target, 'pulse_config', run_config.pulse)
         return {'genomes': [genome_from_dict(g, backend) for g in doc['genomes']],
                 'target': target, 'backend': backend,
-                'valid': doc.get('valid', 0.999), 'run_config': run_config}
+                'valid': doc.get('valid', 0.999), 'run_config': run_config,
+                'fitnesses': doc.get('fitnesses'),
+                'metadata': doc.get('metadata'),
+                'certification': doc.get('certification')}
     from snn_evo.snn import Arch
     arch_data = dict(doc['arch']) if doc.get('arch') else None
     if arch_data:

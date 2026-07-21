@@ -11,19 +11,20 @@ DEFAULT_LUT_MAX_TELOMERE = 8
 
 # The only NV Net substrates exposed for NEW runs. Older node models remain in
 # the engine solely so existing checkpoints and controlled comparisons load.
+#: (tile_arch, node_model, evolve_delay) per profile.
 NV_NEW_RUN_PROFILES = {
-    'legacy': ('single', 'pulse_delay', None, None),
+    'legacy': ('single', 'pulse_delay', None),
     # digital_tri isolates the tile-topology variable: the paper's three-circuit
     # tile under the frozen digital node abstraction. With analog_tri and legacy
     # it completes the topology-vs-physics ablation pair.
-    'digital_tri': ('tri3', 'uniform', None, None),
-    'analog_tri': ('tri3', 'paper_analog', None, None),
+    'digital_tri': ('tri3', 'uniform', None),
+    'analog_tri': ('tri3', 'paper_analog', None),
 }
 
 
 def is_current_nv_profile(ga_config):
     profile = (ga_config.tile_arch, ga_config.node_model,
-               ga_config.evolve_width, ga_config.evolve_delay)
+               ga_config.evolve_delay)
     return profile in NV_NEW_RUN_PROFILES.values()
 
 
@@ -69,15 +70,15 @@ class GAConfig:
     # Tri3 supports the fixed digital abstraction and paper_analog physics; the
     # per-node-type width/delay vectors are single-tile features.
     tile_arch: str = 'single'
-    # Timing-mutation toggles, decoupled from the model name for ablations.
-    # ``None`` keeps the model's pairing (evolved_width <-> width mutation,
-    # pulse_delay <-> delay mutation). An explicit False disables the paired
-    # mutation — e.g. node_model='pulse_delay' with evolve_delay=False is
-    # width-preserving transport at the FIXED base delay, isolating width
-    # preservation from delay evolvability. True is only valid under the
-    # matching model: the engine ignores the vectors everywhere else, so
-    # enabling the mutation there would silently evolve dead genes.
-    evolve_width: bool | None = None
+    # Delay-mutation toggle, decoupled from the model name for ablations.
+    # ``None`` keeps the model's pairing (pulse_delay <-> delay mutation). An
+    # explicit False disables it — node_model='pulse_delay' with
+    # evolve_delay=False is width-preserving transport at the FIXED base delay,
+    # isolating width preservation from delay evolvability. True is only valid
+    # under the matching model: the engine ignores the vector everywhere else,
+    # so enabling the mutation there would silently evolve dead genes.
+    # (A companion evolve_width toggle existed until width evolution was
+    # retired from the substrate; old checkpoints carrying it are migrated.)
     evolve_delay: bool | None = None
     max_telomere: int = DEFAULT_MAX_TELOMERE
     # ``None`` keeps the legacy/direct-API behaviour where chromosome count may
@@ -106,10 +107,9 @@ class GAConfig:
             raise ValueError('stagnation_beta must be between 0 and 10')
         if self.selection not in ('tournament', 'lexicase'):
             raise ValueError('selection must be tournament or lexicase')
-        if self.node_model not in ('uniform', 'evolved_width', 'pulse_delay',
-                                   'paper_analog'):
-            raise ValueError('node_model must be uniform, evolved_width, '
-                             'pulse_delay or paper_analog')
+        if self.node_model not in ('uniform', 'pulse_delay', 'paper_analog'):
+            raise ValueError('node_model must be uniform, pulse_delay or '
+                             'paper_analog')
         if self.tile_arch not in ('single', 'tri3'):
             raise ValueError("tile_arch must be 'single' or 'tri3'")
         # tri3 evolves routing only, so it pairs with the routing-only engines:
@@ -120,8 +120,7 @@ class GAConfig:
             raise ValueError("tri3 tile_arch supports node_model 'uniform' or "
                              "'paper_analog' (width/delay vectors are "
                              'single-tile features)')
-        for name, model in (('evolve_width', 'evolved_width'),
-                            ('evolve_delay', 'pulse_delay')):
+        for name, model in (('evolve_delay', 'pulse_delay'),):
             value = getattr(self, name)
             if value is not None and not isinstance(value, bool):
                 raise ValueError('%s must be None (model pairing) or boolean' % name)
@@ -141,19 +140,20 @@ class GAConfig:
             raise ValueError('evaluation_chunk_multiplier must be positive')
 
     def timing_mutations(self):
-        """Resolved ``(evolve_width, evolve_delay)`` booleans for the GA.
+        """Resolved ``evolve_delay`` boolean for the GA.
 
-        ``None`` toggles fall back to the node model's pairing, so existing
-        configs and checkpoints keep today's behaviour unchanged."""
-        width = (self.node_model == 'evolved_width'
-                 if self.evolve_width is None else self.evolve_width)
-        delay = (self.node_model == 'pulse_delay'
-                 if self.evolve_delay is None else self.evolve_delay)
-        return width, delay
+        ``None`` falls back to the node model's pairing, so existing configs
+        and checkpoints keep today's behaviour unchanged."""
+        return (self.node_model == 'pulse_delay'
+                if self.evolve_delay is None else self.evolve_delay)
 
     @classmethod
     def from_dict(cls, values):
-        return cls(**(values or {}))
+        values = dict(values or {})
+        # Width evolution has been retired from the substrate. Old checkpoints
+        # still carry its toggle; drop it rather than fail to load.
+        values.pop('evolve_width', None)
+        return cls(**values)
 
 
 @dataclass(frozen=True)
@@ -175,9 +175,17 @@ class RunConfig:
         pulse_values.pop('delay_gain', None)
         ga_values = dict(values.get('ga') or {})
         # Older checkpoints stored the timing model only with pulse physics.
-        # Promote that value so loading a width/delay-evolving run cannot quietly
+        # Promote that value so loading a delay-evolving run cannot quietly
         # disable its mutation operator.
-        ga_values['node_model'] = pulse_values.get(
-            'model', ga_values.get('node_model', 'uniform'))
+        model = pulse_values.get('model', ga_values.get('node_model', 'uniform'))
+        # Width evolution is retired: a checkpoint saved under it is loaded on
+        # the paper's fixed-width node instead. The genome's dormant width
+        # vector is dropped on load (see checkpoint.genome_from_dict), and the
+        # GUI flags the run as retired physics because 'uniform'+'single' is
+        # not one of NV_NEW_RUN_PROFILES.
+        if model == 'evolved_width':
+            model = 'uniform'
+            pulse_values['model'] = 'uniform'
+        ga_values['node_model'] = model
         return cls(ga=GAConfig.from_dict(ga_values),
                    pulse=PulseConfig(**pulse_values))

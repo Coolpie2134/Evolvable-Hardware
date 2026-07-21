@@ -14,6 +14,42 @@ from .config import RunConfig, MAX_CHROMOSOME_COUNT, validate_new_nv_profile
 from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
+SOLVER_VALID = 0.999
+
+
+def save_solver_generation(results_dir, population, fitnesses, target, backend,
+                           run_config, *, status, source_try=None,
+                           source_generation=None, certification=None):
+    """Replace the fixed solver snapshot with valid members of one generation.
+
+    ``population`` and ``fitnesses`` must describe a fully evaluated generation.
+    Keeping this operation here makes Stop use the same atomic population writer
+    as normal completion, without creating timestamped history files.
+    """
+    population = list(population)
+    fitnesses = list(fitnesses)
+    if len(population) != len(fitnesses):
+        raise ValueError('solver snapshot population/fitness count mismatch')
+    valid_pairs = [
+        (genome, fitness)
+        for genome, fitness in zip(population, fitnesses)
+        if fitness >= SOLVER_VALID
+    ]
+    genomes = [genome for genome, _fitness in valid_pairs]
+    solver_fitnesses = [fitness for _genome, fitness in valid_pairs]
+    path = os.path.join(results_dir, 'solver_generation.json')
+    save_population(
+        path, genomes, target, backend, SOLVER_VALID, run_config,
+        certification=certification, fitnesses=solver_fitnesses,
+        metadata={
+            'status': status,
+            'source': 'latest-fully-evaluated-generation',
+            'try': source_try,
+            'generation': source_generation,
+        })
+    return path, len(genomes)
+
+
 def wait_for_resume(pause_event, stop_event, messages):
     """Block at a safe boundary until Resume, remaining Stop-responsive."""
     announced = False
@@ -79,15 +115,15 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
-        # Resolve the timing-mutation toggles once so diversification mutates
+        # Resolve the delay-mutation toggle once so diversification mutates
         # under exactly the same operator set as the main GA loop.
-        evolve_width, evolve_delay = config.ga.timing_mutations()
+        evolve_delay = config.ga.timing_mutations()
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,
             max_telomere=config.ga.max_telomere,
             chromosome_count=chromosome_count,
-            evolve_width=evolve_width, evolve_delay=evolve_delay,
+            evolve_delay=evolve_delay,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     elif backend == 'lut':
@@ -164,6 +200,22 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
 
     best_fit, best_genome, best_rank = 0.0, None, None
     population, fitnesses = [], []
+    latest_population, latest_fitnesses = [], []
+    latest_try, latest_generation = None, None
+    certification = None
+
+    def save_latest_solver_generation(status):
+        """Non-fatal persistence: a save problem must not lose best_genome."""
+        try:
+            path, count = save_solver_generation(
+                results_dir, latest_population, latest_fitnesses,
+                target, backend, config, status=status,
+                source_try=latest_try, source_generation=latest_generation,
+                certification=certification)
+            messages.put(('solver_saved', count, SOLVER_VALID, status, path))
+        except Exception:
+            messages.put(('solver_save_error', traceback.format_exc(limit=3)))
+
     try:
         for try_i in range(1, tries + 1):
             if stop_event.is_set():
@@ -182,6 +234,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             validate_population(population)
             fitnesses, cases = evaluate(
                 population, 'Evaluating initial population', try_i, 0)
+            latest_population, latest_fitnesses = population, fitnesses
+            latest_try, latest_generation = try_i, 0
             bi = max(range(pop),
                      key=lambda index: rank_fn(population[index], fitnesses[index]))
             champion, run_fit = copy.deepcopy(population[bi]), fitnesses[bi]
@@ -222,6 +276,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     population, fitnesses, cases = (
                         offspring, offspring_fitnesses, offspring_cases)
                 validate_population(population)
+                latest_population, latest_fitnesses = population, fitnesses
+                latest_try, latest_generation = try_i, generation
                 gi = max(
                     range(pop),
                     key=lambda index: rank_fn(
@@ -245,7 +301,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # FRESH held-out schedules (readout/alignment frozen) and emit a verdict
         # so a memorised-timing / leaky solution is flagged rather than trusted.
         # Advisory only — a failure here must never sink the run.
-        certification = None
         if (backend in ('nervous', 'lut') and best_genome is not None
                 and not stop_event.is_set()):
             try:
@@ -256,19 +311,35 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             except Exception:
                 certification = None
 
-        if (diversify_fn is not None and best_genome is not None
-                and best_fit >= 0.999 and not stop_event.is_set()):
-            valid = 0.999
+        if stop_event.is_set() and backend in ('nervous', 'lut'):
+            save_latest_solver_generation('stopped')
+        elif (diversify_fn is not None and best_genome is not None
+                and best_fit >= SOLVER_VALID):
+            valid = SOLVER_VALID
             messages.put(('phase', 'Preparing solved-circuit diversity', 0, 25, 0))
             seeds = [g for g, f in zip(population, fitnesses) if f >= valid] or [best_genome]
             diverse = diversify_fn(seeds, valid)
-            if diverse:
-                path = os.path.join(results_dir, 'solver_generation.json')
-                save_population(path, diverse, target, backend, valid, config,
-                                certification=certification)
+            path = os.path.join(results_dir, 'solver_generation.json')
+            save_population(
+                path, diverse, target, backend, valid, config,
+                certification=certification,
+                metadata={
+                    'status': ('stopped' if stop_event.is_set() else 'complete'),
+                    'source': 'diversified-solvers',
+                    'try': latest_try,
+                    'generation': latest_generation,
+                })
+            if stop_event.is_set():
+                messages.put(('solver_saved', len(diverse), valid, 'stopped', path))
+            else:
                 messages.put(('diverse', len(diverse), valid))
+        elif backend in ('nervous', 'lut'):
+            # Replace an older solved run with an honest empty snapshot.  An
+            # unsolved current run must never leave stale solvers looking current.
+            save_latest_solver_generation('complete')
     except EvolutionCancelled:
-        pass
+        if backend in ('nervous', 'lut'):
+            save_latest_solver_generation('stopped')
     except Exception:
         messages.put(('error', traceback.format_exc(limit=5)))
     finally:

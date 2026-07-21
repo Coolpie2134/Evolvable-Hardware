@@ -21,7 +21,7 @@ import random
 from . import pulse
 from . import simulation as ae
 from .targets import TemporalTarget, Trial, OutputTerminal
-from .nervous import grow_nervous, interpret_nervous, node_widths, node_delays
+from .nervous import grow_nervous, interpret_nervous, node_delays
 from .temporal import _output_candidates
 from .scoring import (parity_intervals, score_retention_graded,
                       score_retention, score_interval_graded,
@@ -116,7 +116,6 @@ def evaluate_retention(genome, target):
     config = getattr(target, 'pulse_config', None)
     D = pulse.DELAY if config is None else config.delay
     W = pulse.WIDTH if config is None else config.width
-    widths = None if arch == 'tri3' else node_widths(genome, grid, config)
     delays = None if arch == 'tri3' else node_delays(genome, grid, config)
     offsets = [target.latency + k for k in _OFFSETS]
 
@@ -133,8 +132,8 @@ def evaluate_retention(genome, target):
         run_h = H + max(offsets) + 4 * (D + W)
         res, overflow = ae.run_schedule(grid, routing, in_pos, sched, run_h, cands,
                                         max_events=_event_cap(len(grid), H, config),
-                                        config=config, widths=widths,
-                                        delays=delays, arch=arch)
+                                        config=config, delays=delays,
+                                        arch=arch)
         for c in cands:
             for o in offsets:
                 s = 0.0 if overflow else score_retention_graded(res[c], intervals, o)
@@ -303,7 +302,6 @@ def _evaluate_sr_details(genome, target, fitted=None):
     config = getattr(target, 'pulse_config', None)
     D = pulse.DELAY if config is None else config.delay
     W = pulse.WIDTH if config is None else config.width
-    widths = None if arch == 'tri3' else node_widths(genome, grid, config)
     delays = None if arch == 'tri3' else node_delays(genome, grid, config)
     for trial, run in zip(target.trials, target._sr_runs):
         horizon = len(trial.streams)
@@ -313,7 +311,7 @@ def _evaluate_sr_details(genome, target, fitted=None):
         traces, overflow = ae.run_schedule(
             grid, routing, in_pos, schedule, run_horizon, candidates,
             max_events=_event_cap(len(grid), horizon, config),
-            config=config, widths=widths, delays=delays, arch=arch)
+            config=config, delays=delays, arch=arch)
         for cell in candidates:
             for offset in offsets:
                 profiles[(cell, offset)].extend(

@@ -62,7 +62,7 @@ def oracle_spec_for(target):
 # The run's physics config lives on the (mutable) training target the controller
 # built (setattr'd pulse_config / lut_config). Fresh spec-built holdout targets
 # start WITHOUT it, so without carrying it forward a champion evolved under a
-# non-default node-timing model (evolved_width / pulse_delay) would be certified
+# non-default node-timing model (pulse_delay / paper_analog) would be certified
 # under the default uniform physics — every such run would read as OVERFIT. Copy
 # it onto each spec target so fit + holdout run under the SAME physics as training.
 _PHYSICS_ATTRS = ('pulse_config', 'lut_config')

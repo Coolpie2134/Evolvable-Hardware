@@ -58,7 +58,6 @@ from evo_runtime.mutation import adaptive_mutation_rate
 from evo_runtime.parallel import map_ordered
 
 from .genome import (MAX_STATE, TRI_STATE_MAX, MAX_GENES, MAX_CHROMS, MAX_TELOMERE,
-                     WIDTH_MULT_MIN, WIDTH_MULT_MAX, default_state_widths,
                      DELAY_MULT_MIN, DELAY_MULT_MAX, default_state_delays,
                      Genome, Chromosome, germline_telomere,
                      random_hex_gene, random_hex_chromosome, random_hex_genome)
@@ -72,14 +71,12 @@ def clone_genome(genome):
     gene objects is equivalent to deep-copying them. copy.deepcopy dominated
     reproduction (~90% of next_population's time); this replaces it on the hot
     path with an identical-behaviour, ~10x cheaper copy."""
-    sw = getattr(genome, 'state_widths', None)
     sd = getattr(genome, 'state_delays', None)
     return Genome(
         chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
                                 telomere=getattr(c, 'telomere', MAX_TELOMERE))
                      for c in genome.chromosomes],
         tag=genome.tag,
-        state_widths=(sw[:] if sw else None),
         state_delays=(sd[:] if sd else None),
         arch=getattr(genome, 'arch', 'single'))
 from .temporal import (prepare_net, score_temporal_bundle, loop_profile,
@@ -203,11 +200,10 @@ def genome_signature(genome):
          tuple((g.ctx_l, g.ctx_r, g.ctx_d, g.self_in, g.self_out)
                for g in c.genes))
         for c in genome.chromosomes)
-    sw = getattr(genome, 'state_widths', None)
     sd = getattr(genome, 'state_delays', None)
     # arch is part of identity: the same integer fields decode to different
     # hardware under 'single' vs 'tri3', so they must never share a cache slot.
-    return (chroms, tuple(sw) if sw else None, tuple(sd) if sd else None,
+    return (chroms, tuple(sd) if sd else None,
             getattr(genome, 'arch', 'single'))
 
 
@@ -406,24 +402,6 @@ def _tweak_gene(gene, bits=_STATE_BITS):
     return g
 
 
-def _mutate_state_width(genome):
-    """'evolved_width' model (V2): nudge ONE node-type's pulse-width multiplier.
-
-    Builds a fresh width vector (copy-on-write; genomes share gene objects and
-    now width vectors, so never edit in place). A None vector is lazily born as
-    all-1.0 (identical to uniform) so the first width mutation is the ONLY thing
-    that makes a genome behave differently from the paper's node — evolution
-    reaches variable widths gradually. The multiplier walks geometrically within
-    [WIDTH_MULT_MIN, WIDTH_MULT_MAX] of PulseConfig.width."""
-    base = genome.state_widths
-    widths = list(base) if base else default_state_widths()
-    # states 1..MAX_STATE-1 are live node types; 0 is dead (never pulses)
-    s = random.randrange(1, MAX_STATE)
-    factor = random.choice((0.5, 0.7, 0.85, 1.0 / 0.85, 1.0 / 0.7, 1.0 / 0.5))
-    widths[s] = min(WIDTH_MULT_MAX, max(WIDTH_MULT_MIN, widths[s] * factor))
-    genome.state_widths = widths
-
-
 def _mutate_state_delay(genome):
     """Nudge one routing state's width-preserving propagation delay."""
     base = genome.state_delays
@@ -437,20 +415,19 @@ def _mutate_state_delay(genome):
 
 
 _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
-                "add_chrom", "del_chrom", "split", "telomere", "width", "delay"]
-# Width and delay appear only for their corresponding timing models. Their
-# weights keep timing tuning frequent enough to evolve alongside routing.
-_MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08, 0.30, 0.30]
+                "add_chrom", "del_chrom", "split", "telomere", "delay"]
+# Delay appears only under the width-preserving model. Its weight keeps timing
+# tuning frequent enough to evolve alongside routing.
+_MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08, 0.30]
 
 
 def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
-                    chromosome_count=None, evolve_width=False,
-                    evolve_delay=False):
+                    chromosome_count=None, evolve_delay=False):
     """Apply one feasible, state-changing mutation to a nervous-net genome.
 
-    ``evolve_width`` (the 'evolved_width' timing model, V2) adds a mutation that
-    tunes a node type's pulse width. It is off for the paper's 'uniform' node
-    and for 'pulse_delay', which instead enables ``evolve_delay``."""
+    ``evolve_delay`` (the width-preserving 'pulse_delay' model) adds a mutation
+    that tunes a node type's propagation delay. It is off for the paper's
+    'uniform' node."""
     bits = _arch_bits(genome)
     if not genome.chromosomes:
         genome.chromosomes.append(_arch_random_chromosome(genome, max_telomere))
@@ -459,8 +436,6 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
     chroms = genome.chromosomes
     with_genes = [c for c in chroms if c.genes]
     options = []
-    if evolve_width:
-        options.append('width')
     if evolve_delay:
         options.append('delay')
     if with_genes:
@@ -491,9 +466,7 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
 
     weights = [_MUT_WEIGHTS[_MUT_OPS.index(op)] for op in options]
     op = random.choices(options, weights=weights)[0]
-    if op == 'width':
-        _mutate_state_width(genome)
-    elif op == 'delay':
+    if op == 'delay':
         _mutate_state_delay(genome)
     elif op == 'tweak':
         chrom = random.choice(with_genes)
@@ -523,23 +496,20 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
         chrom.telomere = random.choice(values)
 
 
-def timing_mutation_flags(model, evolve_width=None, evolve_delay=None):
-    """Resolve the timing-mutation toggles for a node-timing model.
+def timing_mutation_flags(model, evolve_delay=None):
+    """Resolve the delay-mutation toggle for a node-timing model.
 
-    ``None`` keeps the model's pairing ('evolved_width' <-> width mutation,
-    'pulse_delay' <-> delay mutation) — today's behaviour. An explicit False
-    disables the paired mutation, e.g. 'pulse_delay' with fixed delays: the
-    width-preserving ablation that isolates width preservation from delay
-    evolvability when comparing models."""
-    if evolve_width is None:
-        evolve_width = model == 'evolved_width'
+    ``None`` keeps the model's pairing ('pulse_delay' <-> delay mutation) —
+    today's behaviour. An explicit False disables it, giving width-preserving
+    transport at the FIXED base delay: the ablation that isolates width
+    preservation from delay evolvability when comparing models."""
     if evolve_delay is None:
         evolve_delay = model == 'pulse_delay'
-    return evolve_width, evolve_delay
+    return evolve_delay
 
 
 def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
-              chromosome_count=None, evolve_width=False, evolve_delay=False):
+              chromosome_count=None, evolve_delay=False):
     if (chromosome_count is not None
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
@@ -552,18 +522,17 @@ def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
     for _ in range(events - 1):
         _mutate_once_nv(g, max_telomere=max_telomere,
                         chromosome_count=chromosome_count,
-                        evolve_width=evolve_width, evolve_delay=evolve_delay)
+                        evolve_delay=evolve_delay)
     if events == 1:
         _mutate_once_nv(g, max_telomere=max_telomere,
                         chromosome_count=chromosome_count,
-                        evolve_width=evolve_width, evolve_delay=evolve_delay)
+                        evolve_delay=evolve_delay)
     else:
         # A single mandatory routing tweak guarantees non-clone novelty. When
         # timing is evolving on top of settled routing, also give the transaction
         # a chance to land on a timing edit so runs do not stall on routing churn.
-        if (evolve_width or evolve_delay) and random.random() < 0.5:
-            (_mutate_state_width(g) if evolve_width
-             else _mutate_state_delay(g))
+        if evolve_delay and random.random() < 0.5:
+            _mutate_state_delay(g)
         else:
             _force_nonparent_tweak(g, genome)
     for chromosome in g.chromosomes:
@@ -745,7 +714,7 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, selection=None, ga_config=None,
                     chromosome_count=None, recombination=True,
-                    evolve_width=None, evolve_delay=None):
+                    evolve_delay=None):
     """One generation of a steady, exploratory GA — elitism preserves the best,
     the rest are tournament/ε-lexicase parents recombined and mutated, plus a
     few random immigrants that keep exploration alive.
@@ -783,20 +752,14 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         # under the same integer genome.
         make_genome = lambda: random_hex_genome(chromosome_count or 2,
                                                 arch=pop_arch)
-    # Enable the timing mutation belonging to the selected node model. Explicit
-    # arguments win; otherwise read the run configuration — its evolve_width /
-    # evolve_delay toggles override the model pairing (None = paired).
-    if evolve_width is None or evolve_delay is None:
+    # Enable the timing mutation belonging to the selected node model. An
+    # explicit argument wins; otherwise read the run configuration — its
+    # evolve_delay toggle overrides the model pairing (None = paired).
+    if evolve_delay is None:
         model = (getattr(ga_config, 'node_model', 'uniform')
                  if ga_config is not None else 'uniform')
-        cfg_width, cfg_delay = timing_mutation_flags(
-            model,
-            getattr(ga_config, 'evolve_width', None),
-            getattr(ga_config, 'evolve_delay', None))
-        if evolve_width is None:
-            evolve_width = cfg_width
-        if evolve_delay is None:
-            evolve_delay = cfg_delay
+        evolve_delay = timing_mutation_flags(
+            model, getattr(ga_config, 'evolve_delay', None))
     n_elite = elite_count if elite_count is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
     n_imm   = min(int(round(pop * immigrant_fraction)), pop)
@@ -897,15 +860,13 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             ca, mean_mutations,
             max_telomere=(MAX_TELOMERE if ga_config is None
                           else ga_config.max_telomere),
-            chromosome_count=chromosome_count, evolve_width=evolve_width,
-            evolve_delay=evolve_delay))
+            chromosome_count=chromosome_count,            evolve_delay=evolve_delay))
         if len(new_pop) < pop:
             new_pop.append(mutate_nv(
                 cb, mean_mutations,
                 max_telomere=(MAX_TELOMERE if ga_config is None
                               else ga_config.max_telomere),
-                chromosome_count=chromosome_count, evolve_width=evolve_width,
-                evolve_delay=evolve_delay))
+                chromosome_count=chromosome_count,                evolve_delay=evolve_delay))
     if (chromosome_count is not None
             and any(len(genome.chromosomes) != chromosome_count
                     for genome in new_pop)):
@@ -964,7 +925,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
 
         # The target's timing model enables its matching timing mutation.
         _pc = getattr(target, 'pulse_config', None)
-        evolve_width, evolve_delay = timing_mutation_flags(
+        evolve_delay = timing_mutation_flags(
             getattr(_pc, 'model', 'uniform') if _pc is not None else 'uniform')
         solved_at, stagnation = None, 0
         mut_rate = MEAN_MUTATIONS           # annealing schedule (see MUT_DECAY)
@@ -981,7 +942,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             offspring = next_population(
                 parents, parent_fitnesses, make_genome, parent_cases, mm,
                 selection=selection, chromosome_count=n_chroms,
-                evolve_width=evolve_width, evolve_delay=evolve_delay)
+                evolve_delay=evolve_delay)
             offspring_fitnesses, offspring_cases = eval_batch_cases(
                 offspring, target, cache, ex)
             if max(best_fitness, max(offspring_fitnesses)) >= 1.0:
@@ -1024,7 +985,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
               cache=None, executor=None, should_stop=None, on_progress=None,
               max_telomere=MAX_TELOMERE, chromosome_count=None,
-              evolve_width=None, evolve_delay=None):
+              evolve_delay=None):
     """Fill a population with evaluated, genetically distinct valid offspring.
 
     Distinctness is based on the rule alleles crossover can exchange, not tags,
@@ -1057,8 +1018,7 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
     if not pool:
         return pool
     model = getattr(getattr(target, 'pulse_config', None), 'model', 'uniform')
-    evolve_width, evolve_delay = timing_mutation_flags(
-        model, evolve_width, evolve_delay)
+    evolve_delay = timing_mutation_flags(model, evolve_delay)
     for round_i in range(rounds):
         if len(pool) >= pop_size or should_stop():
             break
@@ -1078,7 +1038,6 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
                 base = parent_a
             c = mutate_nv(base, max_telomere=max_telomere,
                           chromosome_count=chromosome_count,
-                          evolve_width=evolve_width,
                           evolve_delay=evolve_delay)
             s = _recombination_signature(c)
             if s not in seen:

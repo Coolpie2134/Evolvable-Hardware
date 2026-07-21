@@ -47,9 +47,9 @@ class _Parent:
 
 def test_app_exposes_only_the_current_nv_profiles():
     assert NV_NEW_RUN_PROFILES == {
-        'legacy': ('single', 'pulse_delay', None, None),
-        'digital_tri': ('tri3', 'uniform', None, None),
-        'analog_tri': ('tri3', 'paper_analog', None, None),
+        'legacy': ('single', 'pulse_delay', None),
+        'digital_tri': ('tri3', 'uniform', None),
+        'analog_tri': ('tri3', 'paper_analog', None),
     }
     assert is_current_nv_profile(GAConfig(
         tile_arch='single', node_model='pulse_delay'))
@@ -69,10 +69,10 @@ def test_app_exposes_only_the_current_nv_profiles():
         'Var', (), {'get': lambda self: self.value})()
     app._nv_profile_var.value = 'Legacy'
     assert App._selected_tile_arch(app) == 'single'
-    assert App._selected_node_model(app) == ('pulse_delay', None, None)
+    assert App._selected_node_model(app) == ('pulse_delay', None)
     app._nv_profile_var.value = 'Analog'
     assert App._selected_tile_arch(app) == 'tri3'
-    assert App._selected_node_model(app) == ('paper_analog', None, None)
+    assert App._selected_node_model(app) == ('paper_analog', None)
 
 
 def test_new_nv_run_validation_rejects_every_retired_pairing():
@@ -84,7 +84,6 @@ def test_new_nv_run_validation_rejects_every_retired_pairing():
         tile_arch='tri3', node_model='paper_analog'))
     for config in (
             GAConfig(tile_arch='single', node_model='uniform'),
-            GAConfig(tile_arch='single', node_model='evolved_width'),
             GAConfig(tile_arch='single', node_model='paper_analog'),
             GAConfig(tile_arch='single', node_model='pulse_delay',
                      evolve_delay=False)):

@@ -23,15 +23,13 @@ from . import pulse
 from .pulse import PulseSim
 
 
-def create_simulator(grid, routing, max_events=None, config=None, widths=None,
-                     delays=None, sources=None):
+def create_simulator(grid, routing, max_events=None, config=None, delays=None, sources=None):
     """Construct the configured simulator used by every Nervous consumer.
 
-    ``widths`` ({cell: pulse_width}) is consumed only by the 'evolved_width'
-    model. ``delays`` is consumed only by width-preserving transport; its output
-    width is still derived dynamically from the incoming waveform. ``sources``
-    ({node: (s1, s2, si)}) pre-resolves feeder nodes for the tri-tile substrate;
-    None keeps the single-circuit hex_dirs decode."""
+    ``delays`` ({cell: delay}) is consumed only by width-preserving transport;
+    its output width is derived dynamically from the incoming waveform.
+    ``sources`` ({node: (s1, s2, si)}) pre-resolves feeder nodes for the
+    tri-tile substrate; None keeps the single-circuit hex_dirs decode."""
     if max_events is None and config is not None:
         max_events = config.event_cap
     if config is not None and getattr(config, 'model', 'uniform') == 'paper_analog':
@@ -50,7 +48,7 @@ def create_simulator(grid, routing, max_events=None, config=None, widths=None,
         return AnalogPulseSim(grid, routing, max_events=max_events,
                               config=acfg, sources=sources)
     return PulseSim(grid, routing, max_events=max_events, config=config,
-                    widths=widths, delays=delays, sources=sources)
+                    delays=delays, sources=sources)
 
 
 def normalize(schedule):
@@ -101,22 +99,22 @@ def streams_to_schedule(streams, n_inputs, T, config=None):
 
 
 def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
-                 max_events=None, config=None, widths=None, delays=None,
+                 max_events=None, config=None, delays=None,
                  return_intervals=False, arch='single'):
     """Inject `schedule` at float times and run the event-driven sim to
     `horizon`, enforcing `max_events` (overflow ⇒ the run is invalid, exactly as
     in scoring). Returns ({cell: [leading-edge times]}, overflow) for `out_cells`
     (all live cells if None) — continuous, no tick quantisation.
 
-    ``widths`` drives evolved width; ``delays`` drives evolved-delay,
-    width-preserving transport. Set ``return_intervals`` to receive complete
-    physical output intervals instead of leading edges."""
+    ``delays`` drives evolved-delay, width-preserving transport. Set
+    ``return_intervals`` to receive complete physical output intervals instead
+    of leading edges."""
     if arch == 'tri3':
         from .tritile import TriSim
         sim = TriSim(grid, in_pos, max_events=max_events, config=config)
     elif arch == 'single':
         sim = create_simulator(grid, routing, max_events=max_events,
-                               config=config, widths=widths, delays=delays)
+                               config=config, delays=delays)
     else:
         raise ValueError('unknown tile architecture: %r' % (arch,))
     for i, cell in enumerate(in_pos):

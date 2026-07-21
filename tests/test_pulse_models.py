@@ -1,22 +1,20 @@
 """
-tests/test_pulse_models.py — the three nervous-net node-timing models.
+tests/test_pulse_models.py — the nervous-net node-timing models.
 
 The paper's node regenerates ONE fixed pulse width after ONE fixed delay, so an
 input pulse's LENGTH is discarded past the first node (see the discussion in
-nv_evo/pulse.py). Two variants restore width as a usable degree of freedom:
+nv_evo/pulse.py). One variant restores width as a usable degree of freedom:
 
-  * 'uniform'       — the paper (fixed width + delay). Must be BYTE-IDENTICAL to
-                      the engine before this feature, whether or not a genome
-                      carries a width vector and whether or not a config is
-                      passed. This is the "keep the architecture the same" leg.
-  * 'evolved_width' — each node TYPE (routing state) has an evolvable pulse-width
-                      multiplier; a node's emitted pulse takes that width. Delay
-                      unchanged. Verified: the emitted width follows the map, a
-                      neutral (all-1.0) vector reproduces uniform, mutation can
-                      change a width, and the fitness cache is not width-blind.
+  * 'uniform'       — the paper (fixed width + delay). Must be BYTE-IDENTICAL
+                      to the engine before these variants existed, whether or
+                      not a config is passed. The "keep the architecture the
+                      same" leg.
   * 'pulse_delay'   — historical API identifier for width-preserving transport:
                       both pulse edges move by the same evolved node delay, so
                       [t,t+w) becomes [t+d_node,t+d_node+w).
+
+(A third model made the emitted width a per-node-type genome vector; width
+evolution has been retired and its tests removed.)
 
 Run under pytest, or standalone:  py tests/test_pulse_models.py
 """
@@ -30,11 +28,10 @@ from nv_evo.pulse import PulseSim, PulseConfig, TICK          # noqa: E402
 from nv_evo.hexgrid import hex_dirs                           # noqa: E402
 from nv_evo import random_hex_genome                          # noqa: E402
 from nv_evo.ga import (evaluate_nv_full, genome_signature,    # noqa: E402
-                       mutate_nv, _mutate_state_width,
-                       _mutate_state_delay)
-from nv_evo.nervous import (node_widths, node_delays, grow_nervous,  # noqa: E402
+                       mutate_nv, _mutate_state_delay)
+from nv_evo.nervous import (node_delays, grow_nervous,  # noqa: E402
                             interpret_nervous)
-from nv_evo.genome import (default_state_widths, default_state_delays,  # noqa: E402
+from nv_evo.genome import (default_state_delays,  # noqa: E402
                            MAX_STATE)
 from nv_evo.targets import TEMPORAL_TARGETS                   # noqa: E402
 from nv_evo.temporal import (score_temporal_bundle, TemporalTraces,  # noqa: E402
@@ -115,101 +112,11 @@ def test_uniform_is_the_legacy_default():
         assert abs((sim.pulse_until[b] - sim.pulse_start[b]) - 1.0) <= TOL
 
 
-def test_uniform_scoring_identical_with_and_without_widthvector():
-    """A uniform run must ignore any width vector on the genome and any explicit
-    uniform config — the 'keep it the same' guarantee for the fitness path."""
-    random.seed(1)
-    names = ['SR latch', 'Toggle flip-flop', 'Echo (delay 3)',
-             'Pair detector (gap 2)']
-    for nm in names:
-        t = TEMPORAL_TARGETS[nm]
-        for _ in range(4):
-            g = random_hex_genome(2)
-            base = evaluate_nv_full(g, t)
-            # attach a (neutral and even a non-neutral) width vector: uniform
-            # must ignore it entirely
-            g.state_widths = default_state_widths()
-            g.state_widths[5] = 3.0
-            same = evaluate_nv_full(g, t)
-            assert base == same, "uniform model must ignore genome widths (%s)" % nm
 
 
-# ── V2: evolved_width ────────────────────────────────────────────────────────────
-
-def test_evolved_width_sets_emitted_pulse_width():
-    """A node's emitted pulse width follows its per-cell width; delay unchanged."""
-    grid, routing, a, b = _buffer_pair()
-    for m in (0.5, 1.0, 2.0, 3.0):
-        sim = PulseSim(grid, routing, config=PulseConfig(model='evolved_width'),
-                       widths={b: TICK * m})
-        sim.inject_pulse(a, 0.0, 1.0)
-        sim.advance_to(40.0)
-        dur = sim.pulse_until[b] - sim.pulse_start[b]
-        assert abs(dur - TICK * m) <= TOL, "emitted width must equal the node width"
-        assert sim.rise_times[b] == [1.0], "delay stays fixed in evolved_width"
 
 
-def test_evolved_width_neutral_vector_matches_uniform():
-    """An all-1.0 width vector reproduces uniform exactly (V1 ⊆ V2)."""
-    grid, routing, a, b = _buffer_pair()
-    widths = {b: TICK}
-    u = PulseSim(grid, routing, config=PulseConfig())
-    u.inject_pulse(a, 0.0, 1.0); u.advance_to(30.0)
-    e = PulseSim(grid, routing, config=PulseConfig(model='evolved_width'),
-                 widths=widths)
-    e.inject_pulse(a, 0.0, 1.0); e.advance_to(30.0)
-    assert u.rise_times == e.rise_times
-    assert u.pulse_until[b] == e.pulse_until[b]
 
-
-def test_node_widths_maps_states_to_multipliers():
-    """node_widths applies the genome's per-state multiplier against config.width,
-    and returns None off the 'evolved_width' model (the gate lives in the helper,
-    so every scoring path is width-consistent and uniform provably ignores it)."""
-    random.seed(3)
-    g = random_hex_genome(2)
-    t = TEMPORAL_TARGETS['Echo (delay 3)']
-    grid = grow_nervous(g, seeds=tuple(t.inputs))
-    ew = PulseConfig(model='evolved_width', width=1.5)
-    assert node_widths(g, grid, ew) is None                  # no vector -> uniform
-    g.state_widths = default_state_widths()
-    g.state_widths[1] = 2.0                                   # seed/live state 1
-    # off the evolved_width model, the vector is ignored regardless
-    assert node_widths(g, grid, PulseConfig(width=1.5)) is None          # uniform
-    assert node_widths(g, grid, PulseConfig(model='pulse_delay')) is None
-    assert node_widths(g, grid, None) is None
-    w = node_widths(g, grid, ew)
-    for pos, state in grid.items():
-        assert abs(w[pos] - 1.5 * g.state_widths[state & 0x1F]) <= TOL
-
-
-def test_width_mutation_changes_behavior_and_signature():
-    """The width mutation initialises + perturbs the vector, and the fitness
-    cache signature reflects it (so V2 genomes are not width-aliased)."""
-    random.seed(5)
-    g = random_hex_genome(2)
-    assert g.state_widths is None
-    sig0 = genome_signature(g)
-    _mutate_state_width(g)
-    assert g.state_widths is not None and len(g.state_widths) == MAX_STATE
-    assert genome_signature(g) != sig0, "width must enter the cache signature"
-    # some entry now differs from 1.0
-    assert any(abs(x - 1.0) > TOL for x in g.state_widths)
-
-
-def test_evolve_width_mutation_only_under_the_model():
-    """mutate_nv(evolve_width=False) never grows a width vector; True can."""
-    random.seed(7)
-    g = random_hex_genome(2)
-    for _ in range(40):
-        g = mutate_nv(g, mean_mutations=3.0, evolve_width=False)
-    assert g.state_widths is None, "uniform/pulse_delay runs must not evolve widths"
-    saw_widths = False
-    for _ in range(40):
-        g = mutate_nv(g, mean_mutations=3.0, evolve_width=True)
-        if g.state_widths is not None:
-            saw_widths = True
-    assert saw_widths, "evolved_width runs must be able to grow a width vector"
 
 
 # ── V3: evolved-delay width preservation (legacy id: pulse_delay) ─────────────
@@ -264,7 +171,7 @@ def test_node_delays_maps_states_and_is_model_gated():
     g.state_delays = default_state_delays()
     g.state_delays[1] = 1.5
     assert node_delays(g, grid, PulseConfig()) is None
-    assert node_delays(g, grid, PulseConfig(model='evolved_width')) is None
+    assert node_delays(g, grid, PulseConfig(model='uniform')) is None
     delays = node_delays(g, grid, cfg)
     for pos, state in grid.items():
         assert abs(delays[pos] - 2.0 * g.state_delays[state & 0x1F]) <= TOL
@@ -707,32 +614,17 @@ def test_pulse_delay_rejects_invalid_injected_intervals():
 
 # ── cross-model comparability guards ─────────────────────────────────────────────
 
-def test_width_mult_floor_is_sampler_visible():
-    """Evolved pulse widths stay >= half a tick: trace/persistence scoring
-    samples once at mid-tick, so a narrower pulse rising on the tick lattice
-    would fire yet read as silent — a score-mode artifact, not behaviour."""
-    from nv_evo.genome import WIDTH_MULT_MIN
-    assert WIDTH_MULT_MIN >= 0.5
-    random.seed(11)
-    g = random_hex_genome(2)
-    for _ in range(200):
-        _mutate_state_width(g)
-    assert min(g.state_widths) >= WIDTH_MULT_MIN - TOL
-
 
 def test_ga_config_timing_toggles_default_to_model_pairing():
     from evo_runtime.config import GAConfig
-    assert GAConfig().timing_mutations() == (False, False)
-    assert GAConfig(node_model='evolved_width').timing_mutations() == (True, False)
-    assert GAConfig(node_model='pulse_delay').timing_mutations() == (False, True)
+    assert GAConfig().timing_mutations() is False
+    assert GAConfig(node_model='pulse_delay').timing_mutations() is True
     # the fixed-delay ablation: width-preserving transport, no delay mutation
     fixed = GAConfig(node_model='pulse_delay', evolve_delay=False)
-    assert fixed.timing_mutations() == (False, False)
+    assert fixed.timing_mutations() is False
     # a mutation whose vector the engine ignores must be rejected, not evolved
     for bad in (dict(node_model='uniform', evolve_delay=True),
-                dict(node_model='uniform', evolve_width=True),
-                dict(node_model='evolved_width', evolve_delay=True),
-                dict(node_model='pulse_delay', evolve_width=True)):
+                dict(node_model='paper_analog', evolve_delay=True)):
         try:
             GAConfig(**bad)
         except ValueError:
@@ -741,18 +633,46 @@ def test_ga_config_timing_toggles_default_to_model_pairing():
             raise AssertionError('invalid timing toggle accepted: %r' % bad)
 
 
+def test_retired_width_evolution_is_gone_but_old_checkpoints_still_load():
+    """Width evolution was removed from the substrate. Its node model must no
+    longer be constructible, and a checkpoint saved under it must migrate onto
+    the paper's fixed-width node rather than fail to open."""
+    from evo_runtime.config import GAConfig, RunConfig
+    for bad in ({'node_model': 'evolved_width'},):
+        try:
+            GAConfig(**bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('retired width model accepted: %r' % bad)
+    try:
+        PulseConfig(model='evolved_width')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('retired width model accepted by PulseConfig')
+
+    migrated = RunConfig.from_dict({
+        'ga': {'node_model': 'evolved_width', 'evolve_width': True},
+        'pulse': {'model': 'evolved_width', 'width': 1.5}})
+    assert migrated.ga.node_model == 'uniform'
+    assert migrated.pulse.model == 'uniform'
+    assert migrated.pulse.width == 1.5          # run physics is retained
+    assert not hasattr(migrated.ga, 'evolve_width')
+
+
 def test_timing_toggles_round_trip_run_config():
     import dataclasses
     from evo_runtime.config import RunConfig
     config = RunConfig.from_dict({
         'pulse': {'model': 'pulse_delay'},
         'ga': {'node_model': 'pulse_delay', 'evolve_delay': False}})
-    assert config.ga.timing_mutations() == (False, False)
+    assert config.ga.timing_mutations() is False
     rebuilt = RunConfig.from_dict(dataclasses.asdict(config))
     assert rebuilt.ga.evolve_delay is False
-    # configs and checkpoints without the toggles keep the model pairing
+    # configs and checkpoints without the toggle keep the model pairing
     legacy = RunConfig.from_dict({'pulse': {'model': 'pulse_delay'}})
-    assert legacy.ga.timing_mutations() == (False, True)
+    assert legacy.ga.timing_mutations() is True
 
 
 def test_fixed_delay_ablation_never_grows_a_delay_vector():
@@ -785,7 +705,7 @@ def test_fixed_delay_ablation_never_grows_a_delay_vector():
 def test_waveform_targets_declare_width_preserving_model():
     """Waveform contracts need input-dependent output durations, which only
     width-preserving transport can emit — they declare supported_models so a
-    'uniform'/'evolved_width' run is filtered out instead of silently capping
+    'uniform' run is filtered out instead of silently capping
     below 1.0. Event/trace targets stay open to every model."""
     for name in ('Pulse width sum (A+B)', 'Odd pulse selector'):
         assert tuple(TEMPORAL_TARGETS[name].supported_models) == ('pulse_delay',)

@@ -53,6 +53,7 @@ from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
 from designer import DesignerTab
+from diversity_ui import DiversityTab
 from target_ui import TargetPicker
 import ui_compat
 from evo_runtime.config import (GAConfig, RunConfig, NV_NEW_RUN_PROFILES,
@@ -63,6 +64,7 @@ from evo_runtime.controller import worker_entry as evolution_worker_entry
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
 CKPT        = os.path.join(RESULTS_DIR, 'best_genome.json')
+SOLVER_POP  = os.path.join(RESULTS_DIR, 'solver_generation.json')
 LEGACY_CKPT = os.path.join(RESULTS_DIR, 'best_genome.pkl')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -701,6 +703,14 @@ class App:
         self._designer_frame = self._add_tab(nb, 'Designer')
         self._designer = DesignerTab(self._designer_frame,
                                      get_circuit=self.current_circuit)
+        # Population diversity: only meaningful for the asynchronous backends
+        # (it grows and probes circuits), so it is hidden for SNN alongside the
+        # Designer. Analysis is opt-in — it is far too slow to run on every
+        # redraw.
+        self._diversity_frame = self._add_tab(nb, 'Diversity')
+        self._diversity = DiversityTab(
+            self._diversity_frame,
+            get_population_path=lambda: SOLVER_POP, mono=self._mono)
 
         self._status = tk.StringVar(
             value='Ready — pick a model and target, set parameters, click Run (or Load Saved).')
@@ -802,6 +812,15 @@ class App:
                 else:
                     self._nb.add(self._designer_frame)   # restore if hidden
                     self._designer.follow_backend(backend)
+            except tk.TclError:
+                pass
+        # Diversity grows and probes circuits, so it too is nervous/LUT only.
+        if hasattr(self, '_diversity_frame'):
+            try:
+                if backend == 'snn':
+                    self._nb.hide(self._diversity_frame)
+                else:
+                    self._nb.add(self._diversity_frame)
             except tk.TclError:
                 pass
         # dropdown offers only backend-valid targets (LUT hides combinational)
@@ -1042,7 +1061,7 @@ class App:
             max_telomere = int(self._maxtel_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coincidence = float(self._coinc_var.get())
-            node_model, evolve_width, evolve_delay = self._selected_node_model()
+            node_model, evolve_delay = self._selected_node_model()
             tile_arch = self._selected_tile_arch()
             # Analog constants are read only under the analog profile; other
             # profiles keep the frozen PulseConfig defaults untouched.
@@ -1086,7 +1105,7 @@ class App:
                 # The selected profile owns the architecture/physics pairing.
                 # node_model must still mirror pulse.model for worker processes.
                 node_model=node_model,
-                evolve_width=evolve_width, evolve_delay=evolve_delay,
+                evolve_delay=evolve_delay,
                 tile_arch=tile_arch,
                 chromosome_count=chromosome_count),
             pulse=pulse_config)
@@ -1100,15 +1119,15 @@ class App:
         return 'snn'
 
     def _selected_node_model(self):
-        """(pulse model, evolve_width, evolve_delay) for the NV profile."""
-        _, model, evolve_width, evolve_delay = self._selected_nv_profile()
-        return model, evolve_width, evolve_delay
+        """(pulse model, evolve_delay) for the NV profile."""
+        _, model, evolve_delay = self._selected_nv_profile()
+        return model, evolve_delay
 
     def _selected_tile_arch(self):
         return self._selected_nv_profile()[0]
 
     def _selected_nv_profile(self):
-        default = ('single', 'pulse_delay', None, None)
+        default = ('single', 'pulse_delay', None)
         if not hasattr(self, '_nv_profile_var'):
             return default
         return self._NV_PROFILE_LABELS.get(
@@ -1297,6 +1316,7 @@ class App:
         self._n_unique_solvers = 0
         self._certification = None
         self._ga_error = None
+        self._solver_save_error = None
         self._stop_requested = False
         self._run_started = time.monotonic()
         self._work_phase = 'Starting worker processes'
@@ -1479,7 +1499,6 @@ class App:
         saved_profile = (
             normalized_config.ga.tile_arch,
             normalized_config.pulse.model,
-            getattr(normalized_config.ga, 'evolve_width', None),
             getattr(normalized_config.ga, 'evolve_delay', None))
         profile_label = next(
             (label for label, profile in self._NV_PROFILE_LABELS.items()
@@ -1599,6 +1618,24 @@ class App:
                     self._status.set('Diversifying — built %d genotypically UNIQUE '
                                      'solvers (each ≥ %.3f) → results/solver_generation.json'
                                      % (n_unique, valid))
+                    # point the Diversity tab at the population just written;
+                    # analysis stays opt-in (it grows every genome)
+                    if getattr(self, '_diversity', None) is not None:
+                        self._diversity.notify_population(SOLVER_POP)
+                elif kind == 'solver_saved':
+                    _, n_valid, valid, status, _path = msg
+                    self._n_unique_solvers = n_valid
+                    self._status.set(
+                        '%s solver snapshot saved: %d valid genomes '
+                        '(each >= %.3f) -> results/solver_generation.json'
+                        % (status.capitalize(), n_valid, valid))
+                    if getattr(self, '_diversity', None) is not None:
+                        self._diversity.notify_population(SOLVER_POP)
+                elif kind == 'solver_save_error':
+                    _, tb = msg
+                    lines = tb.strip().splitlines()
+                    self._solver_save_error = (
+                        lines[-1] if lines else 'unknown save error')
                 elif kind == 'certified':
                     # Held-out verdict for the winning genome (CERTIFIED /
                     # OVERFIT / BELOW / SOLVED / PLATEAU / UNCERTIFIED).
@@ -1651,13 +1688,17 @@ class App:
                     else:
                         saved = ('  saved → %s' % CKPT) if genome else ''
                         nu = getattr(self, '_n_unique_solvers', 0)
-                        div = ('  |  %d unique valid solvers' % nu) if nu else ''
+                        div = ('  |  %d valid solvers' % nu) if nu else ''
                         cert = getattr(self, '_certification', None)
                         cv = ('  |  %s' % cert['verdict']) if cert and cert.get('verdict') else ''
+                        solver_error = getattr(self, '_solver_save_error', None)
+                        sv = ('  |  solver snapshot NOT saved: %s' % solver_error
+                              if solver_error else '')
                         outcome = 'Stopped' if getattr(self, '_stop_requested', False) else 'Done'
-                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s' %
+                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s%s' %
                                          (outcome, self.target.name, fit,
-                                          getattr(self, '_active_seed', 0), saved, div, cv))
+                                          getattr(self, '_active_seed', 0),
+                                          saved, div, cv, sv))
         except queue.Empty:
             pass
         if last_gen is not None:               # redraw the fitness chart once per poll

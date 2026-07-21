@@ -17,7 +17,7 @@ what forms the excitatory / inhibitory loops.
 from __future__ import annotations
 
 from .hexgrid import hex_dirs, hex_frontier_cells, ROUTING_HEX, routing_kind
-from .genome import germline_telomere
+from .genome import germline_telomere, MAX_STATE, TRI_STATE_MAX
 from .tritile import TRI_SEED_STATE
 
 ROUTING    = ROUTING_HEX       # back-compat name (used by the GUI colourer)
@@ -29,13 +29,42 @@ def _seed_state(genome):
     return (TRI_SEED_STATE if getattr(genome, 'arch', 'single') == 'tri3'
             else SEED_STATE)
 
-# 5-bit popcount for the Hamming-distance gene lookup (state is 0..31: 0-15 AND
-# routing, 16-31 OR — the growth match must see the 5th bit to tell them apart).
-_PC4 = [bin(i).count("1") for i in range(32)]
+# The four context fields occupy disjoint bit ranges, so their summed Hamming
+# distance is exactly the popcount of one packed XOR. Compile gene contexts once
+# per growth run: one XOR + bit_count replaces four fieldwise popcounts per gene
+# while preserving chromosome-major, first-wins lookup order.
+#
+# The widths are DERIVED from the state alphabets, never hard-coded: the packed
+# value is also the growth cache key, so a field narrower than its alphabet
+# would silently truncate and alias two distinct contexts onto one cache entry.
+# Single-tile is 5 bits — 4 would lose the OR twins: states 0-15 are the
+# paper's AND routing and 16-31 their OR counterparts, so the growth match must
+# see the 5th bit to tell them apart. Tri-tile is 12 bits (three packed 4-bit
+# channels); because the channels are disjoint fields, a 12-bit Hamming is
+# exactly the sum of the three per-channel Hammings.
+_SINGLE_BITS = (MAX_STATE - 1).bit_length()        # 5
+_TRI_BITS = (TRI_STATE_MAX - 1).bit_length()       # 12
 
 
-def _h4(a, b):
-    return _PC4[(a ^ b) & 0x1F]
+def _pack_context(sL, sR, sD, si, bits):
+    mask = (1 << bits) - 1
+    return ((sL & mask) | ((sR & mask) << bits)
+            | ((sD & mask) << (2 * bits))
+            | ((si & mask) << (3 * bits)))
+
+
+def _compile_lookup(genome, bits=None):
+    """Return packed gene contexts in the original lookup/tie-break order."""
+    if bits is None:
+        bits = (_TRI_BITS if getattr(genome, 'arch', 'single') == 'tri3'
+                else _SINGLE_BITS)
+    entries = []
+    for chrom in genome.chromosomes:
+        for gene in chrom.genes:
+            context = _pack_context(gene.ctx_l, gene.ctx_r, gene.ctx_d,
+                                    gene.self_in, bits)
+            entries.append((context, gene))
+    return bits, tuple(entries)
 
 
 # ── hex growth (native hex genome: self_out == 0 means the cell dies) ──────────
@@ -57,7 +86,7 @@ def _h4(a, b):
 # telomere — telomeres limit a cell's REPLICATION, not its function, exactly as
 # in biology.
 
-def _lookup_nv(genome, sL, sR, sD, si):
+def _lookup_compiled(program, sL, sR, sD, si, packed=None):
     """Associative next-state lookup (min Hamming). No time/telomere term — the
     telomere now gates DIVISION per cell in _grow_step, not which genes exist.
 
@@ -68,16 +97,14 @@ def _lookup_nv(genome, sL, sR, sD, si):
     matching is per-channel for free."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
         return 0
-    if getattr(genome, 'arch', 'single') == 'tri3':
-        return _lookup_nv_tri(genome, sL, sR, sD, si)
-    pc = _PC4                      # local ref + inlined popcount: this loop ran
-    best_gene, best_dist = None, 1 << 30   # ~3.4M times/200 evals — the _h4 call
-    for chrom in genome.chromosomes:       # overhead was ~15% of eval (sim6 did
-        for gene in chrom.genes:           # the same inlining in table_lookup).
-            d = (pc[(gene.ctx_l ^ sL) & 0x1F] + pc[(gene.ctx_r ^ sR) & 0x1F] +
-                 pc[(gene.ctx_d ^ sD) & 0x1F] + pc[(gene.self_in ^ si) & 0x1F])
-            if d < best_dist:
-                best_dist, best_gene = d, gene
+    bits, entries = program
+    context = (_pack_context(sL, sR, sD, si, bits)
+               if packed is None else packed)
+    best_gene, best_dist = None, 1 << 30
+    for gene_context, gene in entries:
+        distance = (gene_context ^ context).bit_count()
+        if distance < best_dist:             # strict: first gene wins every tie
+            best_dist, best_gene = distance, gene
     if best_gene is None:
         return 0
     if si == 0 and best_gene.self_in != 0:         # empty cells grow only via
@@ -85,38 +112,29 @@ def _lookup_nv(genome, sL, sR, sD, si):
     return best_gene.self_out                      # 0 = off / death (native)
 
 
-def _popcount12(v):
-    return bin(v & 0xFFF).count('1')
+def _lookup_nv(genome, sL, sR, sD, si):
+    """Back-compatible one-shot lookup; growth compiles once and reuses it."""
+    return _lookup_compiled(_compile_lookup(genome), sL, sR, sD, si)
 
 
 def _lookup_nv_tri(genome, sL, sR, sD, si):
-    """12-bit Hamming lookup for the tri-tile alphabet (see _lookup_nv)."""
-    best_gene, best_dist = None, 1 << 30
-    for chrom in genome.chromosomes:
-        for gene in chrom.genes:
-            d = (_popcount12(gene.ctx_l ^ sL) + _popcount12(gene.ctx_r ^ sR) +
-                 _popcount12(gene.ctx_d ^ sD) + _popcount12(gene.self_in ^ si))
-            if d < best_dist:
-                best_dist, best_gene = d, gene
-    if best_gene is None:
-        return 0
-    if si == 0 and best_gene.self_in != 0:
-        return 0
-    return best_gene.self_out
+    """Back-compatible explicit tri3 lookup (normally dispatched by _lookup_nv)."""
+    return _lookup_compiled(_compile_lookup(genome, bits=_TRI_BITS),
+                            sL, sR, sD, si)
 
 
-def _next_state(genome, sL, sR, sD, si, cache):
-    """Cached _lookup_nv keyed on context alone (telomere no longer affects the
+def _next_state(program, sL, sR, sD, si, cache):
+    """Cached packed lookup keyed on context alone (telomere does not affect the
     lookup, so the cache is valid for the whole run — sim6 table_lookup_cached)."""
-    key = (sL, sR, sD, si)
+    key = _pack_context(sL, sR, sD, si, program[0])
     ns = cache.get(key)
     if ns is None:
-        ns = _lookup_nv(genome, sL, sR, sD, si)
+        ns = _lookup_compiled(program, sL, sR, sD, si, packed=key)
         cache[key] = ns
     return ns
 
 
-def _grow_step(genome, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
+def _grow_step(program, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
     """One development step. `grid` = {pos: state}, `tel` = {pos: remaining
     telomere}. Returns (next_grid, next_tel).
 
@@ -130,7 +148,7 @@ def _grow_step(genome, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
     # maintenance / survival of the existing organism
     for (x, y), state in grid.items():
         nb = hex_dirs(x, y)
-        ns = _next_state(genome, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
+        ns = _next_state(program, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
                          grid.get(nb['D'], 0), state, cache)
         if ns:
             nxt[(x, y)] = ns
@@ -147,7 +165,7 @@ def _grow_step(genome, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
                           if nb[d] in grid), default=0)
         if parent_tel <= 0:                       # every neighbour senescent
             continue                              # -> no division (Hayflick)
-        ns = _next_state(genome, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
+        ns = _next_state(program, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
                          grid.get(nb['D'], 0), 0, cache)
         if ns:
             nxt[(x, y)] = ns
@@ -183,11 +201,12 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
     and `iters` are ignored (see note above)."""
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
+    program = _compile_lookup(genome)
     grid = {pos: seed_state for pos in seeds}
     tel  = {pos: L for pos in seeds}
     prev, cache = None, {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache, seed_state)
+        nxt, nxt_tel = _grow_step(program, grid, tel, seeds, L, cache, seed_state)
         if nxt == grid or nxt == prev:      # fixed point (mature) or 2-cycle
             return nxt
         prev, grid, tel = grid, nxt, nxt_tel
@@ -197,12 +216,13 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
 def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
+    program = _compile_lookup(genome)
     snaps = [{pos: seed_state for pos in seeds}]
     grid = dict(snaps[0])
     tel  = {pos: L for pos in seeds}
     prev, cache = None, {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, cache, seed_state)
+        nxt, nxt_tel = _grow_step(program, grid, tel, seeds, L, cache, seed_state)
         snaps.append(dict(nxt))
         if nxt == grid or nxt == prev:
             break
@@ -239,31 +259,6 @@ def _place_outputs(grid, target):
             col = [p for p in non_input if p[0] == x_cols[i]]
             out_pos[term.role] = min(col, key=lambda p: abs(p[1] - mid_y))
     return out_pos
-
-
-def node_widths(genome, grid, config=None):
-    """Per-cell pulse widths for the 'evolved_width' node-timing model, or None.
-
-    A grown cell's pulse width is its node TYPE's evolvable multiplier (indexed
-    by the cell's 5-bit routing state, see Genome.state_widths) times the run's
-    base width (PulseConfig.width). Returns ``{cell: width}`` for PulseSim.
-
-    Returns None unless ALL of: the run is on the 'evolved_width' model, and the
-    genome carries a width vector. The model gate lives here (not at each call
-    site), ensuring uniform / pulse_delay runs ignore any genome width vector
-    and every scoring path is width-consistent by construction. Width is
-    orthogonal to routing, so this is a pure lookup on the already-grown grid —
-    no re-growth, no extra associative pass."""
-    if config is None or getattr(config, 'model', 'uniform') != 'evolved_width':
-        return None
-    mult = getattr(genome, 'state_widths', None)
-    if not mult:
-        return None
-    base = config.width
-    n = len(mult)
-    return {pos: base * mult[state & 0x1F]
-            for pos, state in grid.items()
-            if (state & 0x1F) < n}
 
 
 def node_delays(genome, grid, config=None):

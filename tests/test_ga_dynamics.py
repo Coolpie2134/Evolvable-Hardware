@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from evo_runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
                                 default_max_telomere)
 from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
-from evo_runtime.controller import wait_for_resume
+from evo_runtime.controller import (run_evolution, save_solver_generation,
+                                    wait_for_resume)
 import lut_evo.ga as lut_ga
 import nv_evo.ga as nv_ga
 import snn_evo.ga as snn_ga
@@ -30,6 +31,7 @@ from nv_evo.ga import (adaptive_mutation_rate, consolidate_population,
 from nv_evo.genome import (MAX_CHROMS as NV_MAX_CHROMS,
                            Chromosome as NvChromosome, Genome as NvGenome,
                            HexGene, random_hex_genome)
+from nv_evo.pulse import PulseConfig
 from nv_evo.targets import TEMPORAL_TARGETS
 from snn_evo.ga import crossover as crossover_snn, mutate as mutate_snn
 from snn_evo.genome import (MAX_CHROMS as SNN_MAX_CHROMS,
@@ -460,6 +462,88 @@ def test_solver_generation_breeds_and_counts_distinct_rule_programs():
     assert len(generation) == 5
     assert len(set(signatures)) == 5
     assert crossed.call_count >= 1
+
+
+def test_solver_generation_snapshot_overwrites_and_records_latest_generation():
+    random.seed(7011)
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig()
+    first_population = [random_hex_genome(2) for _ in range(3)]
+
+    with tempfile.TemporaryDirectory() as directory:
+        path, count = save_solver_generation(
+            directory, first_population, [1.0, 0.999, 0.4], target,
+            'nervous', config, status='stopped', source_try=2,
+            source_generation=17)
+        first = load_checkpoint(path)
+
+        assert count == 2
+        assert len(first['genomes']) == 2
+        assert first['fitnesses'] == [1.0, 0.999]
+        assert first['metadata'] == {
+            'status': 'stopped',
+            'source': 'latest-fully-evaluated-generation',
+            'try': 2,
+            'generation': 17,
+        }
+
+        # A later unsolved generation replaces the prior solver set instead of
+        # leaving stale genomes or accumulating timestamped snapshots.
+        path_again, count = save_solver_generation(
+            directory, [random_hex_genome(2)], [0.5], target,
+            'nervous', config, status='complete', source_try=3,
+            source_generation=4)
+        second = load_checkpoint(path_again)
+
+        assert path_again == path
+        assert count == 0
+        assert second['genomes'] == []
+        assert second['fitnesses'] == []
+        assert second['metadata']['try'] == 3
+        assert second['metadata']['generation'] == 4
+        assert os.listdir(directory) == ['solver_generation.json']
+
+
+def test_stop_saves_the_latest_fully_evaluated_solver_generation():
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(
+        ga=GAConfig(chromosome_count=2, tile_arch='tri3',
+                    node_model='uniform'),
+        pulse=PulseConfig(model='uniform'))
+    stop = threading.Event()
+    messages = queue.Queue()
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    def complete_initial_evaluation(genomes, *_args, **_kwargs):
+        # Stop arrives after this whole generation has scores, so it is the
+        # generation the cancellation path must persist.
+        stop.set()
+        return [1.0, 0.5, 0.25], [None] * len(genomes)
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch.object(nv_ga, 'eval_batch_cases',
+                              side_effect=complete_initial_evaluation):
+        run_evolution(
+            gens=4, pop=3, n_chroms=2, tries=1, target=target, arch=None,
+            messages=messages, stop_event=stop, base_seed=17,
+            backend='nervous', run_config=config, results_dir=directory)
+        snapshot = load_checkpoint(
+            os.path.join(directory, 'solver_generation.json'))
+
+    assert len(snapshot['genomes']) == 1
+    assert snapshot['fitnesses'] == [1.0]
+    assert snapshot['metadata']['status'] == 'stopped'
+    assert snapshot['metadata']['try'] == 1
+    assert snapshot['metadata']['generation'] == 0
+    queued = list(messages.queue)
+    assert any(message[:4] == ('solver_saved', 1, 0.999, 'stopped')
+               for message in queued)
+    assert queued[-1][0] == 'done'
 
 
 def test_terminal_survivor_selection_retains_solver_and_case_alignment():

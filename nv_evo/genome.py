@@ -92,15 +92,10 @@ def germline_telomere(genome) -> int:
 class Genome:
     chromosomes: List[Chromosome] = field(default_factory=list)
     tag: int = 0
-    # 'evolved_width' node-timing model ONLY (see nv_evo/pulse.py NODE_MODELS):
-    # a per-node-type pulse-width MULTIPLIER indexed by the cell's 5-bit routing
-    # state (0..31). Each entry scales that node type's emitted pulse width
-    # relative to PulseConfig.width; 1.0 = the paper's uniform width. ``None``
-    # (the default, and every non-'evolved_width' genome) means "all 1.0",
-    # so a fresh 'evolved_width' genome behaves exactly like the paper until
-    # mutation differentiates a type's width. Not decoded during growth — width
-    # is a physical property of the node, orthogonal to its routing.
-    state_widths: List[float] = None
+    # (An evolvable per-node-type pulse-WIDTH vector lived here until it was
+    # retired: width evolution is gone from the substrate entirely. Emitted
+    # width is now either the run's fixed PulseConfig.width, transported from
+    # the input under 'pulse_delay', or emergent under 'paper_analog'.)
     # 'pulse_delay' / width-preserving model ONLY: per-routing-state delay
     # multipliers. Both transported edges use the same selected delay, so width
     # is preserved while propagation speed becomes heritable. ``None`` is the
@@ -111,20 +106,8 @@ class Genome:
     arch: str = 'single'
 
 
-# Evolvable pulse-width multiplier bounds (of PulseConfig.width). The floor is
-# 0.5 because trace/persistence scoring samples each wire ONCE at mid-tick
-# (t + 0.5*TICK, half-open intervals): a narrower pulse rising on the tick
-# lattice would be genuinely firing yet invisible to the sampler, letting the
-# same net score differently across score modes for non-behavioural reasons.
-WIDTH_MULT_MIN = 0.5
-WIDTH_MULT_MAX = 4.0
 DELAY_MULT_MIN = 0.25    # evolvable propagation-delay bounds (of PulseConfig.delay)
 DELAY_MULT_MAX = 4.0
-
-
-def default_state_widths():
-    """A neutral width-multiplier vector (all 1.0): identical to 'uniform'."""
-    return [1.0] * MAX_STATE
 
 
 def default_state_delays():

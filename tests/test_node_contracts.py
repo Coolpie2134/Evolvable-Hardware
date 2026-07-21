@@ -158,87 +158,49 @@ def test_uniform_loop_period_and_survival():
 # ── the four inhibitor timing cases (shared contract, every model) ───────────────
 
 def _model_sims():
-    for name, config, widths in (
-            ('uniform', UNIFORM, None),
-            ('evolved_width', PulseConfig(model='evolved_width'), 'wide-out'),
-            ('width_preserving', WP, None)):
-        yield name, config, widths
+    for name, config in (('uniform', UNIFORM),
+                         ('width_preserving', WP)):
+        yield name, config
 
 
 def test_inhibitor_timing_cases():
     """before: an expired veto does not block. simultaneous: veto wins (batch
     applies rises before notifications). during-delay: no cancellation of a
     committed trigger. during-output: no truncation of an active pulse."""
-    for name, config, widths in _model_sims():
+    for name, config in _model_sims():
         grid, routing, src, inh, v = _inhibited_buffer()
-        wmap = {v: 2.0} if widths else None
 
-        before = PulseSim(grid, routing, config=config, widths=wmap)
+        before = PulseSim(grid, routing, config=config)
         before.inject_pulse(inh, 0.0, 1.0)
         before.inject_pulse(src, 1.0, 1.0)       # veto low at half-open end
         before.advance_to(10.0)
         assert before.rise_times[v] == [2.0], (name, before.rise_times[v])
 
-        simultaneous = PulseSim(grid, routing, config=config, widths=wmap)
+        simultaneous = PulseSim(grid, routing, config=config)
         simultaneous.inject_pulse(inh, 1.0, 1.0)
         simultaneous.inject_pulse(src, 1.0, 1.0)
         simultaneous.advance_to(10.0)
         assert simultaneous.rise_times[v] == [], name
 
-        during_delay = PulseSim(grid, routing, config=config, widths=wmap)
+        during_delay = PulseSim(grid, routing, config=config)
         during_delay.inject_pulse(src, 0.0, 1.0)
         during_delay.inject_pulse(inh, 0.5, 1.0)  # after trigger, before rise
         during_delay.advance_to(10.0)
         assert during_delay.rise_times[v] == [1.0], (
             '%s: a committed trigger must not be cancelled' % name)
 
-        during_output = PulseSim(grid, routing, config=config, widths=wmap)
+        during_output = PulseSim(grid, routing, config=config)
         during_output.inject_pulse(src, 0.0, 1.0)
         during_output.inject_pulse(inh, 1.2, 0.5)  # while output is high
         during_output.advance_to(10.0)
-        expected_w = (2.0 if wmap else 1.0)
+        expected_w = 1.0
         (start, end), = _closed(during_output.pulse_intervals[v])
         assert abs((end - start) - expected_w) <= TOL, (
             '%s: an active output must not be truncated' % name)
 
 
-# ── evolved_width: regeneration + width-coupled dead time ────────────────────────
-
-def test_evolved_width_regenerates_from_any_input_width():
-    """Intrinsic width is the model: the node emits ITS width from a much
-    longer and a much shorter input alike."""
-    grid, routing, a, b = _buffer_pair()
-    for input_w in (0.25, 1.0, 5.0):
-        sim = PulseSim(grid, routing, config=PulseConfig(model='evolved_width'),
-                       widths={b: 2.0})
-        sim.inject_pulse(a, 0.0, input_w)
-        sim.advance_to(20.0)
-        (start, end), = sim.pulse_intervals[b]
-        assert (abs(start - 1.0) <= TOL and abs(end - 3.0) <= TOL), (
-            input_w, sim.pulse_intervals[b])
 
 
-def test_evolved_width_refractory_couples_to_width():
-    """Dead time is delay + width_v: a wide node pays for its width in maximum
-    rate. Inside the window a second edge is lost; at the boundary it fires."""
-    grid, routing, a, b = _buffer_pair()
-    cfg = PulseConfig(model='evolved_width')
-    inside = PulseSim(grid, routing, config=cfg, widths={b: 2.0})
-    inside.inject_pulse(a, 0.0, 1.0)
-    inside.inject_pulse(a, 2.9, 1.0)             # refractory until 3.0
-    inside.advance_to(20.0)
-    assert inside.rise_times[b] == [1.0]
-    boundary = PulseSim(grid, routing, config=cfg, widths={b: 2.0})
-    boundary.inject_pulse(a, 0.0, 1.0)
-    boundary.inject_pulse(a, 3.0, 1.0)
-    boundary.advance_to(20.0)
-    assert boundary.rise_times[b] == [1.0, 4.0]
-
-
-def test_evolved_width_translation_invariance():
-    """Shifting the whole stimulus by a sub-tick delta shifts every edge by
-    exactly that delta — no hidden clock in the variant models either."""
-    _assert_translation(PulseConfig(model='evolved_width'), widths_key=True)
 
 
 # ── width-preserving: chains, OR unions, coincidence widths, loops ───────────────
@@ -381,11 +343,10 @@ def test_wp_translation_invariance():
 def _assert_translation(config, widths_key):
     """All output edges shift by exactly the stimulus shift (sub-tick)."""
     grid, routing, a, b, v = _two_input('and')
-    wmap = {v: 2.0} if widths_key else None
     delta = 0.37
 
     def run(shift):
-        sim = PulseSim(grid, routing, config=config, widths=wmap)
+        sim = PulseSim(grid, routing, config=config)
         sim.inject_pulse(a, 1.0 + shift, 2.0)
         sim.inject_pulse(b, 1.3 + shift, 0.5)
         sim.advance_to(30.0 + shift)
