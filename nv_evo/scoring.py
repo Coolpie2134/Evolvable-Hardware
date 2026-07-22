@@ -1,36 +1,11 @@
-"""
-nv_evo/scoring.py — THE scoring contract: every fitness number in the project
-comes from this module.
+"""The single executable behavioral-contract evaluator.
 
-Seven historical score modes collapse into two semantic families, declared in
-one registry (``RELATIONS``) that every dispatch site reads:
-
-Family "match" — compare the output against per-trial expectations, all
-projections of one canonical observable (the output's physical intervals):
-  * rises      (mode 'events')   — leading-edge F1 under one fitted global
-                                   shift (``event_tolerance``, physical time).
-  * intervals  (mode 'waveform') — rise AND fall matched (width-sensitive
-                                   contracts; ``waveform_tolerance``).
-  * coverage   (modes 'trace', 'retention', 'sr_retention') — sustained
-                 activity over expected spans. Tick-domain coverage scores
-                 hold targets with a substrate-declared gap (``hold_tol``:
-                 1 = nv circulating-pulse ring, 0 = LUT level hold);
-                 float-domain coverage (the retention scorers) judges
-                 commanded (state, start, end) intervals on raw rise trains.
-
-Family "rhythm" — measure an invariant rather than match a reference; phase is
-legitimately free and event counts unbounded, so forcing these through the
-matcher would create degeneracy, not remove it:
-  * free_rhythm      (mode 'cadence')        — sustained period regularity.
-  * commanded_rhythm (mode 'period_stepper') — command-stepped cadence.
-
-The mode STRINGS are permanent aliases (checkpoints and saved targets carry
-them); the registry is the single authority on what each means. Alignment
-discipline is shared: one global shift fitted on training data, freezable via
-``score_temporal_bundle(..., alignment=...)`` for held-out scoring.
-
-Simulation, growth, and placement live in temporal.py / persistence.py; this
-module is pure scoring math over prepared observables.
+Targets declare restrictions as data; backends provide observations. The public
+``score_contract`` entry point evaluates truth tables, timed edges, logical
+state, complete pulse intervals, bounded retention, and cadence. Specialized
+functions below are reusable distance primitives rather than target-selected
+scoring pipelines. One fitted propagation alignment is shared across all
+restrictions, and perfect fitness requires every declared restriction to pass.
 """
 from __future__ import annotations
 from bisect import bisect_left
@@ -38,53 +13,23 @@ import math
 
 from . import pulse
 from . import pulse as pulse_engine
+from .contracts import behavior_contract_lines
 
 
 # ── the relation registry (single source of truth for mode semantics) ────────
 
-class RelationSpec:
-    """What a score-mode string means. ``family``/``relation`` name the
-    semantics; ``observable`` names what the harness must collect ('samples',
-    'rises', 'intervals', or 'schedule' for the genome-level retention
-    pipeline); ``evaluator`` names the evaluation pipeline ('bundle' = scored
-    from a TemporalTraces bundle here, otherwise the persistence.py entry
-    point of that name)."""
-
-    __slots__ = ('family', 'relation', 'observable', 'evaluator')
-
-    def __init__(self, family, relation, observable, evaluator):
-        self.family = family
-        self.relation = relation
-        self.observable = observable
-        self.evaluator = evaluator
-
-
-RELATIONS = {
-    'events': RelationSpec('match', 'rises', 'rises', 'bundle'),
-    'trace': RelationSpec('match', 'coverage', 'samples', 'bundle'),
-    'waveform': RelationSpec('match', 'intervals', 'intervals', 'bundle'),
-    'retention': RelationSpec('match', 'coverage', 'schedule', 'retention'),
-    'sr_retention': RelationSpec('match', 'coverage', 'schedule',
-                                 'sr_retention'),
-    'cadence': RelationSpec('rhythm', 'free_rhythm', 'rises', 'bundle'),
-    'period_stepper': RelationSpec('rhythm', 'commanded_rhythm', 'samples',
-                                   'bundle'),
-}
-
-
-def relation_spec(target):
-    """The registry entry for a target's declared score mode."""
-    mode = getattr(target, 'score_mode', 'trace')
-    try:
-        return RELATIONS[mode]
-    except KeyError:
-        raise ValueError('unknown score mode: %r' % (mode,))
-
-
 def needs_samples(target):
-    """Whether scoring this target consumes per-tick samples (as opposed to
-    raw edge timestamps / intervals). Drives what the simulation collects."""
-    return relation_spec(target).observable == 'samples'
+    """Whether any declared restriction consumes per-tick samples."""
+    return 'samples' in target.contract.observables
+
+
+def contract_relations(target):
+    """Stable semantic labels used by adapters and reports."""
+    return tuple(clause.relation for clause in target.contract.constraints)
+
+
+def has_relation(target, relation):
+    return relation in contract_relations(target)
 
 
 class PhysicalEvents(dict):
@@ -870,26 +815,16 @@ def _trace_metric(trace, exp, metric=None):
 
 def _score_output_candidate(sampled, events, expected, role, target,
                             overflow=False, tol=1, intervals=None):
-    """Score one prospective output and return ``(score, reusable result)``.
-    `tol` = the substrate's hold coverage (0 strict for LUT, 1 ring for nv)."""
+    """Score one prospective readout through the same executable contract."""
     if not sampled:
         return 0.0, None
-    mode = getattr(target, 'score_mode', 'trace')
-    if mode == 'period_stepper':
-        return period_stepper_score({role: sampled}, target)[0], None
     intervals = intervals or [[] for _ in sampled]
     bundle = TemporalTraces({role: sampled}, events={role: events},
                             intervals={role: intervals},
                             overflow=overflow)
-    if mode == 'events':
-        result = _best_event_shift(bundle, target)
-        return result[1], result
-    if mode == 'cadence':
-        result = _best_cadence_latency(bundle, target)
-        return result[1], result
-    if mode == 'waveform':
-        return waveform_score(bundle, target)[0], None
-    return _placement_score(sampled, expected, target, tol), None
+    bundle.hold_tol = tol
+    score, _, alignment = score_contract(bundle, target)
+    return score, alignment
 
 
 def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
@@ -903,15 +838,6 @@ def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
     and no spurious firing. `shift` skips the search (pass the value from
     _best_shift when it's already known). 1.0 iff every expected spike is produced
     (ringing allowed, any consistent latency) and nothing fires where it shouldn't."""
-    mode = getattr(ttarget, 'score_mode', 'trace')
-    if mode == 'events':
-        return event_score(traces, ttarget, shift=shift)
-    if mode == 'waveform':
-        return waveform_score(traces, ttarget, shift=shift)[0]
-    if mode == 'cadence':
-        return cadence_score(traces, ttarget)[0]
-    if mode == 'period_stepper':
-        return period_stepper_score(traces, ttarget)[0]
     if tol is None:
         tol = getattr(traces, 'hold_tol', 1)   # 0 = strict LUT hold, 1 = nv ring
     m = metric or METRIC
@@ -943,67 +869,285 @@ def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
 _REFIT_ALIGNMENT = object()
 
 
-def score_temporal_bundle(traces, ttarget, alignment=_REFIT_ALIGNMENT):
-    """Return ``(scalar, per-trial-role cases, alignment)`` for any score mode.
+def contract_case_count(target):
+    """Number of independently selectable behavioral checks."""
+    if not getattr(target, 'temporal', False):
+        return len(target.cases) * len(target.outputs)
+    if hasattr(target, '_sr_runs'):
+        return sum(len(run['cases']) for run in target._sr_runs)
+    return sum(len(trial.expected) for trial in target.trials)
 
-    Nervous and LUT evolution share this dispatcher so scalar fitness and
-    lexicase case vectors cannot drift into subtly different semantics.
-    By default the best global alignment is fitted. Passing an explicit
-    ``alignment`` freezes that training choice for validation data. The return
-    value always includes the alignment actually used.
+
+def _logic_contract_score(observations, target):
+    """Score normalized logic observations from any substrate.
+
+    ``observations`` is one sequence per truth-table row, in output order.
+    Values may be 0/1, a confidence in [0,1], or None for an unstable/missing
+    readout.  Backends decide how physical activity becomes that normalized
+    observation; the contract owns all expectation comparison and aggregation.
+
+    Aggregation is BALANCED per output: each output's expected-1 rows and
+    expected-0 rows are averaged separately, then those two averages are meaned.
+    A flat mean over every (case, output) cell — what this used to do — lets a
+    do-nothing constant win whenever the truth table is lopsided: outputting
+    always-0 scored 0.75 on AND and 0.78 on the 2x2 multiplier, because those
+    functions are mostly 0 and a silent circuit gets the mostly-0 mass for free.
+    Balancing removes that reward (any constant now tops out at 0.5 on a
+    single-output gate), matching the expected-0/expected-1 balancing the
+    temporal event and state relations already use. A perfect readout still
+    scores exactly 1.0 and the gradient is unchanged within each group.
     """
-    n_cases = sum(len(trial.expected) for trial in ttarget.trials)
-    if getattr(traces, 'overflow', False):
-        used = None if alignment is _REFIT_ALIGNMENT else alignment
-        return 0.0, (0.0,) * n_cases, used
-    mode = getattr(ttarget, 'score_mode', 'trace')
-    if mode == 'waveform':
+    n_out = len(target.outputs)
+    # per_output[j] = {level: [correctness cells]}; cases keeps the flat
+    # (row-major) vector the reports and case_count expect.
+    per_output = [{0: [], 1: []} for _ in range(n_out)]
+    cases = []
+    for row, (_, expected) in zip(observations or (), target.cases):
+        for index, wanted in enumerate(expected):
+            actual = row[index] if index < len(row) else None
+            if actual is None:
+                correctness = 0.0
+            else:
+                confidence = max(0.0, min(1.0, float(actual)))
+                correctness = confidence if wanted else 1.0 - confidence
+            cases.append(correctness)
+            if index < n_out:
+                per_output[index][1 if wanted else 0].append(correctness)
+    missing = contract_case_count(target) - len(cases)
+    if missing > 0:
+        cases.extend([0.0] * missing)
+
+    output_scores = []
+    for levels in per_output:
+        group_means = [sum(cells) / len(cells)
+                       for cells in levels.values() if cells]
+        if group_means:
+            output_scores.append(sum(group_means) / len(group_means))
+    total = (sum(output_scores) / len(output_scores)) if output_scores else 0.0
+    return total, tuple(cases), None
+
+
+def _bounded_state_score(traces, target, alignment):
+    """Phase-invariant bounded memory over raw float-time rise trains."""
+    offsets = ([target.latency + k for k in (0, 1, 2, 3)]
+               if alignment is _REFIT_ALIGNMENT else [float(alignment)])
+    profiles = {}
+    role = target.outputs[0].role
+    strict = any(c.parameters.get('strict', False)
+                 for c in target.contract.constraints
+                 if c.relation == 'bounded_state')
+    for offset in offsets:
+        values = []
+        if hasattr(target, '_sr_runs'):
+            for ti, run in enumerate(target._sr_runs):
+                rise = _role_events(traces, role, ti)
+                for case in run['cases']:
+                    kind = case[1]
+                    if kind == 'state':
+                        _, _, state, start, end = case
+                        if strict:
+                            value = score_retention(
+                                rise, [(state, start, end)], offset)
+                            values.append(0.0 if value is None else value)
+                        else:
+                            values.append(score_interval_graded(
+                                rise, state, start, end, offset))
+                    elif kind == 'reset_influence':
+                        values.append(score_reset_influence(
+                            rise, case[2], offset))
+        else:
+            for ti, trial in enumerate(target.trials):
+                rise = _role_events(traces, role, ti)
+                input_edges = [float(i) for i, bits in enumerate(trial.streams)
+                               if bits and bits[0]]
+                intervals = parity_intervals(input_edges, len(trial.streams))
+                value = (score_retention(rise, intervals, offset) if strict
+                         else score_retention_graded(rise, intervals, offset))
+                values.append(0.0 if value is None else value)
+        profiles[offset] = values
+    used = max(profiles, key=lambda key: (
+        min(profiles[key]) if profiles[key] else 0.0,
+        sum(profiles[key])))
+    cases = tuple(profiles[used])
+    return (min(cases) if cases else 0.0), cases, used
+
+
+STATE_RING_COVERAGE = 0.20
+STATE_QUIET_COVERAGE = 0.20
+
+
+def _sample_intervals(samples):
+    """Convert a backend's sampled level observation into half-open spans."""
+    out, start = [], None
+    for tick, value in enumerate(list(samples) + [0]):
+        if value and start is None:
+            start = float(tick)
+        elif not value and start is not None:
+            out.append((start, float(tick)))
+            start = None
+    return out
+
+
+def _state_observed_intervals(traces, role, trial_index):
+    physical = getattr(traces, 'intervals', {}).get(role, ())
+    if trial_index < len(physical) and physical[trial_index]:
+        return list(physical[trial_index])
+    sampled = traces.get(role, ())
+    return (_sample_intervals(sampled[trial_index])
+            if trial_index < len(sampled) else [])
+
+
+def _state_case_score(traces, target, trial, role, trial_index, shift):
+    """Judge abstract active/quiet epochs without imposing pulse phase.
+
+    LUT output is a held level and therefore uses exact occupancy. Nervous-net
+    output may be a circulating pulse: it receives full active credit when
+    coverage is sustained and no silent gap exceeds the physical loop budget.
+    Fixed window grids are intentionally absent, so translating an identical
+    ring in phase cannot change its score.
+    """
+    actual = _state_observed_intervals(traces, role, trial_index)
+    strict = getattr(traces, 'hold_tol', 1) == 0
+    config = getattr(target, 'pulse_config', None)
+    delay = pulse.DELAY if config is None else config.delay
+    width = pulse.WIDTH if config is None else config.width
+    allowed_gap = 2.0 * (delay + width)
+    values = []
+    commanded_active = judged_active = 0
+    for state, ticks in _expected_windows(trial.expected.get(role, ())):
+        if not ticks:
+            continue
+        start = float(min(ticks) + shift)
+        end = float(max(ticks) + 1 + shift)
+        if end <= start:
+            continue
+        duration = end - start
+        coverage, gap = _cov_gap(actual, start, end)
+        fraction = coverage / duration
+        if state == 0:
+            value = (1.0 - fraction if strict else
+                     max(0.0, 1.0 - fraction / STATE_QUIET_COVERAGE))
+        elif strict:
+            commanded_active += 1
+            judged_active += 1
+            value = fraction
+        else:
+            commanded_active += 1
+            # A window no longer than one legal circulation gap cannot reveal
+            # ring survival independently of phase, so it contributes no claim.
+            if duration <= allowed_gap:
+                continue
+            judged_active += 1
+            value = (0.0 if coverage <= 0.0 else
+                     (1.0 if gap <= allowed_gap else allowed_gap / gap))
+        values.append(max(0.0, min(1.0, value)))
+    # A case that commands activity but whose active epochs are EVERY one too
+    # short to judge would otherwise be scored on its quiet epochs alone, and a
+    # permanently silent output satisfies those perfectly. Refuse the free pass:
+    # the state relation cannot express such a case, and scoring 0 says so
+    # loudly instead of certifying a dead circuit at 1.0.
+    if commanded_active and not judged_active:
+        return 0.0
+    if not values:
+        return 0.0
+    return 0.5 * (sum(values) / len(values) + min(values))
+
+
+def _logical_state_score(traces, target, alignment):
+    limit = int(round(getattr(target, 'event_max_shift', 12.0)))
+    shifts = ([0] if not getattr(target, 'fit_latency', True) else
+              range(-limit, limit + 1))
+    if alignment is not _REFIT_ALIGNMENT:
+        shifts = [int(round(alignment))]
+    profiles = {}
+    for shift in shifts:
+        cases = tuple(
+            _state_case_score(traces, target, trial, role, ti, shift)
+            for ti, trial in enumerate(target.trials)
+            for role in trial.expected)
+        score = (0.5 * (sum(cases) / len(cases) + min(cases))
+                 if cases else 0.0)
+        profiles[shift] = (score, cases)
+    used = max(profiles, key=lambda key: (profiles[key][0], -abs(key), -key))
+    score, cases = profiles[used]
+    return score, cases, used
+
+
+def _score_constraint(traces, target, relation, alignment):
+    if relation == 'pulse_intervals':
         if alignment is _REFIT_ALIGNMENT:
-            used, score, cases = _best_waveform_shift(traces, ttarget)
+            used, score, cases = _best_waveform_shift(traces, target)
         else:
             used = float(alignment)
-            score, cases = waveform_score(traces, ttarget, shift=used)
+            score, cases = waveform_score(traces, target, shift=used)
         return score, tuple(cases), used
-    if mode == 'period_stepper':
+    if relation == 'commanded_cadence':
         if alignment is _REFIT_ALIGNMENT:
-            used, score, cases = _best_stepper_shift(traces, ttarget)
+            used, score, cases = _best_stepper_shift(traces, target)
         else:
             used = int(alignment)
-            score, cases = period_stepper_score(traces, ttarget, shift=used)
+            score, cases = period_stepper_score(traces, target, shift=used)
         return score, tuple(cases), used
-    if mode == 'cadence':
+    if relation == 'sustained_cadence':
         if alignment is _REFIT_ALIGNMENT:
-            used, score, cases = _best_cadence_latency(traces, ttarget)
+            used, score, cases = _best_cadence_latency(traces, target)
         else:
             used = float(alignment)
-            score, cases = cadence_score(traces, ttarget, latency=used)
+            score, cases = cadence_score(traces, target, latency=used)
         return score, tuple(cases), used
-    if mode == 'events':
+    if relation == 'event_correspondence':
         if alignment is _REFIT_ALIGNMENT:
-            shift, score = _best_event_shift(traces, ttarget)
+            used, score = _best_event_shift(traces, target)
         else:
-            shift = float(alignment)
-            score = event_score(traces, ttarget, shift=shift)
+            used = float(alignment)
+            score = event_score(traces, target, shift=used)
         cases = tuple(
-            _event_case_score(traces, ttarget, ti, role, shift)
-            for ti, trial in enumerate(ttarget.trials)
+            _event_case_score(traces, target, ti, role, used)
+            for ti, trial in enumerate(target.trials)
             for role in trial.expected)
-        return score, cases, shift
+        return score, cases, used
+    if relation == 'bounded_state':
+        return _bounded_state_score(traces, target, alignment)
+    if relation == 'reset_influence':
+        # Reset influence is already an explicit SR case in bounded_state.
+        return 1.0, (), (None if alignment is _REFIT_ALIGNMENT else alignment)
+    if relation != 'logical_state':
+        raise ValueError('unknown behavioral relation: %r' % relation)
 
-    tol = getattr(traces, 'hold_tol', 1)       # 0 = strict LUT hold, 1 = nv ring
-    shift = (_best_shift(traces, ttarget, tol)[0]
-             if alignment is _REFIT_ALIGNMENT else int(alignment))
-    cases = []
-    for ti, trial in enumerate(ttarget.trials):
-        for role, exp in trial.expected.items():
-            role_traces = traces.get(role, ())
-            if ti >= len(role_traces):
-                cases.append(0.0)
-            elif METRIC == 'f1':
-                cases.append(_pr_score(role_traces[ti], exp, shift, tol))
-            else:
-                cases.append(_trace_metric(role_traces[ti], exp))
-    return windowed_score(traces, ttarget, shift=shift, tol=tol), tuple(cases), shift
+    return _logical_state_score(traces, target, alignment)
+
+
+def score_contract(observations, target, alignment=_REFIT_ALIGNMENT):
+    """Evaluate any target contract and return ``(score, cases, alignment)``.
+
+    This is the only target-facing scoring entry point in the project. A
+    backend may emit different physical observations, but it cannot select a
+    different definition of correctness.
+    """
+    if not getattr(target, 'temporal', False):
+        return _logic_contract_score(observations, target)
+    n_cases = contract_case_count(target)
+    if getattr(observations, 'overflow', False):
+        used = None if alignment is _REFIT_ALIGNMENT else alignment
+        return 0.0, (0.0,) * n_cases, used
+
+    scores, cases, weights = [], [], []
+    used = alignment
+    for clause in target.contract.constraints:
+        # One fitted propagation offset is shared across every restriction.
+        score, clause_cases, fitted = _score_constraint(
+            observations, target, clause.relation, used)
+        if used is _REFIT_ALIGNMENT and fitted is not None:
+            used = fitted
+        scores.append(score)
+        weights.append(max(0.0, float(clause.weight)))
+        cases.extend(clause_cases)
+    if not scores:
+        return 0.0, (0.0,) * n_cases, None
+    weighted = sum(s * w for s, w in zip(scores, weights)) / max(sum(weights), 1e-12)
+    total = weighted if len(scores) == 1 else 0.5 * (weighted + min(scores))
+    return max(0.0, min(1.0, total)), tuple(cases), (
+        None if used is _REFIT_ALIGNMENT else used)
 
 
 def exact_tick_accuracy(traces, ttarget):
@@ -1274,49 +1418,52 @@ def score_retention_graded(rise, intervals, offset):
 # per-backend voice lives in a small notes dict; the structure lives here once.
 
 NV_REPORT_NOTES = {
-    'waveform': 'Backend detail: scoring compares physical rise/fall intervals.',
-    'period_stepper': 'Backend detail: nervous-net transition phase may be sub-second.',
-    'cadence': 'Backend detail: cadence uses raw nervous-net edge timestamps.',
-    'events': 'Backend detail: raw nervous-net timestamps retain sub-second edges.',
+    'pulse_intervals': 'Backend detail: scoring compares physical rise/fall intervals.',
+    'commanded_cadence': 'Backend detail: nervous-net transition phase may be sub-second.',
+    'sustained_cadence': 'Backend detail: cadence uses raw nervous-net edge timestamps.',
+    'event_correspondence': 'Backend detail: raw nervous-net timestamps retain sub-second edges.',
     'trace_preamble': (
-        'Scored as persistent behaviour in active and quiet windows.',
-        'A stored 1 may ring (1010...) because a nervous node is refractory;',
-        'the scorer therefore tolerates one second of ring phase.',
+        'Scored as persistent behaviour across active and quiet epochs.',
+        'A stored 1 may ring (1010...) because a nervous node is refractory, so',
+        'an active epoch holds while no silent gap exceeds one circulation',
+        'budget (2 x (delay + width)); the ring\'s phase is free and does not',
+        'change the score.',
         'One shared input-to-output latency is used across every test/output.',
-        'The exact per-second value is diagnostic only and ignores ring tolerance.'),
+        'The exact per-second value is diagnostic only.'),
 }
 
 LUT_REPORT_NOTES = {
-    'period_stepper': 'Backend detail: LUT cadence transitions may occur at sub-second times.',
-    'cadence': 'Backend detail: cadence uses raw LUT wire edge timestamps.',
-    'events': 'Backend detail: raw LUT wire timestamps retain sub-second edges.',
+    'commanded_cadence': 'Backend detail: LUT cadence transitions may occur at sub-second times.',
+    'sustained_cadence': 'Backend detail: cadence uses raw LUT wire edge timestamps.',
+    'event_correspondence': 'Backend detail: raw LUT wire timestamps retain sub-second edges.',
     'trace_preamble': (
-        'Scored as persistent behaviour in active and quiet windows.',
-        'A one-second phase tolerance allows recurrent outputs to ring.',
+        'Scored as persistent behaviour across active and quiet epochs.',
+        'A LUT output is a held level, so an active epoch is scored by exact',
+        'occupancy rather than the nervous net\'s circulation budget.',
         'One shared input-to-output latency is used across every test/output.',
-        'The exact per-second value is diagnostic only and ignores tolerance.'),
+        'The exact per-second value is diagnostic only.'),
 }
 
 
 def score_report_lines(ttarget, traces, out_pos, notes=None):
-    """(total_score_or_None, body lines) for a prepared bundle, any mode.
+    """(total_score_or_None, body lines) for one executable contract.
 
-    ``traces`` may be None for the expectation-only preview (waveform/events/
-    trace modes); rhythm modes need real output and their wrappers early-return
+    ``traces`` may be None for expectation-only event/interval/state previews;
+    cadence constraints need real output and their wrappers early-return
     before calling this. ``notes`` carries the per-backend detail phrases; None
     (the Designer) skips them."""
-    mode = getattr(ttarget, 'score_mode', 'trace')
+    relations = set(contract_relations(ttarget))
     notes = notes or {}
-    lines = []
+    lines = behavior_contract_lines(ttarget) + ['']
 
     def out_lines():
         for term in ttarget.outputs:
             lines.append("out '%s' read at %s" % (
                 term.role, None if out_pos is None else out_pos.get(term.role)))
 
-    if mode == 'waveform':
-        if notes.get('waveform'):
-            lines += ['', notes['waveform']]
+    if 'pulse_intervals' in relations:
+        if notes.get('pulse_intervals'):
+            lines += ['', notes['pulse_intervals']]
         shift, total = 0.0, None
         if traces is not None:
             shift, total, _ = _best_waveform_shift(traces, ttarget)
@@ -1340,26 +1487,26 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
                                  (actual, score,
                                   'PASS' if score >= 0.999 else 'FAIL'))
         if traces is not None:
-            lines += ['', '=> waveform score %.4f%s' %
+            lines += ['', '=> Contract score %.4f%s  [complete pulse intervals]' %
                       (total, '   SOLVED' if total >= 0.999 else '')]
         return total, lines
 
-    if mode == 'period_stepper':
-        if notes.get('period_stepper'):
-            lines += ['', notes['period_stepper']]
+    if 'commanded_cadence' in relations:
+        if notes.get('commanded_cadence'):
+            lines += ['', notes['commanded_cadence']]
         total, cases = period_stepper_score(traces, ttarget)
         out_lines()
         for ti, (trial, score) in enumerate(zip(ttarget.trials, cases), 1):
             lines.append('Test %d: %s  cadence score %.3f %s' % (
                 ti, trial_input_summary(trial, ttarget.n_inputs), score,
                 'PASS' if score >= 0.999 else 'FAIL'))
-        lines += ['', '=> cadence-stepper score %.4f%s' % (
+        lines += ['', '=> Contract score %.4f%s  [commanded cadence]' % (
             total, '   SOLVED' if total >= 0.999 else '')]
         return total, lines
 
-    if mode == 'cadence':
-        if notes.get('cadence'):
-            lines += ['', notes['cadence']]
+    if 'sustained_cadence' in relations:
+        if notes.get('sustained_cadence'):
+            lines += ['', notes['sustained_cadence']]
         total, cases = cadence_score(traces, ttarget)
         out_lines()
         for ti, score in enumerate(cases):
@@ -1368,13 +1515,13 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
                 ti + 1, trial_input_summary(ttarget.trials[ti], ttarget.n_inputs),
                 event_list_summary(events), score,
                 'PASS' if score >= 0.999 else 'FAIL'))
-        lines += ['', '=> cadence score %.4f%s' % (
+        lines += ['', '=> Contract score %.4f%s  [sustained cadence]' % (
             total, '   SOLVED' if total >= 0.999 else '')]
         return total, lines
 
-    if mode == 'events':
-        if notes.get('events'):
-            lines += ['', notes['events']]
+    if 'event_correspondence' in relations:
+        if notes.get('event_correspondence'):
+            lines += ['', notes['event_correspondence']]
         best_s = _best_event_shift(traces, ttarget)[0] if traces is not None else 0.0
         if traces is not None:
             out_lines()
@@ -1401,17 +1548,32 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
         total = None
         if traces is not None:
             total = event_score(traces, ttarget, shift=best_s)
-            lines += ['', '=> event score %.4f%s' % (
+            lines += ['', '=> Contract score %.4f%s  [one-to-one timed events]' % (
                 total, '   SOLVED' if total >= 0.999 else '')]
         return total, lines
 
-    # trace / coverage
+    if 'bounded_state' in relations:
+        total, cases, used = ((None, (), 0.0) if traces is None else
+                              score_contract(traces, ttarget))
+        if traces is not None:
+            out_lines()
+            lines.append('fitted shared response latency: %s' %
+                         _display_time(used))
+            lines.append('bounded state cases: %s' %
+                         ', '.join('%.3f' % value for value in cases))
+            lines += ['', '=> Contract score %.4f%s  [bounded persistent state]' % (
+                total, '   SOLVED' if total >= 0.999 else '')]
+        return total, lines
+
+    # Semantic state windows. Expected samples are compiled to active/quiet
+    # epochs; their exact tick pattern is display-only.
     preamble = notes.get('trace_preamble')
     if preamble:
         lines += [''] + list(preamble)
-    best_s = 0
+    best_s, total = 0, None
     if traces is not None:
-        best_s = _best_shift(traces, ttarget)[0]
+        total, case_scores, best_s = score_contract(traces, ttarget)
+        case_iter = iter(case_scores)
         out_lines()
         lines.append('measured output latency offset: %+d second(s)' % best_s)
     for ti, trial in enumerate(ttarget.trials):
@@ -1424,16 +1586,13 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
             if traces is not None:
                 tr = traces.get(role, [])
                 tr_i = tr[ti] if ti < len(tr) else []
-                tp_rec, n_exp, tp_prec, n_act = _pr_counts(tr_i, exp, best_s)
-                s = _f1(tp_rec, n_exp, tp_prec, n_act)
-                lines.append('  actual %s (F1 %.3f %s  highs hit %d/%d, pulses ok %d/%d)'
+                s = next(case_iter)
+                lines.append('  actual %s (state-contract %.3f %s)'
                              % (''.join(str(v) for v in tr_i), s,
-                                'PASS' if s >= 0.999 else 'FAIL',
-                                tp_rec, n_exp, tp_prec, n_act))
-    total = None
+                                'PASS' if s >= 0.999 else 'FAIL'))
     if traces is not None:
-        total = windowed_score(traces, ttarget, shift=best_s)
-        lines += ['', '=> behavioural score %.4f%s   (exact per-second %.4f)'
+        lines += ['', '=> Contract score %.4f%s  [phase-invariant logical state]'
+                  '   (exact per-second %.4f)'
                   % (total, '   SOLVED' if total >= 0.999 else '',
                      exact_tick_accuracy(traces, ttarget))]
     return total, lines

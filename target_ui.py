@@ -33,10 +33,10 @@ def target_category(name, target):
     if explicit:
         return explicit
     if getattr(target, 'temporal', False):
-        mode = getattr(target, 'score_mode', 'trace')
-        if mode in ('cadence', 'period_stepper'):
+        relations = {c.relation for c in target.contract.constraints}
+        if relations & {'sustained_cadence', 'commanded_cadence'}:
             return 'Cadence & patterns'
-        if mode == 'events':
+        if 'event_correspondence' in relations:
             return 'Timed events'
         return 'Memory & state'
     return COMBINATIONAL

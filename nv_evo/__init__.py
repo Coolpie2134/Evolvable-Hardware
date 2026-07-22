@@ -45,12 +45,16 @@ from .oracle import (oracle_target, holdout_score, ORACLE_TARGETS, ORACLE_SPECS,
 from .evaluation import FittedReadout, fit_readout, score_frozen
 from .persistence import (sr_set_hold_oracle, sr_reset_oracle, sr_full_oracle,
                           evolve_sr_curriculum)
+from .contracts import (BehaviorContract, Constraint, logic_contract,
+                        event_contract, state_contract, interval_contract,
+                        cadence_contract, cadence_step_contract,
+                        bounded_state_contract)
+from .scoring import score_contract
 from .temporal import (run_nervous, run_nervous_events, score_temporal, temporal_report,
                        prepare_net, windowed_score, exact_tick_accuracy,
                        place_outputs_by_trace, trace_fixed_outputs,
                        signal_graph, cycle_nodes,
-                       loop_profile, TemporalTraces, event_score, cadence_score,
-                       score_temporal_bundle)
+                       loop_profile, TemporalTraces, event_score, cadence_score)
 from .ga import (evaluate_nv, evaluate_nv_full, eval_batch_nv, eval_batch_cases,
                  mutate_nv, mutate_hex, crossover_nv, tournament_nv,
                  select_parent, next_population, evolve_nervous,

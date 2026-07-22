@@ -22,9 +22,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from nv_evo.targets import TEMPORAL_TARGETS                       # noqa: E402
-from nv_evo.scoring import (TemporalTraces, score_temporal_bundle,  # noqa: E402
+from nv_evo.scoring import (TemporalTraces, score_contract,  # noqa: E402
                             windowed_score, _waveform_expected,
-                            _expected_events, _obs_len)
+                            _expected_events, _obs_len,
+                            contract_relations)
 from nv_evo import scoring as sc                                  # noqa: E402
 
 BUNDLE_VARIANTS = ('perfect', 'shift2', 'half', 'silence', 'always')
@@ -46,7 +47,7 @@ def thin_samples(samples):
 
 def build_bundle(target, variant):
     obs = _obs_len(target)
-    mode = getattr(target, 'score_mode', 'trace')
+    relation = contract_relations(target)[0]
     samples, events, intervals = {}, {}, {}
     roles = sorted({role for tr in target.trials for role in tr.expected})
     for role in roles:
@@ -56,7 +57,7 @@ def build_bundle(target, variant):
             ev = [float(t) for t in _expected_events(tr, role)] if exp else []
             iv = ([(float(a), float(b)) for a, b in
                    _waveform_expected(target, tr, role)]
-                  if mode == 'waveform' else [])
+                  if relation == 'pulse_intervals' else [])
             sm = exp_to_samples(exp, obs)
             if variant == 'shift2':
                 ev = [t + 2.0 for t in ev]
@@ -96,26 +97,26 @@ def main():
     records = []
     skipped = []
     for name, target in sorted(TEMPORAL_TARGETS.items()):
-        mode = getattr(target, 'score_mode', 'trace')
-        if mode in ('retention', 'sr_retention'):
+        relation = contract_relations(target)[0]
+        if relation == 'bounded_state':
             skipped.append(name)
             continue
-        tols = (None, 0) if mode == 'trace' else (None,)
+        tols = (None, 0) if relation == 'logical_state' else (None,)
         for variant in BUNDLE_VARIANTS:
             samples, events, intervals = build_bundle(target, variant)
             for tol in tols:
                 b = bundle_from_parts(samples, events, intervals, tol)
-                score, cases, alignment = score_temporal_bundle(b, target)
+                score, cases, alignment = score_contract(b, target)
                 b2 = bundle_from_parts(samples, events, intervals, tol)
                 if alignment is not None:
-                    fscore, fcases, fused = score_temporal_bundle(
+                    fscore, fcases, fused = score_contract(
                         b2, target, alignment=alignment)
                 else:
                     fscore, fcases, fused = None, None, None
                 b3 = bundle_from_parts(samples, events, intervals, tol)
                 wscore = windowed_score(b3, target)
                 records.append({
-                    'target': name, 'mode': mode, 'variant': variant,
+                    'target': name, 'relation': relation, 'variant': variant,
                     'hold_tol': tol,
                     'bundle': {'samples': samples, 'events': events,
                                'intervals': intervals},
@@ -126,7 +127,7 @@ def main():
                     'frozen_alignment': fused,
                     'windowed': wscore,
                 })
-        print('done %-42s %s' % (name, mode))
+        print('done %-42s %s' % (name, relation))
 
     # ── float-time coverage/retention scorer goldens ─────────────────────────
     ring = [7.0 + 2.0 * k for k in range(29)]              # sustained ring to 63

@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 from .targets import TemporalTarget, Trial
+from .contracts import event_contract
 
 # Probe edges are quantised before hashing so float noise does not manufacture
 # diversity. The unit is a fraction of the run's propagation delay, and it is
@@ -185,7 +186,6 @@ def _nv_adapter():
     from .ga import genome_signature
     from .nervous import (grow_nervous, interpret_nervous, node_delays)
     from .temporal import prepare_net, trace_fixed_outputs
-    from .scoring import score_temporal_bundle          # noqa: F401 (contract)
     from .temporal import score_temporal
 
     def grow(genome, target, config):
@@ -355,7 +355,8 @@ def make_probe_bank(target, seed=PROBE_SEED, n_trials=PROBE_TRIALS):
     probe = TemporalTarget(
         '%s [probe v%d]' % (target.name, PROBE_VERSION), list(target.inputs),
         list(target.outputs), horizon, trials,
-        grid_size=target.grid_size, iters=target.iters, score_mode='events',
+        grid_size=target.grid_size, iters=target.iters,
+        contract=event_contract(),
         max_events=getattr(target, 'max_events', 2048))
     config = getattr(target, 'pulse_config', None)
     if config is not None:

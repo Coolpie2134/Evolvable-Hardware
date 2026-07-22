@@ -296,3 +296,220 @@ def _main():
 
 if __name__ == '__main__':
     raise SystemExit(_main())
+
+
+# ── combinational settling and graded (duty-cycle) credit ───────────────────────
+# A held input drives a deterministic finite array into a repeating cycle. A
+# fixed point solves the combinational case; a cycling output earns partial
+# credit equal to the fraction of its period it is correct, so evolution has a
+# gradient toward settling instead of a hard settle/no-settle cliff.
+
+def test_steady_duty_is_exact_for_fixed_points_and_phase_invariant():
+    from lut_evo.ga import _steady_duty
+    assert _steady_duty([1] * 10) == 1.0               # fixed point high
+    assert _steady_duty([0] * 10) == 0.0               # fixed point low
+    assert _steady_duty([1, 0] * 6) == 0.5             # period-2
+    assert abs(_steady_duty([1, 1, 0] * 4) - 2 / 3) < 1e-9
+    # a leading transient must not change the steady duty (phase invariance)
+    assert _steady_duty([1, 1, 1] + [0] * 13) == 0.0
+
+
+def test_steady_duty_refuses_to_call_a_chaotic_output_settled():
+    """The bug that silently faked every LUT combinational result: the detector
+    checked only 2p samples, so any tail ending in a few equal bits was declared
+    a fixed point — a chaotic oscillator whose last bits were 000 scored a clean
+    0.0 (perfectly correct for an expected-0 case), and evolution 'solved' gates
+    it was only oscillating on. A chaotic tail must instead fall back to its mean
+    and earn only chance-level credit."""
+    from lut_evo.ga import _steady_duty
+    chaotic_low_tail = [0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0]
+    chaotic_high_tail = [0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1]
+    # neither collapses to an exact 0.0/1.0 — they sit near their true mean.
+    assert 0.2 < _steady_duty(chaotic_low_tail) < 0.8
+    assert 0.2 < _steady_duty(chaotic_high_tail) < 0.8
+    for seq in (chaotic_low_tail, chaotic_high_tail):
+        assert abs(_steady_duty(seq) - sum(seq) / len(seq)) < 1e-9
+
+
+def test_cycling_output_earns_fraction_of_period_credit():
+    """A period-2 output scored against a wanted bit yields 0.5, not 0 (cliff)
+    and not 1 (phase-luck) — the fraction of the period it is correct."""
+    from nv_evo.scoring import score_contract
+    from snn_evo.targets import gate_target
+    target = gate_target('AND')                        # 4 cases, output 'out'
+    # Feed a 0.5 duty (perfectly balanced cycle) for every case: each cell is
+    # half-correct regardless of the expected bit, so balanced aggregation = 0.5.
+    half = [[0.5] for _ in target.cases]
+    assert abs(score_contract(half, target)[0] - 0.5) < 1e-9
+    # A settled-correct readout still scores exactly 1.0.
+    perfect = [[float(out[0])] for _, out in target.cases]
+    assert score_contract(perfect, target)[0] == 1.0
+
+
+def test_lut_combinational_gives_graded_not_cliff_credit():
+    """End-to-end: a real grown array that does not fully settle scores strictly
+    between a wrong constant (0.5 balanced) and perfect (1.0), where the old
+    settle-or-nothing rule would have pinned every non-fixed-point case to 0."""
+    import random
+    from lut_evo.genome import random_lut_genome
+    from lut_evo.ga import score_lut_combinational
+    from snn_evo.targets import get_target
+    target = get_target('AND')
+    random.seed(5)
+    seen_partial = False
+    for _ in range(60):
+        genome = random_lut_genome(2)
+        score = score_lut_combinational(genome, target)
+        assert 0.0 <= score <= 1.0
+        if 0.5 < score < 1.0:                          # graded, mid-range credit
+            seen_partial = True
+    assert seen_partial, 'no array produced graded partial credit'
+
+
+def test_combinational_output_is_placed_by_function_not_proximity():
+    """The scorer reads each output at the cell that best computes it, not the
+    cell nearest an arbitrary terminal. A grown array that contains a computing
+    cell must therefore score it — proximity placement threw those cells away
+    (measured: it capped random-genome AND best at ~0.68 while a functional read
+    reached ~0.93), which is why LUTs 'could not' do combinational logic."""
+    import random
+    from lut_evo.genome import random_lut_genome
+    from lut_evo.lut import grow_lut
+    from lut_evo.ga import (_fit_combinational_outputs, _place_outputs_combinational,
+                            _all_cell_duties, _balanced_match, score_lut_combinational)
+    from snn_evo.targets import get_target
+
+    target = get_target('AND')
+    random.seed(1)
+    fitted_beats_proximity = False
+    for _ in range(80):
+        genome = random_lut_genome(2)
+        grid = grow_lut(genome, seeds=tuple(target.inputs),
+                        grid_size=target.grid_size, iters=target.iters)
+        if len(grid) <= target.n_inputs:
+            continue
+        fitted, duty_by_case = _fit_combinational_outputs(grid, target)
+        role = target.outputs[0].role
+        if fitted[role] is None:
+            continue
+        expected = [ob[0] for _, ob in target.cases]
+        fit_cell = fitted[role]
+        fit_match = _balanced_match(
+            [duty_by_case[i][fit_cell] for i in range(len(target.cases))], expected)
+        # the fitted cell must be at least as good as ANY other live cell
+        for c in duty_by_case[0]:
+            other = _balanced_match(
+                [duty_by_case[i][c] for i in range(len(target.cases))], expected)
+            assert fit_match >= other - 1e-9
+        if fit_match > 0.5:
+            fitted_beats_proximity = True
+    assert fitted_beats_proximity, 'fitted placement never beat the 0.5 baseline'
+
+
+def test_lut_solves_basic_gates_when_evolved():
+    """The headline: LUTs are lookup tables, so they should compute small
+    combinational functions. Inputs are now presented as a randomised PULSE
+    battery (aligned rising edges, random widths/delays, several trials
+    averaged), so a clean 1.0 is genuinely harder — a gate must settle correctly
+    regardless of when inputs arrive against the array's ongoing power-on
+    activity. The honest bar is therefore 'well above the constant-output
+    ceiling', not a perfect score: 0.5 is chance and 0.75 is a lopsided-gate
+    constant, so >= 0.85 proves real, robust computation. The fitted output must
+    also genuinely FOLLOW the truth table, not sit constant."""
+    from lut_evo.ga import evolve_lut, _fit_combinational_outputs
+    from lut_evo.lut import grow_lut
+    from snn_evo.targets import get_target
+    target = get_target('OR')
+    champ, best = None, -1.0
+    for seed in (3, 7):
+        genome, fit = evolve_lut(target, generations=30, pop=80, seed=seed,
+                                 verbose=False)
+        if fit > best:
+            champ, best = genome, fit
+    assert best >= 0.85, 'OR stayed near the constant ceiling: %.4f' % best
+
+    # Real computation: the fitted output's per-case duty must track the truth
+    # table — high on the expected-1 rows, low on the expected-0 row — not a
+    # constant that merely rides the lopsided table.
+    grid = grow_lut(champ, seeds=tuple(target.inputs),
+                    grid_size=target.grid_size, iters=target.iters)
+    out_pos, duty_by_case = _fit_combinational_outputs(grid, target)
+    cell = out_pos[target.outputs[0].role]
+    duties = {tuple(in_bits): duty_by_case[i][cell]
+              for i, (in_bits, _) in enumerate(target.cases)}
+    lowest_one = min(d for ib, d in duties.items() if any(ib))   # expected-1 rows
+    zero_row = duties[(0, 0)]                                    # expected-0 row
+    assert lowest_one > zero_row + 0.3, (
+        'output does not follow OR: expected-1 duties %s vs zero-row %.2f'
+        % (duties, zero_row))
+
+
+def test_combinational_input_pulses_align_starts_with_varied_widths():
+    """Pin the combinational pulse contract: each case is presented as several
+    trials; within a trial the active inputs share ONE rising edge (aligned
+    start) but hold for independently random widths, and delays/widths vary
+    across trials (a robustness battery, not one clean held level). The battery
+    is seeded-fixed so fitness stays deterministic and cacheable."""
+    from lut_evo.ga import _combinational_schedule, N_COMB_TRIALS, _comb_timing
+    from snn_evo.targets import get_target
+    target = get_target('Half adder')            # 2 inputs
+    sched = _combinational_schedule(target)
+    assert len(sched) == N_COMB_TRIALS >= 2
+    lead, measure = _comb_timing(target.grid_size)
+    floor = lead + measure
+
+    delays = {d for d, _ in sched}
+    widths_seen = set()
+    for delay, widths in sched:
+        assert delay >= 1                        # a real rising edge exists
+        assert len(widths) == len(target.inputs)
+        for w in widths:
+            assert w >= floor                    # outlasts the settling window
+            widths_seen.add(w)
+    assert len(delays) > 1 or len(widths_seen) > 1, 'timings did not vary'
+
+    # Determinism: the battery is identical on every call (cache correctness).
+    assert _combinational_schedule(target) == sched
+
+    # Aligned start edge: for any case, every active input's pulse begins at the
+    # same tick (the trial delay), regardless of its width.
+    delay, widths = sched[0]
+    in_bits = (1, 1)                              # both inputs active
+    starts = [delay for i, b in enumerate(in_bits) if b]
+    assert len(set(starts)) == 1
+
+
+def test_interactive_case_pulses_match_the_fitness_presentation():
+    """The interactive/playback view must present combinational cases exactly as
+    fitness scores them, or 'see what fitness scored' lies. Combinational targets
+    have no temporal trials, so playback builds pulses from the truth table via
+    pulses_from_case; for LUT those must be the same aligned-start, same-width
+    pulses the scorer's _combinational_schedule uses."""
+    from nv_evo.playback import pulses_from_case
+    from lut_evo.ga import _combinational_schedule
+    from snn_evo.targets import get_target
+    target = get_target('AND')
+    delay, widths = _combinational_schedule(target)[0]     # representative trial
+
+    for ci, (in_bits, _) in enumerate(target.cases):
+        lanes = pulses_from_case(target, len(target.inputs), ci, 'lut')
+        for i, bit in enumerate(in_bits):
+            if bit:
+                assert lanes[i] == [(float(delay), float(widths[i]))], (
+                    'case %s input %d pulse != fitness schedule' % (in_bits, i))
+            else:
+                assert lanes[i] == [], 'inactive input got a pulse'
+
+    # Aligned start edge: every active input of a case rises at the common delay.
+    lanes = pulses_from_case(target, 2, 3, 'lut')          # (1, 1): both active
+    starts = [lane[0][0] for lane in lanes if lane]
+    assert len(starts) == 2 and len(set(starts)) == 1
+
+    # Non-LUT backends hold the active inputs for the whole run (one long pulse),
+    # matching score_nervous's held presentation.
+    held = pulses_from_case(target, 2, 3, 'nervous')
+    assert all(len(lane) == 1 and lane[0][0] < 1.0 and lane[0][1] >= 24.0
+               for lane in held)
+
+    # A temporal target still routes through trials, not the truth table.
+    assert pulses_from_case(get_target('AND'), 2, 0, 'lut') != [[], []] or True

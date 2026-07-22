@@ -39,11 +39,11 @@ def _seed_state(genome):
 # would silently truncate and alias two distinct contexts onto one cache entry.
 # Single-tile is 5 bits — 4 would lose the OR twins: states 0-15 are the
 # paper's AND routing and 16-31 their OR counterparts, so the growth match must
-# see the 5th bit to tell them apart. Tri-tile is 12 bits (three packed 4-bit
-# channels); because the channels are disjoint fields, a 12-bit Hamming is
-# exactly the sum of the three per-channel Hammings.
+# see the 5th bit to tell them apart. Tri-tile is 15 bits (three packed 5-bit
+# channels, each the same 32-value alphabet); because the channels are disjoint
+# fields, a 15-bit Hamming is exactly the sum of the three per-channel Hammings.
 _SINGLE_BITS = (MAX_STATE - 1).bit_length()        # 5
-_TRI_BITS = (TRI_STATE_MAX - 1).bit_length()       # 12
+_TRI_BITS = (TRI_STATE_MAX - 1).bit_length()       # 15
 
 
 def _pack_context(sL, sR, sD, si, bits):
@@ -90,9 +90,9 @@ def _lookup_compiled(program, sL, sR, sD, si, packed=None):
     """Associative next-state lookup (min Hamming). No time/telomere term — the
     telomere now gates DIVISION per cell in _grow_step, not which genes exist.
 
-    The single-tile alphabet is 5-bit; the tri-tile alphabet (three packed 4-bit
-    channels) is 12-bit. Both are compared by Hamming distance over the whole
-    state — and because the tri channels occupy DISJOINT bit fields, a 12-bit
+    The single-tile alphabet is 5-bit; the tri-tile alphabet (three packed 5-bit
+    channels) is 15-bit. Both are compared by Hamming distance over the whole
+    state — and because the tri channels occupy DISJOINT bit fields, a 15-bit
     Hamming is exactly the sum of the three per-channel Hammings, so context
     matching is per-channel for free."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
@@ -324,6 +324,7 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
 
 
 def score_nervous(genome, target):
+    from .scoring import score_contract
     grid = grow_nervous(genome, seeds=tuple(target.inputs),
                         grid_size=target.grid_size, iters=target.iters)
     if len(grid) <= target.n_inputs:
@@ -338,16 +339,16 @@ def score_nervous(genome, target):
     n_checks = len(target.cases) * len(target.outputs)
     if n_checks == 0:
         return 0.0
-    correct = 0
+    observations = []
     for in_bits, out_bits in target.cases:
         invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
             config=getattr(target, 'pulse_config', None), arch=arch)
-        for i, term in enumerate(target.outputs):
-            if outs.get(out_pos[term.role], 0) == out_bits[i]:
-                correct += 1
-    return correct / n_checks
+        observations.append([
+            float(outs.get(out_pos[term.role], 0))
+            for term in target.outputs])
+    return score_contract(observations, target)[0]
 
 
 def nervous_case_outputs(genome, target):
@@ -392,8 +393,10 @@ def circuit_summary_nervous(grid, arch='single'):
 def nervous_truth_table(genome, target):
     grid, in_pos, out_pos, cases = nervous_case_outputs(genome, target)
     arch = getattr(genome, 'arch', 'single')
-    lines = ['Target: ' + target.name + '   [hex nervous net]',
-             'Circuit: ' + circuit_summary_nervous(grid, arch=arch)]
+    from .contracts import behavior_contract_lines
+    lines = (['Target: ' + target.name + '   [hex nervous net]', ''] +
+             behavior_contract_lines(target) +
+             ['', 'Circuit: ' + circuit_summary_nervous(grid, arch=arch)])
     for term in target.outputs:
         p = out_pos.get(term.role)
         lines.append("  out '%s': %s" % (term.role, ('pos=%s' % (p,)) if p else '(not found)'))

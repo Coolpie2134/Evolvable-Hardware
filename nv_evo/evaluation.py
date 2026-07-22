@@ -29,20 +29,16 @@ class FittedReadout:
 
 def fit_readout(genome, target, backend='nervous'):
     """Fit output cells and one shared alignment on training schedules."""
-    from .scoring import relation_spec
-    if (backend == 'nervous'
-            and relation_spec(target).evaluator == 'sr_retention'):
-        from .persistence import fit_sr_readout
-        return fit_sr_readout(genome, target)
     if backend == 'nervous':
-        from .temporal import prepare_net, score_temporal_bundle
+        from .temporal import prepare_net
+        from .scoring import score_contract
         prep = prepare_net(genome, target)
         if prep is None:
             return None
         out_pos, traces = prep[3], prep[4]
     elif backend == 'lut':
         from lut_evo.ga import prepare_lut
-        from .temporal import score_temporal_bundle
+        from .scoring import score_contract
         prep = prepare_lut(genome, target)
         if prep is None:
             return None
@@ -51,18 +47,13 @@ def fit_readout(genome, target, backend='nervous'):
         raise ValueError("unknown temporal backend: %s" % backend)
     if getattr(traces, 'overflow', False):
         return None
-    score, _, alignment = score_temporal_bundle(traces, target)
+    score, _, alignment = score_contract(traces, target)
     outputs = tuple(sorted(out_pos.items()))
     return FittedReadout(backend, outputs, alignment, score)
 
 
 def score_frozen(genome, target, fitted):
     """Score fresh schedules without changing the fitted cell or alignment."""
-    from .scoring import relation_spec
-    if (fitted.backend == 'nervous'
-            and relation_spec(target).evaluator == 'sr_retention'):
-        from .persistence import score_sr_frozen
-        return score_sr_frozen(genome, target, fitted)
     out_pos = fitted.output_positions
     expected_roles = {terminal.role for terminal in target.outputs}
     if set(out_pos) != expected_roles:
@@ -70,7 +61,8 @@ def score_frozen(genome, target, fitted):
 
     if fitted.backend == 'nervous':
         from .nervous import (grow_nervous, interpret_nervous, node_delays)
-        from .temporal import trace_fixed_outputs, score_temporal_bundle
+        from .temporal import trace_fixed_outputs
+        from .scoring import score_contract
         grid = grow_nervous(genome, seeds=tuple(target.inputs),
                             grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
@@ -89,7 +81,7 @@ def score_frozen(genome, target, fitted):
     elif fitted.backend == 'lut':
         from lut_evo.lut import grow_lut
         from lut_evo.ga import trace_fixed_outputs
-        from .temporal import score_temporal_bundle
+        from .scoring import score_contract
         grid = grow_lut(genome, seeds=tuple(target.inputs),
                         grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs or any(
@@ -102,5 +94,5 @@ def score_frozen(genome, target, fitted):
 
     if traces is None or getattr(traces, 'overflow', False):
         return 0.0
-    return score_temporal_bundle(
+    return score_contract(
         traces, target, alignment=fitted.alignment)[0]

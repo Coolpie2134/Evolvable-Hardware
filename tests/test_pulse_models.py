@@ -34,7 +34,7 @@ from nv_evo.nervous import (node_delays, grow_nervous,  # noqa: E402
 from nv_evo.genome import (default_state_delays,  # noqa: E402
                            MAX_STATE)
 from nv_evo.targets import TEMPORAL_TARGETS                   # noqa: E402
-from nv_evo.temporal import (score_temporal_bundle, TemporalTraces,  # noqa: E402
+from nv_evo.temporal import (score_contract, TemporalTraces,  # noqa: E402
                              _waveform_expected)
 from evo_runtime.checkpoint import (genome_to_dict, genome_from_dict,  # noqa: E402
                                     _target_to_dict, _target_from_dict)
@@ -209,7 +209,8 @@ def test_evolved_delay_checkpoint_round_trip():
 def test_waveform_target_checkpoint_round_trip():
     target = TEMPORAL_TARGETS['Pulse width sum (A+B)']
     restored = _target_from_dict(_target_to_dict(target))
-    assert restored.score_mode == 'waveform'
+    assert [c.relation for c in restored.contract.constraints] == \
+        ['pulse_intervals']
     assert restored.waveform_contract == 'width_sum'
     assert restored.trials[0].expected_intervals == \
         target.trials[0].expected_intervals
@@ -240,7 +241,7 @@ def test_width_sum_target_uses_both_input_durations():
         else:
             assert expected == []
     assert positive == 6
-    assert score_temporal_bundle(_perfect_waveform_traces(target), target)[0] == 1.0
+    assert score_contract(_perfect_waveform_traces(target), target)[0] == 1.0
 
 
 def test_waveform_targets_fit_one_shared_latency_but_not_width_errors():
@@ -252,10 +253,10 @@ def test_waveform_targets_fit_one_shared_latency_but_not_width_errors():
         [(start + latency, end + latency) for start, end in trial]
         for trial in shifted.intervals['Q']]
 
-    score, _, fitted = score_temporal_bundle(shifted, target)
+    score, _, fitted = score_contract(shifted, target)
     assert abs(score - 1.0) <= TOL
     assert abs(fitted - latency) <= TOL
-    frozen_wrong, _, used = score_temporal_bundle(
+    frozen_wrong, _, used = score_contract(
         shifted, target, alignment=0.0)
     assert frozen_wrong < 1.0
     assert used == 0.0
@@ -264,13 +265,13 @@ def test_waveform_targets_fit_one_shared_latency_but_not_width_errors():
     shifted.intervals['Q'][0][0] = (start, end - 0.5)
     shifted._waveform_result = None
     # A fitted latency cannot conceal an incorrect output duration.
-    assert score_temporal_bundle(shifted, target)[0] < 1.0
+    assert score_contract(shifted, target)[0] < 1.0
 
     wrong = _perfect_waveform_traces(target)
     wrong.intervals['Q'][0][0] = (
         wrong.intervals['Q'][0][0][0],
         wrong.intervals['Q'][0][0][1] - 0.5)
-    assert score_temporal_bundle(wrong, target)[0] < 1.0
+    assert score_contract(wrong, target)[0] < 1.0
 
 
 def test_odd_selector_passes_odd_indexed_pulses_with_their_widths():
@@ -287,7 +288,7 @@ def test_odd_selector_passes_odd_indexed_pulses_with_their_widths():
         for interval, pulse in zip(expected, source[::2]):
             assert abs(interval[0] - (pulse[0] + 1.0)) <= TOL
             assert abs((interval[1] - interval[0]) - pulse[1]) <= TOL
-    assert score_temporal_bundle(_perfect_waveform_traces(target), target)[0] == 1.0
+    assert score_contract(_perfect_waveform_traces(target), target)[0] == 1.0
 
 
 def test_odd_selector_rejects_fixed_dead_time_filters():

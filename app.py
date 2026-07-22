@@ -49,6 +49,7 @@ from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervo
                     nervous_case_outputs,
                     ROUTING, temporal_report, periodic_combinational_target)
 from nv_evo import TEMPORAL_TARGETS
+from nv_evo.contracts import behavior_contract_lines
 from nv_evo.viz import draw_hex_net
 from lut_evo.viz import draw_lut_net, draw_lut_table
 from interactive import InteractiveTab
@@ -115,14 +116,15 @@ def build_truth_table(genome, target, arch):
         nrn = next((n for n in ns if n.is_output and n.out_role == term.role), None)
         out_ids.append(nrn.id if nrn else None)
 
-    lines = ['Target: ' + target.name,
+    lines = (['Target: ' + target.name, ''] +
+             behavior_contract_lines(target) + [
              '',
              'Goal: Produce the specified logical outputs for each input combination.',
              'Scoring: Each output is an exact expected-versus-observed check; all checks weigh equally.',
              'Tests: %d defined input combination%s.' % (
                  len(target.cases), '' if len(target.cases) == 1 else 's'),
              '',
-             'Circuit: ' + circuit_summary(ns, ss)]
+             'Circuit: ' + circuit_summary(ns, ss)])
     for term, oid in zip(target.outputs, out_ids):
         if oid is not None:
             o = ns[oid]
@@ -732,6 +734,7 @@ class App:
         self.root.bind('<Configure>', self._resize_text_regions, add='+')
 
         self._reconfigure_for_backend()      # set initial model-specific layout
+        self._on_target_change()             # render the initial contract immediately
 
     def _resize_text_regions(self, event):
         """Use available fullscreen width without forcing a larger base window."""
@@ -880,10 +883,10 @@ class App:
         self._fit_canvas = FigureCanvasTkAgg(self._fit_fig, master=left)
         self._fit_canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
 
-        # Titled dynamically by _set_tt_title: 'Truth Table' for combinational
-        # targets, 'Trace Report' for temporal ones (it shows temporal_report /
-        # lut_report there, not a truth table).
-        self._tt_frame = ttk.LabelFrame(frame, text='Report', padding=6)
+        # Before a run this shows the target's executable contract; afterwards
+        # it includes actual observations and the score from the same evaluator
+        # evolution used.
+        self._tt_frame = ttk.LabelFrame(frame, text='Behavior Contract', padding=6)
         self._tt_frame.pack(side='right', fill='both', padx=(0, 6), pady=6)
         # wrap='word' so long prose lines flow onto the next line instead of
         # being clipped by the panel width; short aligned rows are unaffected.
@@ -1006,19 +1009,30 @@ class App:
             self._reconfigure_for_backend()
             # show what this target IS right away in the Evolution tab's panel
             try:
-                self._set_tt(temporal_report(self.target), title='Trace Report')
+                if self._backend() == 'lut':
+                    from lut_evo import lut_report
+                    preview = lut_report(self.target)
+                else:
+                    preview = temporal_report(self.target)
+                self._set_tt(preview, title='Behavior Contract')
             except Exception:
                 pass
             model = ('continuous-time LUT array' if self._backend() == 'lut'
                      else 'continuous-time nervous net')
             self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test seconds. '
-                             'See Evolution for scoring details and Interactive for playback.'
+                             'See Evolution for its executable contract and Interactive for playback.'
                              % (self.target.name, model, self.target.n_inputs,
                                 '' if self.target.n_inputs == 1 else 's',
                                 self.target.n_outputs,
                                 '' if self.target.n_outputs == 1 else 's', self.target.T))
             return
         n_cases = len(self.target.cases)
+        preview = ['Target: ' + self.target.name, '']
+        preview += behavior_contract_lines(self.target)
+        preview += ['', 'Tests: %d defined input combination%s.' %
+                    (n_cases, '' if n_cases == 1 else 's'),
+                    '', '(run the GA or Load Saved to inspect a circuit)']
+        self._set_tt('\n'.join(preview), title='Behavior Contract')
         self._status.set('Target: %s — %d inputs, %d outputs, %d truth-table tests%s' % (
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
             '   (large — evolution will be slow)' if n_cases > 32 else ''))
@@ -1829,7 +1843,7 @@ class App:
                 text = build_truth_table(genome, self._disp_target, self._disp_arch)
         except Exception as exc:
             text = 'Error building report:\n' + str(exc)
-        self._set_tt(text, title='Trace Report' if temporal else 'Truth Table')
+        self._set_tt(text, title='Contract Score')
 
     def _draw_growth(self, genome, fitness):
         target = self._disp_target

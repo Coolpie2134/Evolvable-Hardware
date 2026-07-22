@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple
 
 from .genome import GRID_SIZE, MAX_ITER
+from nv_evo.contracts import BehaviorContract, logic_contract
 
 CURRENT_HIGH = 4.0   # nA — logical "1" input current
 MIN_SPIKES   = 1     # spikes needed to count as "fired"
@@ -52,6 +53,7 @@ class Target:
     output_strategy: str = "terminals"                      # "terminals" | "heuristic"
     high:            float = CURRENT_HIGH
     graded:          bool = False                           # smooth partial-credit fitness
+    contract:        BehaviorContract = field(default_factory=logic_contract)
 
     @property
     def n_inputs(self) -> int:

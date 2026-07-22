@@ -28,6 +28,7 @@ def _genome_types(backend):
 
 
 def genome_to_dict(genome, backend):
+    from nv_evo.tritile import _CHAN_BITS
     fields = _FIELDS[backend]
     def split_for(chromosome):
         count = len(chromosome.genes)
@@ -43,6 +44,9 @@ def genome_to_dict(genome, backend):
             for c in genome.chromosomes],
         'state_delays': ([float(x) for x in sd] if sd else None),
         'arch': getattr(genome, 'arch', 'single'),      # nervous tile architecture
+        # Tri channel field width. Absent (or 4) marks the pre-OR layout, which
+        # genome_from_dict widens on load; stamping 5 stops a re-widen.
+        'tri_channel_bits': _CHAN_BITS,
     }
 
 
@@ -68,6 +72,19 @@ def genome_from_dict(data, backend):
         genome.state_delays = [float(x) for x in sd]
     if backend == 'nervous':                       # tri3 vs single tile decode
         genome.arch = data.get('arch', 'single')
+        # Tri channels were 4-bit AND-only before the OR twins were added. A
+        # legacy checkpoint's packed bits would be re-cut at the new 5-bit field
+        # boundaries and decode as different channels, so widen them. Legacy
+        # configs are all 0-15 (the AND half), hence behaviour is preserved.
+        if (genome.arch == 'tri3'
+                and int(data.get('tri_channel_bits', 4)) == 4):
+            from nv_evo.tritile import widen_legacy_state
+            for chrom in genome.chromosomes:
+                for gene in chrom.genes:
+                    for field_name in ('ctx_l', 'ctx_r', 'ctx_d',
+                                       'self_in', 'self_out'):
+                        setattr(gene, field_name,
+                                widen_legacy_state(getattr(gene, field_name)))
     return genome
 
 
@@ -75,7 +92,7 @@ def _target_to_dict(target):
     kind = 'temporal' if getattr(target, 'temporal', False) else 'logic'
     extras = {
         name: value for name, value in vars(target).items()
-        if name.startswith('_sr_')
+        if name.startswith('_sr_') or name.startswith('_retention_')
     }
     return {'kind': kind, 'data': dataclasses.asdict(target), 'extras': extras}
 
@@ -92,6 +109,18 @@ def _target_from_dict(item):
     data = dict(item['data'])
     if item['kind'] == 'temporal':
         from nv_evo.targets import TemporalTarget, Trial, OutputTerminal
+        from nv_evo.contracts import contract_from_dict, legacy_contract
+        legacy_mode = data.pop('score_mode', None)
+        data['contract'] = (legacy_contract(legacy_mode, data)
+                            if legacy_mode is not None and 'contract' not in data
+                            else contract_from_dict(data.get('contract')))
+        for obsolete in ('event_tolerance', 'waveform_tolerance',
+                         'event_max_shift', 'fit_latency', 'cadence_period',
+                         'cadence_tolerance', 'cadence_settle',
+                         'cadence_min_events', 'stepper_min_period',
+                         'stepper_max_period', 'stepper_settle',
+                         'stepper_min_events', 'stepper_max_delay'):
+            data.pop(obsolete, None)
         data['inputs'] = [tuple(p) for p in data['inputs']]
         data['outputs'] = [OutputTerminal(role=o['role'], pos=tuple(o['pos']))
                            for o in data['outputs']]
@@ -110,6 +139,9 @@ def _target_from_dict(item):
             setattr(target, name, _tuples(value))
         return target
     from snn_evo.targets import Target, OutputTerminal
+    from nv_evo.contracts import contract_from_dict, logic_contract
+    data['contract'] = (contract_from_dict(data['contract'])
+                        if data.get('contract') else logic_contract())
     data['inputs'] = [tuple(p) for p in data['inputs']]
     data['outputs'] = [OutputTerminal(
         role=o['role'], pos=tuple(o['pos']),

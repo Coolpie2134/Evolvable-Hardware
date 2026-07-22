@@ -79,9 +79,9 @@ def clone_genome(genome):
         tag=genome.tag,
         state_delays=(sd[:] if sd else None),
         arch=getattr(genome, 'arch', 'single'))
-from .temporal import (prepare_net, score_temporal_bundle, loop_profile,
+from .temporal import (prepare_net, score_contract, loop_profile,
                        cycle_nodes, _reachable)
-from .scoring import relation_spec
+from .scoring import contract_case_count
 from .tritile import interpret_tri
 
 POPSIZE        = 120
@@ -163,21 +163,14 @@ def evaluate_nv_full(genome, target):
     selection falls back to tournament."""
     if not getattr(target, 'temporal', False):
         return score_nervous(genome, target), None
-    evaluator = relation_spec(target).evaluator
-    if evaluator == 'retention':
-        from .persistence import evaluate_retention    # event-native memory fitness
-        return evaluate_retention(genome, target)
-    if evaluator == 'sr_retention':
-        from .persistence import evaluate_sr_retention
-        return evaluate_sr_retention(genome, target)
-    n_cases = sum(len(tr.expected) for tr in target.trials)
+    n_cases = contract_case_count(target)
     prep = prepare_net(genome, target)
     if prep is None:
         return 0.0, (0.0,) * n_cases
     grid, routing, in_pos, out_pos, traces = prep
     if getattr(traces, 'overflow', False):
         return 0.0, (0.0,) * n_cases
-    s, cases, _ = score_temporal_bundle(traces, target)
+    s, cases, _ = score_contract(traces, target)
     if s < 1.0:
         bonus = (_loop_bonus_tri(grid, in_pos, out_pos)
                  if getattr(genome, 'arch', 'single') == 'tri3'

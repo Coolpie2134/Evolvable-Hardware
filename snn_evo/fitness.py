@@ -2,6 +2,7 @@ from __future__ import annotations
 from .lif_sim import simulate
 from .targets import (Target, get_target, CURRENT_HIGH, MIN_SPIKES,
                       DEFAULT_TARGET)
+from nv_evo.scoring import score_contract
 
 SEED_A    = (0, 3)
 SEED_B    = (0, 5)
@@ -40,7 +41,7 @@ def score(neurons, synapses, target: Target) -> float:
     if n_checks == 0:
         return 0.0
 
-    reward    = 0.0
+    observations = []
     encodings = {t.complement_inputs for t in target.outputs}
     for in_bits, out_bits in target.cases:
         # One simulation per distinct input encoding (normal / complement).
@@ -51,21 +52,15 @@ def score(neurons, synapses, target: Target) -> float:
                 base = target.high if bit else 0.0
                 currents[iid] = (target.high - base) if comp else base
             sims[comp] = simulate(neurons, synapses, currents)
+        row = []
         for i, term in enumerate(target.outputs):
             sp = sims[term.complement_inputs]
             n  = len(sp.get(out_ids[i], []))
-            # A spike encodes the expected bit directly, or inverted.
-            want_fired = (out_bits[i] == 0) if term.invert_spike else (out_bits[i] == 1)
-            if target.graded:
-                # Perfect behaviour still scores 1.0; spurious spikes on a
-                # "should be silent" output are penalised smoothly, giving the
-                # GA a gradient away from saturated all-firing circuits.
-                reward += (1.0 if n >= MIN_SPIKES else 0.0) if want_fired else 1.0 / (1.0 + n)
-            else:
-                fired = n >= MIN_SPIKES
-                reward += 1.0 if fired == want_fired else 0.0
+            fired = n >= MIN_SPIKES
+            row.append(float(not fired) if term.invert_spike else float(fired))
+        observations.append(row)
 
-    return reward / n_checks
+    return score_contract(observations, target)[0]
 
 
 def evaluate(neurons, synapses):

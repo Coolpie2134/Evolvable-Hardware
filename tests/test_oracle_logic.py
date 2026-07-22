@@ -23,6 +23,7 @@ from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            make_watchdog, make_a_parity_query,
                            make_a_mod3_query, make_a_batch_parity_query)
 from nv_evo.temporal import TemporalTraces, event_score     # noqa: E402
+from nv_evo.scoring import contract_relations               # noqa: E402
 from snn_evo.targets import gate_target                     # noqa: E402
 
 
@@ -32,6 +33,10 @@ def _trace(fn, seq):
         ob, st = fn(inb, st)
         out.append(ob[0])
     return out
+
+
+def _is_event_target(target):
+    return contract_relations(target) == ('event_correspondence',)
 
 
 def test_a_parity_query_counts_a_and_b_only_reads_state():
@@ -52,7 +57,7 @@ def test_a_parity_query_target_is_registered_and_labels_every_b_query():
     assert display in TEMPORAL_TARGETS
     assert spec in ORACLE_SPECS
     target = ORACLE_SPECS[spec](seed=515)
-    assert target.score_mode == 'events'
+    assert _is_event_target(target)
     assert len(target.inputs) == 2
     for trial in target.trials:
         parity = 0
@@ -118,13 +123,24 @@ def test_a_count_query_targets_use_mixed_pulse_lengths():
 def test_binary_truth_tables_become_phase_locked_periodic_targets():
     target = periodic_combinational_target(gate_target('AND'))
     assert target.temporal
-    assert target.score_mode == 'events'
+    assert _is_event_target(target)
     assert target.supported_backends == ('nervous', 'lut')
     assert len(target.trials) == 4  # two row orders at two phases
     assert 'tick' not in target.description.lower()
 
+    # Cases are presented in widely-spaced, isolated windows so one test cannot
+    # contaminate the next: the onset-to-onset spacing is many times the grid's
+    # few-tick settling transient, not the old cramped 4-second packing.
+    spacings = []
+    for trial in target.trials:
+        onsets = sorted(second for second, row in enumerate(trial.streams)
+                        if any(row))
+        spacings += [b - a for a, b in zip(onsets, onsets[1:])]
+    spacing = min(spacings)
+    assert spacing >= 3 * target.grid_size
+    cycle = 4 * spacing  # four AND rows, one window each
+
     # Every lane's complete truth-table waveform repeats exactly each cycle.
-    cycle = 4 * 4  # four AND rows, four seconds per row
     for trial in target.trials:
         for lane in range(target.n_inputs):
             events = [second for second, row in enumerate(trial.streams)
@@ -211,7 +227,7 @@ def test_period_doubler_bank_mixes_periods():
     Period 1 must NOT appear: a pulse every tick wired-OR merges into one held
     level — physically it carries no period."""
     t = TEMPORAL_TARGETS['Period doubler (2x)']
-    assert t.score_mode == 'events'
+    assert _is_event_target(t)
     periods, silent = set(), 0
     for tr in t.trials:
         ticks = [i for i, s in enumerate(tr.streams) if s[0]]
@@ -239,7 +255,7 @@ def test_period_tripler_has_three_times_the_input_period():
 
 def test_period_tripler_bank_mixes_periods_and_has_silent_guard():
     target = TEMPORAL_TARGETS['Period tripler (3x)']
-    assert target.score_mode == 'events'
+    assert _is_event_target(target)
     periods, silent = set(), 0
     for trial in target.trials:
         ticks = [tick for tick, bits in enumerate(trial.streams) if bits[0]]
@@ -260,7 +276,7 @@ def test_period_tripler_bank_mixes_periods_and_has_silent_guard():
 
 def test_period_halver_measures_then_emits_at_half_period():
     target = TEMPORAL_TARGETS['Period halver (1/2x)']
-    assert target.score_mode == 'events'
+    assert _is_event_target(target)
     periods, silent = set(), 0
     for trial in target.trials:
         ticks = [tick for tick, bits in enumerate(trial.streams) if bits[0]]
@@ -284,7 +300,7 @@ def test_period_halver_measures_then_emits_at_half_period():
 def test_temporal_sum_encodes_delta_a_plus_delta_b():
     name = 'Temporal sum (ΔA + ΔB)'
     target = TEMPORAL_TARGETS[name]
-    assert target.score_mode == 'events' and target.n_inputs == 2
+    assert _is_event_target(target) and target.n_inputs == 2
     sums, positive, guards = set(), 0, 0
     for trial in target.trials:
         a_ticks = [tick for tick, bits in enumerate(trial.streams) if bits[0]]
@@ -343,7 +359,7 @@ def test_pair_gap_two_widths_is_physical_and_relative():
     # both asynchronous backends may run this continuous-time target; clocked
     # backends (snn) stay excluded so the fractional phases are never quantised
     assert set(target.supported_backends) == {'nervous', 'lut'}
-    assert target.score_mode == 'events'
+    assert _is_event_target(target)
     assert any(start != int(start)
                for trial in target.trials
                for start, _width in trial.input_events[0])
@@ -376,7 +392,7 @@ def test_c_element_registered_as_target():
     assert 'C-element (2-in join)' in TEMPORAL_TARGETS
     assert 'C-element (oracle)' in ORACLE_SPECS
     t = TEMPORAL_TARGETS['C-element (2-in join)']
-    assert t.score_mode == 'events'
+    assert _is_event_target(t)
     assert len(t.inputs) == 2
     # every trial with a positive expectation must have at least one output event
     assert any(1 in [x for x in tr.expected['Q'] if x is not None] for tr in t.trials)
@@ -498,7 +514,7 @@ def test_new_async_oracles_are_registered_and_seeded():
         registered = TEMPORAL_TARGETS[display_name]
         fresh_a = ORACLE_SPECS[spec_name](seed=101)
         fresh_b = ORACLE_SPECS[spec_name](seed=202)
-        assert registered.score_mode == fresh_a.score_mode == 'events'
+        assert _is_event_target(registered) and _is_event_target(fresh_a)
         assert registered.n_outputs == fresh_a.n_outputs == 1
         assert len(registered.inputs) == len(fresh_a.inputs)
         assert [tr.streams for tr in fresh_a.trials] != [tr.streams for tr in fresh_b.trials]
@@ -522,7 +538,7 @@ def test_registered_target_copy_uses_seconds_not_ticks():
 def test_echo_delay_three_requires_absolute_timing():
     """Echo is a precision delay, so a fitted shift cannot rescue a wire."""
     target = TEMPORAL_TARGETS['Echo (delay 3)']
-    assert target.score_mode == 'events'
+    assert _is_event_target(target)
     assert target.latency == 3
     assert target.fit_latency is False
     expected = [trial.expected_events['Q'] for trial in target.trials]

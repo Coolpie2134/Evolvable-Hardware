@@ -1,139 +1,200 @@
-"""
-tests/test_scoring_equivalence.py — the refactor equivalence gate.
+"""Contract-v1 regression and anti-cheat tests.
 
-tests/fixtures/scoring_golden.json was captured by replaying a synthetic
-bundle battery (every registered target x {perfect, shift2, half, silence,
-always} x hold_tol variants) through the PRE-refactor scorers, plus a battery
-of float-time retention/coverage scenarios. This test replays the exact same
-bundles through the consolidated nv_evo/scoring.py path and demands identical
-scores, per-case vectors, and fitted alignments — so the consolidation is
-provably a relocation, not a semantics change. It stays in the suite as a
-permanent scorer-regression net: any future scoring edit that shifts numbers
-must consciously regenerate the goldens (py tools/make_scoring_golden.py)
-and say why in the commit message.
-
-Run under the suite runner:  py tests/run_tests.py
+The old golden file intentionally pinned seven mode-specific scorers. Contract
+v1 is a semantic change, so the gate now pins the invariants that matter:
+every target is declarative, all backends enter one evaluator, phase does not
+change memory quality, and common shortcuts cannot reach perfect fitness.
 """
-import json
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.targets import TEMPORAL_TARGETS                     # noqa: E402
-from nv_evo.scoring import (TemporalTraces, score_temporal_bundle,  # noqa: E402
-                            windowed_score, relation_spec, RELATIONS,
-                            needs_samples, score_retention,
-                            score_retention_graded, score_state_intervals,
-                            score_interval_graded, score_reset_influence)
-
-_GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       'fixtures', 'scoring_golden.json')
-EPS = 1e-12
+from nv_evo.contracts import (behavior_contract_badge,              # noqa: E402
+                              behavior_contract_text, logic_contract)
+from nv_evo.targets import TEMPORAL_TARGETS                         # noqa: E402
+from nv_evo.scoring import (TemporalTraces, contract_relations,     # noqa: E402
+                            needs_samples, score_contract,
+                            _expected_windows)
+from snn_evo.targets import gate_target                             # noqa: E402
 
 
-def _load():
-    with open(_GOLDEN, encoding='utf-8') as fh:
-        return json.load(fh)
+RELATIONS = {
+    'event_correspondence', 'logical_state', 'pulse_intervals',
+    'sustained_cadence', 'commanded_cadence', 'bounded_state',
+}
 
 
-def _rebuild(bundle, hold_tol):
-    traces = TemporalTraces(
-        {role: [list(t) for t in ts] for role, ts in bundle['samples'].items()},
-        events={role: [[float(v) for v in t] for t in ts]
-                for role, ts in bundle['events'].items()},
-        intervals={role: [[tuple(p) for p in t] for t in ts]
-                   for role, ts in bundle['intervals'].items()})
-    if hold_tol is not None:
-        traces.hold_tol = hold_tol
-    return traces
-
-
-def _close(a, b):
-    if a is None or b is None:
-        return a is None and b is None
-    return abs(float(a) - float(b)) <= EPS
-
-
-def test_registry_covers_every_historical_mode():
-    assert set(RELATIONS) == {'events', 'trace', 'waveform', 'cadence',
-                              'period_stepper', 'retention', 'sr_retention'}
-    families = {spec.family for spec in RELATIONS.values()}
-    assert families == {'match', 'rhythm'}
-    # observable drives what the harness collects; 'samples' only where the
-    # scorer genuinely consumes ticks
-    assert needs_samples(TEMPORAL_TARGETS[next(
-        name for name, t in TEMPORAL_TARGETS.items()
-        if getattr(t, 'score_mode', 'trace') == 'trace')])
-
-
-def test_bundle_scores_match_legacy_goldens():
-    data = _load()
-    assert data['bundles'], 'golden battery is empty'
-    missing, checked = [], 0
-    for rec in data['bundles']:
-        target = TEMPORAL_TARGETS.get(rec['target'])
-        if target is None:            # target renamed/retired since capture
-            missing.append(rec['target'])
-            continue
-        traces = _rebuild(rec['bundle'], rec['hold_tol'])
-        score, cases, alignment = score_temporal_bundle(traces, target)
-        ctx = '%s/%s/tol=%s' % (rec['target'], rec['variant'], rec['hold_tol'])
-        assert _close(score, rec['score']), (ctx, score, rec['score'])
-        assert len(cases) == len(rec['cases']), ctx
-        assert all(_close(a, b) for a, b in zip(cases, rec['cases'])), ctx
-        assert _close(alignment, rec['alignment']), (
-            ctx, alignment, rec['alignment'])
-        if rec['frozen_score'] is not None:
-            traces2 = _rebuild(rec['bundle'], rec['hold_tol'])
-            fscore, fcases, fused = score_temporal_bundle(
-                traces2, target, alignment=rec['alignment'])
-            assert _close(fscore, rec['frozen_score']), ctx
-            assert all(_close(a, b)
-                       for a, b in zip(fcases, rec['frozen_cases'])), ctx
-            assert _close(fused, rec['frozen_alignment']), ctx
-        traces3 = _rebuild(rec['bundle'], rec['hold_tol'])
-        assert _close(windowed_score(traces3, target), rec['windowed']), ctx
-        checked += 1
-    # the battery must genuinely cover the suite: a mass-rename would silently
-    # skip everything and this assert is the tripwire
-    assert checked >= max(1, len(data['bundles']) - 10 * max(1, len(missing)))
-    assert not missing, 'golden targets missing from registry: %s' % missing
-
-
-def test_retention_coverage_scores_match_legacy_goldens():
-    data = _load()
-    assert data['coverage'], 'coverage battery is empty'
-    for rec in data['coverage']:
-        rise = [float(v) for v in rec['rise']]
-        offset = float(rec['offset'])
-        par = [tuple(iv) for iv in rec['parity_64']]
-        par2 = [tuple(iv) for iv in rec['parity_96']]
-        sri = [tuple(iv) for iv in rec['sr_96']]
-        ctx = '%s/offset=%s' % (rec['label'], rec['offset'])
-        assert _close(score_retention(rise, par, offset),
-                      rec['score_retention_p64']), ctx
-        assert _close(score_retention_graded(rise, par, offset),
-                      rec['score_retention_graded_p64']), ctx
-        assert _close(score_retention(rise, par2, offset),
-                      rec['score_retention_p96']), ctx
-        assert _close(score_retention_graded(rise, par2, offset),
-                      rec['score_retention_graded_p96']), ctx
-        assert _close(score_state_intervals(rise, sri, offset),
-                      rec['score_state_intervals_sr']), ctx
-        got = [score_interval_graded(rise, state, a, b, offset)
-               for (state, a, b) in sri]
-        assert all(_close(a, b)
-                   for a, b in zip(got, rec['score_interval_graded'])), ctx
-        assert _close(score_reset_influence(rise, 37.0, offset),
-                      rec['score_reset_influence']), ctx
-
-
-def test_evaluator_dispatch_is_registry_driven():
-    """The retention pipelines are selected by the registry, not by string
-    comparison scattered through ga/evaluation."""
-    from nv_evo.persistence import retention_oracle, sr_full_oracle
-    assert relation_spec(retention_oracle()).evaluator == 'retention'
-    assert relation_spec(sr_full_oracle()).evaluator == 'sr_retention'
+def test_every_registered_target_has_an_executable_contract():
     for name, target in TEMPORAL_TARGETS.items():
-        assert relation_spec(target).evaluator == 'bundle', name
+        assert target.contract.constraints, name
+        assert set(contract_relations(target)) <= RELATIONS, name
+        assert not hasattr(target, 'score_mode'), name
+    assert logic_contract().constraints[0].relation == 'truth_table'
+
+
+def test_contract_presentation_is_generated_from_executable_data():
+    target = TEMPORAL_TARGETS['Oscillator']
+    text = behavior_contract_text(target)
+    assert 'Behavior Contract v1' in text
+    assert 'score_contract (shared by every backend)' in text
+    assert 'Sustained cadence' in text
+    assert 'required period=' in text
+    assert 'mean + worst restriction' in text
+    assert 'Sustained cadence' in behavior_contract_badge(target)
+
+    target.contract.constraints[0].parameters['presentation_probe'] = 17
+    try:
+        assert 'presentation probe=17' in behavior_contract_text(target)
+    finally:
+        del target.contract.constraints[0].parameters['presentation_probe']
+
+
+def test_observation_collection_is_derived_from_contract():
+    state = next(t for t in TEMPORAL_TARGETS.values()
+                 if 'logical_state' in contract_relations(t))
+    events = next(t for t in TEMPORAL_TARGETS.values()
+                  if 'event_correspondence' in contract_relations(t))
+    assert needs_samples(state)
+    assert not needs_samples(events)
+
+
+def test_logic_contract_rejects_constant_shortcuts():
+    target = gate_target('XOR')
+    perfect = [[bits[0] ^ bits[1]] for bits, _ in target.cases]
+    assert score_contract(perfect, target)[0] == 1.0
+    assert score_contract([[0]] * len(target.cases), target)[0] < 1.0
+    assert score_contract([[1]] * len(target.cases), target)[0] < 1.0
+
+
+def test_lopsided_logic_gate_gives_a_constant_no_edge():
+    # The degeneracy the old flat-mean aggregation hid: AND is 1 in only one of
+    # four rows, so always-0 used to score 0.75 — a do-nothing circuit looked
+    # three-quarters solved. Balanced per-output aggregation pins any constant
+    # to 0.5 (chance) regardless of how lopsided the truth table is, so the
+    # gradient points at the function, not at the majority output value.
+    for name in ('AND', 'NOR', 'OR', 'NAND'):
+        target = gate_target(name)
+        n = len(target.cases)
+        assert score_contract([[0]] * n, target)[0] == 0.5, name
+        assert score_contract([[1]] * n, target)[0] == 0.5, name
+        perfect = [[out[0]] for _, out in target.cases]
+        assert score_contract(perfect, target)[0] == 1.0, name
+
+
+def test_logic_contract_rewards_partial_correctness_monotonically():
+    # Fixing one more row must never lower the score — evolution needs the
+    # gradient. AND: rows sorted so the single expected-1 row is corrected last.
+    target = gate_target('AND')
+    expected = [out[0] for _, out in target.cases]
+    order = sorted(range(len(expected)), key=lambda i: expected[i])
+    prev = -1.0
+    obs = [[1 - e] for e in expected]                 # every row wrong
+    for i in order:
+        obs[i] = [expected[i]]                         # correct one more row
+        score = score_contract(obs, target)[0]
+        assert score >= prev - 1e-12, (i, score, prev)
+        prev = score
+    assert prev == 1.0
+
+
+def test_event_contract_requires_one_to_one_edges_and_silence():
+    target = TEMPORAL_TARGETS['Coincidence (2-in)']
+    perfect = TemporalTraces(
+        {'Q': [[] for _ in target.trials]},
+        events={'Q': [list(tr.expected_events['Q'])
+                      for tr in target.trials]})
+    assert score_contract(perfect, target)[0] == 1.0
+
+    silent = TemporalTraces(
+        {'Q': [[] for _ in target.trials]},
+        events={'Q': [[] for _ in target.trials]})
+    always = TemporalTraces(
+        {'Q': [[] for _ in target.trials]},
+        events={'Q': [[float(t) for t in range(target.T)]
+                      for _ in target.trials]})
+    assert score_contract(silent, target)[0] < 1.0
+    assert score_contract(always, target)[0] < 1.0
+
+
+def _ring_intervals(target, phase, period=4.0, width=1.0):
+    result = []
+    for trial in target.trials:
+        intervals = []
+        for state, ticks in _expected_windows(trial.expected['Q']):
+            if state != 1 or len(ticks) <= period:
+                continue
+            start, end = float(min(ticks)), float(max(ticks) + 1)
+            time = start + float(phase)
+            while time < end:
+                intervals.append((time, min(time + width, end)))
+                time += period
+        result.append(intervals)
+    return result
+
+
+def test_state_contract_is_phase_invariant_for_the_same_ring():
+    target = TEMPORAL_TARGETS['Toggle flip-flop']
+    scores = []
+    for phase in (0.0, 0.5, 1.0, 1.5, 2.0):
+        traces = TemporalTraces(
+            {'Q': [[] for _ in target.trials]},
+            events={'Q': [[a for a, _ in seq]
+                          for seq in _ring_intervals(target, phase)]},
+            intervals={'Q': _ring_intervals(target, phase)})
+        scores.append(score_contract(traces, target, alignment=0)[0])
+    assert max(scores) - min(scores) < 1e-12
+
+
+def test_state_contract_rejects_silence_and_permanent_activity():
+    target = TEMPORAL_TARGETS['Toggle flip-flop']
+    silent = TemporalTraces(
+        {'Q': [[0] * (2 * target.T) for _ in target.trials]},
+        events={'Q': [[] for _ in target.trials]},
+        intervals={'Q': [[] for _ in target.trials]})
+    high = TemporalTraces(
+        {'Q': [[1] * (2 * target.T) for _ in target.trials]},
+        intervals={'Q': [[(0.0, float(2 * target.T))]
+                         for _ in target.trials]})
+    assert score_contract(silent, target)[0] < 1.0
+    assert score_contract(high, target)[0] < 1.0
+
+
+def test_interval_contract_rejects_right_rises_with_wrong_widths():
+    target = TEMPORAL_TARGETS['Pulse width sum (A+B)']
+    perfect_intervals = {
+        'Q': [list(tr.expected_intervals['Q']) for tr in target.trials]}
+    perfect = TemporalTraces(
+        {'Q': [[] for _ in target.trials]},
+        events={'Q': [[a for a, _ in seq]
+                      for seq in perfect_intervals['Q']]},
+        intervals=perfect_intervals)
+    assert score_contract(perfect, target)[0] == 1.0
+    wrong = TemporalTraces(
+        {'Q': [[] for _ in target.trials]},
+        intervals={'Q': [[(a, a + 0.1) for a, _ in seq]
+                         for seq in perfect_intervals['Q']]})
+    assert score_contract(wrong, target)[0] < 1.0
+
+
+def test_no_target_carries_a_hand_written_scoring_description():
+    """The contract is the only statement of how a target is scored.
+
+    Targets used to embed a 'Scoring:' paragraph chosen when the target was
+    written. After the contract rewrite the GUI printed that stale prose
+    directly above the contract that actually scored — two descriptions, one of
+    them wrong. describe_target() now emits Goal/Tests only.
+    """
+    for name, target in TEMPORAL_TARGETS.items():
+        description = getattr(target, 'description', '')
+        assert 'Scoring:' not in description, name
+        if description:
+            assert description.startswith('Goal:'), name
+
+
+def test_temporal_report_states_the_contract_exactly_once():
+    from nv_evo.temporal import temporal_report
+    for name, target in TEMPORAL_TARGETS.items():
+        report = temporal_report(target)
+        assert report.count('Behavior Contract v1') == 1, name
+        assert 'score_contract (shared by every backend)' in report, name

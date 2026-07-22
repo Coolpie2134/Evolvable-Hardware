@@ -537,66 +537,70 @@ a stimulus, either per-tick `streams` or explicit physical `input_events` as
 should do: an expected per-tick trace, point `expected_events`, or complete
 `expected_intervals`.
 
+The target also carries a `BehaviorContract`, built with helpers such as
+`event_contract(...)`, `state_contract(...)`, `interval_contract(...)`, and
+`cadence_contract(...)`. Adding a target normally means selecting and
+parameterizing these reusable restrictions; no scorer branch or backend edit is
+required.
+
 **Why banks are diverse.** Every preset carries several trials with different
 pulse timings. A net that merely matches one fixed schedule (a lucky delay chain)
 fails the shifted trials; only genuine state passes all of them. This is not
 theoretical: a "solved" toggle was once found locked to the exact pulse gaps it
 had been trained on.
 
-### 5.2 The score modes: one contract, two families
+### 5.2 Executable behavior contracts
 
-All scoring lives in `nv_evo/scoring.py`, with one dispatch. Each `score_mode`
-string is an entry in the `RELATIONS` registry mapping it to a
-`RelationSpec(family, relation, observable, evaluator)`, and every consumer (both
-GAs, the Designer, held-out certification, the retention pipelines) reads that
-registry rather than testing the mode string: `relation_spec(target)` picks the
-evaluation pipeline and `needs_samples(target)` decides whether the harness must
-collect per-tick samples at all. The mode strings are permanent aliases, so saved
-targets and old checkpoints keep working. There are two families, because there
-are two different questions.
+`nv_evo/contracts.py` defines serializable `BehaviorContract` and `Constraint`
+data. A target declares the restrictions that express its idea; it does not
+select a scoring pipeline. `nv_evo/scoring.py: score_contract` is the only
+target-facing fitness entry point. SNN, nervous, and LUT code only translates
+substrate output into normalized observations and passes those observations to
+that evaluator. Output placement uses the same entry point, so evolution cannot
+optimize a different approximation from the score later reported to the user.
 
-**match** compares the output against per-trial expectations. Three relations,
-all projections of one canonical observable (the output's physical intervals):
-`rises` matches leading edges only; `intervals` matches rise and fall; `coverage`
-requires sustained activity across expected spans, with the permitted gap
-declared by the substrate (the nervous net's circulating-pulse ring against the
-LUT's strict level hold) rather than hard-coded per call site.
+A contract can combine restrictions. The current reusable relations are:
 
-**rhythm** measures an invariant instead of matching a reference. These
-behaviours have legitimately free phase and unbounded event counts, so forcing
-them through the matcher would manufacture degeneracy rather than remove it. They
-stay a separate family by design.
-
-| `score_mode` | Reads | How it scores |
+| Relation | Reads | Required behavior |
 | :---- | :---- | :---- |
-| `events` | output rise times | One-to-one edge matching (F1). Missing and spurious edges both cost. One shared latency offset is fitted across the whole bank, so any consistent delay scores the same: the target describes relative structure, not absolute delay. |
-| `trace` | mid-tick samples | Windowed, level-balanced persistence. The expected trace decomposes into maximal constant-level windows (settle gaps unscored); each behavioural phase carries equal weight, so a long hold cannot drown out a missed reset and a constant output caps at 0.5. |
-| `cadence` | output rise times | Sustained rhythm: quiet × regular × count × coverage, at one fitted startup latency. Absolute phase is free. See 5.4. |
-| `waveform` | complete intervals | Rise and width are scored separately per interval, so equal rise times with different pulse widths are not equivalent. Extra or missing intervals enlarge the denominator. |
-| `period_stepper` | rise times | A target-specific command/cadence invariant: each command must make the sustained cadence slower, with long independently scored dwells. |
-| `retention` | output rise trains, float time | Bounded-memory coverage. The commanded `(state, start, end)` intervals derive from the effective (wired-OR merged) input edges, and each is judged by sustained ring or sustained quiet across a sliding window, worst interval winning. Graded for evolution (the fraction of an interval held before the first sustained failure, so selection can climb from a short burst); strict for claims. |
-| `sr_retention` | output rise trains, float time | The SR curriculum's twin: Set activation, long retention, Reset suppression, cleared quiet and re-Set recovery are separate cases, so lexicase sees each behaviour independently instead of averaging a missing one away. |
+| `truth_table` | normalized logic value or confidence | Match every expected output bit for every input row. Missing or unstable readouts score zero. |
+| `event_correspondence` | continuous rise times | Match required edges one-to-one. Missing and spurious edges both cost. A single optional latency offset is shared across the complete trial bank. |
+| `logical_state` | complete pulse intervals, with sampled levels as a backend fallback | Satisfy active and quiet epochs. A nervous active state may be a circulating pulse; a LUT active state is a held level. Exact tick phase is not part of the target. |
+| `pulse_intervals` | complete rise/fall intervals | Match event identity and duration. Correct rise times with wrong widths cannot pass. |
+| `sustained_cadence` | continuous rise times | Maintain the required period after a trigger, with free absolute phase, sufficient event count and horizon coverage, and no pre-trigger output. |
+| `commanded_cadence` | command-delimited output activity | Maintain a cadence in every dwell and change it in the required direction after commands. |
+| `bounded_state` | long-horizon rise trains | Satisfy hold, clear, quiet, reset-influence and reload cases. Retention and SR curricula are ordinary contract cases rather than separate evaluator dispatches. |
 
-#### Phase-tolerant store-1 windows
+Multiple constraints use `mean_worst`: the weighted mean preserves a climbable
+gradient and the worst component prevents easy restrictions from drowning out a
+failed one. A total of 1.0 is possible only when every constraint is perfect.
+`needs_samples(target)` derives collection requirements from the contract's
+observables. Checkpoints serialize the contract; the loader performs a one-way
+migration from historical `score_mode` fields, but runtime target objects no
+longer contain or dispatch on that field.
 
-In `trace` mode a store-1 window is scored by activity coverage, not exact level.
-Nervous-net memory holds a bit as a pulse circulating in a loop, which reads as a
-ripple (1010…) at any single cell; the honeycomb has no triangles, so the phases
-cannot be OR'd back into a steady DC level. A tick counts if it or an immediate
-neighbour fires: a ripple scores 1.0, a single blip scores low, silence scores 0.
-A store-0 window still demands true silence, so a net that keeps ringing after
-reset is penalised. The LUT array holds a level rather than ringing, so its
-traces are marked strict (`hold_tol = 0`) and must be genuinely high on every
-tick.
+#### Phase-invariant logical state
+
+Nervous-net memory holds a bit as a pulse circulating in a loop, not as a DC
+level. Contract v1 therefore converts the expected abstract state into active
+and quiet intervals. During an active interval it measures the maximum silent
+gap in continuous time: a ring receives full credit while every gap stays within
+the physical circulation allowance `2 × (DELAY + WIDTH)`. A one-off burst fails
+when its trailing gap grows; silence fails immediately. Quiet intervals penalize
+physical coverage. No fixed bin grid is laid over the interval, so translating
+the same ring in phase cannot alter its score. Intervals too short to distinguish
+one legal ring phase are not used to claim retention. The LUT adapter declares
+strict level semantics and must cover the whole active interval.
 
 ### 5.3 Latency fitting
 
-Most behaviours care about relative timing, so `fit_latency=True` fits one shared
-offset across the entire bundle. In `nv_evo/scoring.py`, `_best_event_shift` and
+Most behaviours care about relative timing, so their contract enables one shared
+latency offset across the entire bundle. In `nv_evo/scoring.py`,
+`_best_event_shift` and
 `_best_waveform_shift` generate candidate shifts from observed-versus-expected
 edge pairs, clamp to `event_max_shift`, score each, and keep the best; the result
-is cached on the traces object. Precision-delay targets such as Echo set
-`fit_latency=False` because their expected timestamps already specify the
+is cached on the observations object. Precision-delay targets such as Echo set
+the contract's `fit_latency` parameter false because expected timestamps already specify the
 required physical delay, which is what stops a direct input-to-output wire from
 passing. A fitted latency can never conceal an incorrect pulse duration.
 
@@ -676,7 +680,7 @@ oracle's expected output unreachable in every model.
 
 | Folder (GUI) | Examples | Notes |
 | :---- | :---- | :---- |
-| Combinational logic | AND/OR/XOR/NAND/NOR/XNOR, half and full adder, 2-bit adder, 2×2 multiplier, 2:1 MUX, 2-to-4 decoder, comparator, majority-3, parity-3 | Native truth tables on SNN. On the asynchronous backends they are wrapped by `periodic_combinational_target(...)` into repeating event schedules (a 1 emits an event, a 0 is silent), with alternate row orders and two phases so a fixed oscillator cannot replace input-dependent logic. |
+| Combinational logic | AND/OR/XOR/NAND/NOR/XNOR, half and full adder, 2-bit adder, 2×2 multiplier, 2:1 MUX, 2-to-4 decoder, comparator, majority-3, parity-3 | Native truth tables on SNN. On the asynchronous backends they are wrapped by `periodic_combinational_target(...)`: every input combination is tested in its own widely-spaced window (a 1 emits an event, a 0 is silent), with the onset-to-onset gap set to several times the grid's settling transient so one case cannot contaminate the next. Each table repeats under alternate row orders and two phases so a fixed oscillator cannot replace input-dependent logic. |
 | Timed events | Coincidence, Temporal XOR, Sequence A→B, Veto gate, Burst ×3, Divide-by-3, Echo, Pair detector, C-element, A-first rendezvous, Collision serializer, Refractory filter, Watchdog, the A-count query family, Period doubler/tripler/halver, Temporal sum | Point-event (F1) scoring. The mixed-width A-count query family is the fairest cross-model comparison set. |
 | Memory and state | SR latch, Toggle flip-flop, One-shot, Gated oscillator, Resettable toggle | Persistence-window scoring; the real memory tests. |
 | Cadence and patterns | Oscillator (period 2), Pattern (1000), Period stepper | Autonomous rhythms. No oracle is possible, so these are hand-built by necessity. |
@@ -718,6 +722,23 @@ argument applies within the width-preserving model, where
 evolvability. That pairing is not offered for new runs and is reachable only
 programmatically or from an old checkpoint.
 
+### 5.9 Contract-v1 evolution matrix
+
+`tools/benchmark_contracts.py` enumerates the Cartesian matrix of the 15 logic
+and 31 temporal targets against SNN, nervous legacy, nervous digital tri,
+nervous analog tri, and LUT. Unsupported combinations are recorded with a
+reason. Every supported row receives its own deterministic target seed, and the
+runner atomically checkpoints JSON plus a readable Markdown table after each
+row; resuming never repeats a completed evolution.
+
+The July 21, 2026 diagnostic used 100 generations, population 12, two
+chromosomes, and base seed 20260721. It was stopped on request at 204/230 matrix
+rows: 169 completed evolutions, 35 unsupported pairs, zero errors, and 26 LUT
+rows not started. Because the population is deliberately small, these are search
+diagnostics rather than ceiling claims. The exact completed maxima, seeds, and
+durations are in `results/contract_v1_100gen.json` and
+`results/contract_v1_100gen.md`.
+
 ## 6. The application: tabs and features
 
 ### 6.1 The control header
@@ -758,11 +779,14 @@ best new offspring, population mean, and population fitness σ, with the effecti
 mutation rate on a second axis, so plateau reheating and annealing are visible as
 they happen. Note that σ is a diversity read-out only while fitness still varies;
 once the population is solved it is identically zero, which is what the Diversity
-tab (6.9) exists to replace. The right panel is the report: a truth table for
-combinational targets, or a per-trial trace report for temporal ones with
-expected against actual edges, the fitted latency offset, per-trial F1, and
-PASS/FAIL. Selecting a target shows its Goal / Scoring / Tests description before
-any run.
+tab (6.9) exists to replace. The right panel is titled **Behavior Contract**
+before a run and **Contract Score** after evaluation. Its first block is generated
+directly from the target's executable `BehaviorContract`: contract version, the
+single `score_contract` evaluator, aggregation rule, every restriction, its
+physical observable, weight, and parameters. It then shows the target's tests;
+after evaluation it adds actual observations, fitted shared latency, per-case
+scores, and PASS/FAIL. This replaces the old "Truth Table" / "Trace Report"
+presentation and makes it visible that every backend enters the same method.
 
 ### 6.3 Circuit Growth tab
 
@@ -786,7 +810,9 @@ circuit rather than as hex.
 ### 6.6 Interactive tab
 
 Drive the evolved circuit by hand. Click **Load current solution** after a run or
-a Load Saved.
+a Load Saved. A persistent blue **Behavior Contract v1** badge names the active
+restriction(s) and aggregation rule above the visualization, so raw playback is
+never presented without saying what evolution actually judged.
 
 * **Case dropdown** (nervous / LUT) — every stored test case of the target,
   listed with its pulse times (for example `Case 3/10: A[3, 7, 14, 21]`; guard
@@ -920,8 +946,8 @@ than loop-bonus-shaped fitness. Four numbers are reported:
 
 ## 7. Verification
 
-`py tests/run_tests.py` runs the whole suite with bare Python; 208 checks across
-16 files. Tests are organised by the claim they defend rather than by module.
+`py tests/run_tests.py` runs the whole suite with bare Python; 220 checks across
+17 files. Tests are organised by the claim they defend rather than by module.
 
 | File | Claim it defends |
 | :---- | :---- |
@@ -933,7 +959,7 @@ than loop-bonus-shaped fitness. Four numbers are reported:
 | `test_tritile.py` | The three-circuit tile: one tile routes two signals to two outputs independently, 12-bit growth and per-channel mutation, mutual back-directions, the tile-keyed wired-OR readout, determinism, composition with the analog node. |
 | `test_analog.py` | The analog node's stated physics: a single edge does not fire while two coincident edges do, a buffer's doubled coupling fires alone, dense input stretches the output, the hysteretic re-arm, the coupled parameter validation. |
 | `test_analog_reference.py` | The analog engine against an independent small-Δt numerical integrator, so the fast engine is not merely self-consistent. |
-| `test_scoring_equivalence.py` | The scoring contract is frozen: a stored golden battery reproduces identical scores, per-case vectors and fitted alignments to 1e-12. |
+| `test_scoring_equivalence.py` | Contract-v1 semantics: every target has a declarative contract; all observation requirements derive from it; logic, event, state and interval cheats cannot reach 1.0; translating the phase of the same memory ring cannot change its score. |
 | `test_oracle_logic.py` | Each oracle state machine encodes its stated behaviour, and its banks contain the positive, negative, boundary, re-arm and silence cases they claim. |
 | `test_ga_dynamics.py` | Reproduction invariants: chromosome-count constraints survive every operator, children are non-clones from distinct parents, recombination can be disabled without disabling reproduction, configs round-trip; Stop drains its pool and saves both the full evaluated generation and solver subset. |
 | `test_diversity.py` / `test_diversity_ui.py` | The four diversity levels distinguish what they claim and nothing more, including an unsuccessful analog tri-tile population; silent mutants are separated from survivors, and the tab's worker, empty-population, cancel and error paths release their controls. |
@@ -947,12 +973,13 @@ Probe every new target with idealised cheats (pass-all, first-only,
 fixed-refractory) before trusting a 1.0; twice a "solved" target proved solvable
 without the behaviour it was named after (5.6).
 
-Scoring numbers are pinned by fixtures rather than by memory.
-`tests/fixtures/scoring_golden.json` is regenerated only by
-`tools/make_scoring_golden.py`, and only deliberately. A refactor meant to
-preserve semantics must leave every golden untouched, which is how the seven-mode
-scoring consolidation and the width-evolution removal were both shown to move no
-score; a change meant to alter scoring must regenerate the goldens and say why.
+The old golden file pinned the numerical output of seven independent scoring
+modes. Contract v1 deliberately changes semantics, especially logical state, so
+that equivalence gate was retired rather than regenerated under a false claim of
+equivalence. The permanent gate now pins behavioral invariants and anti-cheats.
+`tools/benchmark_contracts.py` supplies the complementary empirical gate: a
+resumable fixed-seed evolution matrix across all registered targets and all five
+substrate profiles.
 
 ## Requirements
 

@@ -212,3 +212,30 @@ def _main():
 
 if __name__ == '__main__':
     raise SystemExit(_main())
+
+
+def test_analog_node_honours_the_or_routing_op():
+    """An OR routing must fire from EITHER excitatory input under analog physics.
+
+    The engine decides firing by summed charge, so it originally read only
+    (e1, e2, i1) and dropped the op. Every OR routing therefore behaved as its
+    AND twin: half the state alphabet was inert, and the tri tile — whose
+    channels are the same alphabet — could not sustain a circulating pulse at
+    all (Oscillator scored 0 under paper_analog while the digital engines
+    solved it). OR is wired as the buffer's own trick: each input couples to
+    both terminals, so one edge delivers 2*step.
+    """
+    from nv_evo.analog import AnalogPulseSim
+
+    grid = {(0, 0): 1, (0, 1): 1, (1, 0): 1}
+    src = {(1, 0): ((0, 0), (0, 1), None)}       # two distinct excitatory feeds
+
+    def fired(op):
+        routing = {(1, 0): ('L', 'R', None, op)}
+        sim = AnalogPulseSim(grid, routing, sources=src)
+        sim.inject_pulse((0, 0), 0.0)            # ONE of the two inputs only
+        sim.advance_to(20.0)
+        return bool(sim.rise_times.get((1, 0)))
+
+    assert not fired('and'), 'coincidence fired on a single input'
+    assert fired('or'), 'OR routing failed to fire on a single input'

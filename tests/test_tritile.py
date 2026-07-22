@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nv_evo.hexgrid import hex_dirs, _ROUTING_BASE               # noqa: E402
 from nv_evo.pulse import PulseConfig                             # noqa: E402
-from nv_evo.tritile import (back_dir, channel_configs, interpret_tri,  # noqa: E402
+from nv_evo.tritile import (back_dir, channel_configs, interpret_tri,
+                            widen_legacy_state,  # noqa: E402
                             pack_channels, TriSim, TRI_SEED_STATE, TRI_DIRS,
                             _MergedView)
 from nv_evo.genome import (Genome, Chromosome, HexGene,          # noqa: E402
@@ -42,7 +43,8 @@ from evo_runtime.config import GAConfig                          # noqa: E402
 
 
 def _pack(cL, cR, cD):
-    return cL | (cR << 4) | (cD << 8)
+    # Independent of tritile.pack_channels: three 5-bit channel fields.
+    return cL | (cR << 5) | (cD << 10)
 
 
 # ── geometry ────────────────────────────────────────────────────────────────────
@@ -57,7 +59,7 @@ def test_back_direction_is_unique_and_mutual():
 
 def test_channel_unpacking_roundtrips():
     for _ in range(200):
-        cL, cR, cD = (random.randrange(16) for _ in range(3))
+        cL, cR, cD = (random.randrange(32) for _ in range(3))
         assert channel_configs(_pack(cL, cR, cD)) == (cL, cR, cD)
         assert pack_channels(cL, cR, cD) == _pack(cL, cR, cD)
 
@@ -183,11 +185,11 @@ def test_three_output_tile_composes_with_analog_node_physics():
 
 # ── GA path ──────────────────────────────────────────────────────────────────────
 
-def test_tri_growth_uses_twelve_bit_states():
+def test_tri_growth_uses_fifteen_bit_states():
     g = random_hex_genome(2, arch='tri3')
     grid = grow_nervous(g, seeds=((0, 0),))
     assert len(grid) > 1
-    # seed tile carries the tri seed state (all-buffer), a 12-bit value
+    # seed tile carries the tri seed state (all-buffer), a 15-bit value
     assert grid[(0, 0)] == TRI_SEED_STATE
 
 
@@ -266,3 +268,63 @@ def _main():
 
 if __name__ == '__main__':
     raise SystemExit(_main())
+
+
+# ── OR twins + the 4-bit -> 5-bit channel migration ─────────────────────────────
+
+def test_tri_channels_reach_the_or_twins():
+    """A tri channel indexes the full 32-value alphabet, not just the AND half.
+
+    The tile was AND-only until measurement showed it could not hold a
+    circulating pulse: under pure coincidence a lone pulse survives a node only
+    where that channel happens to be a buffer, so Oscillator and Pattern were
+    unreachable while input-driven targets scored at or above the single-tile
+    arch. The OR twins restore the cheap re-fire path.
+    """
+    and_tile = pack_channels(1, 1, 1)            # buffer-D on every channel
+    or_tile = pack_channels(1 + 16, 1, 1)        # L channel promoted to its twin
+    grid = {(0, 0): TRI_SEED_STATE, (0, 1): and_tile, (0, 2): or_tile}
+    ops = {key: node[3]
+           for key, node in interpret_tri(grid, [(0, 0)])['nodes'].items()}
+    assert ops[(0, 1, 'L')] == 'and'
+    assert ops[(0, 2, 'L')] == 'or'
+    assert ops[(0, 2, 'R')] == 'and'             # untouched channels stay AND
+
+
+def test_every_channel_config_is_a_valid_routing_index():
+    for config in range(32):
+        tile = pack_channels(config, config, config)
+        assert channel_configs(tile) == (config, config, config)
+    for bad in (-1, 32):
+        try:
+            pack_channels(bad, 0, 0)
+        except ValueError:
+            continue
+        raise AssertionError('accepted out-of-range channel %d' % bad)
+
+
+def test_widening_a_legacy_state_preserves_its_three_channels():
+    # Legacy configs are all 0-15 (the AND half), so a widened genome routes
+    # identically — the migration only re-lays the bit fields.
+    for state in range(4096):
+        legacy = (state & 0xF, (state >> 4) & 0xF, (state >> 8) & 0xF)
+        assert channel_configs(widen_legacy_state(state)) == legacy
+
+
+def test_legacy_tri_checkpoint_is_widened_exactly_once():
+    from evo_runtime.checkpoint import genome_from_dict, genome_to_dict
+    legacy_gene = [0x111, 0x222, 0x333, 0x000, 0x123]     # 12-bit states
+    saved = {'tag': 0, 'arch': 'tri3',
+             'gene_fields': ['ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'],
+             'chromosomes': [{'tag': 0, 'split': 0, 'telomere': 4,
+                              'genes': [legacy_gene]}],
+             'state_delays': None}                        # no tri_channel_bits
+    genome = genome_from_dict(saved, 'nervous')
+    gene = genome.chromosomes[0].genes[0]
+    assert channel_configs(gene.ctx_l) == (1, 1, 1)
+    assert channel_configs(gene.self_out) == (3, 2, 1)
+
+    # A re-saved genome carries the new width and must NOT widen again.
+    again = genome_from_dict(genome_to_dict(genome, 'nervous'), 'nervous')
+    once = again.chromosomes[0].genes[0]
+    assert (once.ctx_l, once.self_out) == (gene.ctx_l, gene.self_out)

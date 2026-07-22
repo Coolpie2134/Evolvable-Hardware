@@ -195,6 +195,41 @@ def pulses_from_trial(target, n_inputs, trial_index=0):
         config=getattr(target, 'pulse_config', None))
 
 
+def pulses_from_case(target, n_inputs, case_index=0, backend='lut',
+                     trial_index=0):
+    """Input pulse lanes for one COMBINATIONAL truth-table case, matching the
+    presentation that backend's fitness actually scores.
+
+    Combinational targets carry ``cases`` (a truth table), not temporal
+    ``trials``, so a playback UI must use this rather than
+    :func:`pulses_from_trial` (which would find no trials and show nothing) to
+    reproduce what fitness tested. The LUT array scores each case as a battery of
+    pulses that share a rising edge after a delay and hold for random per-input
+    widths (see ``lut_evo.ga._combinational_schedule``), reading the output while
+    they are held; one representative trial of that battery is shown here. Every
+    other backend holds the active inputs for the whole run (``score_nervous``
+    semantics), shown as one long pulse."""
+    out = [[] for _ in range(n_inputs)]
+    cases = getattr(target, 'cases', None)
+    if not cases:
+        return out
+    in_bits = cases[max(0, min(int(case_index), len(cases) - 1))][0]
+    if backend == 'lut':
+        from lut_evo.ga import _combinational_schedule
+        schedule = _combinational_schedule(target)
+        delay, widths = schedule[max(0, min(int(trial_index),
+                                            len(schedule) - 1))]
+        for i, bit in enumerate(in_bits):
+            if bit and i < n_inputs:
+                out[i] = [(float(delay), float(widths[i]))]
+    else:                                   # held for the whole run (one edge)
+        horizon = float(max(24, getattr(target, 'T', 24) or 24))
+        for i, bit in enumerate(in_bits):
+            if bit and i < n_inputs:
+                out[i] = [(0.5, horizon)]
+    return out
+
+
 def toggle_pulse(times, t, snap):
     """Add ``t`` to a sorted pulse list, or remove the nearby one if present.
     Pure helper so the click behaviour is testable without a canvas."""

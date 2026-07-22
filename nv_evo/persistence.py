@@ -21,6 +21,7 @@ import random
 from . import pulse
 from . import simulation as ae
 from .targets import TemporalTarget, Trial, OutputTerminal
+from .contracts import bounded_state_contract
 from .nervous import grow_nervous, interpret_nervous, node_delays
 from .temporal import _output_candidates
 from .scoring import (parity_intervals, score_retention_graded,
@@ -75,7 +76,8 @@ def retention_oracle(seed=20260711):
     trials.append(Trial(_stream([t0, t0 + 150], H), {'Q': [0] * H}))
     meta.append(('late-clear', H))
     tgt = TemporalTarget('Retention (oracle)', [INPUT], [OutputTerminal('Q', (2, 2))],
-                         Hmax, trials, grid_size=7, iters=30, score_mode='retention',
+                         Hmax, trials, grid_size=7, iters=30,
+                         contract=bounded_state_contract(),
                          latency=LATENCY,
                          description='Bounded persistent memory: a set bit must be '
                                      'retained across long gaps and cleared on the '
@@ -236,7 +238,8 @@ def _sr_target(phase, seed=20260711, strict=False):
     target = TemporalTarget(
         'Persistent SR latch (%s)' % phase, list(SR_INPUTS),
         [OutputTerminal('Q', (2, 2))], max(len(t.streams) for t in trials),
-        trials, grid_size=7, iters=30, score_mode='sr_retention',
+        trials, grid_size=7, iters=30,
+        contract=bounded_state_contract(strict=strict, reset_influence=True),
         latency=LATENCY,
         description=('Behavioral curriculum phase %s for bounded asynchronous '
                      'SR memory; final retention is tested through 256 x DELAY.'

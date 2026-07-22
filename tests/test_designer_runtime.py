@@ -260,6 +260,68 @@ def test_interactive_case_dropdown_loads_each_trial():
     assert tab._case_var.value == '(custom schedule)'
 
 
+def test_interactive_combinational_cases_load_fitness_pulses():
+    """A COMBINATIONAL target has no temporal trials, only a truth table, so the
+    Interactive tab must enumerate its cases and load the SAME input pulses
+    fitness scores (aligned-start, schedule widths for LUT) — otherwise 'see what
+    fitness scored' shows nothing for gates/adders."""
+    from interactive import InteractiveTab
+    from nv_evo.playback import pulses_from_case
+    from lut_evo.ga import _combinational_schedule
+    from snn_evo.targets import get_target
+
+    target = get_target('AND')
+    n_inputs = len(target.inputs)
+
+    tab = InteractiveTab.__new__(InteractiveTab)
+    tab._circuit = {'target': target}
+    tab._in_pos = list(target.inputs)
+    tab._backend = 'lut'
+    tab._running = False
+    # no _case_kind set — the tab must derive 'cases' from the target itself.
+
+    labels = InteractiveTab._case_labels(tab, target)
+    assert len(labels) == len(target.cases)
+    assert labels[0] == 'Case 1/4: in=00 -> 0'
+    assert labels[3] == 'Case 4/4: in=11 -> 1'
+
+    delay, widths = _combinational_schedule(target)[0]
+
+    class _Editor:
+        pulses = None
+
+        def set_pulses(self, pulses):
+            self.pulses = pulses
+
+        def schedule(self, _cells):
+            return {}
+
+    class _Player:
+        def set_schedule(self, _schedule):
+            pass
+
+    class _Var:
+        value = None
+
+        def set(self, value):
+            self.value = value
+
+    tab._editor = _Editor()
+    tab._player = _Player()
+    tab._case_var = _Var()
+    tab._draw_async = lambda: None
+
+    for index in range(len(target.cases)):
+        tab._case_cb = type('Box', (), {'current': lambda _s, i=index: i})()
+        InteractiveTab._on_case_selected(tab)
+        assert tab._editor.pulses == pulses_from_case(
+            target, n_inputs, index, 'lut')
+        in_bits = target.cases[index][0]
+        starts = [lane[0][0] for lane, b in zip(tab._editor.pulses, in_bits) if b]
+        assert all(s == starts[0] for s in starts), 'start edges not aligned'
+        assert tab._case_var.value is None
+
+
 def test_interactive_width_strip_clips_open_intervals_to_cursor():
     """The width panel reads the engine's waveform log: closed pulses keep
     their real span, a still-high pulse is clipped to the cursor and marked

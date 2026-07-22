@@ -132,10 +132,19 @@ class AnalogPulseSim:
         # src[v] = (s1, s2, si) feeder cells; watch[u] = cells reading u's wire.
         self.src   = {}
         self.watch = {c: [] for c in grid}
+        self.op = {}
         for v, entry in routing.items():
             if v not in grid:
                 continue
             e1, e2, i1 = entry[0], entry[1], entry[2]
+            # entry[3] is the routing op. 'or' means EITHER excitatory input
+            # fires the node on its own; physically that is the buffer's wiring
+            # generalised — each input is coupled to BOTH terminals, so one edge
+            # delivers 2*step and crosses threshold. Ignoring it collapsed every
+            # OR routing onto its AND twin, which made half the state alphabet
+            # inert under this engine and left the tri tile unable to sustain a
+            # circulating pulse.
+            self.op[v] = entry[3] if len(entry) > 3 else 'and'
             if sources is not None:
                 s1, s2, si = sources.get(v, (None, None, None))
             else:
@@ -289,6 +298,11 @@ class AnalogPulseSim:
         n_terminals = (1 if s1 == source else 0) + (1 if s2 == source else 0)
         if n_terminals == 0:
             return
+        if self.op.get(v) == 'or':
+            # OR wiring couples each excitatory input to both terminals, so a
+            # lone edge delivers the same 2*step a buffer does. (A buffer is
+            # already s1 == s2 and reaches 2 by counting.)
+            n_terminals = 2
         cfg = self.config
         self._refresh(v, t)
         if si is not None and self._high(si, t):

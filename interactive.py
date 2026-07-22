@@ -34,8 +34,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from snn_evo import grow_snn, interpret_grid, simulate_trace, draw_snn_net, N_STEPS, DT
 from nv_evo import grow_nervous, interpret_nervous, place_outputs_by_trace
 from nv_evo.viz import draw_hex_net
+from nv_evo.contracts import behavior_contract_badge
 from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
-                             charge_levels)
+                             pulses_from_case, charge_levels)
 from lut_evo import grow_lut
 from lut_evo.playback import LutPlayer
 
@@ -72,6 +73,12 @@ class InteractiveTab:
         self._ctrl = ttk.Frame(self.parent, padding=(6, 0))
         self._ctrl.pack(fill='x')
 
+        self._contract_var = tk.StringVar(
+            value='Behavior Contract v1 will appear when a circuit is loaded.')
+        ttk.Label(self.parent, textvariable=self._contract_var, anchor='w',
+                  foreground='#245a8d', padding=(9, 1),
+                  justify='left').pack(fill='x')
+
         self.fig = plt.figure(figsize=(9, 5))
         self.fig.patch.set_facecolor('#f5f5f5')
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.parent)
@@ -100,6 +107,7 @@ class InteractiveTab:
         self._circuit = c
         target, backend = c['target'], c['backend']
         self._backend = backend
+        self._contract_var.set(behavior_contract_badge(target))
 
         # drop any prior pulse-timeline click handler before rebuilding
         if getattr(self, '_editor', None) is not None:
@@ -112,11 +120,17 @@ class InteractiveTab:
             w.destroy()
         self._inputs = []
         self._case_cb = None
+        # Temporal targets enumerate stored trials; combinational targets have no
+        # trials, only a truth table (`cases`) presented as fitness-matched input
+        # pulses. Either way the dropdown loads exactly what fitness scored.
+        self._case_kind = ('trials' if getattr(target, 'trials', None)
+                           else 'cases' if getattr(target, 'cases', None)
+                           else None)
         if backend in ('nervous', 'lut'):
             # every stored test case is loadable, not just trial 0: pick one
             # from the dropdown to see exactly what fitness scored, then edit
             # the timeline freely (the box flips to '(custom schedule)').
-            if getattr(target, 'trials', None):
+            if self._case_kind:
                 ttk.Label(self._inbar, text='Case:').pack(side='left',
                                                           padx=(4, 2))
                 self._case_var = tk.StringVar()
@@ -206,6 +220,14 @@ class InteractiveTab:
         labels = [chr(65 + i) if i < 26 else 'i%d' % i
                   for i in range(len(self._in_pos))]
         horizon = float(max(24, getattr(target, 'T', 24) or 24))
+        # Combinational LUT pulses arrive after a delay and are held for wide
+        # widths (see _combinational_schedule); stretch the timeline so the whole
+        # held window fitness reads is visible.
+        if self._case_kind == 'cases' and self._backend == 'lut':
+            from lut_evo.ga import _combinational_schedule
+            schedule = _combinational_schedule(target)
+            horizon = max(horizon,
+                          max(d + max(ws) for d, ws in schedule) + 4.0)
         pulse_config = getattr(target, 'pulse_config', None)
         default_width = getattr(pulse_config, 'width', None)
         self.fig.clf()
@@ -220,7 +242,7 @@ class InteractiveTab:
                                        horizon=horizon, snap=0.5,
                                        on_change=self._nv_schedule_changed,
                                        default_width=default_width)
-        self._editor.set_pulses(pulses_from_trial(target, len(self._in_pos)))
+        self._editor.set_pulses(self._case_pulses(target, 0))
         if self._backend == 'nervous':
             config = pulse_config
             # sync() and shared with the trace-matched placement, so playback and
@@ -236,9 +258,36 @@ class InteractiveTab:
                 config=getattr(target, 'lut_config', None))
         self._player.set_schedule(self._editor.schedule(self._in_pos))
 
+    def _case_kind_for(self, target):
+        """'trials' (temporal), 'cases' (combinational truth table), or None.
+        Falls back to deriving from the target if the setup attribute is unset
+        (e.g. a unit test constructing the tab directly)."""
+        kind = getattr(self, '_case_kind', None)
+        if kind is not None:
+            return kind
+        return ('trials' if getattr(target, 'trials', None)
+                else 'cases' if getattr(target, 'cases', None) else None)
+
+    def _case_pulses(self, target, index):
+        """The input pulse lanes for case/trial ``index``, matching what fitness
+        scores for this backend (temporal trial vs combinational truth table)."""
+        n_inputs = len(self._in_pos)
+        if self._case_kind_for(target) == 'cases':
+            return pulses_from_case(target, n_inputs, index,
+                                    getattr(self, '_backend', 'lut'))
+        return pulses_from_trial(target, n_inputs, index)
+
     def _case_labels(self, target):
-        """One dropdown row per stored test case: 'Case k/N: A[times] ...'."""
+        """One dropdown row per stored test case: 'Case k/N: ...'."""
         n_inputs = len(target.inputs)
+        if self._case_kind_for(target) == 'cases':
+            labels = []
+            for index, (in_bits, out_bits) in enumerate(target.cases):
+                labels.append('Case %d/%d: in=%s -> %s'
+                              % (index + 1, len(target.cases),
+                                 ''.join(map(str, in_bits)),
+                                 ''.join(map(str, out_bits))))
+            return labels
         count = len(target.trials)
         labels = []
         for index in range(count):
@@ -264,8 +313,8 @@ class InteractiveTab:
             return
         self._loading_case = True
         try:
-            self._editor.set_pulses(pulses_from_trial(
-                self._circuit['target'], len(self._in_pos), index))
+            self._editor.set_pulses(
+                self._case_pulses(self._circuit['target'], index))
             self._nv_schedule_changed()   # set_schedule resets playback to t=0
         finally:
             self._loading_case = False

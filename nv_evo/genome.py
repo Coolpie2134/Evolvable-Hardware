@@ -35,19 +35,23 @@ MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
 # ── tile architectures ─────────────────────────────────────────────────────────
 # 'single' — the legacy engine: ONE Fig. 3 circuit per tile (5-bit state, one
 #            output net that every listening neighbour reads).
-# 'tri3'   — the paper's actual tile: THREE independent Fig. 3 circuits per
-#            tile, one per output direction (L/R/D). The 12-bit state packs
-#            three 4-bit channel configurations (chan L | chan R << 4 |
-#            chan D << 8), each indexing the paper's 16 useful routing
-#            combinations. Because the channels occupy disjoint bit fields,
-#            Hamming context matching and single-bit mutation both act on one
-#            channel at a time — the genome exposes three independently
-#            mutable 4-bit channels, not one flat 4096-way categorical value.
+# 'tri3'   — the paper's tile layout: THREE independent Fig. 3 circuits per
+#            tile, one per output direction (L/R/D). The 15-bit state packs
+#            three 5-bit channel configurations (chan L | chan R << 5 |
+#            chan D << 10), each indexing ROUTING_HEX exactly as a
+#            single-circuit cell state does: 0-15 the paper's AND routings,
+#            16-31 their OR twins. (The channels were 4-bit AND-only until the
+#            OR half was added; tri tiles could not hold a circulating pulse
+#            without it. tritile.widen_legacy_state migrates old states.)
+#            Because the channels occupy disjoint bit fields, Hamming context
+#            matching and single-bit mutation both act on one channel at a
+#            time — the genome exposes three independently mutable 5-bit
+#            channels, not one flat 32768-way categorical value.
 TILE_ARCHS     = ('single', 'tri3')
-TRI_STATE_MAX  = 4096    # 12-bit tri-tile state; 0 = all three channels off (dead)
+TRI_STATE_MAX  = 32768   # 15-bit tri-tile state; 0 = all three channels off (dead)
 ARCH_STATE_MAX = {'single': MAX_STATE, 'tri3': TRI_STATE_MAX}
 # Random tri genes keep the single-circuit death probability (1/32), not the
-# raw alphabet's 1/4096 — otherwise pruning states are essentially unreachable
+# raw alphabet's 1/32768 — otherwise pruning states are essentially unreachable
 # in random immigrants (the LUT genome seeds its zero rules explicitly for the
 # same reason).
 _TRI_DEATH_P   = 1.0 / 32.0

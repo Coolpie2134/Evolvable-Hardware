@@ -25,8 +25,10 @@ from __future__ import annotations
 import math
 import random
 
-from .targets import (TemporalTarget, Trial, OutputTerminal, describe_target,
-                      EVENT_SCORING, PERSISTENCE_SCORING)
+from .targets import (TemporalTarget, Trial, OutputTerminal,
+                      describe_target)
+from .contracts import (cadence_step_contract, event_contract,
+                        interval_contract, state_contract)
 
 
 # ── reference oracles (in_bits, state) -> (out_bits, new_state) ──────────────────
@@ -402,7 +404,10 @@ def label_trace(oracle, streams, T, latency):
 def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
                   seed=20260702, latency=2, min_gap=5, align_prob=0.0,
                   out_pos=(2, 2), grid_size=5, description='',
-                  score_mode='trace', fit_latency=True, global_gap=False):
+                  contract=None, global_gap=False):
+    contract = contract or state_contract()
+    event_semantics = any(c.relation == 'event_correspondence'
+                          for c in contract.constraints)
     rng = random.Random(seed)
     out = OutputTerminal(output_role, out_pos)
     n_in = len(inputs)
@@ -413,12 +418,12 @@ def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
             global_gap=global_gap)
         exp = label_trace(oracle, streams, T, latency)
         events = ([float(t) for t, value in enumerate(exp) if value == 1]
-                  if score_mode == 'events' else [])
+                  if event_semantics else [])
         trials.append(Trial(streams, {output_role: exp},
-                            {output_role: events} if score_mode == 'events' else {}))
+                            {output_role: events} if event_semantics else {}))
     return TemporalTarget(name, list(inputs), [out], T, trials,
                           grid_size=grid_size, iters=30, description=description,
-                          score_mode=score_mode, fit_latency=fit_latency,
+                          contract=contract,
                           latency=latency)
 
 
@@ -444,7 +449,7 @@ def _event_bank_target(name, oracle, inputs, pulse_banks, T, latency,
     return TemporalTarget(
         name, list(inputs), [OutputTerminal('Q', out_pos)], T, trials,
         grid_size=grid_size, iters=30, description=description,
-        score_mode='events', latency=latency)
+        contract=event_contract(), latency=latency)
 
 
 # A widened pulse must FALL strictly before the next event on the same lane
@@ -534,7 +539,7 @@ def sr_latch_oracle(seed=20260702):
                          global_gap=True,
                          description=describe_target(
         'Input A sets one stored bit; input B resets it; otherwise Q retains its '
-        'previous state.', PERSISTENCE_SCORING,
+        'previous state.',
         'Twelve seeded random schedules plus explicit never-set and '
         'Set→Reset→Set tests exercise storage, clearing, and reloading.'))
     # Persistence guardrails: silence without Set, and a Set->Reset->Set trial
@@ -557,18 +562,16 @@ def toggle_oracle(seed=20260702):
                          T=40, n_trials=12, seed=seed, latency=2, min_gap=10,
                          global_gap=True,
                          description=describe_target(
-        'Each input edge flips the stored output state.', PERSISTENCE_SCORING,
+        'Each input edge flips the stored output state.',
         'Twelve seeded random pulse trains vary phase and spacing.'))
 
 
 def echo_oracle(seed=20260702, delay=3):
     return oracle_target('Echo (oracle)', make_echo(delay), [(0, 2)], 'Q',
                          T=22, n_trials=10, seed=seed, latency=delay, min_gap=3,
-                         score_mode='events', fit_latency=False,
+                         contract=event_contract(fit_latency=False),
                          description=describe_target(
         'Reproduce every input edge exactly %d seconds later.' % delay,
-        'Match output edges one-to-one at the specified absolute times; missing, '
-        'early, late, and extra edges reduce fitness.',
         'Ten seeded schedules vary phase and spacing. A direct input-to-output '
         'connection fails because no additional latency offset is fitted.'))
 
@@ -576,9 +579,9 @@ def echo_oracle(seed=20260702, delay=3):
 def coincidence_oracle(seed=20260702):
     return oracle_target('Coincidence (oracle)', orc_coincidence, [(0, 1), (0, 3)], 'Q',
                          T=24, n_trials=12, seed=seed, latency=3, min_gap=4, align_prob=0.5,
-                         score_mode='events',
+                         contract=event_contract(),
                          description=describe_target(
-        'Emit Q only when A and B arrive together.', EVENT_SCORING,
+        'Emit Q only when A and B arrive together.',
         'Twelve seeded schedules contain approximately equal coincident and '
         'offset input events.'))
 
@@ -595,7 +598,7 @@ def one_shot_oracle(seed=20260702, width=5):
                          T=28, n_trials=10, seed=seed, latency=2, min_gap=width + 4,
                          description=describe_target(
         'Each input edge starts a %d-second active interval that self-terminates.'
-        % width, PERSISTENCE_SCORING,
+        % width,
         'Ten seeded random schedules space triggers far enough to verify '
         'termination and re-arming.'))
 
@@ -603,10 +606,9 @@ def one_shot_oracle(seed=20260702, width=5):
 def pair_oracle(seed=20260702, gap=2):
     return oracle_target('Pair detector (oracle)', make_pair(gap), [(0, 2)], 'Q',
                          T=24, n_trials=12, seed=seed, latency=3, min_gap=1,
-                         score_mode='events',
+                         contract=event_contract(),
                          description=describe_target(
         'Emit Q when two input edges are separated by exactly %d seconds.' % gap,
-        EVENT_SCORING,
         'Twelve seeded random trains mix valid pairs, wrong gaps, and isolated '
         'events.'))
 
@@ -669,15 +671,15 @@ def pair_two_widths_oracle(seed=20260702, pulse_width=None):
     target = TemporalTarget(
         'Pair gap 2x width (oracle)', [(0, 2)],
         [OutputTerminal('Q', (2, 2))], horizon, trials,
-        grid_size=5, iters=30, score_mode='events', latency=latency,
-        event_tolerance=0.15 * width,
-        event_max_shift=max(12.0, 12.0 * width),
+        grid_size=5, iters=30,
+        contract=event_contract(0.15 * width,
+                                max(12.0, 12.0 * width)),
+        latency=latency,
         supported_backends=('nervous', 'lut'),
         category='Pulse width & duration',
         description=describe_target(
             'Emit Q when two physical input-pulse leading edges are separated by '
             'exactly twice the input pulse width (2w).',
-            EVENT_SCORING,
             'Twelve seeded fractional-phase schedules include exact 2w pairs, '
             '1.5w/2.5w/3w wrong gaps, chains, mixed valid/invalid gaps, a lone '
             'pulse, and silence. Input pulse width w is %.3g seconds.' % width))
@@ -716,25 +718,30 @@ def period_stepper_oracle(seed=20260702, base=2):
         description=describe_target(
             'The first command starts period 2; later commands step the '
             'sustained cadence to periods 4 and 6.',
-            'Score regular coverage within each command-delimited dwell and '
-            'require every later period to be strictly longer; phase is free.',
             'Five long schedules cover start-only, one-step, and two-step '
             'operation with enough time to observe each settled cadence.'),
-        score_mode='period_stepper', stepper_min_period=2,
+        contract=cadence_step_contract(
+            min_period=2,
         # A command can meet a circulating pulse at any phase.  Its short
         # switchover is intentionally unscored; only the settled cadence matters.
-        stepper_max_period=6, stepper_settle=6, stepper_min_events=4,
-        stepper_max_delay=8)
+            max_period=6, settle=6, min_events=4, max_delay=8))
 
 
 def gated_oscillator_oracle(seed=20260702):
+    # START fixes the phase, so the commanded output is a fully determined spike
+    # train and event correspondence scores it (see make_gated_oscillator). It
+    # must NOT fall through to the default state contract: this target's active
+    # epochs are single ticks of a period-2 cadence, every one of them shorter
+    # than a legal circulation gap, so a state contract drops all of them and
+    # scores the case on its quiet epochs alone — under which silence, a single
+    # pulse and a correct oscillator are indistinguishable at 1.0.
     return oracle_target('Gated oscillator (oracle)', make_gated_oscillator(),
                          [(0, 1), (0, 3)], 'Q',
                          T=44, n_trials=12, seed=seed, latency=2, min_gap=12,
-                         global_gap=True,
+                         global_gap=True, contract=event_contract(),
                          description=describe_target(
         'Input A starts a period-2 output cadence; input B stops it. Q is quiet '
-        'outside the commanded run interval.', PERSISTENCE_SCORING,
+        'outside the commanded run interval.',
         'Twelve seeded random A/B schedules verify start, sustained running, '
         'stop, and later restart.'))
 
@@ -746,7 +753,7 @@ def resettable_toggle_oracle(seed=20260702):
                          global_gap=True,
                          description=describe_target(
         'Input A flips the stored bit; input B clears it to 0 and dominates a '
-        'simultaneous A+B event.', PERSISTENCE_SCORING,
+        'simultaneous A+B event.',
         'Twelve seeded random schedules exercise toggling, clearing, and '
         'post-clear recovery.'))
 
@@ -790,10 +797,10 @@ def pulse_doubler_oracle(seed=20260702, widths=(1, 2, 3)):
             'yields one contiguous 2x-second output hold starting with it. The '
             'bank mixes widths x in %s, so a fixed delay or fixed-length '
             'one-shot cannot fit them all - the circuit must measure x.'
-            % (tuple(widths),), PERSISTENCE_SCORING,
+            % (tuple(widths),),
             'Seeded single- and double-pulse schedules across every width plus '
             'a silent guard trial.'),
-        score_mode='trace', latency=latency,
+        contract=state_contract(), latency=latency,
         category='Pulse width & duration')
 
 
@@ -831,16 +838,14 @@ def pulse_width_sum_oracle(seed=20260716):
     return TemporalTarget(
         'Pulse width sum (oracle)', [(0, 1), (0, 3)],
         [OutputTerminal('Q', (2, 2))], 24, trials,
-        grid_size=5, iters=30, score_mode='waveform', fit_latency=True,
-        waveform_tolerance=0.20, supported_backends=('nervous',),
+        grid_size=5, iters=30, contract=interval_contract(0.20),
+        supported_backends=('nervous',),
         supported_models=('pulse_delay',),
         category='Pulse width & duration',
         waveform_contract='width_sum',
         description=describe_target(
             'For one A pulse and one B pulse, emit one Q pulse whose '
             'width equals width(A) + width(B).',
-            'Score the complete Q interval. One shared response-latency offset '
-            'is fitted, but its measured duration must equal the width sum.',
             'Six fractional-phase width pairs vary both widths and overlap; '
             'A-only, B-only, and silent trials guard false output.'))
 
@@ -904,16 +909,14 @@ def odd_pulse_selector_oracle(seed=20260716):
     return TemporalTarget(
         'Odd pulse selector (oracle)', [(0, 2)],
         [OutputTerminal('Q', (2, 2))], horizon, trials,
-        grid_size=5, iters=30, score_mode='waveform', fit_latency=True,
-        waveform_tolerance=0.20, supported_backends=('nervous',),
+        grid_size=5, iters=30, contract=interval_contract(0.20),
+        supported_backends=('nervous',),
         supported_models=('pulse_delay',),
         category='Pulse width & duration',
         waveform_contract='odd_selector',
         description=describe_target(
             'Pass A pulses numbered 1, 3, 5, ... to Q, suppress pulses numbered '
             '2, 4, 6, ... and preserve every passed pulse width.',
-            'Score every complete Q interval, so both parity selection and the '
-            'rise-to-fall duration of each selected pulse must be correct.',
             'Banks contain zero through five pulses with mixed widths, fractional '
             'phases, and varied gaps; the empty bank guards autonomous output. '
             'Two adversarial schedules (a suppressed pulse after a long gap, an '
@@ -948,7 +951,7 @@ def a_parity_query_oracle(seed=20260716):
         description=describe_target(
             'Count input A events cumulatively. Whenever B fires, emit Q if '
             'the number of A events seen so far is odd; remain silent if it is '
-            'even.', EVENT_SCORING,
+            'even.',
             'Ten seeded schedules query both parities, repeat B without changing '
             'the count, and add consecutive A events. A-only, B-only, and silent '
             'guards reject direct echoes and autonomous output. B does not reset '
@@ -982,7 +985,6 @@ def a_mod3_query_oracle(seed=20260716):
         description=describe_target(
             'Count A events cumulatively. Emit Q when B fires and the positive '
             'A count is divisible by three; otherwise remain silent.',
-            EVENT_SCORING,
             'Schedules query counts 0, 1, 2, 3, 4, and 6, including repeated B '
             'queries at count 3. A-only, B-only, and silent guards reject echoes '
             'and autonomous output. Mixed 0.5-to-2.25-second pulse widths ensure '
@@ -1015,7 +1017,6 @@ def a_batch_parity_query_oracle(seed=20260716):
         description=describe_target(
             'Count A events since the previous B. When B fires, emit Q if that '
             'batch count is odd, then clear the parity and begin a new batch.',
-            EVENT_SCORING,
             'Schedules query empty, one-A, two-A, and three-A batches, with '
             'back-to-back empty queries. A-only, B-only, and silent guards plus '
             'mixed 0.5-to-2.25-second widths test edge counting, clearing, and '
@@ -1057,10 +1058,10 @@ def period_doubler_oracle(seed=20260702, periods=(2, 3, 4)):
             'period p, emit every 2nd input edge so the output is periodic at '
             '2p. The bank mixes periods p in %s at varying phases, so a fixed '
             'free-running cadence cannot fit them all, and a silent trial '
-            'forbids output without input.' % (tuple(periods),), EVENT_SCORING,
+            'forbids output without input.' % (tuple(periods),),
             'Three phase-varied periodic schedules per period plus a silent '
             'guard trial.'),
-        score_mode='events', latency=latency)
+        contract=event_contract(), latency=latency)
 
 
 def period_tripler_oracle(seed=20260702, periods=(2, 3, 4)):
@@ -1090,11 +1091,11 @@ def period_tripler_oracle(seed=20260702, periods=(2, 3, 4)):
         description=describe_target(
             'Triple the input period: for a periodic input of period p, emit '
             'every third input edge so consecutive Q events are separated by '
-            '3p seconds.', EVENT_SCORING,
+            '3p seconds.',
             'Three phase-varied schedules for each input period in %s plus a '
             'silent guard. Mixed periods prevent a fixed oscillator from '
             'matching the bank.' % (periods,)),
-        score_mode='events', latency=latency)
+        contract=event_contract(), latency=latency)
 
 
 def period_halver_oracle(seed=20260702, periods=(4, 6, 8)):
@@ -1130,11 +1131,11 @@ def period_halver_oracle(seed=20260702, periods=(4, 6, 8)):
         description=describe_target(
             'Halve the input period: after measuring one complete interval p, '
             'emit Q at the input cadence and at each midpoint so consecutive '
-            'Q events are p/2 seconds apart.', EVENT_SCORING,
+            'Q events are p/2 seconds apart.',
             'Three phase-varied schedules for each even period in %s plus a '
             'silent guard. The mixed periods require measurement rather than '
             'a fixed-rate oscillator.' % (periods,)),
-        score_mode='events', latency=latency)
+        contract=event_contract(), latency=latency)
 
 
 def temporal_sum_oracle(seed=20260702):
@@ -1177,11 +1178,10 @@ def temporal_sum_oracle(seed=20260702):
         description=describe_target(
             'Measure the interval ΔA between two A events and ΔB between two B '
             'events, then emit two Q events separated by ΔA + ΔB seconds.',
-            EVENT_SCORING,
             'Nine seeded schedules vary both intervals and lane ordering. '
             'A-only, B-only, incomplete, and silent guards forbid direct '
             'connections and fixed bursts.'),
-        score_mode='events', latency=latency)
+        contract=event_contract(), latency=latency)
 
 
 def c_element_oracle(seed=20260702):
@@ -1241,7 +1241,6 @@ def c_element_oracle(seed=20260702):
             'emit Q once BOTH inputs have produced an edge, in either order, '
             'then rearm. Remembering the first arrival while waiting for the '
             'second is the stored state — the asynchronous handshake keystone.',
-            EVENT_SCORING,
             'Ten seeded mixed schedules each contain A-first, B-first, '
             'simultaneous, repeated-first, incomplete, and re-arm cases. A-only, '
             'B-only, and silent guards forbid single-input echoes, wired OR, and '
@@ -1273,7 +1272,6 @@ def refractory_filter_oracle(seed=20260702, dead_time=3):
         description=describe_target(
             'Pass the first input event, suppress events for %d seconds, then '
             're-arm and pass the next eligible event.' % dead_time,
-            EVENT_SCORING,
             'Ten seeded burst schedules mix blocked gaps below the dead time, '
             'the exact re-arm boundary, longer accepted gaps, and a silent guard.'))
 
@@ -1310,7 +1308,6 @@ def a_first_rendezvous_oracle(seed=20260702):
         description=describe_target(
             'Treat each A/B pair as a race: emit Q when A arrived first and B '
             'completes the round; B-first and simultaneous ties stay silent.',
-            EVENT_SCORING,
             'Twelve seeded schedules mix both orders, variable gaps, ties, '
             'same-channel distractors, incomplete rounds, and repeated re-arming.'))
 
@@ -1339,7 +1336,6 @@ def collision_serializer_oracle(seed=20260702, spacing=2):
             'Merge A and B onto Q without losing event count: an isolated input '
             'makes one Q event, while simultaneous A+B is serialized into two '
             'Q events separated by %d seconds.' % spacing,
-            EVENT_SCORING,
             'Ten seeded episode banks mix A-only, B-only, and collision events '
             'at varied phases, plus a silent guard; every input token must emerge.'))
 
@@ -1372,7 +1368,6 @@ def watchdog_oracle(seed=20260702, timeout=5):
             'After the first heartbeat, emit one alarm if no new heartbeat '
             'arrives for %d seconds. A deadline heartbeat cancels the alarm; after '
             'an alarm, a later heartbeat re-arms the watchdog.' % timeout,
-            EVENT_SCORING,
             'Seeded schedules mix safe, exact-deadline, and late heartbeat gaps, '
             'multiple timeout/re-arm rounds, and never-armed silence.'))
 

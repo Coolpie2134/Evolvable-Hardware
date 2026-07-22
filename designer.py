@@ -344,7 +344,7 @@ def _routed_neighbours(idx, x, y):
 
 
 def _traces_report(ttarget, traces, out_pos, label):
-    """Semantic score report for a manually edited working grid: the shared
+    """Contract score report for a manually edited working grid: the shared
     scoring.score_report_lines body under a designer header, with no
     backend-detail notes (the designer shows the working grid itself)."""
     lines = ['Target: %s   [%s — designer working grid]' % (ttarget.name, label)]

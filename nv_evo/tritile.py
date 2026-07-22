@@ -34,32 +34,65 @@ scorer needs no tri-specific branch.
 """
 from __future__ import annotations
 
-from .hexgrid import hex_dirs, _ROUTING_BASE
+from .hexgrid import hex_dirs, ROUTING_HEX
 
-# The three output directions of a tile, in bit-field order (chanL = bits 0-3,
-# chanR = 4-7, chanD = 8-11). ROUTING for a tri channel is always the paper's
-# pure coincidence/AND semantics (op='and'); the OR twins are a single-tile
-# extension and have no place in the faithful tile.
+# The three output directions of a tile, in bit-field order (chanL = bits 0-4,
+# chanR = 5-9, chanD = 10-14).
+#
+# Each channel is a FIVE-bit config indexing ROUTING_HEX, exactly as a
+# single-circuit cell state does: 0-15 are the paper's Fig. 3 coincidence/AND
+# routings, 16-31 their OR twins (fire on EITHER excitatory input). The tile was
+# originally AND-only, on the grounds that the OR twins are a single-tile
+# extension with no place in a paper-faithful tile. That faithfulness had a
+# measured cost: under pure AND a lone circulating pulse only survives a node
+# whose channel happens to be a buffer, so a sustained ring needs every tile
+# around the loop to hold the right buffer on the right channel — and tri tiles
+# consequently could not hold a ring at all (Oscillator and Pattern scored ~0
+# while input-driven targets scored at or above the single-tile arch). OR
+# restores the cheap re-fire path that makes circulating-pulse memory reachable.
 TRI_DIRS = ('L', 'R', 'D')
-_DIR_SHIFT = {'L': 0, 'R': 4, 'D': 8}
+_CHAN_BITS = 5
+_CHAN_MASK = (1 << _CHAN_BITS) - 1                       # 0x1F
+_DIR_SHIFT = {'L': 0, 'R': _CHAN_BITS, 'D': 2 * _CHAN_BITS}
 
 # Seed tiles start with all three channels as buffer-D (config 1): a live,
 # signal-passing tile, mirroring SEED_STATE=1 for the single-circuit array.
-TRI_SEED_STATE = 1 | (1 << 4) | (1 << 8)     # 0x111
+TRI_SEED_STATE = 1 | (1 << _CHAN_BITS) | (1 << (2 * _CHAN_BITS))
+
+# Width of the pre-OR layout, kept so old tri3 checkpoints can be widened.
+_LEGACY_CHAN_BITS = 4
+_LEGACY_CHAN_MASK = (1 << _LEGACY_CHAN_BITS) - 1         # 0xF
 
 
 def channel_configs(state):
-    """(chanL, chanR, chanD): the three 4-bit channel configs packed in a tile
-    state. Each indexes _ROUTING_BASE (0 = off, 1-15 = paper routing)."""
-    return ((state >> 0) & 0xF, (state >> 4) & 0xF, (state >> 8) & 0xF)
+    """(chanL, chanR, chanD): the three 5-bit channel configs packed in a tile
+    state. Each indexes ROUTING_HEX (0 = off, 1-15 paper AND, 16-31 OR twin)."""
+    return tuple((state >> _DIR_SHIFT[d]) & _CHAN_MASK for d in TRI_DIRS)
 
 
 def pack_channels(chan_l, chan_r, chan_d):
-    """Pack three paper routing configurations into one 12-bit tile state."""
+    """Pack three routing configurations into one 15-bit tile state."""
     values = (int(chan_l), int(chan_r), int(chan_d))
-    if any(value < 0 or value > 15 for value in values):
-        raise ValueError('tri-tile channel configurations must be in 0..15')
-    return values[0] | (values[1] << 4) | (values[2] << 8)
+    if any(value < 0 or value > _CHAN_MASK for value in values):
+        raise ValueError('tri-tile channel configurations must be in 0..%d'
+                         % _CHAN_MASK)
+    return (values[0] | (values[1] << _CHAN_BITS)
+            | (values[2] << (2 * _CHAN_BITS)))
+
+
+def widen_legacy_state(state):
+    """Re-lay a pre-OR 12-bit tri state into the 15-bit layout.
+
+    The three channel configs are carried across unchanged, and every legacy
+    config is 0-15 — the AND half of ROUTING_HEX — so a widened genome grows the
+    same grid and simulates identically. Without this an old checkpoint's packed
+    bits would be re-cut at the new field boundaries and silently decode as
+    different channels.
+    """
+    value = int(state)
+    return pack_channels(value & _LEGACY_CHAN_MASK,
+                         (value >> _LEGACY_CHAN_BITS) & _LEGACY_CHAN_MASK,
+                         (value >> (2 * _LEGACY_CHAN_BITS)) & _LEGACY_CHAN_MASK)
 
 
 def back_dir(pos, d):
@@ -119,8 +152,8 @@ def interpret_tri(grid, inputs):
         configs = channel_configs(state)
         for d, cfg in zip(TRI_DIRS, configs):
             key = (tile[0], tile[1], d)
-            e1, e2, i1 = _ROUTING_BASE[cfg]
-            nodes[key] = (e1, e2, i1, 'and')
+            e1, e2, i1, op = ROUTING_HEX[cfg]
+            nodes[key] = (e1, e2, i1, op)
             # A channel drives direction d ONLY if that neighbour exists; a
             # circuit pointing off-grid is inert but harmless (still computed).
             s1 = signal_source(tile, e1) if e1 is not None else None

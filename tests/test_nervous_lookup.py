@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nv_evo.genome import (Chromosome, Genome, HexGene, germline_telomere,
-                           random_hex_genome)
+                           random_hex_genome, MAX_STATE, TRI_STATE_MAX)
 from nv_evo.hexgrid import hex_dirs, hex_frontier_cells
 from nv_evo.nervous import (_compile_lookup, _grow_budget, _lookup_compiled,
                             _lookup_nv, _seed_state, grow_nervous,
@@ -19,7 +19,11 @@ def _reference_lookup(genome, sL, sR, sD, si):
     """The original fieldwise scalar lookup, retained independently for tests."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
         return 0
-    bits = 12 if getattr(genome, 'arch', 'single') == 'tri3' else 5
+    # Widths come from the genome-level alphabet, not from the lookup module, so
+    # this reference stays an independent check of the packed implementation.
+    bits = ((TRI_STATE_MAX - 1).bit_length()
+            if getattr(genome, 'arch', 'single') == 'tri3'
+            else (MAX_STATE - 1).bit_length())
     mask = (1 << bits) - 1
     best_gene, best_distance = None, 1 << 30
     for chromosome in genome.chromosomes:
@@ -97,7 +101,8 @@ def _reference_grow(genome, seeds):
 
 def test_packed_lookup_matches_fieldwise_reference_for_both_architectures():
     random.seed(8101)
-    for architecture, state_max in (('single', 32), ('tri3', 4096)):
+    for architecture, state_max in (('single', MAX_STATE),
+                                    ('tri3', TRI_STATE_MAX)):
         for _ in range(20):
             genome = random_hex_genome(4, max_telomere=5, arch=architecture)
             program = _compile_lookup(genome)

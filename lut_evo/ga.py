@@ -1,9 +1,8 @@
 """
 lut_evo/ga.py — scoring and GA for the LUT array.
 
-Problem definitions (TemporalTarget / snn Target) and the trace-scoring maths
-(windowed, level-balanced, phase-tolerant) are shared with the rest of the
-project; only the substrate differs. Selection uses the same recipe as the
+Problem definitions and executable behavior contracts are shared with the rest
+of the project; only the substrate-to-observation adapter differs. Selection uses the same recipe as the
 nervous GA — elites + random immigrants + tournament, NO early stop at 1.0 —
 but WITHOUT the parsimony tie-break: seeds are dense sim6-style ontogeny
 biomorphs (rich morphology), and parsimony pruned them back to sparse diamonds.
@@ -18,9 +17,10 @@ from evo_runtime.mutation import adaptive_mutation_rate
 from evo_runtime.parallel import map_ordered
 
 from nv_evo.temporal import (_obs_len, _output_candidates, TemporalTraces,
-                             score_temporal_bundle, _score_output_candidate)
-from nv_evo.scoring import (relation_spec, needs_samples, score_report_lines,
-                            LUT_REPORT_NOTES)
+                             _score_output_candidate)
+from nv_evo.scoring import (contract_relations, needs_samples, score_contract,
+                            score_report_lines, LUT_REPORT_NOTES)
+from nv_evo.contracts import behavior_contract_lines
 from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome)
@@ -105,7 +105,7 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     traces.hold_tol = 0
     if len(grid) <= len(in_set):
         return out_pos, traces
-    mode = getattr(ttarget, 'score_mode', 'trace')
+    relations = set(contract_relations(ttarget))
     cands_by_role = {term.role: _output_candidates(grid, in_set, term)
                      for term in ttarget.outputs}
     watch = sorted(set().union(*cands_by_role.values()))
@@ -133,8 +133,8 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
             if not ctr:
                 s, aux = 0.0, None
             else:
-                source = cevents if mode in ('events', 'cadence') else ctr
-                signature = tuple(tuple(seq) for seq in source)
+                signature = (tuple(tuple(seq) for seq in ctr),
+                             tuple(tuple(seq) for seq in cevents))
                 cached = score_cache.get(signature)
                 s, aux = cached if cached is not None else (None, None)
             if ctr and s is None:
@@ -155,10 +155,6 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
                               for ti in range(len(ttarget.trials))]
         traces.events[term.role] = [list(trial_events[ti].get(best, ()))
                                     for ti in range(len(ttarget.trials))]
-        if len(ttarget.outputs) == 1 and mode == 'events':
-            traces._event_result = best_aux
-        elif len(ttarget.outputs) == 1 and mode == 'cadence':
-            traces._cadence_result = best_aux
     return out_pos, traces
 
 
@@ -197,12 +193,24 @@ def score_lut_temporal(genome, ttarget):
     prep = prepare_lut(genome, ttarget)
     if prep is None:
         return 0.0
-    return score_temporal_bundle(prep[2], ttarget)[0]
+    return score_contract(prep[2], ttarget)[0]
 
 
 def _place_outputs_combinational(grid, target):
-    """{role: cell|None} — each output read at the nearest live non-input cell to
-    its terminal (distinct cells; None if the grid runs out)."""
+    """{role: cell|None} — where each combinational output is read.
+
+    Prefers the FITTED placement the scorer uses (the cell that best computes
+    each role, see _fit_combinational_outputs) so every view — growth tab,
+    interactive playback, truth-table report — reads the same cell that decides
+    fitness. Falls back to nearest-cell proximity when there is no truth table
+    to fit against or the fit cannot fill every role."""
+    if getattr(target, 'cases', None) and len(grid) > target.n_inputs:
+        try:
+            fitted, _ = _fit_combinational_outputs(grid, target)
+            if all(fitted.get(t.role) is not None for t in target.outputs):
+                return fitted
+        except Exception:
+            pass
     in_set    = set(target.inputs)
     non_input = [p for p in sorted(grid) if p not in in_set]
     out_pos, used = {}, set()
@@ -224,54 +232,193 @@ def _place_outputs_combinational(grid, target):
 # answer at one fixed tick therefore samples a single phase of that oscillation
 # and rewards phase-luck, not computation. A real combinational result requires
 # the output to reach a FIXED POINT: hold the same value over a settling window.
-# If it never settles the case is simply wrong (the array isn't computing a stable
-# function of its inputs). This is the difference between a genuine logic circuit
-# and a chaotic oscillator that happens to line up at one sampled tick.
+#
+# An output that never settles is not simply discarded, though. The array is a
+# deterministic finite machine, so a held input drives every output into a
+# repeating cycle; the honest read of a cycling output is the DUTY CYCLE over one
+# period — the fraction of the period it sits high. A fixed point is the period-1
+# case (duty 0.0 or 1.0), so the two live on one continuous scale. Scoring feeds
+# that duty as a confidence to the contract, which turns it into "fraction of the
+# period the output is correct": a circuit right nine-tenths of its cycle scores
+# 0.9, giving evolution a smooth gradient toward a stable fixed point instead of
+# the old settle/no-settle cliff (non-settling was a hard 0, so a nearly-solved
+# oscillator looked no better than noise). The averaging is over one detected
+# period, not a raw tail window, so it is phase-invariant, not phase-luck.
 SETTLE_WINDOW = 5
 
 
-def _settled_outputs(grid, target, out_pos, in_bits, window=SETTLE_WINDOW,
-                     horizon=None):
-    """Hold `in_bits`, run, and return ({role: settled_bit|None}, final_sim).
-    A role's value is the output cell's bit ONLY if it held constant over the
-    last `window` ticks (a fixed point); otherwise None (never settled)."""
-    steps  = horizon or (4 * target.grid_size + 12)
-    invals = {p: in_bits[i] for i, p in enumerate(target.inputs)}
-    sim    = AsyncLutSim(grid)
-    tails  = {r: [] for r in out_pos if out_pos[r] is not None}
-    for _ in range(steps):
-        bits = sim.step(invals)
-        for r, tail in tails.items():
-            tail.append(bits.get(out_pos[r], 0))
-            if len(tail) > window:
-                tail.pop(0)
-    settled = {r: (tail[-1] if len(set(tail)) == 1 else None)
-               for r, tail in tails.items()}
-    return settled, sim
+def _steady_duty(seq):
+    """Fraction of the output's settled CYCLE that sits high, phase-invariantly.
+
+    ``seq`` is the recorded output-bit tail. For each candidate period ``p`` the
+    periodicity is measured back from the end (how long ``seq[i] == seq[i-p]``
+    keeps holding); ``p`` is accepted only if that periodic suffix covers a solid
+    stretch — at least half the tail and several whole periods — so a chaotic run
+    cannot fluke a short period from its last few equal samples (the earlier
+    version checked only ``2p`` samples and so declared any tail ending in three
+    equal bits 'settled', crediting oscillators as solved). The duty is the mean
+    over the periodic suffix's whole periods; a fixed point is ``p == 1`` and
+    returns exactly 0.0/1.0. A tail with no such period falls back to its whole
+    mean — a chaotic output lands near 0.5 and earns only chance credit, which is
+    correct: it is not computing a stable function."""
+    n = len(seq)
+    if n == 0:
+        return 0.0
+    for p in range(1, n // 2 + 1):
+        length = 0                                   # periodic suffix length
+        for i in range(n - 1, p - 1, -1):
+            if seq[i] == seq[i - p]:
+                length += 1
+            else:
+                break
+        if length >= max(3 * p, (n - p + 1) // 2):
+            reps = length // p                       # whole periods only
+            return sum(seq[-reps * p:]) / (reps * p)
+    return sum(seq) / n
+# Combinational inputs are presented as PULSES, not a level held from t=0. Each
+# trial gives the active inputs a common rising edge after a random delay (so the
+# case's onset is one clean coincident edge) and a random per-line hold width,
+# and several such trials are averaged — the array must compute the function
+# robustly across arrival times and hold durations rather than exploiting one
+# fixed, clean, power-on-aligned presentation. Widths sit above a settling floor
+# so the output can reach a fixed point WHILE the whole pattern is held, and the
+# duty is read only over that held, settled window. Timings are seeded-fixed per
+# target (a stable battery, deterministic across genomes and worker processes so
+# the fitness cache stays valid), varied across trials.
+N_COMB_TRIALS = 3
+_COMB_SEED    = 0xC0FFEE
+
+
+def _comb_timing(grid_size):
+    """(settle_lead, measure_span) in ticks for a combinational presentation:
+    time for the pattern to propagate and settle, then the window over which the
+    held output's duty is read."""
+    return 2 * grid_size, max(2 * SETTLE_WINDOW, grid_size)
+
+
+def _combinational_schedule(target, n_trials=N_COMB_TRIALS):
+    """Seeded-fixed pulse timings [(delay, [width per input line]), ...].
+
+    Same battery for every genome (so fitness is deterministic and cacheable),
+    varied across trials. A trial's delay is the common rising edge of that
+    trial's active inputs; each input line holds for its own random width, all
+    at or above the settling floor so the full pattern outlasts the read window.
+    """
+    lead, measure = _comb_timing(target.grid_size)
+    floor = lead + measure
+    rng   = random.Random(_COMB_SEED)
+    n     = len(target.inputs)
+    span  = max(2, target.grid_size)
+    return [(rng.randint(1, span),
+             [floor + rng.randint(0, target.grid_size) for _ in range(n)])
+            for _ in range(n_trials)]
+
+
+def _all_cell_duties(grid, target, in_bits, schedule):
+    """Average, over the schedule's pulse trials, each live non-input cell's
+    steady duty read during the held window — {cell: mean duty}.
+
+    The active inputs (bits set in ``in_bits``) rise together at each trial's
+    delay and hold for their per-line widths; the duty is measured over
+    ``[delay + lead, delay + min active width]`` — the full pattern present and
+    settled. The all-zero case has no pulses, so it reads a fixed lead..measure
+    window of the array's no-input response (the function's value there). Uses
+    the vectorised ``run_bits`` matrix so the whole-grid read is not per-tick
+    Python."""
+    lead, measure = _comb_timing(target.grid_size)
+    in_pos  = list(target.inputs)
+    in_set  = set(target.inputs)
+    active  = [i for i, b in enumerate(in_bits) if b]
+    totals  = None
+    for delay, widths in schedule:
+        # Read the LAST ``measure`` ticks the full pattern is held, so the output
+        # has the maximum settling time (>= lead, since widths >= lead+measure)
+        # before it is sampled and the input-arrival transient has cleared.
+        if active:
+            hi = delay + min(widths[i] for i in active)
+            lo = max(delay + lead, hi - measure)
+        else:
+            lo, hi = delay + lead, delay + lead + measure
+        streams = [tuple((1 if (b and delay <= k < delay + widths[i]) else 0)
+                         for i, b in enumerate(in_bits))
+                   for k in range(hi)]
+        sim    = AsyncLutSim(grid)
+        levels = sim.run_bits(streams, in_pos, hi)
+        window = levels[lo:hi]
+        cells  = sim._cells
+        duties = {cells[j]: _steady_duty(window[:, j].tolist())
+                  for j in range(len(cells)) if cells[j] not in in_set}
+        if totals is None:
+            totals = duties
+        else:
+            for c in totals:
+                totals[c] += duties.get(c, 0.0)
+    n = len(schedule) or 1
+    return {c: v / n for c, v in (totals or {}).items()}
+
+
+def _balanced_match(duties, expected):
+    """Balanced per-level match of one cell's per-case duty to an expected bit
+    vector — the single-output form of the contract's logic aggregation, used
+    only to RANK candidate output cells (the reported fitness comes from
+    score_contract on the chosen cells)."""
+    groups = {0: [], 1: []}
+    for duty, want in zip(duties, expected):
+        groups[1 if want else 0].append(duty if want else 1.0 - duty)
+    parts = [sum(v) / len(v) for v in groups.values() if v]
+    return sum(parts) / len(parts) if parts else 0.0
+
+
+def _fit_combinational_outputs(grid, target):
+    """(out_pos, duty_by_case) — assign each output role to the live cell whose
+    per-case duty best computes that role's truth-table column.
+
+    Output identity is a FITTED parameter, exactly as on the temporal path
+    (``place_outputs_by_trace``): rather than reading a cell chosen by mere
+    proximity to the terminal, the array is treated as a POOL of candidate
+    functions and each role reads the cell that best implements it — its whole
+    point is lookup. One cell is fixed per role across every case (never a
+    different cell per case), so a full score means a single grown cell really
+    computes the function, not a cherry-picked phase. ``duty_by_case[i][cell]``
+    is the phase-invariant steady duty, so a settled cell contributes its exact
+    bit and a cycling cell the fraction of its period it is correct."""
+    schedule = _combinational_schedule(target)   # one shared pulse battery
+    duty_by_case = [_all_cell_duties(grid, target, in_bits, schedule)
+                    for in_bits, _ in target.cases]
+    cells = list(duty_by_case[0]) if duty_by_case else []
+    out_pos, used = {}, set()
+    for oi, term in enumerate(target.outputs):
+        expected = [out_bits[oi] for _, out_bits in target.cases]
+        free = [c for c in cells if c not in used]
+        if not free:
+            out_pos[term.role] = None
+            continue
+        best = max(free, key=lambda c: (
+            _balanced_match([duty_by_case[i][c] for i in range(len(target.cases))],
+                            expected),
+            -(abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]))))
+        used.add(best)
+        out_pos[term.role] = best
+    return out_pos, duty_by_case
 
 
 def score_lut_combinational(genome, target):
-    """Hold input levels, run until the output reaches a FIXED POINT, and read
-    the settled bit at each output cell. An output that never settles (still
-    oscillating) counts as wrong — see the note above on why single-tick reads
-    on this recurrent substrate are phase-luck rather than computation."""
+    """Hold each input pattern, let the array settle, and read the output at the
+    fitted cell that best computes each role (see _fit_combinational_outputs).
+    A settled cell scores its exact bit; a cycling cell scores the fraction of
+    its period it is correct."""
     grid = grow_lut(genome, seeds=tuple(target.inputs),
                     grid_size=target.grid_size, iters=target.iters)
     if len(grid) <= target.n_inputs:
         return 0.0
-    out_pos = _place_outputs_combinational(grid, target)
+    if len(target.cases) == 0 or len(target.outputs) == 0:
+        return 0.0
+    out_pos, duty_by_case = _fit_combinational_outputs(grid, target)
     if any(out_pos[t.role] is None for t in target.outputs):
         return 0.0
-    n_checks = len(target.cases) * len(target.outputs)
-    if n_checks == 0:
-        return 0.0
-    correct = 0
-    for in_bits, out_bits in target.cases:
-        settled, _ = _settled_outputs(grid, target, out_pos, in_bits)
-        for i, term in enumerate(target.outputs):
-            if settled.get(term.role) == out_bits[i]:   # None != 0/1 -> unstable fails
-                correct += 1
-    return correct / n_checks
+    observations = [[duty_by_case[i][out_pos[t.role]] for t in target.outputs]
+                    for i in range(len(target.cases))]
+    return score_contract(observations, target)[0]
 
 
 def lut_case_outputs(genome, target):
@@ -281,18 +428,39 @@ def lut_case_outputs(genome, target):
     array's response. The LUT analogue of nv_evo.nervous_case_outputs."""
     grid = grow_lut(genome, seeds=tuple(target.inputs),
                     grid_size=target.grid_size, iters=target.iters)
-    out_pos = _place_outputs_combinational(grid, target)
     cases = []
-    if (len(grid) <= target.n_inputs
-            or any(out_pos[t.role] is None for t in target.outputs)):
+    if len(grid) <= target.n_inputs or not target.cases or not target.outputs:
+        return grid, {t.role: None for t in target.outputs}, cases
+    # Read at the SAME fitted cells and pulsed trials the scorer uses, so the
+    # report reflects the circuit's actual fitness. Node activity for the drawing
+    # comes from one representative trial's held window; the reported duty is the
+    # trial-averaged value the scorer uses, and a role counts 'settled' only when
+    # that averaged duty is an exact 0/1 (a fixed point in every trial).
+    out_pos, duty_by_case = _fit_combinational_outputs(grid, target)
+    if any(out_pos[t.role] is None for t in target.outputs):
         return grid, out_pos, cases
-    for in_bits, out_bits in target.cases:
-        settled, sim = _settled_outputs(grid, target, out_pos, in_bits)
-        acts = {t.role: settled.get(t.role) for t in target.outputs}    # bit | None
+    schedule      = _combinational_schedule(target)
+    lead, measure = _comb_timing(target.grid_size)
+    delay, widths = schedule[0]
+    in_pos        = list(target.inputs)
+    for ci, (in_bits, out_bits) in enumerate(target.cases):
+        active = [i for i, b in enumerate(in_bits) if b]
+        if active:
+            hi = delay + min(widths[i] for i in active)
+        else:
+            hi = delay + lead + measure
+        streams = [tuple((1 if (b and delay <= k < delay + widths[i]) else 0)
+                         for i, b in enumerate(in_bits))
+                   for k in range(hi)]
+        sim = AsyncLutSim(grid)
+        sim.run_bits(streams, in_pos, hi)
         node_out = {c: (1 if sim.out[c] else 0) for c in grid}
+        duty = {t.role: duty_by_case[ci][out_pos[t.role]] for t in target.outputs}
+        acts = {r: (int(round(d)) if (d <= 1e-9 or d >= 1 - 1e-9) else None)
+                for r, d in duty.items()}
         cases.append({'in_bits': in_bits, 'out_bits': out_bits,
                       'node_outputs': node_out, 'node_nibbles': dict(sim.out),
-                      'acts': acts,
+                      'acts': acts, 'duty': duty,
                       'stable': all(v is not None for v in acts.values())})
     return grid, out_pos, cases
 
@@ -312,27 +480,40 @@ def lut_truth_table(genome, target):
     if not cases:
         lines += ['', '(circuit incomplete — grew too little or outputs missing)']
         return '\n'.join(lines)
-    lines += ['', 'Inputs held; output read only if it SETTLES to a fixed point',
-              "('?' = never settled — the recurrent array is still oscillating).", '']
+    lines += ['', 'Inputs held; each output settles to a fixed point (full',
+              "credit) or cycles — then it scores the fraction of its period it",
+              "is correct. Cell shows expected / actual, actual = settled bit,",
+              "or ~NN% duty when still oscillating.", '']
     in_hdr  = ' '.join('i%d' % i for i in range(len(target.inputs)))
     out_hdr = ' '.join('%s:e/a' % t.role for t in target.outputs)
     lines += ['  %s | %s | result' % (in_hdr, out_hdr),
               '  ' + '-' * (len(in_hdr) + len(out_hdr) + 14)]
-    correct = total = 0
     for case in cases:
-        cells, row_ok = [], True
+        cells, row_ok, cycling = [], True, False
         for i, term in enumerate(target.outputs):
             act = case['acts'][term.role]; exp = case['out_bits'][i]
-            ok = act == exp; row_ok = row_ok and ok
-            total += 1; correct += 1 if ok else 0
-            cells.append('%d/%s' % (exp, '?' if act is None else act))
+            duty = case['duty'][term.role]
+            row_ok = row_ok and (act == exp)
+            if act is None:                    # cycling: show duty toward expected
+                cycling = True
+                shown = '~%d%%' % round((duty if exp else 1.0 - duty) * 100)
+            else:
+                shown = str(act)
+            cells.append('%d/%s' % (exp, shown))
         in_str  = ' '.join(str(b) for b in case['in_bits']).ljust(len(in_hdr))
         out_str = ' '.join(c.ljust(len('%s:e/a' % t.role))
                            for c, t in zip(cells, target.outputs))
-        lines.append('  %s | %s | %s' % (in_str, out_str, 'PASS' if row_ok else 'FAIL'))
-    fit = correct / total if total else 0.0
-    lines += ['', '  => %d/%d checks  (fitness = %.4f)%s'
-              % (correct, total, fit, '   ALL PASS' if correct == total else '')]
+        # PASS = every output settled correct; a settled-but-wrong output is a
+        # clean FAIL; only a still-cycling output is 'partial' (graded credit).
+        verdict = 'PASS' if row_ok else ('partial' if cycling else 'FAIL')
+        lines.append('  %s | %s | %s' % (in_str, out_str, verdict))
+    # Report the exact fitness the GA optimises, not a separate settled-only
+    # tally, so the readout can never disagree with selection.
+    fit = score_lut_combinational(genome, target)
+    n_settled = sum(1 for c in cases if c['stable'])
+    lines += ['', '  => fitness = %.4f   (%d/%d cases settled to a fixed point)%s'
+              % (fit, n_settled, len(cases),
+                 '   ALL PASS' if fit >= 0.9999 else '')]
     return '\n'.join(lines)
 
 
@@ -341,12 +522,13 @@ def evaluate_lut_full(genome, target):
     the units ε-lexicase streams over (None for combinational targets)."""
     if not getattr(target, 'temporal', False):
         return score_lut_combinational(genome, target), None
-    n_cases = sum(len(tr.expected) for tr in target.trials)
+    from nv_evo.scoring import contract_case_count
+    n_cases = contract_case_count(target)
     prep = prepare_lut(genome, target)
     if prep is None:
         return 0.0, (0.0,) * n_cases
     _, _, traces = prep
-    score, cases, _ = score_temporal_bundle(traces, target)
+    score, cases, _ = score_contract(traces, target)
     return score, cases
 
 
@@ -893,7 +1075,10 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     return new_pop[:pop]
 
 
-def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True):
+def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
+               seed=None):
+    if seed is not None:
+        random.seed(seed)
     if not 1 <= n_chroms <= MAX_CHROMS:
         raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
     make_genome = lambda: make_seed_genome(n_chroms)     # ontogeny biomorph seeds
@@ -1008,17 +1193,17 @@ def lut_report(ttarget, genome=None):
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
-    spec = relation_spec(ttarget)
+    relations = set(contract_relations(ttarget))
     prep = None if genome is None else prepare_lut(genome, ttarget)
-    if spec.family == 'rhythm':
+    if relations & {'sustained_cadence', 'commanded_cadence'}:
         # rhythm modes measure real output; no expectation-only preview exists
-        note = LUT_REPORT_NOTES.get(getattr(ttarget, 'score_mode', 'trace'))
+        note = LUT_REPORT_NOTES.get(next(iter(relations), 'logical_state'))
         pre = ['', note] if note else []
         if genome is None:
-            return '\n'.join(lines + pre + [
+            return '\n'.join(lines + [''] + behavior_contract_lines(ttarget) + pre + [
                 '', '(run the GA or Load Saved to inspect a circuit)'])
         if prep is None:
-            return '\n'.join(lines + pre + [
+            return '\n'.join(lines + [''] + behavior_contract_lines(ttarget) + pre + [
                 '', '(circuit incomplete - grew too little or inputs dead)'])
     if genome is not None and prep is None:
         lines += ['', '(circuit incomplete — grew too little or inputs dead)']

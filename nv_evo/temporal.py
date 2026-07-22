@@ -44,7 +44,7 @@ from .targets import (OutputTerminal, Trial, TemporalTarget,  # noqa: F401
 # nv_evo.temporal; new code should import from nv_evo.scoring directly.
 from .scoring import (                                          # noqa: F401
     PhysicalEvents, TemporalTraces,
-    RELATIONS, RelationSpec, relation_spec, needs_samples,
+    contract_relations, has_relation, needs_samples,
     METRIC, _trace_metric, _obs_len,
     _expected_windows, _window_score, _role_trace_score,
     _pr_counts, _f1, _pr_score, _pooled_f1, _cand_shifts, _target_pairs,
@@ -60,9 +60,10 @@ from .scoring import (                                          # noqa: F401
     cadence_score,
     _pulse_events, _stepper_epoch, _stepper_trial_score, _stepper_at_shift,
     _best_stepper_shift, period_stepper_score,
-    windowed_score, _REFIT_ALIGNMENT, score_temporal_bundle,
+    windowed_score, _REFIT_ALIGNMENT, score_contract,
     exact_tick_accuracy, _score_output_candidate,
     NV_REPORT_NOTES, LUT_REPORT_NOTES, score_report_lines)
+from .contracts import behavior_contract_lines
 
 
 # ── dynamics (asynchronous pulse engine, sampled per tick) ──────────────────────
@@ -244,7 +245,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
     # one dynamics run per trial, observed to _obs_len (past T) so a delayed
     # output's late events are captured; every cell's trace falls out of the states
     obs = _obs_len(ttarget)
-    mode = getattr(ttarget, 'score_mode', 'trace')
+    relations = set(contract_relations(ttarget))
     need_samples = needs_samples(ttarget)
     config = getattr(ttarget, 'pulse_config', None)
     # Topology is identical across trials.  Computing the exact reachable cone
@@ -291,9 +292,11 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
             if not ctr:
                 s, aux = 0.0, None
             else:
-                source = (cintervals if mode == 'waveform' else
-                          cevents if mode in ('events', 'cadence') else ctr)
-                signature = tuple(tuple(seq) for seq in source)
+                signature = (
+                    tuple(tuple(seq) for seq in ctr),
+                    tuple(tuple(seq) for seq in cevents),
+                    tuple(tuple(tuple(pair) for pair in seq)
+                          for seq in cintervals))
                 cached = score_cache.get(signature)
                 s, aux = cached if cached is not None else (None, None)
             if ctr and s is None:
@@ -319,10 +322,6 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
         traces.intervals[term.role] = [
             list(trial_intervals[ti].get(best, ()))
             for ti in range(len(ttarget.trials))]
-        if len(ttarget.outputs) == 1 and mode == 'events':
-            traces._event_result = best_aux
-        elif len(ttarget.outputs) == 1 and mode == 'cadence':
-            traces._cadence_result = best_aux
     return out_pos, traces
 
 
@@ -389,12 +388,12 @@ def prepare_net(genome, ttarget):
 
 
 def score_temporal(genome, ttarget):
-    """Behavioural fitness in [0,1] using the target's declared score mode."""
+    """Behavioural fitness in [0,1] through the shared target contract."""
     prep = prepare_net(genome, ttarget)
     if prep is None:
         return 0.0
     _, _, _, _, traces = prep
-    return score_temporal_bundle(traces, ttarget)[0]
+    return score_contract(traces, ttarget)[0]
 
 
 def temporal_report(ttarget, genome=None):
@@ -407,17 +406,17 @@ def temporal_report(ttarget, genome=None):
     desc = getattr(ttarget, 'description', '')
     if desc:
         lines += [''] + desc.splitlines()
-    spec = relation_spec(ttarget)
+    relations = set(contract_relations(ttarget))
     prep = None if genome is None else prepare_net(genome, ttarget)
-    if spec.family == 'rhythm':
+    if relations & {'sustained_cadence', 'commanded_cadence'}:
         # rhythm modes measure real output; no expectation-only preview exists
-        note = NV_REPORT_NOTES.get(getattr(ttarget, 'score_mode', 'trace'))
+        note = NV_REPORT_NOTES.get(next(iter(relations), 'logical_state'))
         pre = ['', note] if note else []
         if genome is None:
-            return '\n'.join(lines + pre + [
+            return '\n'.join(lines + [''] + behavior_contract_lines(ttarget) + pre + [
                 '', '(run the GA or Load Saved to inspect a circuit)'])
         if prep is None:
-            return '\n'.join(lines + pre + [
+            return '\n'.join(lines + [''] + behavior_contract_lines(ttarget) + pre + [
                 '', '(circuit incomplete - grew too little or inputs dead)'])
     if genome is not None and prep is None:
         lines += ['', '(circuit incomplete — grew too little or inputs dead)']
@@ -425,7 +424,8 @@ def temporal_report(ttarget, genome=None):
     out_pos = prep[3] if prep is not None else None
     _, body = score_report_lines(ttarget, traces, out_pos,
                                  notes=NV_REPORT_NOTES)
-    lines += body
+    lines += [''] + body        # blank line between the static description and
+                                # the contract, matching the cadence path above
     if traces is None and genome is None:
         lines += ['', '(run the GA or Load Saved to inspect a circuit)']
     return '\n'.join(lines)

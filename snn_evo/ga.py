@@ -390,7 +390,10 @@ def next_population(population, fitnesses, chromosome_count=None,
 
 # ── main loop ─────────────────────────────────────────────────────
 
-def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arch=None):
+def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
+           arch=None, seed=None):
+    if seed is not None:
+        random.seed(seed)
     if target is None:
         target = get_target(DEFAULT_TARGET)
     if not 1 <= n_chroms <= MAX_CHROMS:
@@ -426,9 +429,8 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None, arc
                 ns, ss = interpret_grid(grid, target=target, arch=arch)
                 print("%5d  %6.4f  %6.4f  %s" % (gen, best_fitness, mean_f,
                                                    circuit_summary(ns, ss)))
-            if best_fitness >= 1.0:
-                if verbose: print("Solved at generation %d!" % gen)
-                break
+            # Keep running after a solve so a requested generation budget is a
+            # real, comparable budget across all backends.
     finally:
         ex.shutdown()
 
