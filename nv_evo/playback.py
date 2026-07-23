@@ -265,9 +265,20 @@ class PulseLaneEditor:
             'button_release_event', self._on_release)
 
     def schedule(self, in_cells):
-        """Map lane pulses onto their grid cells: {cell: [(start, width)]}."""
-        return {in_cells[i]: list(self.pulses[i])
-                for i in range(min(len(in_cells), len(self.pulses)))}
+        """Map lane pulses onto their grid cells: {cell: [(start, width)]}.
+
+        ``in_cells`` may carry per-input attachment GROUPS (evolvable I/O
+        binding): lane i's pulses are replicated onto every cell of group i,
+        and a cell shared by several lanes receives their merged train (the
+        pulse engines wired-OR overlapping injections). A flat cell list maps
+        1:1 exactly as before."""
+        from .io_placement import input_groups
+        groups = input_groups(in_cells)
+        sched = {}
+        for i in range(min(len(groups), len(self.pulses))):
+            for cell in groups[i]:
+                sched.setdefault(cell, []).extend(self.pulses[i])
+        return {cell: sorted(pulses) for cell, pulses in sched.items()}
 
     def set_pulses(self, pulses):
         self.pulses = []

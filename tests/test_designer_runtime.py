@@ -75,6 +75,43 @@ def test_app_exposes_only_the_current_nv_profiles():
     assert App._selected_node_model(app) == ('paper_analog', None)
 
 
+def test_wiring_io_selection_automatically_provides_chromosome_three():
+    class Var:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    statuses = []
+    app = App.__new__(App)
+    app._IO_PLACEMENT_LABELS = {
+        'Fixed': 'fixed',
+        'Wiring': 'wiring_chromosome',
+        'Spatial': 'spatial_chromosome',
+    }
+    app._io_placement_var = Var('Spatial')
+    app._chroms_var = Var('2')
+    app._status = type(
+        'Status', (), {'set': lambda _self, value: statuses.append(value)})()
+
+    App._on_io_placement_change(app)
+    assert app._chroms_var.get() == '3'
+    assert 'chromosome 3' in statuses[-1]
+
+    app._io_placement_var.set('Wiring')
+    app._chroms_var.set('2')
+    App._on_io_placement_change(app)
+    assert app._chroms_var.get() == '3'
+
+    app._chroms_var.set('5')
+    App._on_io_placement_change(app)
+    assert app._chroms_var.get() == '5'
+
+
 def test_new_nv_run_validation_rejects_every_retired_pairing():
     validate_new_nv_profile(GAConfig(
         tile_arch='single', node_model='pulse_delay'))

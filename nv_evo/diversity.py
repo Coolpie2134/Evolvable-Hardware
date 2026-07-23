@@ -18,12 +18,11 @@ The four levels, from most to least generous:
                 crossover, so they are real heritable variation.
   functional  — variation that can affect a phenotype: architecture, ordered
                 rule alleles, germline telomere (it sets growth radius L AND
-                the settle budget, so it is emphatically not neutral), and the
-                timing vectors the run's node model actually reads. Tags and
-                split points are excluded — they are the parts crossover
-                bookkeeps rather than expresses.
-  phenotype   — the realised circuit: architecture, the grown state grid, and
-                the timing values referenced by states PRESENT in that grid.
+                the settle budget), active timing vectors, and—under an
+                evolvable I/O strategy—the I/O alleles it actually reads.
+  phenotype   — the realised circuit: architecture, the grown state grid,
+                evolved I/O attachments, and timing values referenced by states
+                PRESENT in that grid.
                 Two different rule sets that grow the same body with the same
                 per-node delays are the same circuit.
   behavior    — quantised output edges on a frozen OFF-SPEC probe bank, read at
@@ -79,10 +78,10 @@ LEVEL_MEANING = {
              'chromosome tags, split points, all telomeres, timing vectors, '
              'architecture.',
     'functional': 'Only differences that can change a circuit: rule alleles, '
-                  'the germline telomere, the timing vector the run reads, '
-                  'architecture. Excludes tags and split points.',
+                  'the germline telomere, active I/O alleles and timing vector, '
+                  'architecture. Excludes inactive tags and split points.',
     'phenotype': 'The grown circuit: architecture, the grown state grid, and '
-                 'the timing values of states present in it.',
+                 'its I/O attachments and live-state timing values.',
     'behavior': 'Quantised output edges on a fixed probe bank of stimuli the '
                 'target does not specify, read at the fitted output cell.',
 }
@@ -189,8 +188,9 @@ def _nv_adapter():
     from .temporal import score_temporal
 
     def grow(genome, target, config):
+        from .io_placement import growth_seeds
         arch = getattr(genome, 'arch', 'single')
-        grid = grow_nervous(genome, seeds=tuple(target.inputs),
+        grid = grow_nervous(genome, seeds=growth_seeds(target),
                             grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return None
@@ -216,9 +216,11 @@ def _nv_adapter():
 def _nv_mutate(genome, config, chromosome_count):
     from .ga import mutate_nv, clone_genome
     ga = getattr(config, 'ga', None)
+    strategy = getattr(ga, 'io_placement', 'fixed')
     return mutate_nv(clone_genome(genome), 1.0,
                      chromosome_count=chromosome_count,
-                     evolve_delay=bool(getattr(ga, 'evolve_delay', None)))
+                     evolve_delay=bool(getattr(ga, 'evolve_delay', None)),
+                     evolve_io=(strategy != 'fixed'))
 
 
 def _lut_adapter():
@@ -227,7 +229,8 @@ def _lut_adapter():
     from lut_evo.lut import grow_lut
 
     def grow(genome, target, config):
-        grid = grow_lut(genome, seeds=tuple(target.inputs),
+        from .io_placement import growth_seeds
+        grid = grow_lut(genome, seeds=growth_seeds(target),
                         grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return None
@@ -237,15 +240,21 @@ def _lut_adapter():
         prep = prepare_lut(genome, target)
         if prep is None:
             return None
-        grid, out_pos, _ = prep
+        grid, out_pos, in_pos = prep[0], prep[1], prep[3]
         if any(out_pos.get(term.role) is None for term in target.outputs):
             return None
-        return trace_fixed_outputs(grid, list(target.inputs), out_pos,
+        # Probe at the SAME driven input cells the scorer used (the genome's
+        # evolved binding under an io_placement strategy; the seed pads
+        # otherwise), so phenotype identity reflects the run's actual wiring.
+        return trace_fixed_outputs(grid, list(in_pos), out_pos,
                                    probe_target)
 
     def mutate(genome, config, chromosome_count):
+        strategy = getattr(getattr(config, 'ga', None),
+                           'io_placement', 'fixed')
         return mutate_lut(clone_genome(genome), 1.0,
-                          chromosome_count=chromosome_count)
+                          chromosome_count=chromosome_count,
+                          evolve_io=(strategy != 'fixed'))
 
     return {'signature': genome_signature, 'grow': grow, 'probe': probe,
             'score': score_lut_temporal, 'mutate': mutate}
@@ -285,31 +294,74 @@ def functional_signature(genome, backend, config=None):
     """Variation that could change a phenotype: architecture, ordered rule
     alleles, germline telomere, and the timing vectors the model reads.
 
-    Chromosome tags and split points are deliberately excluded: they are
-    crossover bookkeeping, not expression. The germline telomere is deliberately
-    INCLUDED — it sets the growth radius and the settle budget."""
+    Chromosome tags and split points are deliberately excluded. Body-gene tags
+    are included only in tag-rank mode; mapping alleles are included only in
+    wiring-chromosome mode. The germline telomere is included because it sets
+    growth radius and settle budget."""
+    strategy = getattr(getattr(config, 'ga', None),
+                       'io_placement', 'fixed')
+    chromosomes = list(genome.chromosomes)
+    body = [chromosome for chromosome in chromosomes
+            if not getattr(chromosome, 'wiring', False)]
+    developmental = (
+        body if strategy in ('wiring_chromosome', 'spatial_chromosome')
+        else chromosomes)
+    mapping = None
+    if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+        from .io_placement import wiring_chromosome
+        port_map = wiring_chromosome(genome)
+        mapping = tuple(
+            (getattr(gene, 'tag', 0),
+             getattr(gene, 'io_selector', 0))
+            for gene in (port_map.genes if port_map is not None else ()))
+
     if backend == 'nervous':
         from .genome import germline_telomere
         fields = ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out')
+        if strategy == 'tag_rank':
+            fields += ('tag',)
         alleles = tuple(
             tuple(tuple(getattr(gene, f) for f in fields)
                   for gene in chromosome.genes)
-            for chromosome in genome.chromosomes)
+            for chromosome in developmental)
         delays = _active_timing(genome, config)
         return (getattr(genome, 'arch', 'single'), alleles,
-                germline_telomere(genome), delays)
+                germline_telomere(genome), delays, mapping)
     fields = ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out')
+    if strategy == 'tag_rank':
+        fields += ('tag',)
     alleles = tuple(
         tuple(tuple(getattr(gene, f) for f in fields)
               for gene in chromosome.genes)
-        for chromosome in genome.chromosomes)
-    telomeres = tuple(getattr(c, 'telomere', 0) for c in genome.chromosomes)
-    return ('lut', alleles, telomeres)
+        for chromosome in developmental)
+    telomeres = tuple(getattr(c, 'telomere', 0) for c in developmental)
+    return ('lut', alleles, telomeres, mapping)
+
+
+def _evolved_binding_signature(genome, backend, target, grid):
+    """Hashable mature I/O attachments, or None for legacy fixed placement."""
+    from .io_placement import (bind_io, input_groups, io_strategy,
+                               output_groups)
+    if io_strategy(target) == 'fixed':
+        return None
+    node_types = None
+    if backend == 'lut':
+        from lut_evo.lut import cell_io_tags
+        node_types = cell_io_tags(genome, grid)
+    bound = bind_io(genome, grid, target, tags=node_types)
+    if bound is None:
+        return False
+    inputs, outputs = bound
+    return (
+        tuple(tuple(group) for group in input_groups(inputs)),
+        tuple((role, tuple(group))
+              for role, group in sorted(output_groups(outputs).items())),
+    )
 
 
 def phenotype_signature(genome, backend, target, config=None, adapter=None):
-    """The realised circuit: architecture + grown grid + the timing values
-    referenced by states actually present in the organism.
+    """The realised circuit: architecture, grown grid, evolved I/O attachments,
+    and timing values referenced by states actually present in the organism.
 
     Timing has to be in here: under the legacy profile two genomes can grow an
     identical state grid while carrying different per-node delays, which are
@@ -319,11 +371,14 @@ def phenotype_signature(genome, backend, target, config=None, adapter=None):
     if grown is None:
         return None
     grid, delays = grown
+    binding = _evolved_binding_signature(genome, backend, target, grid)
+    if binding is False:
+        return None
     live_delays = (tuple(sorted((pos, round(float(v), 9))
                                 for pos, v in delays.items()))
                    if delays else None)
     return (getattr(genome, 'arch', 'single') if backend == 'nervous' else 'lut',
-            _grid_signature(grid), live_delays)
+            _grid_signature(grid), live_delays, binding)
 
 
 # ── off-spec behavioural probes ──────────────────────────────────────────────

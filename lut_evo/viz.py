@@ -75,7 +75,9 @@ def draw_lut_net(ax, grid, grid_size=None, activity=None, in_pos=None,
     in_pos  = in_pos or []
     out_pos = out_pos or {}
     in_set  = set(in_pos)
-    out_cells = {p: r for r, p in out_pos.items() if p}
+    from nv_evo.io_placement import output_groups
+    out_cells = {p: role for role, cells in output_groups(out_pos).items()
+                 for p in cells}
     ax.clear()
     ax.set_aspect('equal'); ax.axis('off')
     if not grid:

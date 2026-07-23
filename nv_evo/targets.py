@@ -59,6 +59,17 @@ class TemporalTarget:
     grid_size:       int = 7
     iters:           int = 30      # safety CAP — growth stops at its attractor
     output_strategy: str = "terminals"
+    # How input/output ports bind to physical cells (nv_evo/io_placement.py):
+    #   'fixed'          — inputs are the seed pads in declared order; outputs are
+    #                      trace-fitted near their terminals (the default, legacy).
+    #   'tag_rank'       — ports bind to the highest-tagged cells, in order
+    #                      (Method A). Placement becomes an evolvable genome trait.
+    #   'wiring_chromosome' — chromosome 3 maps each port to a desired node type,
+    #                      then selects one matching instance (Method B).
+    #   'spatial_chromosome': chromosome 3 maps each port to an evolvable
+    #                      normalised (x, y) anchor; the nearest unclaimed live
+    #                      cell is used.
+    io_placement:    str = "fixed"
     temporal:        bool = True          # marker so the GUI/GA can dispatch
     description:     str = ''             # human explanation, shown in the GUI
     # Executable statement of the target idea. Every backend supplies raw
@@ -266,6 +277,20 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
             'two phases, so one case cannot contaminate the next and a fixed '
             'oscillator cannot replace input-dependent logic.'
             % len(target.cases)))
+
+
+def with_io_placement(target, strategy):
+    """Return a copy of ``target`` that binds its I/O ports with the given
+    evolvable strategy ('tag_rank', 'wiring_chromosome', or
+    'spatial_chromosome'; 'fixed' is the default geometric/trace-fitted
+    binding). Everything else — stimulus, contract, grid — is preserved, so
+    the ONLY changed variable is how ports attach to cells. Handy for A/B
+    comparing fixed vs evolvable I/O on one target."""
+    import dataclasses
+    from .io_placement import IO_STRATEGIES
+    if strategy not in IO_STRATEGIES:
+        raise ValueError('unknown io_placement strategy: %r' % (strategy,))
+    return dataclasses.replace(target, io_placement=strategy)
 
 
 def _pulse_streams(T, n_inputs, pulses):

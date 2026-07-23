@@ -70,6 +70,23 @@ class GAConfig:
     # Tri3 supports the fixed digital abstraction and paper_analog physics; the
     # per-node-type width/delay vectors are single-tile features.
     tile_arch: str = 'single'
+    # I/O binding strategy (nv_evo/io_placement.py IO_STRATEGIES), honoured by
+    # ALL backends (nervous, LUT, SNN):
+    #   'fixed'          — inputs are the seed pads in declared order; outputs are
+    #                      trace-/duty-fitted near their terminals (the legacy
+    #                      default).
+    #   'tag_rank'       — body-gene expression tags rank mature cells; ports
+    #                      claim the highest still-free cells in order (Method A).
+    #   'wiring_chromosome' — chromosome 3 is a non-developmental but evolvable
+    #                      port map. Each gene selects one cell by node type and
+    #                      offset in an unbiased stable site order (Method B).
+    #   'spatial_chromosome' — chromosome 3 evolves one normalised (x,y)
+    #                      anchor per port and attaches it to the nearest free
+    #                      living cell.
+    # Kept 'fixed' by default so every existing run and checkpoint is
+    # byte-identical; the literal is duplicated from IO_STRATEGIES to keep
+    # evo_runtime backend-neutral (no nv_evo import at module level).
+    io_placement: str = 'fixed'
     # Delay-mutation toggle, decoupled from the model name for ablations.
     # ``None`` keeps the model's pairing (pulse_delay <-> delay mutation). An
     # explicit False disables it — node_model='pulse_delay' with
@@ -112,6 +129,12 @@ class GAConfig:
                              'paper_analog')
         if self.tile_arch not in ('single', 'tri3'):
             raise ValueError("tile_arch must be 'single' or 'tri3'")
+        if self.io_placement not in (
+                'fixed', 'tag_rank', 'wiring_chromosome',
+                'spatial_chromosome'):
+            raise ValueError(
+                "io_placement must be 'fixed', 'tag_rank', "
+                "'wiring_chromosome' or 'spatial_chromosome'")
         # tri3 evolves routing only, so it pairs with the routing-only engines:
         # 'uniform' (digital) or 'paper_analog' (analog). The width/delay vectors
         # are single-tile node-type features and have no tri3 meaning.
@@ -153,6 +176,10 @@ class GAConfig:
         # Width evolution has been retired from the substrate. Old checkpoints
         # still carry its toggle; drop it rather than fail to load.
         values.pop('evolve_width', None)
+        # The wiring-chromosome strategy briefly shipped under another name;
+        # migrate on load so those checkpoints keep working.
+        if values.get('io_placement') == 'sex_chromosome':
+            values['io_placement'] = 'wiring_chromosome'
         return cls(**values)
 
 

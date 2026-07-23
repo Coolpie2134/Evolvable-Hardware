@@ -222,12 +222,14 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
 
     original = RunConfig(ga=GAConfig(
         chromosome_count=MAX_CHROMOSOME_COUNT, stagnation_beta=2.5,
-        mutation_limit=12.0, recombination_enabled=False))
+        mutation_limit=12.0, recombination_enabled=False,
+        io_placement='spatial_chromosome'))
     rebuilt = RunConfig.from_dict(dataclasses.asdict(original))
     assert rebuilt.ga.chromosome_count == MAX_CHROMOSOME_COUNT
     assert rebuilt.ga.stagnation_beta == 2.5
     assert rebuilt.ga.mutation_limit == 12.0
     assert rebuilt.ga.recombination_enabled is False
+    assert rebuilt.ga.io_placement == 'spatial_chromosome'
 
     legacy = dataclasses.asdict(original)
     legacy['ga'].pop('chromosome_count')
@@ -346,6 +348,21 @@ def test_nv_reproduction_preserves_configured_count_for_children_and_immigrants(
     assert {len(genome.chromosomes) for genome in children} == {3}
 
 
+def test_nv_plateau_reheating_cannot_apply_multiple_io_mutations_per_child():
+    genome = random_hex_genome(
+        3, wiring_chromosome=True, n_ports=3)
+    random.seed(7009)
+    real_edit = nv_ga._mutate_io_tag
+    with mock.patch.object(
+            nv_ga, '_mutate_io_tag', wraps=real_edit) as edit:
+        for _ in range(100):
+            edit.reset_mock()
+            mutate_nv(
+                genome, mean_mutations=8.0, chromosome_count=3,
+                evolve_delay=True, evolve_io=True)
+            assert edit.call_count <= 1
+
+
 def test_recombination_can_be_disabled_without_disabling_reproduction():
     random.seed(1776)
 
@@ -377,6 +394,120 @@ def test_recombination_can_be_disabled_without_disabling_reproduction():
     assert len(snn_children) == len(snn_population)
     assert all(child is not parent for child in nv_children
                for parent in nv_population)
+    assert all(child is not parent for child in lut_children
+               for parent in lut_population)
+    assert all(child is not parent for child in snn_children
+               for parent in snn_population)
+
+
+def test_controller_archives_the_champion_without_carrying_parents_forward():
+    """A worse offspring generation remains the live population.
+
+    The all-time best is reported separately, but must not be reinserted as an
+    elite survivor or used to inflate the charted population mean.
+    """
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(
+        ga=GAConfig(chromosome_count=2, tile_arch='single',
+                    node_model='pulse_delay'),
+        pulse=PulseConfig(model='pulse_delay'))
+    messages = queue.Queue()
+    stop = threading.Event()
+    evaluations = iter((
+        ([0.8, 0.8, 0.8], None),
+        ([0.1, 0.2, 0.3], None),
+    ))
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch('nv_evo.certification.certify', return_value=None), \
+            mock.patch.object(
+                nv_ga, 'eval_batch_cases',
+                side_effect=lambda *_args, **_kwargs: next(evaluations)):
+        run_evolution(
+            gens=1, pop=3, n_chroms=2, tries=1, target=target, arch=None,
+            messages=messages, stop_event=stop, base_seed=1701,
+            backend='nervous', run_config=config, results_dir=directory)
+        snapshot = load_checkpoint(
+            os.path.join(directory, 'latest_population.json'))
+
+    assert snapshot['fitnesses'] == [0.1, 0.2, 0.3]
+    generation = next(
+        message for message in messages.queue
+        if message[0] == 'gen' and message[2] == 1)
+    assert generation[3] == 0.8
+    assert abs(generation[4] - 0.2) < 1e-12
+    assert generation[5] == 0.3
+
+
+def test_terminal_convergence_starts_only_after_a_perfect_offspring():
+    """After the first 1.0, solved parents/children accumulate toward mean 1."""
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(
+        ga=GAConfig(chromosome_count=2, tile_arch='single',
+                    node_model='pulse_delay'),
+        pulse=PulseConfig(model='pulse_delay'))
+    messages = queue.Queue()
+    stop = threading.Event()
+    evaluations = iter((
+        ([0.8, 0.7, 0.6], None),
+        ([1.0, 0.4, 0.3], None),
+        ([1.0, 1.0, 0.0], None),
+    ))
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch('nv_evo.certification.certify', return_value=None), \
+            mock.patch('evo_runtime.controller.SOLVER_VALID', 1.1), \
+            mock.patch.object(
+                nv_ga, 'eval_batch_cases',
+                side_effect=lambda *_args, **_kwargs: next(evaluations)):
+        run_evolution(
+            gens=2, pop=3, n_chroms=2, tries=1, target=target, arch=None,
+            messages=messages, stop_event=stop, base_seed=1702,
+            backend='nervous', run_config=config, results_dir=directory)
+        snapshot = load_checkpoint(
+            os.path.join(directory, 'latest_population.json'))
+
+    generations = [
+        message for message in messages.queue if message[0] == 'gen']
+    assert generations[1][3:6] == (1.0, 2.5 / 3.0, 1.0)
+    assert generations[2][3:6] == (1.0, 1.0, 1.0)
+    assert snapshot['fitnesses'] == [1.0, 1.0, 1.0]
+
+
+def test_terminal_consolidation_preserves_case_alignment():
+    random.seed(7)
+    parents = [random_hex_genome(2) for _ in range(3)]
+    offspring = [random_hex_genome(2) for _ in range(3)]
+    for marker, genome in enumerate(parents + offspring):
+        genome.tag = marker
+    parent_fitnesses = [1.0, 0.7, 0.6]
+    offspring_fitnesses = [1.0, 0.9, 0.8]
+    parent_cases = [[genome.tag] for genome in parents]
+    offspring_cases = [[genome.tag] for genome in offspring]
+    expected = dict(zip(
+        [genome.tag for genome in parents + offspring],
+        parent_fitnesses + offspring_fitnesses))
+
+    selected, fitnesses, cases = consolidate_population(
+        parents, parent_fitnesses, parent_cases,
+        offspring, offspring_fitnesses, offspring_cases)
+
+    assert fitnesses == [1.0, 1.0, 0.9]
+    for genome, fitness, case_vector in zip(selected, fitnesses, cases):
+        assert fitness == expected[genome.tag]
+        assert case_vector == [genome.tag]
 
 
 def test_pause_waits_at_boundary_and_resumes_without_losing_state():
@@ -615,47 +746,3 @@ def test_stop_before_initial_evaluation_still_finishes_and_releases_pool():
     queued = list(messages.queue)
     assert not any(message[0] == 'error' for message in queued)
     assert queued[-1] == ('done', None, 0.0)
-
-
-def test_terminal_survivor_selection_retains_solver_and_case_alignment():
-    random.seed(7)
-    parents = [random_hex_genome(2) for _ in range(4)]
-    offspring = [random_hex_genome(2) for _ in range(4)]
-    for marker, genome in enumerate(parents + offspring):
-        genome.tag = marker
-
-    parent_fitnesses = [0.4, 0.3, 0.2, 0.1]
-    offspring_fitnesses = [1.0, 0.9, 0.8, 0.7]
-    parent_cases = [[genome.tag] for genome in parents]
-    offspring_cases = [[genome.tag] for genome in offspring]
-    expected_fitness = {
-        genome.tag: fitness
-        for genome, fitness in zip(
-            parents + offspring, parent_fitnesses + offspring_fitnesses)
-    }
-
-    selected, fitnesses, cases = consolidate_population(
-        parents, parent_fitnesses, parent_cases,
-        offspring, offspring_fitnesses, offspring_cases)
-
-    assert max(fitnesses) == 1.0
-    assert sum(fitnesses) / len(fitnesses) >= (
-        sum(parent_fitnesses) / len(parent_fitnesses))
-    for genome, fitness, case_vector in zip(selected, fitnesses, cases):
-        assert case_vector == [genome.tag]
-        assert fitness == expected_fitness[genome.tag]
-
-
-def test_terminal_survivor_selection_can_fill_the_live_population_with_solvers():
-    random.seed(11)
-    parents = [random_hex_genome(2) for _ in range(5)]
-    offspring = [random_hex_genome(2) for _ in range(5)]
-    parent_fitnesses = [1.0, 1.0, 0.4, 0.3, 0.2]
-    offspring_fitnesses = [1.0, 1.0, 1.0, 0.9, 0.8]
-
-    _, selected_fitnesses, selected_cases = consolidate_population(
-        parents, parent_fitnesses, None,
-        offspring, offspring_fitnesses, None)
-
-    assert selected_fitnesses == [1.0] * 5
-    assert selected_cases is None

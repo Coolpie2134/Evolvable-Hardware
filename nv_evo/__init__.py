@@ -35,11 +35,14 @@ from .nervous import (ROUTING, SEED_STATE, interpret_nervous, evaluate_nervous,
                       score_nervous, nervous_truth_table, nervous_case_outputs,
                       circuit_summary_nervous, grow_nervous, grow_nervous_snapshots)
 from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
-                      periodic_combinational_target,
+                      periodic_combinational_target, with_io_placement,
                       spike_target, sr_latch, toggle_ff, oscillator, echo,
                       pattern_generator, coincidence_detector, one_shot,
                       pair_detector, temporal_xor, ordered_sequence, veto_gate,
                       burst_generator, divide_by_3)
+from .io_placement import (IO_STRATEGIES, io_strategy, cell_tags, bind_io,
+                           wiring_chromosome, seed_spatial_from_phenotype,
+                           describe_binding)
 from .oracle import (oracle_target, holdout_score, ORACLE_TARGETS, ORACLE_SPECS,
                      sample_streams, label_trace)
 from .evaluation import FittedReadout, fit_readout, score_frozen

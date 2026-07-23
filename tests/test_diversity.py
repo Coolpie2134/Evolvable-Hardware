@@ -9,6 +9,7 @@ and only the phenotype/behaviour checks develop organisms.
 
 Run under the suite runner:  py tests/run_tests.py
 """
+import copy
 import os
 import random
 import sys
@@ -19,7 +20,8 @@ from nv_evo import diversity as dv                            # noqa: E402
 from nv_evo.ga import clone_genome, mutate_nv                 # noqa: E402
 from nv_evo.genome import random_hex_genome                   # noqa: E402
 from nv_evo.pulse import PulseConfig                          # noqa: E402
-from nv_evo.targets import TEMPORAL_TARGETS                   # noqa: E402
+from nv_evo.targets import (TEMPORAL_TARGETS,
+                            with_io_placement)                 # noqa: E402
 from evo_runtime.config import GAConfig, RunConfig            # noqa: E402
 
 
@@ -69,6 +71,48 @@ def test_functional_signature_ignores_tags_and_splits():
     # ...while the exact level, which is full inherited identity, does see them
     assert (dv.exact_signature(genome, 'nervous')
             != dv.exact_signature(other, 'nervous'))
+
+
+def test_functional_signature_counts_only_active_io_alleles():
+    """I/O tags are functional only when the selected strategy reads them."""
+    fixed = RunConfig(ga=GAConfig(io_placement='fixed'))
+    ranked = RunConfig(ga=GAConfig(io_placement='tag_rank'))
+    genome = random_hex_genome(3, tag_rank=True)
+    other = clone_genome(genome)
+    gene = copy.copy(other.chromosomes[0].genes[0])
+    gene.tag ^= 1
+    other.chromosomes[0].genes[0] = gene
+    assert (dv.functional_signature(genome, 'nervous', fixed)
+            == dv.functional_signature(other, 'nervous', fixed))
+    assert (dv.functional_signature(genome, 'nervous', ranked)
+            != dv.functional_signature(other, 'nervous', ranked))
+
+    wiring_cfg = RunConfig(ga=GAConfig(
+        chromosome_count=3, io_placement='wiring_chromosome'))
+    wired = random_hex_genome(
+        3, wiring_chromosome=True, n_ports=3)
+    changed = clone_genome(wired)
+    gene = copy.copy(changed.chromosomes[2].genes[0])
+    gene.io_selector ^= 1
+    changed.chromosomes[2].genes[0] = gene
+    assert (dv.functional_signature(wired, 'nervous', wiring_cfg)
+            != dv.functional_signature(changed, 'nervous', wiring_cfg))
+
+    # The retired multi-site limiter is serialized only for compatibility.
+    retired_limit = clone_genome(wired)
+    gene = copy.copy(retired_limit.chromosomes[2].genes[0])
+    gene.io_limit = 8
+    retired_limit.chromosomes[2].genes[0] = gene
+    assert (dv.functional_signature(wired, 'nervous', wiring_cfg)
+            == dv.functional_signature(retired_limit, 'nervous', wiring_cfg))
+
+    # Developmental fields on the non-developmental map are irrelevant.
+    dormant = clone_genome(wired)
+    gene = copy.copy(dormant.chromosomes[2].genes[0])
+    gene.self_out = (gene.self_out + 1) % 32
+    dormant.chromosomes[2].genes[0] = gene
+    assert (dv.functional_signature(wired, 'nervous', wiring_cfg)
+            == dv.functional_signature(dormant, 'nervous', wiring_cfg))
 
 
 def test_functional_signature_counts_germline_telomere():

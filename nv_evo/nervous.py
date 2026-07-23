@@ -60,6 +60,8 @@ def _compile_lookup(genome, bits=None):
                 else _SINGLE_BITS)
     entries = []
     for chrom in genome.chromosomes:
+        if getattr(chrom, 'wiring', False):
+            continue
         for gene in chrom.genes:
             context = _pack_context(gene.ctx_l, gene.ctx_r, gene.ctx_d,
                                     gene.self_in, bits)
@@ -323,48 +325,95 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
     return dict(sim.ever)
 
 
+def _resolve_io_binding(genome, grid, target, in_pos, out_pos):
+    """Swap the geometric port binding for the genome's evolvable one when the
+    target opts into an io_placement strategy (nv_evo/io_placement.py). Returns
+    (in_pos, out_pos) — under a strategy each in_pos entry is a LIST of
+    attachment cells (an input may fan out; ports may share sites) — or None
+    when the strategy is active but the organism cannot bind every port.
+    'fixed' passes the geometric binding through."""
+    from .io_placement import io_strategy, bind_io
+    if io_strategy(target) == 'fixed':
+        return in_pos, out_pos
+    return bind_io(genome, grid, target)
+
+
+def _input_levels(in_pos, in_bits):
+    """{cell: 0/1} drive map for one combinational case. Inputs with several
+    attachment cells drive them all; a cell shared by several inputs is the
+    wired-OR of their bits."""
+    from .io_placement import input_groups
+    levels = {}
+    for index, cells in enumerate(input_groups(in_pos)):
+        bit = int(in_bits[index]) if index < len(in_bits) else 0
+        for cell in cells:
+            levels[cell] = levels.get(cell, 0) | bit
+    return levels
+
+
 def score_nervous(genome, target):
     from .scoring import score_contract
-    grid = grow_nervous(genome, seeds=tuple(target.inputs),
+    from .io_placement import (growth_seeds, io_strategy, binding_progress,
+                               record_binding_progress)
+    strategy = io_strategy(target)
+    grid = grow_nervous(genome, seeds=growth_seeds(target),
                         grid_size=target.grid_size, iters=target.iters)
+    if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+        record_binding_progress(
+            genome, binding_progress(genome, grid, target))
     if len(grid) <= target.n_inputs:
         return 0.0
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, out_pos = interpret_nervous(grid, target, arch=arch)
+    resolved = _resolve_io_binding(genome, grid, target, in_pos, out_pos)
+    if resolved is None:
+        return 0.0
+    in_pos, out_pos = resolved
     if any(out_pos[t.role] is None for t in target.outputs):
         return 0.0
+    from .io_placement import flat_inputs, output_groups
     live = set(grid)
-    if any(p not in live for p in in_pos):
+    if any(p not in live for p in flat_inputs(in_pos)):
         return 0.0
     n_checks = len(target.cases) * len(target.outputs)
     if n_checks == 0:
         return 0.0
     observations = []
     for in_bits, out_bits in target.cases:
-        invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
+        invals = _input_levels(in_pos, in_bits)
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
             config=getattr(target, 'pulse_config', None), arch=arch)
+        groups = output_groups(out_pos)
         observations.append([
-            float(outs.get(out_pos[term.role], 0))
+            float(any(outs.get(cell, 0) for cell in groups[term.role]))
             for term in target.outputs])
     return score_contract(observations, target)[0]
 
 
 def nervous_case_outputs(genome, target):
-    grid = grow_nervous(genome, seeds=tuple(target.inputs),
+    from .io_placement import growth_seeds
+    grid = grow_nervous(genome, seeds=growth_seeds(target),
                         grid_size=target.grid_size, iters=target.iters)
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, out_pos = interpret_nervous(grid, target, arch=arch)
     cases = []
+    resolved = _resolve_io_binding(genome, grid, target, in_pos, out_pos)
+    if resolved is None:
+        return grid, in_pos, {t.role: None for t in target.outputs}, cases
+    in_pos, out_pos = resolved
     if len(grid) <= target.n_inputs or any(out_pos[t.role] is None for t in target.outputs):
         return grid, in_pos, out_pos, cases
     for in_bits, out_bits in target.cases:
-        invals = {in_pos[i]: in_bits[i] for i in range(len(in_pos))}
+        invals = _input_levels(in_pos, in_bits)
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
             config=getattr(target, 'pulse_config', None), arch=arch)
-        acts   = {t.role: outs.get(out_pos[t.role], 0) for t in target.outputs}
+        from .io_placement import output_groups
+        groups = output_groups(out_pos)
+        acts = {t.role: int(any(outs.get(cell, 0)
+                               for cell in groups[t.role]))
+                for t in target.outputs}
         cases.append({'in_bits': in_bits, 'out_bits': out_bits,
                       'node_outputs': outs, 'acts': acts})
     return grid, in_pos, out_pos, cases
@@ -397,9 +446,14 @@ def nervous_truth_table(genome, target):
     lines = (['Target: ' + target.name + '   [hex nervous net]', ''] +
              behavior_contract_lines(target) +
              ['', 'Circuit: ' + circuit_summary_nervous(grid, arch=arch)])
+    from .io_placement import output_groups
+    groups = output_groups(out_pos)
     for term in target.outputs:
-        p = out_pos.get(term.role)
-        lines.append("  out '%s': %s" % (term.role, ('pos=%s' % (p,)) if p else '(not found)'))
+        cells = groups.get(term.role, [])
+        lines.append("  out '%s': %s" % (
+            term.role,
+            ('wired-OR at %s' % ', '.join(map(str, cells)))
+            if cells else '(not found)'))
     if not cases:
         lines += ['', '(circuit incomplete — inputs/outputs missing)']
         return '\n'.join(lines)

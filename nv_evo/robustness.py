@@ -46,12 +46,17 @@ def total_offset(target, fitted):
 def semantic_trial_scores(genome, target, fitted, schedules):
     """Frozen-readout semantic score per trial for a list of (possibly perturbed)
     float `schedules`. Grows once; injects each schedule; scores worst-interval."""
-    grid = grow_nervous(genome, seeds=tuple(target.inputs),
+    from .io_placement import growth_seeds
+    grid = grow_nervous(genome, seeds=growth_seeds(target),
                         grid_size=target.grid_size, iters=target.iters)
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, _ = interpret_nervous(grid, target, arch=arch)
-    cell = fitted.output_positions[target.outputs[0].role]
-    if cell not in grid:
+    # Drive the FITTED binding (the genome's evolved attachment groups under an
+    # io_placement strategy); the pads under fixed binding.
+    in_pos = fitted.input_positions(target)
+    from .io_placement import output_groups, merge_intervals
+    cells = output_groups(fitted.output_positions)[target.outputs[0].role]
+    if any(cell not in grid for cell in cells):
         return [0.0] * len(schedules)
     delays = (None if arch == 'tri3' else
               node_delays(genome, grid, getattr(target, 'pulse_config', None)))
@@ -63,14 +68,17 @@ def semantic_trial_scores(genome, target, fitted, schedules):
     horizon = _obs_len(target) * pulse.TICK
     out = []
     for sched in schedules:
-        res, overflow = ae.run_schedule(grid, routing, in_pos, sched, horizon,
-                                        [cell], max_events=target.max_events,
-                                        config=getattr(target, 'pulse_config', None),
-                                        delays=delays, arch=arch)
+        res, overflow = ae.run_schedule(
+            grid, routing, in_pos, sched, horizon, cells,
+            max_events=target.max_events,
+            config=getattr(target, 'pulse_config', None),
+            delays=delays, return_intervals=True, arch=arch)
         if overflow:
             out.append(0.0)
             continue
         edges = ae.effective_edges(sched)[0]        # single-input parity target
         intervals = parity_intervals(edges, horizon)
-        out.append(score_state_intervals(res[cell], intervals, offset))
+        rises = [start for start, _ in
+                 merge_intervals([res[cell] for cell in cells])]
+        out.append(score_state_intervals(rises, intervals, offset))
     return out

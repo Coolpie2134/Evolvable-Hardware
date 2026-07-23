@@ -70,11 +70,20 @@ _PHYSICS_ATTRS = ('pulse_config', 'lut_config')
 
 def carry_physics(src_target, dst_target):
     """Copy the run's physics config from the training target onto a freshly
-    built spec target (returns dst)."""
+    built spec target (returns dst).
+
+    Also carries ``io_placement``: an evolvable binding changes the
+    DEVELOPMENTAL ORIGIN (growth nucleates from one neutral center cell, not
+    the input pads — nv_evo/io_placement.growth_seeds), so a validation target
+    left at 'fixed' would grow a different organism than the one the fitted
+    binding belongs to."""
     for attr in _PHYSICS_ATTRS:
         cfg = getattr(src_target, attr, None)
         if cfg is not None:
             setattr(dst_target, attr, cfg)
+    strategy = getattr(src_target, 'io_placement', 'fixed')
+    if strategy != 'fixed':
+        setattr(dst_target, 'io_placement', strategy)
     return dst_target
 
 

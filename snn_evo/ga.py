@@ -29,11 +29,15 @@ def clone_genome(g):
     """Shallow structural copy: new chromosome/gene lists, shared (never mutated
     in place) gene objects. Mirrors nv_evo.clone_genome — far cheaper than
     deepcopy, which dominated reproduction."""
-    return Genome(
+    clone = Genome(
         chromosomes=[Chromosome(genes=list(c.genes), split=c.split, tag=c.tag,
-                                telomere=getattr(c, 'telomere', MAX_TELOMERE))
+                                telomere=getattr(c, 'telomere', MAX_TELOMERE),
+                                wiring=getattr(c, 'wiring', False))
                      for c in g.chromosomes],
         tag=g.tag)
+    if hasattr(g, '_io_binding_progress'):
+        clone._io_binding_progress = g._io_binding_progress
+    return clone
 
 
 def n_genes(g):
@@ -41,12 +45,13 @@ def n_genes(g):
 
 
 def rank_key(genome, fitness):
-    """Selection key: fitness first, then (once solved) a senescence/parsimony
-    tie-break — fewer genes, then a shorter telomere (a smaller, cheaper body).
-    Never distorts the fitness value, so a solved run still reads exactly 1.0."""
+    """Selection key: wiring viability, honest fitness, then solved parsimony."""
+    from nv_evo.io_placement import binding_viability
+    viability = binding_viability(genome)
     if fitness < PARSIMONY_START_FITNESS:
-        return (fitness, 0, 0)
-    return (fitness, -n_genes(genome), -germline_telomere(genome))
+        return (viability, fitness, 0, 0)
+    return (viability, fitness, -n_genes(genome),
+            -germline_telomere(genome))
 
 # ── evaluation ────────────────────────────────────────────────────
 # (the nervous / temporal backends have their own GA: see nv_evo/ga.py)
@@ -54,18 +59,59 @@ def rank_key(genome, fitness):
 def evaluate_genome(genome, target=None, arch=None):
     if target is None:
         target = get_target(DEFAULT_TARGET)
-    grid = grow_snn(genome, seeds=tuple(target.inputs),
+    # Evolvable I/O binding (nv_evo/io_placement.py): the genome's heritable
+    # tags choose the driven/read cells, and the organism nucleates from ONE
+    # neutral center cell (growth_seeds) instead of the input pads; 'fixed'
+    # keeps the pad-seeded growth and terminal layout byte-identical.
+    from nv_evo.io_placement import (
+        io_strategy, bind_io, flat_inputs, growth_seeds, binding_progress,
+        record_binding_progress)
+    strategy = io_strategy(target)
+    grid = grow_snn(genome, seeds=growth_seeds(target, strategy),
                     grid_size=target.grid_size, iters=target.iters)
+    node_types = None
+    if strategy != 'fixed':
+        from .growth import cell_io_tags
+        node_types = cell_io_tags(genome, grid)
+        if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+            record_binding_progress(
+                genome,
+                binding_progress(genome, grid, target, tags=node_types))
     if len(grid) <= target.n_inputs:
         return 0.0
+    if strategy != 'fixed':
+        bound = bind_io(genome, grid, target, strategy,
+                        tags=node_types)
+        if bound is None:
+            return 0.0
+        in_pos, out_pos = bound          # in_pos: attachment groups per input
+        neurons, synapses = interpret_grid(grid, target=target, arch=arch,
+                                           input_pos=flat_inputs(in_pos),
+                                           output_pos=out_pos)
+        return score(neurons, synapses, target, in_pos=in_pos)
     neurons, synapses = interpret_grid(grid, target=target, arch=arch)
     return score(neurons, synapses, target)
 
+
+def _evaluate_selection_record(genome, target=None, arch=None):
+    if target is None:
+        target = get_target(DEFAULT_TARGET)
+    fitness = evaluate_genome(genome, target, arch)
+    from nv_evo.io_placement import io_strategy
+    total = target.n_inputs + len(target.outputs)
+    if io_strategy(target) not in (
+            'wiring_chromosome', 'spatial_chromosome'):
+        return fitness, (total, total)
+    progress = getattr(genome, '_io_binding_progress', (total, total))
+    return fitness, progress
+
 def genome_signature(genome):
     return tuple(
-        (c.tag, c.split, getattr(c, 'telomere', 0),
+        (c.tag, c.split, getattr(c, 'telomere', 0), getattr(c, 'wiring', False),
          tuple((g.state_n, g.state_s, g.state_e, g.state_w,
-                g.self_in, g.self_out) for g in c.genes))
+                g.self_in, g.self_out, getattr(g, 'tag', 0),
+                getattr(g, 'io_selector', 0))
+               for g in c.genes))
         for c in genome.chromosomes)
 
 
@@ -77,12 +123,21 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
     large speed-up (matches nv_evo/lut_evo). Omitting it keeps the one-shot pool.
     `should_stop`/`on_progress` are threaded to map_ordered (saturated, no chunk
     barrier, cancellable)."""
-    fn = partial(evaluate_genome, target=target, arch=arch)
+    fn = partial(_evaluate_selection_record, target=target, arch=arch)
     if cache is None:
         if executor is not None:
-            return map_ordered(executor, fn, genomes, should_stop, on_progress)
+            records = map_ordered(
+                executor, fn, genomes, should_stop, on_progress)
+            from nv_evo.io_placement import record_binding_progress
+            for genome, record in zip(genomes, records):
+                record_binding_progress(genome, record[1])
+            return [record[0] for record in records]
         with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
-            return map_ordered(ex, fn, genomes, should_stop, on_progress)
+            records = map_ordered(ex, fn, genomes, should_stop, on_progress)
+        from nv_evo.io_placement import record_binding_progress
+        for genome, record in zip(genomes, records):
+            record_binding_progress(genome, record[1])
+        return [record[0] for record in records]
     if len(cache) > FITNESS_CACHE_MAX:
         cache.clear()
     sigs = [genome_signature(g) for g in genomes]
@@ -94,7 +149,10 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
     representatives = [(sig, indices[0]) for sig, indices in unique.items()]
     subset = [genomes[i] for _, i in representatives]
     if not subset:
-        return out
+        from nv_evo.io_placement import record_binding_progress
+        for genome, record in zip(genomes, out):
+            record_binding_progress(genome, record[1])
+        return [record[0] for record in out]
     if executor is not None:
         results = map_ordered(executor, fn, subset, should_stop, on_progress)
     else:
@@ -104,7 +162,10 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
         cache[sig] = result
         for i in unique[sig]:
             out[i] = result
-    return out
+    from nv_evo.io_placement import record_binding_progress
+    for genome, record in zip(genomes, out):
+        record_binding_progress(genome, record[1])
+    return [record[0] for record in out]
 
 # ── genetic operators ──────────────────────────────────────────────
 
@@ -119,13 +180,14 @@ def _normalize_split(chromosome):
                         max(1, min(int(chromosome.split), count - 1)))
 
 
-def _recombine_gene_fields(gene_a, gene_b):
+def _recombine_gene_fields(gene_a, gene_b, fields=None):
     """Uniformly recombine a single rule's active alleles.
 
     ``limit`` is a legacy pickle field and is no longer used by growth, so it is
     deliberately not presented as fake breeding variation.
     """
-    differing = [field for field in _GENE_FIELDS
+    fields = tuple(_GENE_FIELDS) + ('tag',) if fields is None else fields
+    differing = [field for field in fields
                   if getattr(gene_a, field) != getattr(gene_b, field)]
     if len(differing) < 2:
         return gene_a, gene_b
@@ -142,8 +204,10 @@ def _recombine_gene_fields(gene_a, gene_b):
 def _recombination_signature(genome):
     """Alleles crossover can actually exchange (not slot/object identity)."""
     return tuple(
-        tuple(tuple(getattr(gene, field) for field in _GENE_FIELDS)
-              for gene in chromosome.genes)
+        (getattr(chromosome, 'wiring', False),
+         tuple((*(getattr(gene, field) for field in _GENE_FIELDS),
+                getattr(gene, 'tag', 0), getattr(gene, 'io_selector', 0))
+               for gene in chromosome.genes))
         for chromosome in genome.chromosomes)
 
 
@@ -169,7 +233,7 @@ def _value_excluding(low, high, *values):
 def _force_nonparent_tweak(genome, parent):
     """End a multi-edit transaction at an allele distinct from its parent."""
     with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
-                  if chromosome.genes]
+                  if chromosome.genes and not getattr(chromosome, 'wiring', False)]
     if not with_genes:
         if not genome.chromosomes:
             genome.chromosomes.append(random_chromosome())
@@ -207,35 +271,49 @@ def _poisson(lam):
     return k - 1
 
 
-def _mutate_once(genome, chromosome_count=None):
+def _mutate_io_tag(genome, io_placement=None):
+    """Mutate one body priority, type/selector pair, or spatial anchor."""
+    from nv_evo.io_placement import mutate_io_allele
+    mutate_io_allele(genome, MAX_STATE, strategy=io_placement)
+
+
+IO_MUTATION_PROB = 0.20
+
+
+def _mutate_once(genome, chromosome_count=None, evolve_io=False,
+                 io_placement=None):
     """Apply one feasible, state-changing mutation to ``genome``.
 
     Invalid operations (such as deleting the last gene) are excluded before
     drawing.  That makes an offspring mutation a real genetic event rather
-    than a random chance to do nothing.
+    than a random chance to do nothing. ``evolve_io`` adds the I/O-tag and
+    wiring-chromosome mutations for evolvable io_placement; off by default so the
+    ordinary mutation stream is byte-identical.
     """
     if not genome.chromosomes:
         genome.chromosomes.append(random_chromosome())
         return
 
     chroms = genome.chromosomes
-    with_genes = [c for c in chroms if c.genes]
+    has_wiring = any(getattr(c, 'wiring', False) for c in chroms)
+    body = [c for c in chroms if not getattr(c, 'wiring', False)]
+    with_genes = [c for c in body if c.genes]
     choices = []
     if with_genes:
         choices.append('tweak')
-    if any(len(c.genes) < MAX_GENES for c in chroms):
+    if any(len(c.genes) < MAX_GENES for c in body):
         choices.append('add_gene')
-    if any(len(c.genes) > 1 for c in chroms):
+    if any(len(c.genes) > 1 for c in body):
         choices.append('del_gene')
-    if chromosome_count is None and len(chroms) < MAX_CHROMS:
+    if chromosome_count is None and not has_wiring and len(chroms) < MAX_CHROMS:
         choices.append('add_chrom')
-    if chromosome_count is None and len(chroms) > 1:
+    if chromosome_count is None and not has_wiring and len(body) > 1:
         choices.append('del_chrom')
-    if any(len(c.genes) > 2 for c in chroms):
+    if any(len(c.genes) > 2 for c in body):
         choices.append('split')
     if any(1 < getattr(c, 'telomere', MAX_TELOMERE) < MAX_TELOMERE
            or getattr(c, 'telomere', MAX_TELOMERE) in (1, MAX_TELOMERE)
-           for c in chroms):
+           for c in body):
         choices.append('telomere')
 
     op = random.choice(choices)
@@ -244,26 +322,27 @@ def _mutate_once(genome, chromosome_count=None):
         idx = random.randrange(len(chrom.genes))
         chrom.genes[idx] = _mutate_gene(chrom.genes[idx])
     elif op == 'add_gene':
-        random.choice([c for c in chroms if len(c.genes) < MAX_GENES]).genes.append(random_gene())
+        random.choice([c for c in body if len(c.genes) < MAX_GENES]).genes.append(random_gene())
     elif op == 'del_gene':
-        chrom = random.choice([c for c in chroms if len(c.genes) > 1])
+        chrom = random.choice([c for c in body if len(c.genes) > 1])
         chrom.genes.pop(random.randrange(len(chrom.genes)))
     elif op == 'add_chrom':
         chroms.append(random_chromosome())
     elif op == 'del_chrom':
-        chroms.pop(random.randrange(len(chroms)))
+        chroms.remove(random.choice(body))
     elif op == 'split':
-        chrom = random.choice([c for c in chroms if len(c.genes) > 2])
+        chrom = random.choice([c for c in body if len(c.genes) > 2])
         options = [s for s in range(1, len(chrom.genes)) if s != chrom.split]
         chrom.split = random.choice(options)
     else:  # telomere
-        chrom = random.choice(chroms)
+        chrom = random.choice(body)
         base = getattr(chrom, 'telomere', MAX_TELOMERE)
         options = [base + d for d in (-1, 1) if 1 <= base + d <= MAX_TELOMERE]
         chrom.telomere = random.choice(options)
 
 
-def mutate(genome, chromosome_count=None):
+def mutate(genome, chromosome_count=None, evolve_io=False,
+           io_placement=None):
     if (chromosome_count is not None
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
@@ -276,11 +355,17 @@ def mutate(genome, chromosome_count=None):
     # allele edit so earlier inverse operations cannot cancel back to a clone.
     events = max(1, _poisson(MEAN_MUTATIONS))
     for _ in range(events - 1):
-        _mutate_once(g, chromosome_count=chromosome_count)
+        _mutate_once(
+            g, chromosome_count=chromosome_count, evolve_io=evolve_io,
+            io_placement=io_placement)
     if events == 1:
-        _mutate_once(g, chromosome_count=chromosome_count)
+        _mutate_once(
+            g, chromosome_count=chromosome_count, evolve_io=evolve_io,
+            io_placement=io_placement)
     else:
         _force_nonparent_tweak(g, genome)
+    if evolve_io and random.random() < IO_MUTATION_PROB:
+        _mutate_io_tag(g, io_placement=io_placement)
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
     return g
@@ -293,6 +378,9 @@ def crossover(pa, pb):
         best_j, best_dist = None, float("inf")
         for j, chrom_b in enumerate(cb.chromosomes):
             if j in used_b: continue
+            if (getattr(chrom_a, 'wiring', False)
+                    != getattr(chrom_b, 'wiring', False)):
+                continue
             d = abs(chrom_a.tag - chrom_b.tag)
             if d < best_dist: best_dist, best_j = d, j
         if best_j is None: continue
@@ -307,7 +395,10 @@ def crossover(pa, pb):
             cb.chromosomes[best_j].genes = genes_b[:sp] + genes_a[sp:]
             ca.chromosomes[i].split = cb.chromosomes[best_j].split = sp
         elif common == 1:
-            gene_a, gene_b = _recombine_gene_fields(genes_a[0], genes_b[0])
+            fields = (('tag', 'io_selector')
+                      if getattr(chrom_a, 'wiring', False) else None)
+            gene_a, gene_b = _recombine_gene_fields(
+                genes_a[0], genes_b[0], fields=fields)
             ca.chromosomes[i].genes = [gene_a] + genes_b[1:]
             cb.chromosomes[best_j].genes = [gene_b] + genes_a[1:]
             ca.chromosomes[i].split = cb.chromosomes[best_j].split = 0
@@ -325,12 +416,16 @@ def tournament(population, fitnesses):
     return population[max(idx, key=lambda i: rank_key(population[i], fitnesses[i]))]
 
 def next_population(population, fitnesses, chromosome_count=None,
-                    recombination=True):
+                    recombination=True, evolve_io=False,
+                    io_placement=None):
     """One generation of offspring only.
 
     Elites are a recombination parent pool, not verbatim survivors.  The
     separately tracked champion remains safe outside the population, while the
     current-generation best stays an honest value for the chart.
+
+    ``evolve_io`` threads the I/O-tag / wiring-chromosome mutations through to
+    ``mutate`` when an evolvable io_placement strategy is active.
     """
     if chromosome_count is not None:
         if not 1 <= chromosome_count <= MAX_CHROMS:
@@ -383,9 +478,13 @@ def next_population(population, fitnesses, chromosome_count=None,
         pa, pb = parent_pair()
         ca, cb = (crossover(pa, pb) if recombination else
                   (clone_genome(pa), clone_genome(pb)))
-        new_pop.append(mutate(ca, chromosome_count=chromosome_count))
+        new_pop.append(mutate(ca, chromosome_count=chromosome_count,
+                              evolve_io=evolve_io,
+                              io_placement=io_placement))
         if len(new_pop) < pop:
-            new_pop.append(mutate(cb, chromosome_count=chromosome_count))
+            new_pop.append(mutate(cb, chromosome_count=chromosome_count,
+                                  evolve_io=evolve_io,
+                                  io_placement=io_placement))
     return new_pop[:pop]
 
 # ── main loop ─────────────────────────────────────────────────────
@@ -399,7 +498,35 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
     if not 1 <= n_chroms <= MAX_CHROMS:
         raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
     popsize    = pop or POPSIZE
-    population = [random_genome(n_chroms) for _ in range(popsize)]
+    from nv_evo.io_placement import (
+        growth_seeds, io_strategy, seed_spatial_from_phenotype,
+        seed_wiring_from_phenotype, uses_port_chromosome)
+    strategy = io_strategy(target)
+    if uses_port_chromosome(strategy) and n_chroms < 3:
+        raise ValueError('chromosome-based I/O requires n_chroms >= 3')
+    evolve_io = strategy != 'fixed'
+    n_ports = target.n_inputs + len(target.outputs)
+    def make_genome():
+        genome = random_genome(
+            n_chroms,
+            wiring_chromosome=(strategy == 'wiring_chromosome'),
+            spatial_chromosome=(strategy == 'spatial_chromosome'),
+            n_ports=n_ports, tag_rank=(strategy == 'tag_rank'))
+        if uses_port_chromosome(strategy):
+            from .growth import grow_snn, cell_io_tags
+            grid = grow_snn(
+                genome, seeds=growth_seeds(target),
+                grid_size=target.grid_size, iters=target.iters)
+            tags = cell_io_tags(genome, grid)
+            if strategy == 'spatial_chromosome':
+                seed_spatial_from_phenotype(
+                    genome, grid, target, tags=tags)
+            else:
+                seed_wiring_from_phenotype(
+                    genome, grid, target, tags=tags)
+        return genome
+
+    population = [make_genome() for _ in range(popsize)]
     cache = LRUCache(FITNESS_CACHE_MAX)
     # Reuse ONE worker pool across generations (matches nv_evo/lut_evo). Spawning
     # a fresh pool every generation dominated runtime on Windows.
@@ -416,15 +543,17 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
 
         for gen in range(generations):
             population = next_population(
-                population, fitnesses, chromosome_count=n_chroms)
+                population, fitnesses, chromosome_count=n_chroms,
+                evolve_io=evolve_io, io_placement=strategy)
             fitnesses  = _eval_batch(population, target, arch, ex, cache)
             gi = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
             if rank_key(population[gi], fitnesses[gi]) > rank_key(best_genome, best_fitness):
                 best_fitness = fitnesses[gi]
                 best_genome  = clone_genome(population[gi])
             if verbose and (gen % 10 == 0 or fitnesses[gi] >= 1.0):
+                from nv_evo.io_placement import growth_seeds
                 mean_f = sum(fitnesses) / popsize
-                grid   = grow_snn(best_genome, seeds=tuple(target.inputs),
+                grid   = grow_snn(best_genome, seeds=growth_seeds(target),
                                   grid_size=target.grid_size)
                 ns, ss = interpret_grid(grid, target=target, arch=arch)
                 print("%5d  %6.4f  %6.4f  %s" % (gen, best_fitness, mean_f,

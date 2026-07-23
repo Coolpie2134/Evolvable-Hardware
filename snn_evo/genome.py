@@ -22,6 +22,13 @@ class Gene:
     self_in:  int = 0
     self_out: int = 1
     limit:    int = MAX_ITER      # unused by growth now; retained for old pickles
+    # Body-gene expression priority under tag_rank; desired node type or
+    # normalised x coordinate on a chromosome-3 port gene.
+    tag:      int = 0
+    # Deprecated checkpoint field, pinned to 1: every port owns one cell.
+    io_limit: int = 1
+    # Type-instance selector, or normalised y for spatial wiring.
+    io_selector: int = 0
 
 @dataclass
 class Chromosome:
@@ -36,6 +43,10 @@ class Chromosome:
     split: int = 0
     tag:   int = 0
     telomere: int = MAX_TELOMERE
+    # Non-developmental port-chromosome marker (see nv_evo/genome.py). Its genes
+    # hold either type/selector or x/y I/O mappings. Default False leaves every
+    # existing genome unchanged.
+    wiring:   bool = False
 
 @dataclass
 class Genome:
@@ -46,7 +57,8 @@ class Genome:
 def germline_telomere(genome) -> int:
     """The organism's germline telomere L: the longest division program across
     its chromosomes (seed cells start here). No chromosomes → 1 (seeds only)."""
-    return max((getattr(c, 'telomere', 1) for c in genome.chromosomes), default=1)
+    body = [c for c in genome.chromosomes if not getattr(c, 'wiring', False)]
+    return max((getattr(c, 'telomere', 1) for c in body), default=1)
 
 def random_gene() -> Gene:
     return Gene(
@@ -59,7 +71,7 @@ def random_gene() -> Gene:
         limit    = MAX_ITER - random.randint(0, MAX_ITER // 3),
     )
 
-def random_chromosome(n_genes=None) -> Chromosome:
+def random_chromosome(n_genes=None, wiring=False) -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
@@ -70,10 +82,20 @@ def random_chromosome(n_genes=None) -> Chromosome:
         # parsimony then shrinks the telomere toward the smallest body that still
         # solves (it is the telomere, not the grid, that limits a mature circuit).
         telomere = random.randint(9, min(14, MAX_TELOMERE)),
+        wiring   = wiring,
     )
 
-def random_genome(n_chroms=1) -> Genome:
-    return Genome(
-        chromosomes = [random_chromosome() for _ in range(n_chroms)],
+def random_genome(n_chroms=1, wiring_chromosome=False, n_ports=None,
+                  tag_rank=False, spatial_chromosome=False) -> Genome:
+    """Build a fixed genome or seed one of the evolvable I/O strategies."""
+    chroms = [random_chromosome() for _ in range(n_chroms)]
+    genome = Genome(
+        chromosomes = chroms,
         tag = random.randint(0, 9999),
     )
+    if wiring_chromosome or spatial_chromosome or tag_rank:
+        from nv_evo.io_placement import seed_io_metadata
+        seed_io_metadata(genome, wiring_chromosome=wiring_chromosome,
+                         n_ports=n_ports, tag_rank=tag_rank,
+                         spatial_chromosome=spatial_chromosome)
+    return genome

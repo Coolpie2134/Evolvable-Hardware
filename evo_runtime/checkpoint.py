@@ -9,9 +9,14 @@ import tempfile
 FORMAT = 'evohw-checkpoint-v2'
 
 _FIELDS = {
-    'snn': ('state_n', 'state_s', 'state_e', 'state_w', 'self_in', 'self_out', 'limit'),
-    'nervous': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'),
-    'lut': ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out'),
+    # Evolvable I/O alleles. ``io_limit`` is retained in the wire format only
+    # for old-checkpoint compatibility; every save/load pins it to one.
+    'snn': ('state_n', 'state_s', 'state_e', 'state_w', 'self_in', 'self_out',
+            'limit', 'tag', 'io_limit', 'io_selector'),
+    'nervous': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out', 'tag',
+                'io_limit', 'io_selector'),
+    'lut': ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out', 'tag',
+            'io_limit', 'io_selector'),
 }
 
 
@@ -40,7 +45,10 @@ def genome_to_dict(genome, backend):
         'chromosomes': [
             {'tag': int(c.tag), 'split': split_for(c),
              'telomere': int(getattr(c, 'telomere', 1)),
-             'genes': [[int(getattr(g, f)) for f in fields] for g in c.genes]}
+             # wiring-chromosome marker for evolvable I/O binding (Method B)
+             'wiring': bool(getattr(c, 'wiring', False)),
+             'genes': [[1 if f == 'io_limit' else int(getattr(g, f))
+                        for f in fields] for g in c.genes]}
             for c in genome.chromosomes],
         'state_delays': ([float(x) for x in sd] if sd else None),
         'arch': getattr(genome, 'arch', 'single'),      # nervous tile architecture
@@ -55,13 +63,21 @@ def genome_from_dict(data, backend):
     fields = tuple(data.get('gene_fields') or _FIELDS[backend])
     chroms = []
     for item in data['chromosomes']:
-        genes = [Gene(**dict(zip(fields, map(int, row))))
-                 for row in item['genes']]
+        genes = []
+        for row in item['genes']:
+            values = dict(zip(fields, map(int, row)))
+            # Historical 0/all and multi-site limits are retired. Keeping the
+            # field readable avoids breaking old files while guaranteeing that
+            # every loaded port has single-cell semantics.
+            values['io_limit'] = 1
+            genes.append(Gene(**values))
         split = (0 if len(genes) < 2 else
                  max(1, min(int(item.get('split', 0)), len(genes) - 1)))
         chroms.append(Chromosome(
             genes=genes, split=split,
-            tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1))))
+            tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1)),
+            # 'sex' is the flag's retired spelling — readable, never written
+            wiring=bool(item.get('wiring', item.get('sex', False)))))
     genome = Genome(chromosomes=chroms, tag=int(data.get('tag', 0)))
     # 'state_widths' appears in checkpoints written before width evolution was
     # retired. It is deliberately ignored: the vector no longer exists on the

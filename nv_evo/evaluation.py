@@ -18,24 +18,49 @@ class FittedReadout:
     """The complete fitted evaluation state carried into fresh schedules."""
 
     backend: str
-    outputs: Tuple[Tuple[str, Pos], ...]
+    # Fixed binding stores one Pos per role. Evolvable binding stores a tuple of
+    # Pos values: the immutable wired-OR output group.
+    outputs: Tuple
     alignment: Optional[float]
     training_score: float
+    # Input CELLS chosen at fit time. Empty means "use the target's seed pads"
+    # (the fixed/legacy binding). Under an evolvable io_placement strategy the
+    # genome's tags pick the injection cells, so they too are a fitted parameter
+    # that validation must reuse unchanged — otherwise validation would silently
+    # re-bind inputs to fresh cells. Defaulted so legacy 4-arg construction (e.g.
+    # nv_evo/persistence.py) still works.
+    # Under an evolvable strategy each entry is itself a tuple of attachment
+    # cells (an input may fan out to several sites); fixed binding stores ().
+    inputs: Tuple = ()
 
     @property
     def output_positions(self):
         return dict(self.outputs)
 
+    def input_positions(self, target):
+        """The input binding to drive: the fitted one (one attachment-cell
+        group per input under an evolvable strategy), or the target's seed pads
+        when nothing was fitted (fixed binding / legacy checkpoints)."""
+        return list(self.inputs) if self.inputs else list(target.inputs)
+
 
 def fit_readout(genome, target, backend='nervous'):
-    """Fit output cells and one shared alignment on training schedules."""
+    """Fit output cells and one shared alignment on training schedules. Under an
+    evolvable io_placement strategy the input cells are fitted here too, so
+    validation reuses the genome's chosen binding rather than re-deriving it."""
+    def _freeze_inputs(entries):
+        """Nested-tuple form of an in_pos (groups stay groups, cells stay cells)."""
+        from .io_placement import input_groups
+        return tuple(tuple(group) for group in input_groups(entries))
+
+    in_pos = ()
     if backend == 'nervous':
         from .temporal import prepare_net
         from .scoring import score_contract
         prep = prepare_net(genome, target)
         if prep is None:
             return None
-        out_pos, traces = prep[3], prep[4]
+        in_pos, out_pos, traces = _freeze_inputs(prep[2]), prep[3], prep[4]
     elif backend == 'lut':
         from lut_evo.ga import prepare_lut
         from .scoring import score_contract
@@ -43,13 +68,24 @@ def fit_readout(genome, target, backend='nervous'):
         if prep is None:
             return None
         out_pos, traces = prep[1], prep[2]
+        in_pos = _freeze_inputs(prep[3]) if len(prep) > 3 else ()
     else:
         raise ValueError("unknown temporal backend: %s" % backend)
     if getattr(traces, 'overflow', False):
         return None
     score, _, alignment = score_contract(traces, target)
-    outputs = tuple(sorted(out_pos.items()))
-    return FittedReadout(backend, outputs, alignment, score)
+    if getattr(target, 'io_placement', 'fixed') == 'fixed':
+        outputs = tuple(sorted(out_pos.items()))
+    else:
+        from .io_placement import output_groups
+        outputs = tuple(sorted(
+            (role, tuple(cells))
+            for role, cells in output_groups(out_pos).items()))
+    # Only carry the input binding for genuinely evolvable strategies; leave it
+    # empty for 'fixed' so input_positions() falls back to the seed pads and
+    # nothing about the legacy path changes.
+    fitted_inputs = in_pos if getattr(target, 'io_placement', 'fixed') != 'fixed' else ()
+    return FittedReadout(backend, outputs, alignment, score, inputs=fitted_inputs)
 
 
 def score_frozen(genome, target, fitted):
@@ -63,13 +99,21 @@ def score_frozen(genome, target, fitted):
         from .nervous import (grow_nervous, interpret_nervous, node_delays)
         from .temporal import trace_fixed_outputs
         from .scoring import score_contract
-        grid = grow_nervous(genome, seeds=tuple(target.inputs),
+        from .io_placement import growth_seeds
+        # Same developmental origin as training: pads under fixed binding, ONE
+        # neutral center cell under an evolvable strategy — else validation
+        # would grow a different organism than the one the binding was fitted on.
+        grid = grow_nervous(genome, seeds=growth_seeds(target),
                             grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return 0.0
         arch = getattr(genome, 'arch', 'single')
-        routing, in_pos, _ = interpret_nervous(grid, target, arch=arch)
-        if any(pos not in grid for pos in in_pos):
+        routing, _, _ = interpret_nervous(grid, target, arch=arch)
+        # Drive the FITTED input cells (the genome's evolved binding under an
+        # io_placement strategy); fall back to the seed pads for fixed binding.
+        from .io_placement import flat_inputs
+        in_pos = fitted.input_positions(target)
+        if any(pos not in grid for pos in flat_inputs(in_pos)):
             return 0.0
         # carry the evolved per-node delays into validation too, so a fitted
         # width-preserving champion is scored on the same physics
@@ -82,13 +126,18 @@ def score_frozen(genome, target, fitted):
         from lut_evo.lut import grow_lut
         from lut_evo.ga import trace_fixed_outputs
         from .scoring import score_contract
-        grid = grow_lut(genome, seeds=tuple(target.inputs),
+        from .io_placement import growth_seeds
+        grid = grow_lut(genome, seeds=growth_seeds(target),
                         grid_size=target.grid_size, iters=target.iters)
+        # Drive the FITTED input cells (the genome's evolved binding under an
+        # io_placement strategy); the seed pads for fixed binding.
+        from .io_placement import flat_inputs
+        in_pos = fitted.input_positions(target)
         if len(grid) <= target.n_inputs or any(
-                pos not in grid for pos in target.inputs):
+                pos not in grid for pos in flat_inputs(in_pos)):
             return 0.0
         traces = trace_fixed_outputs(
-            grid, list(target.inputs), out_pos, target)
+            grid, list(in_pos), out_pos, target)
     else:
         raise ValueError("unknown fitted backend: %s" % fitted.backend)
 

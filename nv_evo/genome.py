@@ -64,6 +64,16 @@ class HexGene:
     ctx_d:    int = 0
     self_in:  int = 0
     self_out: int = 0        # 0 = off / dead (native — no shift needed)
+    # I/O allele. On a BODY gene this is its expression priority for tag_rank.
+    # On chromosome 3 it is either the desired mature node type (type wiring)
+    # or the normalised x coordinate (spatial wiring).
+    # Defaults preserve old checkpoints and the fixed strategy's RNG stream.
+    tag:      int = 0
+    # Deprecated checkpoint field, pinned to 1: every port owns one cell.
+    io_limit: int = 1
+    # On type-wiring genes this selects one matching instance without a
+    # left/top bias. On spatial-wiring genes it stores the normalised y.
+    io_selector: int = 0
 
 
 @dataclass
@@ -83,13 +93,18 @@ class Chromosome:
     split: int = 0
     tag:   int = 0
     telomere: int = MAX_TELOMERE
+    # Chromosome 3 is marked as the evolvable I/O map under Method B. It is
+    # deliberately excluded from development; only its mapping alleles mutate
+    # and recombine. Default False keeps old/fixed genomes developmental.
+    wiring:   bool = False
 
 
 def germline_telomere(genome) -> int:
     """The organism's germline telomere length L: the longest division program
     across its chromosomes. Seed cells start here; growth reaches radius L. A
     genome with no chromosomes cannot divide (L falls back to 1 — seeds only)."""
-    return max((getattr(c, 'telomere', 1) for c in genome.chromosomes), default=1)
+    body = [c for c in genome.chromosomes if not getattr(c, 'wiring', False)]
+    return max((getattr(c, 'telomere', 1) for c in body), default=1)
 
 
 @dataclass
@@ -119,13 +134,14 @@ def default_state_delays():
     return [1.0] * MAX_STATE
 
 
-def random_hex_gene(arch='single') -> HexGene:
+def random_hex_gene(arch='single', tag_range=0) -> HexGene:
     # self_in == 0 makes a GROWTH rule: it matches empty cells and is the only
     # kind that can bring an empty cell to life under the sim6 empty-cell guard
     # (division is further gated by the parent's Hayflick telomere). Random
     # genomes need a healthy share of them or nothing ever grows — sim6 gets this
     # for free because table_create manufactures a gene for every empty-cell
     # context it meets.
+    #
     if arch not in TILE_ARCHS:
         raise ValueError('unknown tile architecture: %r' % (arch,))
     if arch == 'tri3':
@@ -148,7 +164,7 @@ def random_hex_gene(arch='single') -> HexGene:
 
 
 def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE,
-                          arch='single') -> Chromosome:
+                          arch='single', wiring=False) -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
@@ -156,17 +172,31 @@ def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE,
         split = random.randint(1, max(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         telomere = random.randint(2, min(5, max_telomere)),
+        wiring   = wiring,
     )
 
 
 def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
-                      arch='single') -> Genome:
+                      arch='single', wiring_chromosome=False, n_ports=None,
+                      tag_rank=False, spatial_chromosome=False) -> Genome:
+    """Random genome with optional evolvable I/O metadata.
+
+    Fixed runs take the original byte-identical path. Method A seeds body-gene
+    priorities; Method B reserves chromosome three as a non-developmental port
+    map sized to ``n_ports``.
+    """
     if arch not in TILE_ARCHS:
         raise ValueError('unknown tile architecture: %r' % (arch,))
-    return Genome(
-        chromosomes = [random_hex_chromosome(max_telomere=max_telomere,
-                                             arch=arch)
-                       for _ in range(n_chroms)],
+    chroms = [random_hex_chromosome(max_telomere=max_telomere, arch=arch)
+              for _ in range(n_chroms)]
+    genome = Genome(
+        chromosomes = chroms,
         tag = random.randint(0, 9999),
         arch = arch,
     )
+    if wiring_chromosome or spatial_chromosome or tag_rank:
+        from .io_placement import seed_io_metadata
+        seed_io_metadata(genome, wiring_chromosome=wiring_chromosome,
+                         n_ports=n_ports, tag_rank=tag_rank,
+                         spatial_chromosome=spatial_chromosome)
+    return genome

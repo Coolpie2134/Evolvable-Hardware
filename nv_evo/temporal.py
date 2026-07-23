@@ -30,6 +30,10 @@ they are re-exported here for back-compat with older imports and pickles.
 from __future__ import annotations
 
 from .nervous import (grow_nervous, interpret_nervous, node_delays)
+from .io_placement import (io_strategy, bind_io, input_groups, output_groups,
+                           flat_inputs, flat_outputs, merge_intervals,
+                           growth_seeds, binding_progress,
+                           record_binding_progress)
 from .hexgrid import hex_dirs
 from .pulse import TICK
 from .simulation import create_simulator
@@ -75,9 +79,11 @@ def input_cone(grid, routing, in_pos):
     reachable from the input seeds in the signal graph. On the nervous net there
     is no spontaneous activity, so every cell OUTSIDE this cone is silent for all
     time; simulating only the cone is exact and, on the unbounded field where
-    growth may leave a large off-cone blob, far cheaper."""
+    growth may leave a large off-cone blob, far cheaper. ``in_pos`` may carry
+    per-input attachment GROUPS (evolvable binding); the cone starts from every
+    attachment cell."""
     edges = signal_graph(grid, routing)          # u -> cells that read u
-    seen  = set(p for p in in_pos if p in grid)
+    seen  = set(p for p in flat_inputs(in_pos) if p in grid)
     stack = list(seen)
     while stack:
         for v in edges.get(stack.pop(), ()):
@@ -87,9 +93,11 @@ def input_cone(grid, routing, in_pos):
 
 
 def _inject_stream_edges(sim, in_pos, streams, T):
-    """Queue each contiguous high run as one physical wired-OR pulse."""
+    """Queue each contiguous high run as one physical wired-OR pulse. An input
+    with several attachment cells (evolvable binding) injects the same pulse at
+    every site; shared cells wired-OR naturally in the pulse engine."""
     stop = min(int(T), len(streams))
-    for input_index, cell in enumerate(in_pos):
+    for input_index, cells in enumerate(input_groups(in_pos)):
         tick = 0
         while tick < stop:
             if input_index >= len(streams[tick]) or not streams[tick][input_index]:
@@ -101,15 +109,18 @@ def _inject_stream_edges(sim, in_pos, streams, T):
                    and streams[tick][input_index]):
                 tick += 1
             duration = max(sim.config.width, (tick - start) * TICK)
-            sim.inject_pulse(cell, start * TICK, duration)
+            for cell in cells:
+                sim.inject_pulse(cell, start * TICK, duration)
 
 
 def _inject_physical_events(sim, in_pos, input_events):
-    """Queue an explicit floating-time stimulus schedule onto the input nets."""
-    for input_index, cell in enumerate(in_pos):
+    """Queue an explicit floating-time stimulus schedule onto the input nets
+    (every attachment cell of an input receives the input's schedule)."""
+    for input_index, cells in enumerate(input_groups(in_pos)):
         events = input_events[input_index] if input_index < len(input_events) else ()
         for start, width in events:
-            sim.inject_pulse(cell, float(start), float(width))
+            for cell in cells:
+                sim.inject_pulse(cell, float(start), float(width))
 
 
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
@@ -118,8 +129,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
-    that input cell's net (held 1s are one long pulse). out_pos is
-    {role: (x,y)}. Returns (states, traces):
+    that input cell's net (held 1s are one long pulse). out_pos may contain one
+    cell or a wired-OR cell group per role. Returns (states, traces):
         states : list[T] of sampled {(x,y):0/1} activity maps
         traces : {role: [0/1 over T]}
     `prune` restricts the simulation to the input cone (exact for the nervous
@@ -134,7 +145,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         from .tritile import TriSim
         # Tri sub-node fan-out makes routing/hex_dirs pruning inapplicable and
         # the graph is small anyway, so simulate the whole grown organism.
-        sim = TriSim(grid, in_pos, config=config, max_events=max_events)
+        sim = TriSim(grid, flat_inputs(in_pos), config=config,
+                     max_events=max_events)
     else:
         sub = grid
         if prune:
@@ -169,8 +181,9 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         sim.advance_to(sample_time)
         state = sim.activity_at(sample_time)
         states.append(state)
-        for role, p in out_pos.items():
-            traces[role].append(state.get(p, 0) if p else 0)
+        for role, cells in output_groups(out_pos).items():
+            traces[role].append(
+                1 if any(state.get(cell, 0) for cell in cells) else 0)
         if sim.overflow:
             break
     # Flush the remaining physical horizon so scoring retains every edge.
@@ -237,7 +250,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
     the engine at its configured fixed delay. Returns (out_pos
     {role: (x,y)|None}, traces {role: [trace per trial]}).
     """
-    in_set = set(in_pos)
+    in_set = set(flat_inputs(in_pos))
     out_pos = {term.role: None for term in ttarget.outputs}
     traces  = TemporalTraces()
     if len(grid) <= len(in_set):
@@ -332,7 +345,8 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, ar
     It is the evaluation path for validation schedules: output identity is a
     fitted model parameter and must remain unchanged after training.
     """
-    if any(pos not in grid for pos in out_pos.values()):
+    groups = output_groups(out_pos)
+    if any(pos not in grid for pos in flat_outputs(out_pos)):
         return None
     obs = _obs_len(ttarget)
     need_samples = needs_samples(ttarget)
@@ -349,12 +363,19 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, ar
                 input_events=getattr(trial, 'input_events', None), delays=delays, arch=arch)
             for trial in ttarget.trials]
     traces = TemporalTraces(
-        {role: [run[1].get(role, []) for run in runs] for role in out_pos},
-        events={role: [list(run[2].get(pos, ())) for run in runs]
-                for role, pos in out_pos.items()},
-        intervals={role: [list(getattr(run[2], 'intervals', {}).get(pos, ()))
-                          for run in runs]
-                   for role, pos in out_pos.items()},
+        {role: [run[1].get(role, []) for run in runs] for role in groups},
+        events={
+            role: [[start for start, _ in merge_intervals(
+                        [getattr(run[2], 'intervals', {}).get(cell, ())
+                         for cell in cells])]
+                   for run in runs]
+            for role, cells in groups.items()},
+        intervals={
+            role: [merge_intervals(
+                       [getattr(run[2], 'intervals', {}).get(cell, ())
+                        for cell in cells])
+                   for run in runs]
+            for role, cells in groups.items()},
         overflow=any(run[3] for run in runs))
     return traces
 
@@ -363,15 +384,28 @@ def prepare_net(genome, ttarget):
     """Grow + interpret a genome for a temporal target, placing outputs by
     trace match. Returns (grid, routing, in_pos, out_pos, traces) — where
     traces[role][i] is the chosen cell's trace in trial i — or None if the net
-    is unusable (too small, no candidate output cells, or an input seed dead)."""
-    grid = grow_nervous(genome, seeds=tuple(ttarget.inputs),
+    is unusable (too small, no candidate output cells, or an input seed dead).
+
+    When the target opts into an evolvable io_placement strategy (see
+    nv_evo/io_placement.py), the input and output CELLS are chosen by the
+    genome's heritable tags instead of by geometry/trace-match, and the traces
+    are read at those fixed cells."""
+    strategy = io_strategy(ttarget)
+    # Fixed binding grows outward FROM the input pads (the legacy seeds); an
+    # evolvable strategy nucleates from ONE neutral center cell instead — the
+    # I/O attaches to the mature body afterward, so nothing about growth is
+    # anchored to the declared pad positions.
+    grid = grow_nervous(genome, seeds=growth_seeds(ttarget, strategy),
                         grid_size=ttarget.grid_size, iters=ttarget.iters)
+    if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+        record_binding_progress(
+            genome, binding_progress(genome, grid, ttarget))
     if len(grid) <= ttarget.n_inputs:
         return None
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, _ = interpret_nervous(grid, ttarget, arch=arch)
-    if any(p not in grid for p in in_pos):
-        return None
+    if strategy == 'fixed' and any(p not in grid for p in in_pos):
+        return None                     # a dead seed pad (fixed binding only)
     # Width-preserving transport: build the per-cell delays from the genome's
     # node-type delay vector (node_delays returns None for every other model,
     # and that model derives each output width from its incoming waveform).
@@ -379,6 +413,20 @@ def prepare_net(genome, ttarget):
     # single-tile node-type feature), so it never consults it.
     config = getattr(ttarget, 'pulse_config', None)
     delays = None if arch == 'tri3' else node_delays(genome, grid, config)
+
+    if strategy != 'fixed':
+        bound = bind_io(genome, grid, ttarget, strategy)
+        if bound is None:
+            return None
+        in_pos, out_pos = bound          # in_pos: attachment GROUPS per input
+        if any(cell not in grid for cell in flat_inputs(in_pos)):
+            return None
+        traces = trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
+                                     delays=delays, arch=arch)
+        if traces is None:
+            return None
+        return grid, routing, in_pos, out_pos, traces
+
     out_pos, traces = place_outputs_by_trace(grid, routing, in_pos, ttarget,
                                              delays=delays,
                                              arch=arch)
@@ -488,10 +536,10 @@ def loop_profile(grid, routing, in_pos, out_pos):
     cyc   = cycle_nodes(edges)
     if not cyc:
         return {'n_cycle': 0, 'n_relevant': 0}
-    from_in = _reachable(edges, in_pos)
+    from_in = _reachable(edges, flat_inputs(in_pos))
     rev = {c: set() for c in edges}
     for u, vs in edges.items():
         for v in vs:
             rev[v].add(u)
-    to_out = _reachable(rev, [p for p in out_pos.values() if p])
+    to_out = _reachable(rev, flat_outputs(out_pos))
     return {'n_cycle': len(cyc), 'n_relevant': len(cyc & from_in & to_out)}

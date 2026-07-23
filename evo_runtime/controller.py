@@ -117,7 +117,14 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         config = dataclasses.replace(
             config, ga=dataclasses.replace(
                 config.ga, chromosome_count=chromosome_count))
+    if (config.ga.io_placement in (
+            'wiring_chromosome', 'spatial_chromosome')
+            and chromosome_count < 3):
+        raise ValueError(
+            'chromosome-based I/O requires at least 3 chromosomes; '
+            'chromosome 3 is reserved as the evolvable port map')
     setattr(target, 'pulse_config', config.pulse)
+    n_ports = target.n_inputs + len(target.outputs)
     pool = None
     diversify_fn = None
     consolidate_fn = None
@@ -130,17 +137,43 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         from nv_evo.ga import (eval_batch_cases, next_population, diversify,
                                consolidate_population,
                                adaptive_mutation_rate, rank_key, N_WORKERS)
+        # Evolvable I/O binding: the strategy lives on the target. Method A
+        # evolves body-gene expression priorities. Chromosome strategies evolve
+        # either type/selector mappings or normalised x/y anchors.
+        io_strategy = getattr(config.ga, 'io_placement', 'fixed')
+        setattr(target, 'io_placement', io_strategy)
+        evolve_io = io_strategy != 'fixed'
+        port_chromosome = io_strategy in (
+            'wiring_chromosome', 'spatial_chromosome')
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
-        make_genome = lambda: random_hex_genome(
-            chromosome_count, max_telomere=config.ga.max_telomere,
-            arch=getattr(config.ga, 'tile_arch', 'single'))
+        def make_genome():
+            genome = random_hex_genome(
+                chromosome_count, max_telomere=config.ga.max_telomere,
+                arch=getattr(config.ga, 'tile_arch', 'single'),
+                wiring_chromosome=(io_strategy == 'wiring_chromosome'),
+                spatial_chromosome=(io_strategy == 'spatial_chromosome'),
+                n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'))
+            if port_chromosome:
+                from nv_evo.io_placement import (
+                    growth_seeds, seed_spatial_from_phenotype,
+                    seed_wiring_from_phenotype)
+                from nv_evo.nervous import grow_nervous
+                grid = grow_nervous(
+                    genome, seeds=growth_seeds(target),
+                    grid_size=target.grid_size, iters=target.iters)
+                if io_strategy == 'spatial_chromosome':
+                    seed_spatial_from_phenotype(genome, grid, target)
+                else:
+                    seed_wiring_from_phenotype(genome, grid, target)
+            return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         step = lambda p, f, c, mm, recombine: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
-            chromosome_count=chromosome_count, recombination=recombine)
+            chromosome_count=chromosome_count, recombination=recombine,
+            evolve_io=evolve_io, io_placement=io_strategy)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
@@ -152,13 +185,22 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             should_stop=stop_event.is_set,
             max_telomere=config.ga.max_telomere,
             chromosome_count=chromosome_count,
-            evolve_delay=evolve_delay,
+            evolve_delay=evolve_delay, evolve_io=evolve_io,
+            io_placement=io_strategy,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     elif backend == 'lut':
         from lut_evo.ga import (eval_batch_cases, next_population, diversify,
                                 consolidate_population, make_seed_genome,
-                                adaptive_mutation_rate, _tiebreak, N_WORKERS)
+                                adaptive_mutation_rate, rank_key, N_WORKERS)
+        from nv_evo.io_placement import seed_io_metadata
+        # Evolvable I/O binding (see the nervous branch): body priorities or a
+        # dedicated chromosome of type/selector or spatial anchor alleles.
+        io_strategy = getattr(config.ga, 'io_placement', 'fixed')
+        setattr(target, 'io_placement', io_strategy)
+        evolve_io = io_strategy != 'fixed'
+        port_chromosome = io_strategy in (
+            'wiring_chromosome', 'spatial_chromosome')
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
@@ -167,34 +209,86 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             for chromosome in genome.chromosomes:
                 chromosome.telomere = min(
                     chromosome.telomere, config.ga.max_telomere)
+            if evolve_io:
+                seed_io_metadata(
+                    genome,
+                    wiring_chromosome=(io_strategy == 'wiring_chromosome'),
+                    spatial_chromosome=(
+                        io_strategy == 'spatial_chromosome'),
+                    n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'))
+            if port_chromosome:
+                from lut_evo.lut import grow_lut, cell_io_tags
+                from nv_evo.io_placement import (
+                    growth_seeds, seed_spatial_from_phenotype,
+                    seed_wiring_from_phenotype)
+                grid = grow_lut(
+                    genome, seeds=growth_seeds(target),
+                    grid_size=target.grid_size, iters=target.iters)
+                tags = cell_io_tags(genome, grid)
+                if io_strategy == 'spatial_chromosome':
+                    seed_spatial_from_phenotype(
+                        genome, grid, target, tags=tags)
+                else:
+                    seed_wiring_from_phenotype(
+                        genome, grid, target, tags=tags)
             return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         step = lambda p, f, c, mm, recombine: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
-            chromosome_count=chromosome_count, recombination=recombine)
+            chromosome_count=chromosome_count, recombination=recombine,
+            evolve_io=evolve_io, io_placement=io_strategy)
         rate_fn = adaptive_mutation_rate
-        rank_fn = lambda genome, fitness: (fitness, _tiebreak(genome))
+        rank_fn = rank_key
         consolidate_fn = consolidate_population
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,
             max_telomere=config.ga.max_telomere,
             chromosome_count=chromosome_count,
+            evolve_io=evolve_io, io_placement=io_strategy,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     else:
         from snn_evo.ga import N_WORKERS
+        # Evolvable I/O binding for the SNN combinational scorer.
+        io_strategy = getattr(config.ga, 'io_placement', 'fixed')
+        setattr(target, 'io_placement', io_strategy)
+        evolve_io = io_strategy != 'fixed'
+        port_chromosome = io_strategy in (
+            'wiring_chromosome', 'spatial_chromosome')
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
-        make_genome = lambda: random_genome(chromosome_count)
+        def make_genome():
+            genome = random_genome(
+                chromosome_count,
+                wiring_chromosome=(io_strategy == 'wiring_chromosome'),
+                spatial_chromosome=(io_strategy == 'spatial_chromosome'),
+                n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'))
+            if port_chromosome:
+                from snn_evo.growth import grow_snn, cell_io_tags
+                from nv_evo.io_placement import (
+                    growth_seeds, seed_spatial_from_phenotype,
+                    seed_wiring_from_phenotype)
+                grid = grow_snn(
+                    genome, seeds=growth_seeds(target),
+                    grid_size=target.grid_size, iters=target.iters)
+                tags = cell_io_tags(genome, grid)
+                if io_strategy == 'spatial_chromosome':
+                    seed_spatial_from_phenotype(
+                        genome, grid, target, tags=tags)
+                else:
+                    seed_wiring_from_phenotype(
+                        genome, grid, target, tags=tags)
+            return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: (
             eval_snn(genomes, target, arch, pool, cache, should_stop, on_progress),
             None)
         step = lambda p, f, c, mm, recombine: next_snn(
             p, f, chromosome_count=chromosome_count,
-            recombination=recombine)
+            recombination=recombine, evolve_io=evolve_io,
+            io_placement=io_strategy)
 
     def recombination_enabled():
         if recombination_event is not None:
@@ -303,18 +397,19 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     recombination_enabled())
                 offspring_fitnesses, offspring_cases = evaluate(
                     offspring, 'Evaluating population', try_i, generation)
-                # Report reproduction separately from survivor selection.  Once
-                # a terminal LUT solution exists, environmental selection keeps
-                # that solved parent alive; reporting the selected population's
-                # best would therefore duplicate the all-time-best line even
-                # when every newly generated offspring is worse.
                 offspring_best = max(offspring_fitnesses)
                 if (consolidate_fn is not None
                         and max(run_fit, offspring_best) >= 1.0):
+                    # Terminal convergence begins only after the first perfect
+                    # circuit. Before that, elites are breeders only. After it,
+                    # the best evaluated parents and offspring accumulate so the
+                    # live population mean can rise toward one.
                     population, fitnesses, cases = consolidate_fn(
                         parents, parent_fitnesses, parent_cases,
                         offspring, offspring_fitnesses, offspring_cases)
                 else:
+                    # Strict pre-solve generational replacement: no evaluated
+                    # parent is copied into the next live population.
                     population, fitnesses, cases = (
                         offspring, offspring_fitnesses, offspring_cases)
                 validate_population(population)

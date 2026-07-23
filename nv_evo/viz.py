@@ -145,11 +145,13 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
         ax.text(px, py + 0.08, chr(65 + i) if i < 26 else '*',
                 ha='center', va='center',
                 fontsize=7, color='white', fontweight='bold', zorder=4)
-    for role, p in out_pos.items():
-        if p and p in grid:
-            px, py = hex_pixel(*p)
-            ax.text(px, py + 0.08, role[:2], ha='center', va='center',
-                    fontsize=6.5, color='#111', fontweight='bold', zorder=4)
+    from .io_placement import output_groups
+    for role, cells in output_groups(out_pos).items():
+        for p in cells:
+            if p in grid:
+                px, py = hex_pixel(*p)
+                ax.text(px, py + 0.08, role[:2], ha='center', va='center',
+                        fontsize=6.5, color='#111', fontweight='bold', zorder=4)
 
     xs = [hex_pixel(x, y)[0] for (x, y) in grid] or [0]
     ys = [hex_pixel(x, y)[1] for (x, y) in grid] or [0]

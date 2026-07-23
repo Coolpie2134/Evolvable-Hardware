@@ -46,17 +46,26 @@ class Arch:
 DEFAULT_ARCH = Arch()
 
 
-def interpret_grid(grid, n_outputs=1, target=None, arch=None):
+def interpret_grid(grid, n_outputs=1, target=None, arch=None,
+                   input_pos=None, output_pos=None):
     """
     Build (neurons, synapses) from a grown grid.
 
     If `target` is given, input/output layout follows the target (any number of
     inputs and outputs). Otherwise the legacy 2-seed, sum/carry heuristic is used
     (controlled by n_outputs) so existing callers keep working unchanged.
+
+    `input_pos` / `output_pos` override the port binding — the evolvable
+    io_placement path (nv_evo/io_placement.py) passes the genome's tag-chosen
+    cells here: `input_pos` is the ordered list of driven cells, `output_pos` is
+    {role: (x, y)}. None keeps the target/legacy layout unchanged.
     """
     if arch is None:
         arch = DEFAULT_ARCH
-    input_pos = list(target.inputs) if target is not None else [SEED_A, SEED_B]
+    if input_pos is None:
+        input_pos = list(target.inputs) if target is not None else [SEED_A, SEED_B]
+    else:
+        input_pos = list(input_pos)
     grid_size = target.grid_size    if target is not None else GRID_SIZE
 
     neurons    = []
@@ -78,7 +87,17 @@ def interpret_grid(grid, n_outputs=1, target=None, arch=None):
 
     non_input = [n for n in neurons if not n.is_input]
 
-    if target is not None and target.output_strategy == "terminals":
+    if output_pos is not None:
+        # Evolvable binding: every selected site joins the role's wired-OR bus.
+        from nv_evo.io_placement import output_groups
+        by_pos = {(n.x, n.y): n for n in neurons}
+        for role, cells in output_groups(output_pos).items():
+            for pos in cells:
+                nrn = by_pos.get(tuple(pos))
+                if nrn is not None:
+                    nrn.is_output = True
+                    nrn.out_role  = role
+    elif target is not None and target.output_strategy == "terminals":
         # Assign each output role to the nearest free grown neuron to its terminal.
         for term in target.outputs:
             tx, ty = term.pos

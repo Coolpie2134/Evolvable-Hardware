@@ -17,25 +17,35 @@ LOGIC_CASES = [
 ]
 
 
-def score(neurons, synapses, target: Target) -> float:
+def score(neurons, synapses, target: Target, in_pos=None) -> float:
     """
     Generic fitness in [0, 1]: fraction of (case x output) checks the grown
     circuit gets right, for any registered Target.
+
+    ``in_pos`` overrides the driven input positions (the evolvable io_placement
+    binding — must match the ``input_pos`` the grid was interpreted with);
+    None keeps the target's seed pads. Each entry may itself be a group of
+    attachment cells: the logical input drives every member neuron, and a
+    neuron shared by several inputs receives the strongest drive (wired-OR).
     """
-    # Map input seed positions and output roles to neuron ids.
+    from nv_evo.io_placement import input_groups
+    # Map input positions and output roles to neuron ids (one id GROUP per
+    # logical input).
+    by_pos = {(n.x, n.y): n for n in neurons if n.is_input}
     in_ids = []
-    for pos in target.inputs:
-        nrn = next((n for n in neurons if (n.x, n.y) == pos and n.is_input), None)
-        if nrn is None:
+    for cells in input_groups(target.inputs if in_pos is None else in_pos):
+        ids = [by_pos[c].id for c in cells if c in by_pos]
+        if len(ids) != len(cells):
             return 0.0
-        in_ids.append(nrn.id)
+        in_ids.append(ids)
 
     out_ids = []
     for term in target.outputs:
-        nrn = next((n for n in neurons if n.is_output and n.out_role == term.role), None)
-        if nrn is None:
+        ids = [n.id for n in neurons
+               if n.is_output and n.out_role == term.role]
+        if not ids:
             return 0.0
-        out_ids.append(nrn.id)
+        out_ids.append(ids)
 
     n_checks = len(target.cases) * len(target.outputs)
     if n_checks == 0:
@@ -48,15 +58,19 @@ def score(neurons, synapses, target: Target) -> float:
         sims = {}
         for comp in encodings:
             currents = {}
-            for bit, iid in zip(in_bits, in_ids):
+            for bit, ids in zip(in_bits, in_ids):
                 base = target.high if bit else 0.0
-                currents[iid] = (target.high - base) if comp else base
+                level = (target.high - base) if comp else base
+                for iid in ids:
+                    # a neuron serving several logical inputs takes the
+                    # strongest drive — the wired-OR of the held levels
+                    currents[iid] = max(currents.get(iid, 0.0), level)
             sims[comp] = simulate(neurons, synapses, currents)
         row = []
         for i, term in enumerate(target.outputs):
             sp = sims[term.complement_inputs]
-            n  = len(sp.get(out_ids[i], []))
-            fired = n >= MIN_SPIKES
+            fired = any(len(sp.get(output_id, [])) >= MIN_SPIKES
+                        for output_id in out_ids[i])
             row.append(float(not fired) if term.invert_spike else float(fired))
         observations.append(row)
 

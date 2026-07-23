@@ -109,17 +109,22 @@ def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
     ``delays`` drives evolved-delay, width-preserving transport. Set
     ``return_intervals`` to receive complete physical output intervals instead
     of leading edges."""
+    from .io_placement import input_groups, flat_inputs
     if arch == 'tri3':
         from .tritile import TriSim
-        sim = TriSim(grid, in_pos, max_events=max_events, config=config)
+        sim = TriSim(grid, flat_inputs(in_pos), max_events=max_events,
+                     config=config)
     elif arch == 'single':
         sim = create_simulator(grid, routing, max_events=max_events,
                                config=config, delays=delays)
     else:
         raise ValueError('unknown tile architecture: %r' % (arch,))
-    for i, cell in enumerate(in_pos):
+    # ``in_pos`` may carry per-input attachment GROUPS (evolvable binding):
+    # lane i's schedule injects at every attachment cell of input i.
+    for i, cells in enumerate(input_groups(in_pos)):
         for (t, w) in schedule[i]:
-            sim.inject_pulse(cell, float(t), float(w))
+            for cell in cells:
+                sim.inject_pulse(cell, float(t), float(w))
     sim.advance_to(float(horizon))
     cells = list(grid) if out_cells is None else out_cells
     if return_intervals:

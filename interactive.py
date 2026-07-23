@@ -156,9 +156,10 @@ class InteractiveTab:
         # controls
         for w in self._ctrl.winfo_children():
             w.destroy()
+        from nv_evo.io_placement import io_strategy, bind_io, growth_seeds
         if backend == 'nervous':
             self._nv_arch = getattr(c['genome'], 'arch', 'single')
-            self._grid = grow_nervous(c['genome'], seeds=tuple(target.inputs),
+            self._grid = grow_nervous(c['genome'], seeds=growth_seeds(target),
                                       grid_size=target.grid_size, iters=target.iters)
             self._routing, self._in_pos, self._out_pos = interpret_nervous(
                 self._grid, target, arch=self._nv_arch)
@@ -170,7 +171,14 @@ class InteractiveTab:
             pulse_config = getattr(target, 'pulse_config', None)
             self._nv_delays = (None if self._nv_arch == 'tri3' else
                                node_delays(c['genome'], self._grid, pulse_config))
-            if getattr(target, 'temporal', False):
+            # Evolvable I/O binding: drive and read the SAME cells fitness
+            # used — each _in_pos entry becomes that input's attachment GROUP
+            # (an input may fan out to several sites).
+            bound = (bind_io(c['genome'], self._grid, target)
+                     if io_strategy(target) != 'fixed' else None)
+            if bound is not None:
+                self._in_pos, self._out_pos = bound
+            elif getattr(target, 'temporal', False):
                 # show the same output cell the fitness reads (trace-matched)
                 self._out_pos, _ = place_outputs_by_trace(
                     self._grid, self._routing, self._in_pos, target,
@@ -181,10 +189,17 @@ class InteractiveTab:
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
         elif backend == 'lut':                             # LUT array (async levels)
-            self._grid = grow_lut(c['genome'], seeds=tuple(target.inputs),
+            self._grid = grow_lut(c['genome'], seeds=growth_seeds(target),
                                   grid_size=target.grid_size, iters=target.iters)
             self._in_pos = list(target.inputs)
-            if getattr(target, 'temporal', False):
+            bound = None
+            if io_strategy(target) != 'fixed':
+                from lut_evo.lut import cell_io_tags
+                bound = bind_io(c['genome'], self._grid, target,
+                                tags=cell_io_tags(c['genome'], self._grid))
+            if bound is not None:
+                self._in_pos, self._out_pos = bound
+            elif getattr(target, 'temporal', False):
                 self._out_pos, _ = lut_place_by_trace(self._grid, self._in_pos, target)
             else:
                 self._out_pos = lut_place_combinational(self._grid, target)
@@ -193,19 +208,44 @@ class InteractiveTab:
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
         else:                                              # SNN — LIF playback
-            self._grid = grow_snn(c['genome'], seeds=tuple(target.inputs),
+            from nv_evo.io_placement import flat_inputs, input_groups
+            self._grid = grow_snn(c['genome'], seeds=growth_seeds(target),
                                   grid_size=target.grid_size, iters=target.iters)
-            self._neurons, self._synapses = interpret_grid(
-                self._grid, target=target, arch=c['arch'])
-            self._in_ids = []
-            for p in target.inputs:
-                nn = next((m for m in self._neurons
-                           if (m.x, m.y) == p and m.is_input), None)
-                self._in_ids.append(nn.id if nn else None)
+            bound = None
+            if io_strategy(target) != 'fixed':
+                from snn_evo.growth import cell_io_tags
+                bound = bind_io(c['genome'], self._grid, target,
+                                tags=cell_io_tags(c['genome'], self._grid))
+            if bound is not None:
+                in_pos, out_pos = bound
+                self._neurons, self._synapses = interpret_grid(
+                    self._grid, target=target, arch=c['arch'],
+                    input_pos=flat_inputs(in_pos), output_pos=out_pos)
+            else:
+                in_pos = list(target.inputs)
+                self._neurons, self._synapses = interpret_grid(
+                    self._grid, target=target, arch=c['arch'])
+            # one id GROUP per logical input (fan-out under evolvable binding)
+            self._in_pos = in_pos                 # groups; for the status note
+            by_pos = {(m.x, m.y): m for m in self._neurons if m.is_input}
+            self._in_ids = [
+                [by_pos[cell].id for cell in cells if cell in by_pos]
+                for cells in input_groups(in_pos)]
             self._playback_controls(
                 '   (toggle an input to inject one source pulse; Step/Run watches its wave)')
             self._reset()
-        self._status.set('Loaded %s [%s] — drive the inputs.' % (target.name, backend))
+        strategy = io_strategy(target)
+        note = ''
+        if strategy != 'fixed':
+            from nv_evo.io_placement import input_groups
+            groups = input_groups(getattr(self, '_in_pos', []) or [])
+            sites = sum(len(g) for g in groups)
+            note = ('   [I/O binding: %s — evolved placement; %d input%s on '
+                    '%d site%s]'
+                    % (strategy, len(groups), '' if len(groups) == 1 else 's',
+                       sites, '' if sites == 1 else 's'))
+        self._status.set('Loaded %s [%s] — drive the inputs.%s'
+                         % (target.name, backend, note))
 
     def _playback_controls(self, hint):
         ttk.Button(self._ctrl, text='Step', command=self._step).pack(side='left', padx=3)
@@ -247,11 +287,13 @@ class InteractiveTab:
             config = pulse_config
             # sync() and shared with the trace-matched placement, so playback and
             # the highlighted output cell agree on the physics.
+            from nv_evo.io_placement import flat_inputs
             self._player = NervousPlayer(
                 self._grid, self._routing, horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048),
                 config=config, delays=getattr(self, '_nv_delays', None),
-                arch=getattr(self, '_nv_arch', 'single'), inputs=self._in_pos)
+                arch=getattr(self, '_nv_arch', 'single'),
+                inputs=flat_inputs(self._in_pos))
         else:                                  # LUT — same player, level engine
             self._player = LutPlayer(
                 self._grid, horizon=horizon,
@@ -340,6 +382,7 @@ class InteractiveTab:
         title = 't = %.1f%s' % (self._player.cursor,
                                 '   (event cap hit)' if self._player.overflow
                                 else '')
+        from nv_evo.io_placement import flat_inputs
         if self._backend == 'nervous':
             # capacitor-style playback: nodes charge while pulsing and fade
             # after the pulse ends (display only — physics stays binary)
@@ -347,13 +390,14 @@ class InteractiveTab:
                         or self._player.activity())
             draw_hex_net(self._axg, self._grid, target.grid_size,
                          routing=self._routing,
-                         in_pos=self._in_pos, out_pos=self._out_pos,
+                         in_pos=flat_inputs(self._in_pos),
+                         out_pos=self._out_pos,
                          activity=activity,
                          show_edges=(getattr(self, '_nv_arch', 'single') == 'single'),
                          arch=getattr(self, '_nv_arch', 'single'),
                          title=title)
         else:
-            in_pos = [p for p in self._in_pos if p in self._grid]
+            in_pos = [p for p in flat_inputs(self._in_pos) if p in self._grid]
             draw_lut_net(self._axg, self._grid, activity=self._player.nibbles(),
                          in_pos=in_pos, out_pos=self._out_pos, show_edges=True,
                          title=title)
@@ -366,9 +410,11 @@ class InteractiveTab:
     def _draw_event_strip(self, axt):
         target = self._circuit['target']
         axt.clear()
+        from nv_evo.io_placement import output_groups
+        groups = output_groups(self._out_pos)
         for k, term in enumerate(target.outputs):
-            cell = self._out_pos.get(term.role)
-            evs = self._player.events_upto(cell) if cell else []
+            evs = [start for start, _, _ in
+                   self._output_spans(groups.get(term.role, ()))]
             if evs:
                 axt.vlines(evs, k - 0.4, k + 0.4, color='#1a6fd0', lw=1.6)
         axt.axvline(self._player.cursor, color='#e8a33d', lw=1.4, alpha=0.9)
@@ -380,17 +426,17 @@ class InteractiveTab:
         # the width strip directly below carries the shared time axis label
         axt.tick_params(labelsize=7)
 
-    def _output_spans(self, cell):
-        """[(start, end, still_open)] pulses of one output wire, clipped to the
-        playback cursor. Both engines expose ``pulse_intervals`` (PulseSim
-        natively, AsyncLutSim via its rise/fall logs); an interval whose fall
-        has not happened yet reads as open-ended at the cursor."""
+    def _output_spans(self, cells):
+        """Wired-OR output-bus intervals, clipped to the playback cursor."""
         raw = getattr(self._player.sim, 'pulse_intervals', None)
-        if raw is None or cell is None:
+        if raw is None:
             return []
+        from nv_evo.io_placement import merge_intervals, output_groups
+        cells = output_groups({'output': cells})['output']
         cursor = self._player.cursor
         spans = []
-        for start, end in raw.get(cell, ()):
+        merged = merge_intervals([raw.get(cell, ()) for cell in cells])
+        for start, end in merged:
             if start > cursor:
                 continue
             spans.append((float(start), float(min(end, cursor)), end > cursor))
@@ -407,9 +453,11 @@ class InteractiveTab:
         # text spills across neighbouring pulses. One character is roughly this
         # much of the time axis at the strip's font size.
         char_span = 0.012 * max(self._player.horizon, 1e-9)
+        from nv_evo.io_placement import output_groups
+        groups = output_groups(self._out_pos)
         for k, term in enumerate(target.outputs):
-            cell = self._out_pos.get(term.role)
-            for start, end, open_ended in self._output_spans(cell):
+            for start, end, open_ended in self._output_spans(
+                    groups.get(term.role, ())):
                 axw.broken_barh([(start, max(end - start, 0.05))],
                                 (k - 0.35, 0.7),
                                 facecolors='#7cb8f2' if open_ended else '#1a6fd0',
@@ -431,9 +479,10 @@ class InteractiveTab:
     def _nv_output_summary(self):
         target = self._circuit['target']
         parts = []
+        from nv_evo.io_placement import output_groups
+        groups = output_groups(self._out_pos)
         for term in target.outputs:
-            cell = self._out_pos.get(term.role)
-            n = len(self._player.events_upto(cell)) if cell else 0
+            n = len(self._output_spans(groups.get(term.role, ())))
             parts.append('%s=%d' % (term.role, n))
         return '  '.join(parts)
 
@@ -518,8 +567,13 @@ class InteractiveTab:
         bits = self._in_bits()
         # A logical high is interpreted by lif_sim as one source pulse.  Reusing
         # the target's high value keeps this view consistent with fitness/plots.
-        currents = {self._in_ids[i]: (target.high if bits[i] else 0.0)
-                    for i in range(len(self._in_ids)) if self._in_ids[i] is not None}
+        # _in_ids holds one id GROUP per logical input: the input drives every
+        # member neuron; a neuron shared by inputs takes the strongest drive.
+        currents = {}
+        for i, ids in enumerate(self._in_ids):
+            level = target.high if (i < len(bits) and bits[i]) else 0.0
+            for iid in ids:
+                currents[iid] = max(currents.get(iid, 0.0), level)
         (self._snn_times, self._snn_V,
          self._snn_spikes, self._snn_fired) = simulate_trace(
             self._neurons, self._synapses, currents)

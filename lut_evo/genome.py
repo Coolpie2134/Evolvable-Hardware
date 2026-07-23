@@ -33,6 +33,13 @@ class LutGene:
     ctx_w:    int = 0
     self_in:  int = 0
     self_out: int = 0            # 0 = off / dead
+    # Body-gene expression priority under tag_rank; desired direction-LUT type
+    # or normalised x coordinate on a chromosome-3 port gene.
+    tag:      int = 0
+    # Deprecated checkpoint field, pinned to 1: every port owns one cell.
+    io_limit: int = 1
+    # Type-instance selector, or normalised y for spatial wiring.
+    io_selector: int = 0
 
 
 @dataclass
@@ -45,6 +52,10 @@ class Chromosome:
     split: int = 0
     tag:   int = 0
     telomere: int = MAX_TELOMERE
+    # Non-developmental port-chromosome marker (see nv_evo/genome.py). Its genes
+    # hold either type/selector or x/y I/O mappings. Default False leaves every
+    # existing genome unchanged.
+    wiring:   bool = False
 
 
 @dataclass
@@ -69,7 +80,7 @@ def random_lut_gene() -> LutGene:
     )
 
 
-def random_lut_chromosome(n_genes=None) -> Chromosome:
+def random_lut_chromosome(n_genes=None, wiring=False) -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
@@ -77,11 +88,21 @@ def random_lut_chromosome(n_genes=None) -> Chromosome:
         split = (0 if n_genes < 2 else random.randint(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         telomere = random.randint(2, min(5, MAX_TELOMERE)),
+        wiring   = wiring,
     )
 
 
-def random_lut_genome(n_chroms=2) -> Genome:
-    return Genome(
-        chromosomes = [random_lut_chromosome() for _ in range(n_chroms)],
+def random_lut_genome(n_chroms=2, wiring_chromosome=False, n_ports=None,
+                      tag_rank=False, spatial_chromosome=False) -> Genome:
+    """Build a fixed genome or seed one of the evolvable I/O strategies."""
+    chroms = [random_lut_chromosome() for _ in range(n_chroms)]
+    genome = Genome(
+        chromosomes = chroms,
         tag = random.randint(0, 9999),
     )
+    if wiring_chromosome or spatial_chromosome or tag_rank:
+        from nv_evo.io_placement import seed_io_metadata
+        seed_io_metadata(genome, wiring_chromosome=wiring_chromosome,
+                         n_ports=n_ports, tag_rank=tag_rank,
+                         spatial_chromosome=spatial_chromosome)
+    return genome

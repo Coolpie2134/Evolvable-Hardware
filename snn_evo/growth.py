@@ -20,6 +20,8 @@ def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int, si: int) -> int:
     pc = _PC4
     best_out, best_dist = 0, 1 << 30
     for chrom in genome.chromosomes:
+        if getattr(chrom, 'wiring', False):
+            continue
         for gene in chrom.genes:
             d = (pc[(gene.state_n ^ sn) & 0xF] + pc[(gene.state_s ^ ss) & 0xF] +
                  pc[(gene.state_e ^ se) & 0xF] + pc[(gene.state_w ^ sw) & 0xF] +
@@ -27,6 +29,15 @@ def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int, si: int) -> int:
             if d < best_dist:
                 best_dist, best_out = d, gene.self_out
     return best_out if best_out else 1
+
+
+def cell_io_tags(genome: Genome, grid) -> Dict[Tuple[int, int], int]:
+    """Map each live cell to its CELL TYPE: the settled 4-bit state itself —
+    the node-type number the growth view shows. The ``genome`` parameter is
+    kept for the shared call signature but the type is purely phenotypic.
+    Powers the evolvable io_placement strategies (nv_evo/io_placement.bind_io);
+    deterministic and side-effect free."""
+    return {pos: int(state) for pos, state in grid.items()}
 
 
 def _next_state(genome, sn, ss, se, sw, si, cache):

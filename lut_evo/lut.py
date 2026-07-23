@@ -51,6 +51,8 @@ def _genome_lut_arrays(genome):
     n, cn, ce, cs, cw, si, so, tel = 0, [], [], [], [], [], [], []
     big = 1 << 30
     for c in genome.chromosomes:
+        if getattr(c, 'wiring', False):
+            continue
         ct = getattr(c, 'telomere', big)
         for g in c.genes:
             cn.append(g.ctx_n); ce.append(g.ctx_e); cs.append(g.ctx_s)
@@ -129,7 +131,8 @@ def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None):
     # contexts repeat massively across cells (sim6 measured ~94%), so cache
     # per (context, telomere-expiry mask) within one growth run.
     mask = tuple(iteration >= getattr(c, 'telomere', 1 << 30)
-                 for c in genome.chromosomes)
+                 for c in genome.chromosomes
+                 if not getattr(c, 'wiring', False))
 
     if counts is None:                          # fast path (unchanged)
         def look(f, b, r, l, s):
@@ -207,6 +210,21 @@ def grow_lut_tracked(genome, seeds, grid_size, iters):
             return nxt, counts
         prev, grid = grid, nxt
     return grid, counts
+
+
+def cell_io_tags(genome, grid):
+    """Map each live cell to its CELL TYPES: the distinct nonzero 16-bit
+    direction LUTs it carries — the cell's actual hardware content, exactly
+    what the Designer/Growth views display. A LUT cell holds four directional
+    tables, so it may be several types at once; a port whose desired number
+    equals ANY of them binds here. The ``genome`` parameter is kept for the
+    shared call signature but the type is purely phenotypic.
+
+    Powers the evolvable io_placement strategies (nv_evo/io_placement.bind_io);
+    deterministic and side-effect free.
+    """
+    return {pos: tuple(sorted({int(v) for v in state if v}))
+            for pos, state in grid.items()}
 
 
 def grow_lut_snapshots(genome, seeds, grid_size, iters):

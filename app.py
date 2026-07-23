@@ -78,22 +78,45 @@ MAX_VOLT_CASES  = 8     # voltage tab caps rows for readability on big targets
 
 # ── target-aware analysis helpers ─────────────────────────────────────────────
 
+def _growth_seeds(target):
+    """The target's developmental origin: input pads under fixed binding, ONE
+    neutral center cell under an evolvable io_placement strategy — every
+    display grow must match the scorer's body (nv_evo/io_placement)."""
+    from nv_evo.io_placement import growth_seeds
+    return growth_seeds(target)
+
+
 def grow_for(genome, target):
-    return grow_snn(genome, seeds=tuple(target.inputs),
+    return grow_snn(genome, seeds=_growth_seeds(target),
                     grid_size=target.grid_size, iters=target.iters)
 
 
 def interpret_for(genome, target, arch):
     grid = grow_for(genome, target)
-    neurons, synapses = interpret_grid(grid, target=target, arch=arch)
+    from nv_evo.io_placement import io_strategy, bind_io, flat_inputs
+    if io_strategy(target) != 'fixed':
+        from snn_evo.growth import cell_io_tags
+        bound = bind_io(genome, grid, target,
+                        tags=cell_io_tags(genome, grid))
+        if bound is None:
+            return grid, [], []
+        in_pos, out_pos = bound
+        neurons, synapses = interpret_grid(
+            grid, target=target, arch=arch,
+            input_pos=flat_inputs(in_pos), output_pos=out_pos)
+    else:
+        neurons, synapses = interpret_grid(grid, target=target, arch=arch)
     return grid, neurons, synapses
 
 
 def _case_currents(target, in_bits, in_ids, complement):
     currents = {}
-    for bit, iid in zip(in_bits, in_ids):
+    for bit, ids in zip(in_bits, in_ids):
+        ids = ids if isinstance(ids, (tuple, list)) else [ids]
         base = target.high if bit else 0.0
-        currents[iid] = (target.high - base) if complement else base
+        level = (target.high - base) if complement else base
+        for iid in ids:
+            currents[iid] = max(currents.get(iid, 0.0), level)
     return currents
 
 
@@ -106,15 +129,22 @@ def simulate_vmem(neurons, synapses, input_currents, track_ids):
 
 def build_truth_table(genome, target, arch):
     """Return the truth-table report for `target` as a string."""
-    _, ns, ss = interpret_for(genome, target, arch)
-    in_ids = []
-    for pos in target.inputs:
-        nrn = next((n for n in ns if (n.x, n.y) == pos and n.is_input), None)
-        in_ids.append(nrn.id if nrn else None)
+    grid, ns, ss = interpret_for(genome, target, arch)
+    from nv_evo.io_placement import io_strategy, bind_io, input_groups
+    if io_strategy(target) != 'fixed':
+        from snn_evo.growth import cell_io_tags
+        bound = bind_io(genome, grid, target,
+                        tags=cell_io_tags(genome, grid))
+        groups = input_groups(bound[0]) if bound else []
+    else:
+        groups = input_groups(target.inputs)
+    by_pos = {(n.x, n.y): n for n in ns if n.is_input}
+    in_ids = [[by_pos[pos].id for pos in cells if pos in by_pos]
+              for cells in groups]
     out_ids = []
     for term in target.outputs:
-        nrn = next((n for n in ns if n.is_output and n.out_role == term.role), None)
-        out_ids.append(nrn.id if nrn else None)
+        out_ids.append([n.id for n in ns
+                        if n.is_output and n.out_role == term.role])
 
     lines = (['Target: ' + target.name, ''] +
              behavior_contract_lines(target) + [
@@ -125,19 +155,21 @@ def build_truth_table(genome, target, arch):
                  len(target.cases), '' if len(target.cases) == 1 else 's'),
              '',
              'Circuit: ' + circuit_summary(ns, ss)])
-    for term, oid in zip(target.outputs, out_ids):
-        if oid is not None:
-            o = ns[oid]
+    for term, ids in zip(target.outputs, out_ids):
+        if ids:
+            o = ns[ids[0]]
             enc = []
             if term.complement_inputs: enc.append('complement-in')
             if term.invert_spike:      enc.append('invert')
             tag = ('  [%s]' % ', '.join(enc)) if enc else ''
-            lines.append("  out '%s': pos=(%d,%d) vth=%.1f excit=%s%s" %
-                         (term.role, o.x, o.y, o.vth, o.excit, tag))
+            lines.append("  out '%s': %d site%s; first=(%d,%d) "
+                         "vth=%.1f excit=%s%s" %
+                         (term.role, len(ids), '' if len(ids) == 1 else 's',
+                          o.x, o.y, o.vth, o.excit, tag))
         else:
             lines.append("  out '%s': (not found)" % term.role)
 
-    if any(i is None for i in in_ids) or any(o is None for o in out_ids):
+    if any(not ids for ids in in_ids) or any(not ids for ids in out_ids):
         lines.append('')
         lines.append('(circuit incomplete — some input/output neurons missing)')
         return '\n'.join(lines)
@@ -157,7 +189,8 @@ def build_truth_table(genome, target, arch):
         cells  = []
         for i, term in enumerate(target.outputs):
             sp    = sims[term.complement_inputs]
-            fired = len(sp.get(out_ids[i], [])) >= 1
+            fired = any(len(sp.get(output_id, [])) >= 1
+                        for output_id in out_ids[i])
             act   = (0 if fired else 1) if term.invert_spike else (1 if fired else 0)
             ok    = act == out_bits[i]
             row_ok = row_ok and ok
@@ -204,10 +237,25 @@ def _split_display(chromosome):
     return str(max(1, min(int(chromosome.split), count - 1)))
 
 
-def build_genome_text(genome, fitness=None):
-    """Render the genome as a readable, aligned chromosome/gene table."""
+def build_genome_text(genome, fitness=None, binding=None):
+    """Render the genome as a readable, aligned chromosome/gene table.
+
+    ``binding`` is an optional pre-rendered I/O-binding summary (see
+    nv_evo/io_placement.describe_binding) appended as a footer, so a genome
+    evolved under an evolvable io_placement strategy shows exactly which tag
+    each port selected and where it attached."""
     chroms  = list(getattr(genome, 'chromosomes', []) or [])
     n_total = sum(len(c.genes) for c in chroms)
+    # I/O tags only matter (and are only shown) when some gene carries one —
+    # default genomes stay rendered exactly as before.
+    show_iotags = any(
+        getattr(c, 'wiring', False)
+        or any(getattr(g, 'tag', 0) or getattr(g, 'io_selector', 0)
+               for g in c.genes)
+        for c in chroms)
+    spatial_iotags = (
+        binding is not None
+        and 'io_placement=spatial_chromosome' in str(binding))
     L = []
     head = 'Genome  -  %d chromosome%s,  %d genes' % (
         len(chroms), '' if len(chroms) == 1 else 's', n_total)
@@ -242,25 +290,40 @@ def build_genome_text(genome, fitness=None):
         L.append("'until' = the gene only applies while the growth iteration <= that limit.")
     L.append('split = the between-gene crossover point; a one-gene chromosome')
     L.append('recombines the rule fields inside that gene instead.')
+    if show_iotags:
+        if spatial_iotags:
+            L.append('On chromosome 3, io-tag/selector encode a normalised')
+            L.append('(x,y) anchor. Each port attaches to the nearest free')
+            L.append('living cell; coordinate mutations move the anchor locally.')
+        else:
+            L.append('io-tag = expression priority on a body gene (tag-rank mode),')
+            L.append('or the desired CELL TYPE on chromosome 3 (wiring mode).')
+            L.append('Each wiring gene selects exactly one physical cell; its')
+            L.append('selector chooses among matching instances of the desired type.')
     L.append('')
     if not chroms:
         L.append('(empty genome)')
         return '\n'.join(L)
 
+    iotag_hdr, iotag_sep = (
+        (' | x/y  ', '+-------') if spatial_iotags
+        else ((' | iotag', '+-------') if show_iotags else ('', '')))
     if hexmode:
-        hdr = '    #  | ctx L ctx R ctx D | self |  out'
-        sep = '  -----+----------------+------+------'
+        hdr = '    #  | ctx L ctx R ctx D | self |  out' + iotag_hdr
+        sep = '  -----+----------------+------+------' + iotag_sep
     elif lutmode:
         hdr = sep = None                          # block layout instead of a row
     else:
-        hdr = '    #  |   N    E    S    W  | self |  out | until'
-        sep = '  -----+---------------------+------+------+-------'
+        hdr = '    #  |   N    E    S    W  | self |  out | until' + iotag_hdr
+        sep = '  -----+---------------------+------+------+-------' + iotag_sep
     for ci, c in enumerate(chroms):
         tel = getattr(c, 'telomere', None)
-        L.append('Chromosome %s     tag=%-4d  split=%-11s%s   (%d genes)'
+        L.append('Chromosome %s     tag=%-4d  split=%-11s%s   (%d genes)%s'
                  % (chr(ord('a') + ci), c.tag, _split_display(c),
                     ('  telomere=%d' % tel) if tel is not None else '',
-                    len(c.genes)))
+                    len(c.genes),
+                    '   [WIRING chromosome - I/O port map]'
+                    if getattr(c, 'wiring', False) else ''))
         if hdr:
             L.append(hdr)
             L.append(sep)
@@ -269,28 +332,42 @@ def build_genome_text(genome, fitness=None):
         for gi, g in enumerate(c.genes):
             if effective_split == gi:
                 L.append('       - - - - - - split - - - - - -')
-            if hexmode:
-                L.append('  %4d | %4d %4d %4d | %4d | %4d'
-                         % (gi, g.ctx_l, g.ctx_r, g.ctx_d, g.self_in, g.self_out))
-            elif lutmode:
-                L.extend(_lut_gene_lines(gi, g))
+            if show_iotags:
+                iotag = (' | %5d/%d'
+                         % (getattr(g, 'tag', 0),
+                            getattr(g, 'io_selector', 0)))
             else:
-                L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d'
+                iotag = ''
+            if hexmode:
+                L.append('  %4d | %4d %4d %4d | %4d | %4d%s'
+                         % (gi, g.ctx_l, g.ctx_r, g.ctx_d, g.self_in,
+                            g.self_out, iotag))
+            elif lutmode:
+                L.extend(_lut_gene_lines(gi, g, show_iotags))
+            else:
+                L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d%s'
                          % (gi, g.state_n, g.state_e, g.state_s, g.state_w,
-                            g.self_in, g.self_out, g.limit))
+                            g.self_in, g.self_out, g.limit, iotag))
+        L.append('')
+    if binding:
+        L.append('I/O binding (evolved):')
+        L.extend('  ' + line for line in str(binding).splitlines())
         L.append('')
     return '\n'.join(L)
 
 
-def _lut_gene_lines(gi, g):
+def _lut_gene_lines(gi, g, show_iotags=False):
     """Readable two-line view of one LUT gene: the boolean function the gene
     installs (out, decoded from its 16-bit table to logic over the neighbour
     inputs N/S/E/W) plus the raw hex of every table for reference. The tables
     themselves are drawn as truth grids on the Growth tab. See lut_evo/boolfn.py."""
     from lut_evo.boolfn import lut_sop, popcount
     kind = 'growth' if g.self_in == 0 else 'maint '
+    iotag = (('   iotag=%d selector=%d'
+              % (getattr(g, 'tag', 0), getattr(g, 'io_selector', 0)))
+             if show_iotags else '')
     return [
-        '  %3d %s  out = %s' % (gi, kind, lut_sop(g.self_out)),
+        '  %3d %s  out = %s%s' % (gi, kind, lut_sop(g.self_out), iotag),
         '            hex  out=%04X (%d/16 on)   ctx N/E/S/W=%04X %04X %04X %04X   self=%04X'
         % (g.self_out, popcount(g.self_out),
            g.ctx_n, g.ctx_e, g.ctx_s, g.ctx_w, g.self_in),
@@ -653,6 +730,28 @@ class App:
         self._nv_profile_cb.pack(side='left')
         self._nv_profile_cb.bind('<<ComboboxSelected>>',
                                  self._on_nv_profile_change)
+        # Evolvable I/O binding (nv_evo/io_placement.py). 'fixed' is the original
+        # geometric/fitted placement; the others make port placement an
+        # evolvable genome trait. All THREE backends honour
+        # it, so it lives in its own always-visible frame — the pulse frame is
+        # hidden for non-nervous backends.
+        self._io_frame = ttk.Frame(ctrl3)
+        self._io_frame.pack(side='left')
+        ttk.Label(self._io_frame, text='I/O binding:').pack(
+            side='left', padx=(6, 2))
+        self._IO_PLACEMENT_LABELS = {
+            'Fixed (original)':            'fixed',
+            'Evolvable: node-type rank':   'tag_rank',
+            'Evolvable: wiring chromosome':   'wiring_chromosome',
+            'Evolvable: spatial chromosome':  'spatial_chromosome',
+        }
+        self._io_placement_var = tk.StringVar(value='Fixed (original)')
+        self._io_placement_cb = ttk.Combobox(
+            self._io_frame, textvariable=self._io_placement_var, width=31,
+            state='readonly', values=list(self._IO_PLACEMENT_LABELS))
+        self._io_placement_cb.pack(side='left')
+        self._io_placement_cb.bind('<<ComboboxSelected>>',
+                                   self._on_io_placement_change)
         self._pulse_sep = ttk.Separator(ctrl3, orient='vertical')
         self._pulse_sep.pack(side='left', fill='y', padx=8)
         self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
@@ -788,17 +887,18 @@ class App:
             self._model_note.config(text='SNN — leaky integrate-and-fire neurons.')
             self._set_tab_label(self._volt_tab, 'Voltage Traces')
         # pulse-physics knobs apply only to the nervous net's pulse engine.
-        # Re-pack relative to the always-present Reset button (the separator is
-        # itself hidden for other models, so it can't be a pack anchor).
+        # Re-pack relative to the always-present I/O-binding frame (the
+        # separator is itself hidden for other models, so it can't be a pack
+        # anchor). The I/O binding dropdown itself stays for EVERY backend —
+        # all three GAs honour the strategy.
         if hasattr(self, '_pulse_frame'):
             if backend == 'nervous':
-                self._pulse_frame.pack(side='left', before=self._tune_reset_btn)
+                self._pulse_frame.pack(side='left', before=self._io_frame)
                 self._pulse_sep.pack(side='left', fill='y', padx=8,
                                      before=self._tune_reset_btn)
                 self._sync_nv_profile_controls()   # analog row follows profile
             else:
                 self._pulse_frame.pack_forget()
-                self._pulse_sep.pack_forget()
                 if hasattr(self, '_analog_row'):
                     self._analog_row.pack_forget()
         # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
@@ -1128,6 +1228,7 @@ class App:
                 node_model=node_model,
                 evolve_delay=evolve_delay,
                 tile_arch=tile_arch,
+                io_placement=self._selected_io_placement(),
                 chromosome_count=chromosome_count),
             pulse=pulse_config)
 
@@ -1146,6 +1247,30 @@ class App:
 
     def _selected_tile_arch(self):
         return self._selected_nv_profile()[0]
+
+    def _selected_io_placement(self):
+        """The I/O binding strategy for NV runs ('fixed' when the control is
+        absent or unset — e.g. non-nervous backends)."""
+        if not hasattr(self, '_io_placement_var'):
+            return 'fixed'
+        return self._IO_PLACEMENT_LABELS.get(
+            self._io_placement_var.get(), 'fixed')
+
+    def _on_io_placement_change(self, _evt=None):
+        """Keep the genome controls runnable for the selected I/O strategy."""
+        if self._selected_io_placement() not in (
+                'wiring_chromosome', 'spatial_chromosome'):
+            return
+        try:
+            chromosome_count = int(self._chroms_var.get())
+        except (TypeError, ValueError):
+            chromosome_count = 0
+        if chromosome_count < 3:
+            self._chroms_var.set('3')
+            if hasattr(self, '_status'):
+                self._status.set(
+                    'Chroms raised to 3: chromosome 3 is the evolvable, '
+                    'non-developmental I/O map.')
 
     def _selected_nv_profile(self):
         default = ('single', 'pulse_delay', None)
@@ -1189,6 +1314,9 @@ class App:
     def _set_nv_controls_locked(self, locked):
         self._nv_controls_locked = bool(locked)
         self._sync_nv_profile_controls()
+        if hasattr(self, '_io_placement_cb'):
+            self._io_placement_cb.configure(
+                state='disabled' if locked else 'readonly')
 
     def _sync_telomere_backend(self, backend=None):
         """Swap in the remembered growth ceiling for the selected backend.
@@ -1243,7 +1371,10 @@ class App:
         self._vmin_var.set(str(DEFAULT_ARCH.vth_levels[0]))
         self._vmax_var.set(str(DEFAULT_ARCH.vth_levels[-1]))
         self._cur_var.set(str(self.target.high))
-        self._chroms_var.set('2')
+        self._chroms_var.set(
+            '3' if self._selected_io_placement() in (
+                'wiring_chromosome', 'spatial_chromosome')
+            else '2')
         backend = self._backend()
         value = str(default_max_telomere(backend))
         self._maxtel_var.set(value)
@@ -1306,6 +1437,13 @@ class App:
             self._status.set('Invalid genome — Chroms must be an integer from '
                              '1 to %d.' % MAX_CHROMS)
             return
+        if (self._selected_io_placement() in (
+                'wiring_chromosome', 'spatial_chromosome')
+                and n_chroms < 3):
+            self._status.set(
+                'Chromosome-based I/O needs at least 3 chromosomes; '
+                'chromosome 3 is the evolvable port map.')
+            return
 
         run_config = self._read_run_config(chromosome_count=n_chroms)
         if run_config is None:
@@ -1321,6 +1459,11 @@ class App:
         backend = self._backend()
         eff_target = self._effective_target(high, self._graded_var.get())
         setattr(eff_target, 'pulse_config', run_config.pulse)
+        # Mirror the evolvable I/O binding onto the display/scoring target so the
+        # main-thread report and playback (which call prepare_net/prepare_lut/
+        # interpret paths) bind ports the same way the run does. All backends
+        # honour the strategy.
+        setattr(eff_target, 'io_placement', run_config.ga.io_placement)
         self._active_target  = eff_target
         self._active_arch    = arch
         self._active_chroms  = n_chroms
@@ -1532,6 +1675,13 @@ class App:
                 profile_warn = ('   — loaded retired NV physics for playback; '
                                 'new runs use one of the current profiles')
         self._nv_profile_var.set(profile_label)
+        # Restore the I/O binding dropdown from the loaded run (old checkpoints
+        # default to 'fixed').
+        saved_io = getattr(normalized_config.ga, 'io_placement', 'fixed')
+        io_label = next(
+            (label for label, strat in self._IO_PLACEMENT_LABELS.items()
+             if strat == saved_io), 'Fixed (original)')
+        self._io_placement_var.set(io_label)
         self._sync_nv_profile_controls()
         self._sync_recombination()
         self._chroms_var.set(str(actual_chroms))
@@ -1856,7 +2006,7 @@ class App:
         try:
             grid, ns_list, _ = interpret_for(genome, target, self._disp_arch)
             output_pos = {(n.x, n.y): n.out_role for n in ns_list if n.is_output}
-            snapshots  = grow_snn_snapshots(genome, seeds=tuple(target.inputs),
+            snapshots  = grow_snn_snapshots(genome, seeds=_growth_seeds(target),
                                             grid_size=target.grid_size, iters=target.iters)
             rgba_fn = grid_to_rgba
         except Exception:
@@ -1921,12 +2071,20 @@ class App:
         """Growth tab for the hex nervous net: snapshots as honeycomb panels,
         the final one wired (excitatory green / inhibitory red)."""
         try:
-            snaps = grow_nervous_snapshots(genome, seeds=tuple(target.inputs),
+            snaps = grow_nervous_snapshots(genome, seeds=_growth_seeds(target),
                                            grid_size=target.grid_size, iters=target.iters)
             arch = getattr(genome, 'arch', 'single')
             routing, in_pos, out_pos = interpret_nervous(
                 snaps[-1], target, arch=arch)
-            if getattr(target, 'temporal', False):
+            # Honour an evolvable io_placement strategy: mark the tag-bound
+            # cells the scorer actually drives/reads.
+            from nv_evo.io_placement import io_strategy, bind_io, flat_inputs
+            bound = None
+            if io_strategy(target) != 'fixed':
+                bound = bind_io(genome, snaps[-1], target)
+            if bound is not None:
+                in_pos, out_pos = flat_inputs(bound[0]), bound[1]
+            elif getattr(target, 'temporal', False):
                 from nv_evo import place_outputs_by_trace
                 out_pos, _ = place_outputs_by_trace(
                     snaps[-1], routing, in_pos, target, arch=arch)
@@ -1962,14 +2120,24 @@ class App:
         try:
             from lut_evo import grow_lut_snapshots, place_outputs_by_trace
             from lut_evo.ga import _place_outputs_combinational
-            snaps = grow_lut_snapshots(genome, seeds=tuple(target.inputs),
+            snaps = grow_lut_snapshots(genome, seeds=_growth_seeds(target),
                                        grid_size=target.grid_size, iters=target.iters)
         except Exception:
             return
         final  = snaps[-1] if snaps else {}
         in_pos = [p for p in target.inputs if p in final]
         try:
-            if getattr(target, 'temporal', False):
+            # Under an evolvable io_placement strategy the genome's tags choose
+            # the ports — mark the SAME cells the scorer drives/reads.
+            from nv_evo.io_placement import io_strategy, bind_io, flat_inputs
+            bound = None
+            if io_strategy(target) != 'fixed' and final:
+                from lut_evo.lut import cell_io_tags
+                bound = bind_io(genome, final, target,
+                                tags=cell_io_tags(genome, final))
+            if bound is not None:
+                in_pos, out_pos = flat_inputs(bound[0]), bound[1]
+            elif getattr(target, 'temporal', False):
                 out_pos, _ = place_outputs_by_trace(final, list(target.inputs), target)
             else:
                 out_pos = _place_outputs_combinational(final, target)
@@ -2044,33 +2212,56 @@ class App:
         target = self._disp_target
         try:
             from lut_evo import grow_lut, AsyncLutSim, place_outputs_by_trace
-            grid = grow_lut(genome, seeds=tuple(target.inputs),
+            grid = grow_lut(genome, seeds=_growth_seeds(target),
                             grid_size=target.grid_size, iters=target.iters)
             if len(grid) <= target.n_inputs:
                 raise ValueError
-            out_pos, _ = place_outputs_by_trace(grid, list(target.inputs), target)
+            # Honour an evolvable io_placement strategy: drive/read the same
+            # tag-bound cells the scorer uses.
+            from nv_evo.io_placement import io_strategy, bind_io
+            bound = None
+            if io_strategy(target) != 'fixed':
+                from lut_evo.lut import cell_io_tags
+                bound = bind_io(genome, grid, target,
+                                tags=cell_io_tags(genome, grid))
+            if bound is not None:
+                bound_in, out_pos = list(bound[0]), bound[1]
+            else:
+                bound_in = None
+                out_pos, _ = place_outputs_by_trace(grid, list(target.inputs), target)
         except Exception:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
                                    '(LUT: circuit incomplete — grew too little)')
             return
         trial   = target.trials[0]
-        in_pos  = [p for p in target.inputs if p in grid]
+        from nv_evo.io_placement import input_groups, flat_inputs
+        # Drive the SAME cells the scorer drives: the bound attachment groups
+        # under an evolvable strategy (an input may fan out to several sites; a
+        # shared site wired-ORs), the seed pads otherwise.
+        groups  = input_groups(bound_in if bound_in is not None
+                               else [p for p in target.inputs if p in grid])
+        in_pos  = flat_inputs(groups)                  # display markers
         sim     = AsyncLutSim(grid)
         frames  = []                                   # (tick, nibble-map)
         physical = getattr(trial, 'input_events', None)
         if physical is not None:
             # float-time stimulus: inject the real (sub-tick) schedule and
             # sample the running levels mid-tick, as scoring does
-            for i, cell in enumerate(target.inputs):
+            for i, cells in enumerate(groups):
                 for start, width in (physical[i] if i < len(physical) else ()):
-                    sim.inject_pulse(cell, start, width)
+                    for cell in cells:
+                        sim.inject_pulse(cell, start, width)
             for t in range(target.T):
                 sim.advance_to(t + 0.5)
                 frames.append((t, dict(sim.out)))
         else:
             for t in range(target.T):
-                sim.step({target.inputs[i]: trial.streams[t][i]
-                          for i in range(target.n_inputs)})
+                levels = {}
+                for i, cells in enumerate(groups):
+                    bit = trial.streams[t][i] if i < len(trial.streams[t]) else 0
+                    for cell in cells:
+                        levels[cell] = levels.get(cell, 0) | bit
+                sim.step(levels)
                 frames.append((t, dict(sim.out)))
         # show up to 8 evenly-spaced ticks
         k    = min(8, len(frames))
@@ -2144,19 +2335,28 @@ class App:
             return
         target = self._disp_target
         try:
-            _, ns, ss = interpret_for(genome, target, self._disp_arch)
-            in_ids = []
-            for pos in target.inputs:
-                nrn = next((n for n in ns if (n.x, n.y) == pos and n.is_input), None)
-                if nrn is None:
-                    raise ValueError
-                in_ids.append(nrn.id)
+            grid, ns, ss = interpret_for(genome, target, self._disp_arch)
+            from nv_evo.io_placement import (io_strategy, bind_io,
+                                             input_groups)
+            if io_strategy(target) != 'fixed':
+                from snn_evo.growth import cell_io_tags
+                bound = bind_io(
+                    genome, grid, target, tags=cell_io_tags(genome, grid))
+                groups = input_groups(bound[0]) if bound else []
+            else:
+                groups = input_groups(target.inputs)
+            by_pos = {(n.x, n.y): n for n in ns if n.is_input}
+            in_ids = [[by_pos[pos].id for pos in cells if pos in by_pos]
+                      for cells in groups]
+            if any(not ids for ids in in_ids):
+                raise ValueError
             out_neurons = []
             for term in target.outputs:
-                nrn = next((n for n in ns if n.is_output and n.out_role == term.role), None)
-                if nrn is None:
+                members = [n for n in ns
+                           if n.is_output and n.out_role == term.role]
+                if not members:
                     raise ValueError
-                out_neurons.append(nrn)
+                out_neurons.append(members)
         except Exception:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
                                    '(circuit incomplete — no I/O neurons to trace)')
@@ -2165,7 +2365,7 @@ class App:
         cases   = target.cases[:MAX_VOLT_CASES]
         n_rows  = len(cases)
         n_cols  = len(target.outputs)
-        track   = [n.id for n in out_neurons]
+        track   = [n.id for members in out_neurons for n in members]
         t       = np.arange(N_STEPS) * DT
         palette = ['#2196F3', '#E91E63', '#4CAF50', '#FF9800', '#9C27B0', '#00BCD4']
 
@@ -2184,14 +2384,17 @@ class App:
                                      _case_currents(target, in_bits, in_ids, c), track)
                     for c in encodings}
             for col, term in enumerate(target.outputs):
-                neuron     = out_neurons[col]
+                members    = out_neurons[col]
+                neuron     = members[0]
                 spk, vmem  = sims[term.complement_inputs]
-                fired      = len(spk.get(neuron.id, [])) >= 1
+                fired      = any(len(spk.get(n.id, [])) >= 1 for n in members)
                 act        = (0 if fired else 1) if term.invert_spike else (1 if fired else 0)
                 exp        = out_bits[col]
                 color      = palette[col % len(palette)]
                 ax = self._volt_fig.add_subplot(gspec[row, col])
-                ax.plot(t, vmem[neuron.id], color=color, lw=1.1)
+                bus_v = np.max(
+                    np.vstack([vmem[n.id] for n in members]), axis=0)
+                ax.plot(t, bus_v, color=color, lw=1.1)
                 ax.axhline(neuron.vth, color='gray', lw=0.8, ls='--', alpha=0.7)
                 ax.set_xlim(0, SIM_TIME)
                 ax.set_ylim(-0.15, neuron.vth + 0.35)
@@ -2203,7 +2406,9 @@ class App:
                     if term.invert_spike:
                         notes.append('fires => 0')
                     note = ('  [%s]' % ', '.join(notes)) if notes else ''
-                    ax.set_title("%s  pos=%s%s" % (term.role, (neuron.x, neuron.y), note),
+                    ax.set_title("%s  %d site%s%s" % (
+                                     term.role, len(members),
+                                     '' if len(members) == 1 else 's', note),
                                  fontsize=8.5)
                 ax.text(0.02, 0.88, 'in=%s' % ''.join(map(str, in_bits)),
                         transform=ax.transAxes, fontsize=7.5, va='top')
@@ -2320,6 +2525,42 @@ class App:
         if hasattr(gene, 'limit'):
             ax.text(ox + 5.85, oy - 0.18, 'it<=%d' % gene.limit, ha='right', va='top',
                     fontsize=6.5, color='#888', zorder=3)
+        # I/O-binding tag badge (bottom-right) — only when the gene carries one,
+        # so default genomes draw exactly as before
+        if getattr(gene, 'tag', 0):
+            ax.text(ox + 5.85, oy + 3.05, 'io:%d' % gene.tag, ha='right', va='top',
+                    fontsize=6.5, color='#a03070', zorder=3)
+
+    def _io_binding_text(self, genome):
+        """The evolved I/O binding summary for the display target, or None when
+        the fixed strategy is active / anything is missing. Grows the organism
+        with the backend's own growth + tag attribution so the summary names
+        exactly the cells the scorer drives and reads."""
+        target = getattr(self, '_disp_target', None)
+        if genome is None or target is None:
+            return None
+        try:
+            from nv_evo.io_placement import io_strategy, describe_binding
+            if io_strategy(target) == 'fixed':
+                return None
+            backend = getattr(self, '_disp_backend', 'snn')
+            if backend == 'nervous':
+                from nv_evo.nervous import grow_nervous
+                grid = grow_nervous(genome, seeds=_growth_seeds(target))
+                tags = None                       # nervous attribution is the default
+            elif backend == 'lut':
+                from lut_evo.lut import grow_lut, cell_io_tags
+                grid = grow_lut(genome, seeds=_growth_seeds(target),
+                                grid_size=target.grid_size, iters=target.iters)
+                tags = cell_io_tags(genome, grid)
+            else:
+                from snn_evo.growth import grow_snn, cell_io_tags
+                grid = grow_snn(genome, seeds=_growth_seeds(target),
+                                grid_size=target.grid_size)
+                tags = cell_io_tags(genome, grid)
+            return describe_binding(genome, grid, target, tags=tags)
+        except Exception:
+            return None
 
     def _draw_genome(self, genome, fitness):
         fig = self._genome_fig
@@ -2344,6 +2585,10 @@ class App:
         # way the Growth tab summarises the grown organism.
         if lutmode and n_total > CARD_CAP:
             self._draw_genome_lut_summary(fig, chroms, n_total, title)
+            binding = self._io_binding_text(genome)
+            if binding:
+                fig.text(0.01, 0.02, binding, fontsize=7.5, color='#a03070',
+                         va='bottom', family='monospace')
             self._genome_canvas.draw_idle()
             return
 
@@ -2359,11 +2604,14 @@ class App:
 
         for ci, chrom in enumerate(chroms):
             tel = getattr(chrom, 'telomere', None)
-            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %s%s   ·   %d genes"
+            is_wiring = getattr(chrom, 'wiring', False)
+            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %s%s   ·   %d genes%s"
                     % (chr(ord('a') + ci), chrom.tag, _split_display(chrom),
                        ('   ·   telomere %d' % tel) if tel is not None else '',
-                       len(chrom.genes)),
-                    fontsize=9.5, fontweight='bold', color='#334', va='bottom')
+                       len(chrom.genes),
+                       '   ·   WIRING (I/O port map)' if is_wiring else ''),
+                    fontsize=9.5, fontweight='bold',
+                    color='#a03070' if is_wiring else '#334', va='bottom')
             y += 1.0
             drawn_here = 0
             for gene in chrom.genes:
@@ -2396,6 +2644,14 @@ class App:
                  'growth picks the gene closest (min Hamming distance) to a circuit%s'
                 % (_sides, _tail),
                 fontsize=7.5, color='#666', va='bottom', wrap=True)
+        y += 1.0
+        # Evolved I/O binding footer: which allele/anchor each port selected and
+        # attached (only under an evolvable io_placement strategy).
+        binding = self._io_binding_text(genome)
+        if binding:
+            ax.text(0.0, y + 0.4, binding, fontsize=8, color='#a03070',
+                    va='top', family='monospace')
+            y += 1.2 + 0.55 * binding.count('\n')
 
         ax.set_xlim(-0.4, per_row * CW)
         ax.set_ylim(0, y + 1.4)
@@ -2421,12 +2677,15 @@ class App:
             counts = Counter(g.self_out for g in c.genes if g.self_out)
             n_growth = sum(1 for g in c.genes if getattr(g, 'self_in', 1) == 0)
             tel = getattr(c, 'telomere', None)
+            is_wiring = getattr(c, 'wiring', False)
             lbl = axes[r][0]
             lbl.axis('off')
-            lbl.text(0.0, 0.5, 'Chrom %s\n%d genes\n%d distinct\n%d growth%s' % (
-                chr(ord('a') + r), len(c.genes), len(counts), n_growth,
+            lbl.text(0.0, 0.5, 'Chrom %s%s\n%d genes\n%d distinct\n%d growth%s' % (
+                chr(ord('a') + r), ' [WIRING]' if is_wiring else '',
+                len(c.genes), len(counts), n_growth,
                 ('\ntel %d' % tel) if tel is not None else ''),
                 va='center', ha='left', fontsize=8.5, family='monospace',
+                color='#a03070' if is_wiring else 'black',
                 transform=lbl.transAxes)
             top = counts.most_common(K)
             for k in range(K):
@@ -2467,7 +2726,8 @@ class App:
             seed = getattr(self, '_active_seed', None)
             if seed is not None:
                 f.write('seed = %d\n\n' % seed)
-            f.write(build_genome_text(self.best_genome, self.best_fitness))
+            f.write(build_genome_text(self.best_genome, self.best_fitness,
+                                      binding=self._io_binding_text(self.best_genome)))
         self._status.set('Saved growth / voltage / genome (png + txt) (%s) → results/' % ts)
 
 
