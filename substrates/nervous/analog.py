@@ -1,5 +1,5 @@
 """
-nv_evo/analog.py — the analog Fig. 1 node: charge, leak, comparator, hysteresis.
+substrates/nervous/analog.py — the analog Fig. 1 node: charge, leak, comparator, hysteresis.
 
 The default engine (pulse.py) is a digital abstraction of the paper's node: it
 regenerates ONE fixed-width pulse after ONE fixed delay and treats the
@@ -33,7 +33,7 @@ rest; edges step it DOWN; it recovers UP toward rest as
 instantaneous and recovery is monotone-up between them, a downward threshold
 crossing can only happen AT an edge — so firing is decided at edge times and no
 inter-event root-finding is needed. The output fall is the recovery time solved
-analytically, rescheduled (inertial-delay style, like lut_evo/pulse.py) whenever
+analytically, rescheduled (inertial-delay style, like substrates/lut/pulse.py) whenever
 a later edge extends the pulse.
 
 Figure 1's I1 input controls the leak/bias branch. Without transistor parameters
@@ -119,7 +119,8 @@ class AnalogPulseSim:
     """Event-driven analog nervous-net node (see module docstring)."""
 
     def __init__(self, grid, routing, max_events=None, config=None,
-                 sources=None, inputs=None):
+                 sources=None, inputs=None, input_nodes=None,
+                 output_nodes=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or AnalogConfig()
@@ -127,7 +128,8 @@ class AnalogPulseSim:
                            else max(1, int(max_events)))
         self.event_count = 0
         self.overflow = False
-        self._inputs = set(inputs or ())
+        self._inputs = set(inputs or ()) | set(input_nodes or ())
+        self._outputs = set(output_nodes or ())
 
         # src[v] = (s1, s2, si) feeder cells; watch[u] = cells reading u's wire.
         self.src   = {}
@@ -135,6 +137,8 @@ class AnalogPulseSim:
         self.op = {}
         for v, entry in routing.items():
             if v not in grid:
+                continue
+            if v in self._inputs:
                 continue
             e1, e2, i1 = entry[0], entry[1], entry[2]
             # entry[3] is the routing op. 'or' means EITHER excitatory input
@@ -152,6 +156,9 @@ class AnalogPulseSim:
                 s1 = nb[e1] if e1 is not None else None
                 s2 = nb[e2] if e2 is not None else None
                 si = nb[i1] if i1 is not None else None
+            s1 = None if s1 in self._outputs else s1
+            s2 = None if s2 in self._outputs else s2
+            si = None if si in self._outputs else si
             self.src[v] = (s1, s2, si)
             for s in {s1, s2}:
                 if s is not None and s in self.watch:

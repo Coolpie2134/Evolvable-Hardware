@@ -1,5 +1,5 @@
 """
-nv_evo/viz.py — honeycomb rendering for the nervous net.
+substrates/nervous/viz.py — honeycomb rendering for the nervous net.
 
 Nodes are drawn as CIRCLES at the *corners* of a hex array ("cells are
 positioned at the corners of a hex array" — automaton_arrays), i.e. on

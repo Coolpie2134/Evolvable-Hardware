@@ -19,12 +19,15 @@ sys.path.insert(0, ROOT)
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
-from snn_evo.targets import TARGETS                                  # noqa: E402
-from snn_evo.ga import evolve as evolve_snn                          # noqa: E402
-from nv_evo.targets import TEMPORAL_TARGETS                          # noqa: E402
-from nv_evo.ga import evolve_nervous                                 # noqa: E402
-from nv_evo.pulse import PulseConfig                                 # noqa: E402
-from lut_evo.ga import evolve_lut                                    # noqa: E402
+from substrates.snn.targets import TARGETS                                  # noqa: E402
+from substrates.snn.ga import evolve as evolve_snn                          # noqa: E402
+from substrates.nervous.targets import (TEMPORAL_TARGETS,                        # noqa: E402
+                            periodic_combinational_target,
+                            with_io_placement)
+from substrates.nervous.io_placement import IO_STRATEGIES, uses_port_chromosome  # noqa: E402
+from substrates.nervous.ga import evolve_nervous                                 # noqa: E402
+from substrates.nervous.pulse import PulseConfig                                 # noqa: E402
+from substrates.lut.ga import evolve_lut                                    # noqa: E402
 
 
 SUBSTRATES = (
@@ -34,6 +37,19 @@ SUBSTRATES = (
     ('nervous_analog_tri', 'tri3', 'paper_analog'),
     ('lut', None, None),
 )
+
+
+def _replace_atomic(source, destination):
+    """Replace a result despite brief OneDrive/antivirus sharing locks."""
+    destination = os.path.abspath(destination)
+    for attempt in range(6):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
 
 
 def _seed(base, target_name):
@@ -51,22 +67,40 @@ def _atomic_json(path, value):
         with handle:
             json.dump(value, handle, indent=2, ensure_ascii=False)
             handle.write('\n')
-        os.replace(handle.name, path)
+        _replace_atomic(handle.name, path)
     finally:
         if os.path.exists(handle.name):
             os.unlink(handle.name)
 
 
-def _target_rows():
+def _target_rows(kind=None):
     rows = [('logic', name, target) for name, target in TARGETS.items()]
     rows.extend(('temporal', name, target)
                 for name, target in TEMPORAL_TARGETS.items())
-    return rows
+    return rows if kind is None else [row for row in rows if row[0] == kind]
+
+
+def _effective_target(substrate, target):
+    """The target object the substrate actually evolves against.
+
+    The asynchronous backends never see a static truth table: the app wraps
+    every combinational target in the periodic asynchronous encoding before
+    handing it to the GA (see AsyncApp._targets_for_backend). Benchmarking the
+    raw table instead measured a path the product does not use, and understated
+    those rows badly — under an identical budget AND and OR reach 1.0 through
+    the wrapper and stall at 0.83 without it.
+    """
+    if substrate == 'snn' or getattr(target, 'temporal', False):
+        return target
+    return periodic_combinational_target(target)
 
 
 def _support_reason(substrate, kind, target, model):
-    if substrate == 'snn' and kind != 'logic':
-        return 'SNN has no continuous-time temporal simulator'
+    if substrate == 'snn':
+        allowed = getattr(target, 'supported_backends', ())
+        if allowed and 'snn' not in allowed:
+            return 'target excludes SNN backend'
+        return None
     if substrate.startswith('nervous'):
         allowed = getattr(target, 'supported_backends', ())
         if allowed and 'nervous' not in allowed:
@@ -83,8 +117,9 @@ def _support_reason(substrate, kind, target, model):
     return None
 
 
-def _run(substrate, arch, model, target, generations, pop, chromosomes, seed):
-    target = copy.deepcopy(target)
+def _run(substrate, arch, model, target, generations, pop, chromosomes, seed,
+         io_placement='fixed'):
+    target = with_io_placement(copy.deepcopy(target), io_placement)
     if substrate == 'snn':
         return evolve_snn(
             generations=generations, verbose=False, n_chroms=chromosomes,
@@ -103,12 +138,13 @@ def _markdown(document):
     cfg = document['config']
     rows = document['results']
     lines = [
-        '# Contract v1: 100-generation fitness matrix', '',
+        '# Contract v1: bounded fitness matrix', '',
         'Generated: %s' % document.get('finished_at', document['started_at']), '',
-        ('Settings: generations=%d, population=%d, chromosomes=%d, base seed=%d. '
-         'Fitness is the maximum observed at or before the final generation.'
+        ('Settings: generations=%d, population=%d, chromosomes=%d, base seed=%d, '
+         'I/O=%s. Fitness is the maximum observed at or before the final '
+         'generation.'
          % (cfg['generations'], cfg['population'], cfg['chromosomes'],
-            cfg['base_seed'])), '',
+            cfg['base_seed'], cfg.get('io_placement', 'fixed'))), '',
         '| Substrate | Target | Kind | Max fitness | Status | Seconds |',
         '|---|---|---:|---:|---|---:|',
     ]
@@ -150,7 +186,7 @@ def _write_markdown(path, document):
     try:
         with handle:
             handle.write(_markdown(document))
-        os.replace(handle.name, path)
+        _replace_atomic(handle.name, path)
     finally:
         if os.path.exists(handle.name):
             os.unlink(handle.name)
@@ -161,18 +197,42 @@ def main(argv=None):
     parser.add_argument('--generations', type=int, default=100)
     parser.add_argument('--pop', type=int, default=12)
     parser.add_argument('--chromosomes', type=int, default=2)
+    parser.add_argument(
+        '--io-placement', choices=IO_STRATEGIES, default='fixed',
+        help='I/O architecture used by every measured backend')
     parser.add_argument('--seed', type=int, default=20260721)
+    parser.add_argument(
+        '--substrate', action='append', choices=[row[0] for row in SUBSTRATES],
+        help='run only this substrate (repeatable)')
+    parser.add_argument('--kind', choices=('logic', 'temporal'),
+                        help='run only one target kind')
+    parser.add_argument(
+        '--target', action='append',
+        help='run only this target by exact name (repeatable). Handy for '
+             're-measuring a single row after a target/scoring fix instead of '
+             'repeating a multi-hour sweep.')
     parser.add_argument('--json', default=os.path.join(
         ROOT, 'results', 'contract_v1_100gen.json'))
     parser.add_argument('--markdown', default=os.path.join(
         ROOT, 'results', 'contract_v1_100gen.md'))
     parser.add_argument('--no-resume', action='store_true')
     args = parser.parse_args(argv)
+    if uses_port_chromosome(args.io_placement) and args.chromosomes < 3:
+        parser.error('--chromosomes must be at least 3 for %s'
+                     % args.io_placement)
 
+    selected_substrates = tuple(
+        row for row in SUBSTRATES
+        if not args.substrate or row[0] in set(args.substrate))
     config = {
         'generations': args.generations, 'population': args.pop,
         'chromosomes': args.chromosomes, 'base_seed': args.seed,
-        'substrates': [name for name, _, _ in SUBSTRATES],
+        'io_placement': args.io_placement,
+        'substrates': [name for name, _, _ in selected_substrates],
+        'kind': args.kind,
+        # Part of the identity of the run: a filtered sweep must never resume
+        # into (or be mistaken for) a full one.
+        'targets': sorted(args.target) if args.target else None,
     }
     document = {'schema': 1, 'started_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
                 'config': config, 'results': []}
@@ -186,16 +246,24 @@ def main(argv=None):
     done = {(row['substrate'], row['kind'], row['target'])
             for row in document['results']}
 
-    targets = _target_rows()
-    total = len(SUBSTRATES) * len(targets)
+    targets = _target_rows(args.kind)
+    if args.target:
+        wanted = set(args.target)
+        targets = [row for row in targets if row[1] in wanted]
+        missing = wanted - {row[1] for row in targets}
+        if missing:
+            raise SystemExit('unknown target name(s): %s'
+                             % ', '.join(sorted(missing)))
+    total = len(selected_substrates) * len(targets)
     index = 0
-    for substrate, arch, model in SUBSTRATES:
+    for substrate, arch, model in selected_substrates:
         for kind, name, target in targets:
             index += 1
             key = substrate, kind, name
             if key in done:
                 continue
-            reason = _support_reason(substrate, kind, target, model)
+            effective = _effective_target(substrate, target)
+            reason = _support_reason(substrate, kind, effective, model)
             row = {'substrate': substrate, 'kind': kind, 'target': name,
                    'generations': args.generations, 'population': args.pop,
                    'chromosomes': args.chromosomes,
@@ -208,8 +276,9 @@ def main(argv=None):
             if reason is None:
                 try:
                     row['max_fitness'] = float(_run(
-                        substrate, arch, model, target, args.generations,
-                        args.pop, args.chromosomes, row['seed']))
+                        substrate, arch, model, effective, args.generations,
+                        args.pop, args.chromosomes, row['seed'],
+                        args.io_placement))
                     row['status'] = 'ok'
                 except Exception as exc:  # record the full matrix; fail at end
                     row['status'] = 'error'

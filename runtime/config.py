@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nv_evo.pulse import PulseConfig
+from substrates.nervous.pulse import PulseConfig
 from .limits import MAX_CHROMOSOME_COUNT
 from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
@@ -64,28 +64,31 @@ class GAConfig:
     # default remains 'uniform' for checkpoint/API compatibility; fresh GUI runs
     # use one of NV_NEW_RUN_PROFILES instead.
     node_model: str = 'uniform'
-    # Nervous-net TILE architecture (nv_evo/genome.py TILE_ARCHS):
+    # Nervous-net TILE architecture (substrates/nervous/genome.py TILE_ARCHS):
     # 'single' — one Fig. 3 circuit per tile. 'tri3' — the paper's
     #            three-circuit tile (three independent L/R/D outputs per tile).
     # Tri3 supports the fixed digital abstraction and paper_analog physics; the
     # per-node-type width/delay vectors are single-tile features.
     tile_arch: str = 'single'
-    # I/O binding strategy (nv_evo/io_placement.py IO_STRATEGIES), honoured by
-    # ALL backends (nervous, LUT, SNN):
+    # I/O binding strategy (substrates/nervous/io_placement.py IO_STRATEGIES).
+    # Nervous and LUT support every strategy. SNN does not implement
+    # directional terminal nodes.
     #   'fixed'          — inputs are the seed pads in declared order; outputs are
     #                      trace-/duty-fitted near their terminals (the legacy
     #                      default).
+    #   'terminal_nodes' - body genes evolve ordinary/input/output identity;
+    #                      matching mature cells become one-way terminals.
     #   'tag_rank'       — body-gene expression tags rank mature cells; ports
     #                      claim the highest still-free cells in order (Method A).
     #   'wiring_chromosome' — chromosome 3 is a non-developmental but evolvable
     #                      port map. Each gene selects one cell by node type and
     #                      offset in an unbiased stable site order (Method B).
     #   'spatial_chromosome' — chromosome 3 evolves one normalised (x,y)
-    #                      anchor per port and attaches it to the nearest free
-    #                      living cell.
+    #                      anchor per port. Input anchors are developmental
+    #                      germlines; outputs attach to nearest free live cells.
     # Kept 'fixed' by default so every existing run and checkpoint is
     # byte-identical; the literal is duplicated from IO_STRATEGIES to keep
-    # evo_runtime backend-neutral (no nv_evo import at module level).
+    # runtime backend-neutral (no substrates.nervous import at module level).
     io_placement: str = 'fixed'
     # Delay-mutation toggle, decoupled from the model name for ablations.
     # ``None`` keeps the model's pairing (pulse_delay <-> delay mutation). An
@@ -104,7 +107,7 @@ class GAConfig:
     chromosome_count: int | None = None
     cache_size: int = 200_000
     # Reserved / no-op: evaluation now runs one saturated, cancellation-aware
-    # pool pass per generation (evo_runtime.parallel.map_ordered) instead of
+    # pool pass per generation (runtime.parallel.map_ordered) instead of
     # chunked barriers, so this multiplier is no longer consumed. Kept as a
     # validated field so existing v2 checkpoints still round-trip.
     evaluation_chunk_multiplier: int = 2
@@ -130,10 +133,10 @@ class GAConfig:
         if self.tile_arch not in ('single', 'tri3'):
             raise ValueError("tile_arch must be 'single' or 'tri3'")
         if self.io_placement not in (
-                'fixed', 'tag_rank', 'wiring_chromosome',
+                'fixed', 'terminal_nodes', 'tag_rank', 'wiring_chromosome',
                 'spatial_chromosome'):
             raise ValueError(
-                "io_placement must be 'fixed', 'tag_rank', "
+                "io_placement must be 'fixed', 'terminal_nodes', 'tag_rank', "
                 "'wiring_chromosome' or 'spatial_chromosome'")
         # tri3 evolves routing only, so it pairs with the routing-only engines:
         # 'uniform' (digital) or 'paper_analog' (analog). The width/delay vectors

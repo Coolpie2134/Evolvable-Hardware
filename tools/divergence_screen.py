@@ -32,10 +32,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(errors='replace')
 
-from nv_evo import random_hex_genome                      # noqa: E402
-from nv_evo.ga import evaluate_nv_full                    # noqa: E402
-from nv_evo.targets import TEMPORAL_TARGETS               # noqa: E402
-from nv_evo.pulse import PulseConfig                      # noqa: E402
+from substrates.nervous import random_hex_genome                      # noqa: E402
+from substrates.nervous.ga import evaluate_nv_full                    # noqa: E402
+from substrates.nervous.targets import TEMPORAL_TARGETS               # noqa: E402
+from substrates.nervous.pulse import PulseConfig                      # noqa: E402
 
 N_GENOMES = 10
 GENOME_SEED = 4

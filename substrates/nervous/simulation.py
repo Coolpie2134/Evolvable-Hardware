@@ -1,5 +1,5 @@
 """
-nv_evo/simulation.py — the single construction and schedule API for nervous
+substrates/nervous/simulation.py — the single construction and schedule API for nervous
 nets: the audited path for asynchronous robustness testing.
 
 temporal.py drives circuits from tick-quantised streams (`start * TICK`, integer
@@ -23,7 +23,8 @@ from . import pulse
 from .pulse import PulseSim
 
 
-def create_simulator(grid, routing, max_events=None, config=None, delays=None, sources=None):
+def create_simulator(grid, routing, max_events=None, config=None, delays=None,
+                     sources=None, input_nodes=None, output_nodes=None):
     """Construct the configured simulator used by every Nervous consumer.
 
     ``delays`` ({cell: delay}) is consumed only by width-preserving transport;
@@ -46,9 +47,12 @@ def create_simulator(grid, routing, max_events=None, config=None, delays=None, s
                             delay_prop=config.delay,
                             event_cap=getattr(config, 'event_cap', 4096))
         return AnalogPulseSim(grid, routing, max_events=max_events,
-                              config=acfg, sources=sources)
+                              config=acfg, sources=sources,
+                              input_nodes=input_nodes,
+                              output_nodes=output_nodes)
     return PulseSim(grid, routing, max_events=max_events, config=config,
-                    delays=delays, sources=sources)
+                    delays=delays, sources=sources,
+                    input_nodes=input_nodes, output_nodes=output_nodes)
 
 
 def normalize(schedule):
@@ -100,7 +104,8 @@ def streams_to_schedule(streams, n_inputs, T, config=None):
 
 def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
                  max_events=None, config=None, delays=None,
-                 return_intervals=False, arch='single'):
+                 return_intervals=False, arch='single',
+                 terminal_inputs=None, terminal_outputs=None):
     """Inject `schedule` at float times and run the event-driven sim to
     `horizon`, enforcing `max_events` (overflow ⇒ the run is invalid, exactly as
     in scoring). Returns ({cell: [leading-edge times]}, overflow) for `out_cells`
@@ -113,10 +118,12 @@ def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
     if arch == 'tri3':
         from .tritile import TriSim
         sim = TriSim(grid, flat_inputs(in_pos), max_events=max_events,
-                     config=config)
+                     config=config, outputs=terminal_outputs)
     elif arch == 'single':
         sim = create_simulator(grid, routing, max_events=max_events,
-                               config=config, delays=delays)
+                               config=config, delays=delays,
+                               input_nodes=terminal_inputs,
+                               output_nodes=terminal_outputs)
     else:
         raise ValueError('unknown tile architecture: %r' % (arch,))
     # ``in_pos`` may carry per-input attachment GROUPS (evolvable binding):
@@ -152,17 +159,3 @@ def scale(schedule, k):
     """Scale every event time and width by `k` (used with a matching scale of
     the physical constants to test scale covariance)."""
     return [[(t * k, w * k) for (t, w) in ev] for ev in schedule]
-
-
-def rate_scale(schedule, k):
-    """Compress/expand the inter-event SCHEDULE by `k` (time axis only), leaving
-    pulse widths intact — models a faster/slower input rate."""
-    return [[(t * k, w) for (t, w) in ev] for ev in schedule]
-
-
-def horizon_for(schedule, base_T, margin=None):
-    """A horizon covering every scheduled event plus a settling margin, so a
-    delayed output's late edges are observed rather than clipped at the boundary."""
-    last = max((t + w for ev in schedule for (t, w) in ev), default=0.0)
-    return (max(float(base_T) * pulse.TICK, last)
-            + (4.0 * pulse.DELAY if margin is None else margin))

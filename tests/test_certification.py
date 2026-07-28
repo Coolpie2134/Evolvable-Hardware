@@ -1,6 +1,6 @@
 """
 tests/test_certification.py — the held-out verdict rule that guards every
-"solved" claim (nv_evo.certification). Fast/pure: no growth, no evolution, no
+"solved" claim (substrates.nervous.certification). Fast/pure: no growth, no evolution, no
 multiprocessing. The end-to-end certify() on a real evolved winner is exercised
 by reproduce.py.
 
@@ -12,8 +12,8 @@ import dataclasses
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo import TEMPORAL_TARGETS                        # noqa: E402
-from nv_evo.certification import classify, oracle_spec_for, certify  # noqa: E402
+from substrates.nervous import TEMPORAL_TARGETS                        # noqa: E402
+from substrates.nervous.certification import classify, oracle_spec_for, certify  # noqa: E402
 
 
 def test_classify_certified_when_holdout_clears_bar():
@@ -53,7 +53,7 @@ def test_oracle_mapping_present_only_for_oracle_targets():
     assert oracle_spec_for(
         TEMPORAL_TARGETS['Pair detection gap (2x pulse width)']) is not None
     legacy = dataclasses.replace(
-        TEMPORAL_TARGETS['One-shot (5 seconds)'], name='One-shot (5 ticks)')
+        TEMPORAL_TARGETS['One-shot (12 seconds)'], name='One-shot (5 ticks)')
     assert oracle_spec_for(legacy) is not None
     assert oracle_spec_for(TEMPORAL_TARGETS['Oscillator']) is None   # autonomous
 
@@ -61,7 +61,7 @@ def test_oracle_mapping_present_only_for_oracle_targets():
 def test_certify_non_oracle_target_is_uncertified_without_scoring():
     """A target with no reference oracle must be reported UNCERTIFIED and must
     NOT attempt held-out scoring (no growth/sim needed)."""
-    from nv_evo import random_hex_genome
+    from substrates.nervous import random_hex_genome
     res = certify(random_hex_genome(1), TEMPORAL_TARGETS['Oscillator'],
                   train=1.0, backend='nervous')
     assert res['verdict'].startswith('UNCERTIFIED')

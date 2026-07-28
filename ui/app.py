@@ -19,12 +19,12 @@ On completion the best genome (and its target) are saved to
 results/best_genome.json; the two plot tabs can be exported to PNG.
 
 Usage:
-    python app.py
+    python -m ui.app
 """
 import sys, os, math, time, random, threading, queue, dataclasses
 import multiprocessing
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import tkinter as tk
@@ -39,29 +39,33 @@ from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 import matplotlib.gridspec as gridspec
 import numpy as np
 
-from snn_evo import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
+from substrates.snn import (grow_snn, grow_snn_snapshots, interpret_grid, simulate,
                      simulate_trace, circuit_summary,
                      TARGETS, DEFAULT_TARGET, get_target, truth_table_target,
-                     Arch, DEFAULT_ARCH)
-from snn_evo.genome import GRID_SIZE
-from snn_evo.lif_sim import DT, SIM_TIME, N_STEPS
-from nv_evo import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
+                     Arch, DEFAULT_ARCH, temporal_arch,
+                     prepare_snn_temporal, snn_temporal_report)
+from substrates.snn.genome import GRID_SIZE
+from substrates.snn.lif_sim import DT, SIM_TIME, N_STEPS
+from substrates.nervous import (nervous_truth_table, grow_nervous_snapshots, interpret_nervous,
                     nervous_case_outputs,
                     ROUTING, temporal_report, periodic_combinational_target)
-from nv_evo import TEMPORAL_TARGETS
-from nv_evo.contracts import behavior_contract_lines
-from nv_evo.viz import draw_hex_net
-from lut_evo.viz import draw_lut_net, draw_lut_table
-from interactive import InteractiveTab
-from designer import DesignerTab
-from diversity_ui import DiversityTab
-from target_ui import TargetPicker
-import ui_compat
-from evo_runtime.config import (GAConfig, RunConfig, NV_NEW_RUN_PROFILES,
+from substrates.nervous import TEMPORAL_TARGETS
+from substrates.nervous.contracts import behavior_contract_lines
+from substrates.nervous.viz import draw_hex_net
+from substrates.lut.viz import draw_lut_net, draw_lut_table
+# Absolute package imports work both for the documented ``python -m ui.app``
+# launch and when this file is invoked directly by an IDE/file association.
+# ROOT is inserted above, so direct execution still resolves the package.
+from ui.interactive import InteractiveTab
+from ui.designer import DesignerTab
+from ui.diversity_ui import DiversityTab
+from ui.target_ui import TargetPicker
+from ui import ui_compat
+from runtime.config import (GAConfig, RunConfig, NV_NEW_RUN_PROFILES,
                                 MAX_CHROMOSOME_COUNT as MAX_CHROMS,
                                 default_max_telomere)
-from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
-from evo_runtime.controller import worker_entry as evolution_worker_entry
+from runtime.checkpoint import load_checkpoint, save_checkpoint
+from runtime.controller import worker_entry as evolution_worker_entry
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
 CKPT        = os.path.join(RESULTS_DIR, 'best_genome.json')
@@ -78,24 +82,28 @@ MAX_VOLT_CASES  = 8     # voltage tab caps rows for readability on big targets
 
 # ── target-aware analysis helpers ─────────────────────────────────────────────
 
-def _growth_seeds(target):
-    """The target's developmental origin: input pads under fixed binding, ONE
-    neutral center cell under an evolvable io_placement strategy — every
-    display grow must match the scorer's body (nv_evo/io_placement)."""
-    from nv_evo.io_placement import growth_seeds
-    return growth_seeds(target)
+def _growth_seeds(target, genome=None):
+    """Return the strategy's developmental origin for every GUI backend.
+
+    Fixed mode uses declared pads, developmental spatial mode uses the
+    genome's input anchors, and the other evolvable modes use a neutral centre.
+    """
+    from substrates.nervous.io_placement import growth_seeds, io_strategy
+    return growth_seeds(target, io_strategy(target), genome)
 
 
 def grow_for(genome, target):
-    return grow_snn(genome, seeds=_growth_seeds(target),
+    return grow_snn(genome, seeds=_growth_seeds(target, genome),
                     grid_size=target.grid_size, iters=target.iters)
 
 
 def interpret_for(genome, target, arch):
     grid = grow_for(genome, target)
-    from nv_evo.io_placement import io_strategy, bind_io, flat_inputs
+    if getattr(target, 'temporal', False):
+        arch = temporal_arch(arch)
+    from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
     if io_strategy(target) != 'fixed':
-        from snn_evo.growth import cell_io_tags
+        from substrates.snn.growth import cell_io_tags
         bound = bind_io(genome, grid, target,
                         tags=cell_io_tags(genome, grid))
         if bound is None:
@@ -130,9 +138,9 @@ def simulate_vmem(neurons, synapses, input_currents, track_ids):
 def build_truth_table(genome, target, arch):
     """Return the truth-table report for `target` as a string."""
     grid, ns, ss = interpret_for(genome, target, arch)
-    from nv_evo.io_placement import io_strategy, bind_io, input_groups
+    from substrates.nervous.io_placement import io_strategy, bind_io, input_groups
     if io_strategy(target) != 'fixed':
-        from snn_evo.growth import cell_io_tags
+        from substrates.snn.growth import cell_io_tags
         bound = bind_io(genome, grid, target,
                         tags=cell_io_tags(genome, grid))
         groups = input_groups(bound[0]) if bound else []
@@ -241,7 +249,7 @@ def build_genome_text(genome, fitness=None, binding=None):
     """Render the genome as a readable, aligned chromosome/gene table.
 
     ``binding`` is an optional pre-rendered I/O-binding summary (see
-    nv_evo/io_placement.describe_binding) appended as a footer, so a genome
+    substrates/nervous/io_placement.describe_binding) appended as a footer, so a genome
     evolved under an evolvable io_placement strategy shows exactly which tag
     each port selected and where it attached."""
     chroms  = list(getattr(genome, 'chromosomes', []) or [])
@@ -360,8 +368,8 @@ def _lut_gene_lines(gi, g, show_iotags=False):
     """Readable two-line view of one LUT gene: the boolean function the gene
     installs (out, decoded from its 16-bit table to logic over the neighbour
     inputs N/S/E/W) plus the raw hex of every table for reference. The tables
-    themselves are drawn as truth grids on the Growth tab. See lut_evo/boolfn.py."""
-    from lut_evo.boolfn import lut_sop, popcount
+    themselves are drawn as truth grids on the Growth tab. See substrates/lut/boolfn.py."""
+    from substrates.lut.boolfn import lut_sop, popcount
     kind = 'growth' if g.self_in == 0 else 'maint '
     iotag = (('   iotag=%d selector=%d'
               % (getattr(g, 'tag', 0), getattr(g, 'io_selector', 0)))
@@ -651,10 +659,10 @@ class App:
             wraplength=max(140, event.width - 8)), add='+')
 
         # ── third row: GA + substrate-physics tuning (applied on Run) ──
-        from nv_evo.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
+        from substrates.nervous.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
                                TOURNAMENT_K as _TK, MUT_DECAY as _AL)
-        from evo_runtime.mutation import DEFAULT_MUTATION_LIMIT as _ML
-        from nv_evo.pulse import DELAY as _D, WIDTH as _W, COINC as _C
+        from runtime.mutation import DEFAULT_MUTATION_LIMIT as _ML
+        from substrates.nervous.pulse import DELAY as _D, WIDTH as _W, COINC as _C
         self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL,
                                    beta=1.0, limit=_ML, elite=5,
                                    delay=_D, width=_W, coinc=_C)
@@ -730,7 +738,7 @@ class App:
         self._nv_profile_cb.pack(side='left')
         self._nv_profile_cb.bind('<<ComboboxSelected>>',
                                  self._on_nv_profile_change)
-        # Evolvable I/O binding (nv_evo/io_placement.py). 'fixed' is the original
+        # Evolvable I/O binding (substrates/nervous/io_placement.py). 'fixed' is the original
         # geometric/fitted placement; the others make port placement an
         # evolvable genome trait. All THREE backends honour
         # it, so it lives in its own always-visible frame — the pulse frame is
@@ -741,6 +749,7 @@ class App:
             side='left', padx=(6, 2))
         self._IO_PLACEMENT_LABELS = {
             'Fixed (original)':            'fixed',
+            'Dedicated input/output nodes': 'terminal_nodes',
             'Evolvable: node-type rank':   'tag_rank',
             'Evolvable: wiring chromosome':   'wiring_chromosome',
             'Evolvable: spatial chromosome':  'spatial_chromosome',
@@ -762,7 +771,7 @@ class App:
         # the pulse row cannot overflow; packed/hidden before the notebook by
         # _sync_nv_profile_controls. Defaults are the frozen PulseConfig values,
         # so an untouched row reproduces the audited physics exactly.
-        from nv_evo.pulse import PulseConfig as _PulseConfig
+        from substrates.nervous.pulse import PulseConfig as _PulseConfig
         _AC = _PulseConfig()
         self._analog_defaults = dict(vth=_AC.analog_threshold,
                                      step=_AC.analog_step,
@@ -844,6 +853,14 @@ class App:
     def _reconfigure_for_backend(self):
         """Show only the controls / tab labels relevant to the selected model."""
         backend = self._backend()
+        if hasattr(self, '_io_placement_cb'):
+            labels = [
+                label for label, strategy in self._IO_PLACEMENT_LABELS.items()
+                if backend != 'snn' or strategy != 'terminal_nodes']
+            if (backend == 'snn'
+                    and self._selected_io_placement() == 'terminal_nodes'):
+                self._io_placement_var.set('Fixed (original)')
+            self._io_placement_cb.configure(values=labels)
         self._sync_telomere_backend(backend)
         if backend != 'snn':
             self._arch_frame.pack_forget()
@@ -1104,21 +1121,24 @@ class App:
             name, get_target(DEFAULT_TARGET))
         self._cur_var.set(str(self.target.high))
         if getattr(self.target, 'temporal', False):
-            if self._backend() == 'snn':          # temporal needs nervous or LUT
-                self._backend_var.set('Nervous')
             self._reconfigure_for_backend()
             # show what this target IS right away in the Evolution tab's panel
             try:
                 if self._backend() == 'lut':
-                    from lut_evo import lut_report
+                    from substrates.lut import lut_report
                     preview = lut_report(self.target)
+                elif self._backend() == 'snn':
+                    preview = snn_temporal_report(self.target)
                 else:
                     preview = temporal_report(self.target)
                 self._set_tt(preview, title='Behavior Contract')
             except Exception:
                 pass
-            model = ('continuous-time LUT array' if self._backend() == 'lut'
-                     else 'continuous-time nervous net')
+            model = {
+                'lut': 'continuous-time LUT array',
+                'nervous': 'continuous-time nervous net',
+                'snn': 'continuous-time recurrent SNN',
+            }[self._backend()]
             self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test seconds. '
                              'See Evolution for its executable contract and Interactive for playback.'
                              % (self.target.name, model, self.target.n_inputs,
@@ -1203,7 +1223,7 @@ class App:
                 raise ValueError
         except ValueError:
             return None
-        from nv_evo.pulse import PulseConfig
+        from substrates.nervous.pulse import PulseConfig
         try:
             pulse_config = PulseConfig(delay=delay, width=width,
                                        coincidence=coincidence,
@@ -1363,8 +1383,12 @@ class App:
         except ValueError:
             return None, None, False
         levels = tuple(round(vmin + (vmax - vmin) * i / 3.0, 4) for i in range(4))
+        recurrent = (
+            self._backend() == 'snn'
+            and getattr(self.target, 'temporal', False))
         return Arch(syn_weight=sw, vth_levels=levels,
-                    tau_levels=DEFAULT_ARCH.tau_levels), high, True
+                    tau_levels=DEFAULT_ARCH.tau_levels,
+                    recurrent=recurrent), high, True
 
     def _reset_arch(self):
         self._syn_var.set(str(DEFAULT_ARCH.syn_weight))
@@ -1980,14 +2004,17 @@ class App:
         try:
             if temporal:
                 if self._disp_backend == 'lut':
-                    from lut_evo import lut_report
+                    from substrates.lut import lut_report
                     text = lut_report(self._disp_target, genome)
+                elif self._disp_backend == 'snn':
+                    text = snn_temporal_report(
+                        self._disp_target, genome, self._disp_arch)
                 else:
                     text = temporal_report(self._disp_target, genome)
             elif self._disp_backend == 'nervous':
                 text = nervous_truth_table(genome, self._disp_target)
             elif self._disp_backend == 'lut':
-                from lut_evo import lut_truth_table
+                from substrates.lut import lut_truth_table
                 text = lut_truth_table(genome, self._disp_target)
             else:
                 text = build_truth_table(genome, self._disp_target, self._disp_arch)
@@ -2004,9 +2031,24 @@ class App:
             self._draw_growth_lut(genome, target, fitness)
             return
         try:
-            grid, ns_list, _ = interpret_for(genome, target, self._disp_arch)
-            output_pos = {(n.x, n.y): n.out_role for n in ns_list if n.is_output}
-            snapshots  = grow_snn_snapshots(genome, seeds=_growth_seeds(target),
+            if getattr(target, 'temporal', False):
+                prep = prepare_snn_temporal(
+                    genome, target, self._disp_arch)
+                if prep is None:
+                    raise ValueError('incomplete temporal SNN')
+                grid, ns_list, output_binding = prep[0], prep[1], prep[4]
+                from substrates.nervous.io_placement import output_groups
+                output_pos = {
+                    cell: role
+                    for role, cells in output_groups(output_binding).items()
+                    for cell in cells}
+            else:
+                grid, ns_list, _ = interpret_for(
+                    genome, target, self._disp_arch)
+                output_pos = {
+                    (n.x, n.y): n.out_role for n in ns_list if n.is_output}
+            snapshots  = grow_snn_snapshots(
+                genome, seeds=_growth_seeds(target, genome),
                                             grid_size=target.grid_size, iters=target.iters)
             rgba_fn = grid_to_rgba
         except Exception:
@@ -2071,21 +2113,22 @@ class App:
         """Growth tab for the hex nervous net: snapshots as honeycomb panels,
         the final one wired (excitatory green / inhibitory red)."""
         try:
-            snaps = grow_nervous_snapshots(genome, seeds=_growth_seeds(target),
+            snaps = grow_nervous_snapshots(
+                genome, seeds=_growth_seeds(target, genome),
                                            grid_size=target.grid_size, iters=target.iters)
             arch = getattr(genome, 'arch', 'single')
             routing, in_pos, out_pos = interpret_nervous(
                 snaps[-1], target, arch=arch)
             # Honour an evolvable io_placement strategy: mark the tag-bound
             # cells the scorer actually drives/reads.
-            from nv_evo.io_placement import io_strategy, bind_io, flat_inputs
+            from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
             bound = None
             if io_strategy(target) != 'fixed':
                 bound = bind_io(genome, snaps[-1], target)
             if bound is not None:
                 in_pos, out_pos = flat_inputs(bound[0]), bound[1]
             elif getattr(target, 'temporal', False):
-                from nv_evo import place_outputs_by_trace
+                from substrates.nervous import place_outputs_by_trace
                 out_pos, _ = place_outputs_by_trace(
                     snaps[-1], routing, in_pos, target, arch=arch)
         except Exception:
@@ -2118,9 +2161,10 @@ class App:
         with the first-class renderer (per-side capability nibs + I/O markers),
         the final panel showing the mature organism, plus a legend."""
         try:
-            from lut_evo import grow_lut_snapshots, place_outputs_by_trace
-            from lut_evo.ga import _place_outputs_combinational
-            snaps = grow_lut_snapshots(genome, seeds=_growth_seeds(target),
+            from substrates.lut import grow_lut_snapshots, place_outputs_by_trace
+            from substrates.lut.ga import _place_outputs_combinational
+            snaps = grow_lut_snapshots(
+                genome, seeds=_growth_seeds(target, genome),
                                        grid_size=target.grid_size, iters=target.iters)
         except Exception:
             return
@@ -2129,10 +2173,10 @@ class App:
         try:
             # Under an evolvable io_placement strategy the genome's tags choose
             # the ports — mark the SAME cells the scorer drives/reads.
-            from nv_evo.io_placement import io_strategy, bind_io, flat_inputs
+            from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
             bound = None
             if io_strategy(target) != 'fixed' and final:
-                from lut_evo.lut import cell_io_tags
+                from substrates.lut.lut import cell_io_tags
                 bound = bind_io(genome, final, target,
                                 tags=cell_io_tags(genome, final))
             if bound is not None:
@@ -2153,8 +2197,8 @@ class App:
         # most common first — shown below as REAL truth tables (green=1/white=0)
         # so the raw table content is visible, not just the wedge-colour hash.
         from collections import Counter
-        from lut_evo import lut_sop
-        from lut_evo.viz import _lut_color
+        from substrates.lut import lut_sop
+        from substrates.lut.viz import _lut_color
         counts = Counter(v for st in final.values() for v in st if v)
         luts   = [v for v, _ in counts.most_common(8)]
         # Two STRUCTURED sections (a single uniform grid scattered the LUT tables
@@ -2211,17 +2255,17 @@ class App:
         dynamics that ARE the LUT's computation are visible over time."""
         target = self._disp_target
         try:
-            from lut_evo import grow_lut, AsyncLutSim, place_outputs_by_trace
-            grid = grow_lut(genome, seeds=_growth_seeds(target),
+            from substrates.lut import grow_lut, AsyncLutSim, place_outputs_by_trace
+            grid = grow_lut(genome, seeds=_growth_seeds(target, genome),
                             grid_size=target.grid_size, iters=target.iters)
             if len(grid) <= target.n_inputs:
                 raise ValueError
             # Honour an evolvable io_placement strategy: drive/read the same
             # tag-bound cells the scorer uses.
-            from nv_evo.io_placement import io_strategy, bind_io
+            from substrates.nervous.io_placement import io_strategy, bind_io
             bound = None
             if io_strategy(target) != 'fixed':
-                from lut_evo.lut import cell_io_tags
+                from substrates.lut.lut import cell_io_tags
                 bound = bind_io(genome, grid, target,
                                 tags=cell_io_tags(genome, grid))
             if bound is not None:
@@ -2234,14 +2278,19 @@ class App:
                                    '(LUT: circuit incomplete — grew too little)')
             return
         trial   = target.trials[0]
-        from nv_evo.io_placement import input_groups, flat_inputs
+        from substrates.nervous.io_placement import (
+            input_groups, flat_inputs, terminal_node_sets)
         # Drive the SAME cells the scorer drives: the bound attachment groups
         # under an evolvable strategy (an input may fan out to several sites; a
         # shared site wired-ORs), the seed pads otherwise.
         groups  = input_groups(bound_in if bound_in is not None
                                else [p for p in target.inputs if p in grid])
         in_pos  = flat_inputs(groups)                  # display markers
-        sim     = AsyncLutSim(grid)
+        terminal_inputs, terminal_outputs = terminal_node_sets(
+            target, groups, out_pos)
+        sim = AsyncLutSim(
+            grid, input_nodes=terminal_inputs,
+            output_nodes=terminal_outputs)
         frames  = []                                   # (tick, nibble-map)
         physical = getattr(trial, 'input_events', None)
         if physical is not None:
@@ -2292,7 +2341,7 @@ class App:
             self._draw_lut_dynamics(genome)
             return
         try:
-            from lut_evo import lut_case_outputs
+            from substrates.lut import lut_case_outputs
             grid, out_pos, cases = lut_case_outputs(genome, target)
         except Exception:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
@@ -2334,12 +2383,19 @@ class App:
             self._draw_activity_lut(genome)
             return
         target = self._disp_target
+        if getattr(target, 'temporal', False):
+            self._draw_placeholder(
+                self._volt_fig, self._volt_canvas,
+                'Temporal recurrent SNN — the fitted event/state traces are '
+                'listed in the Contract Score panel; use Interactive to load '
+                'or edit a complete trial timeline.')
+            return
         try:
             grid, ns, ss = interpret_for(genome, target, self._disp_arch)
-            from nv_evo.io_placement import (io_strategy, bind_io,
+            from substrates.nervous.io_placement import (io_strategy, bind_io,
                                              input_groups)
             if io_strategy(target) != 'fixed':
-                from snn_evo.growth import cell_io_tags
+                from substrates.snn.growth import cell_io_tags
                 bound = bind_io(
                     genome, grid, target, tags=cell_io_tags(genome, grid))
                 groups = input_groups(bound[0]) if bound else []
@@ -2540,22 +2596,23 @@ class App:
         if genome is None or target is None:
             return None
         try:
-            from nv_evo.io_placement import io_strategy, describe_binding
+            from substrates.nervous.io_placement import io_strategy, describe_binding
             if io_strategy(target) == 'fixed':
                 return None
             backend = getattr(self, '_disp_backend', 'snn')
             if backend == 'nervous':
-                from nv_evo.nervous import grow_nervous
-                grid = grow_nervous(genome, seeds=_growth_seeds(target))
+                from substrates.nervous.nervous import grow_nervous
+                grid = grow_nervous(
+                    genome, seeds=_growth_seeds(target, genome))
                 tags = None                       # nervous attribution is the default
             elif backend == 'lut':
-                from lut_evo.lut import grow_lut, cell_io_tags
-                grid = grow_lut(genome, seeds=_growth_seeds(target),
+                from substrates.lut.lut import grow_lut, cell_io_tags
+                grid = grow_lut(genome, seeds=_growth_seeds(target, genome),
                                 grid_size=target.grid_size, iters=target.iters)
                 tags = cell_io_tags(genome, grid)
             else:
-                from snn_evo.growth import grow_snn, cell_io_tags
-                grid = grow_snn(genome, seeds=_growth_seeds(target),
+                from substrates.snn.growth import grow_snn, cell_io_tags
+                grid = grow_snn(genome, seeds=_growth_seeds(target, genome),
                                 grid_size=target.grid_size)
                 tags = cell_io_tags(genome, grid)
             return describe_binding(genome, grid, target, tags=tags)
@@ -2667,8 +2724,8 @@ class App:
         Shows the genome's structure (which chromosome carries which LUTs) rather
         than a global merge or an unreadable wall of one card per gene."""
         from collections import Counter
-        from lut_evo import lut_sop
-        from lut_evo.viz import _lut_color
+        from substrates.lut import lut_sop
+        from substrates.lut.viz import _lut_color
         K = 6                                     # top output LUTs shown per chromosome
         shown = chroms[:8]
         axes = fig.subplots(len(shown), K + 1, squeeze=False)

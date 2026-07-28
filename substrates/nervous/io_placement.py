@@ -1,8 +1,17 @@
-"""Heritable input/output placement shared by all three substrates.
+"""Input/output placement shared by the developmental substrates.
 
 The legacy ``fixed`` mode grows from geometrically declared input pads and fits
-outputs after simulation.  The evolvable modes instead grow from one neutral
-centre seed and bind ports to the mature body without looking at target traces:
+outputs after simulation. Tag/type evolvable modes grow from one neutral centre
+and bind ports without looking at target traces. Spatial mode instead makes its
+input alleles the developmental germlines:
+
+``terminal_nodes``
+    Body genes carry a heritable ``io_kind`` allele: ordinary, input terminal,
+    or output terminal. A mature cell inherits the identity of its winning
+    developmental gene. Logical ports bind only to cells that actually express
+    the matching terminal kind; target coordinates are never consulted. The
+    simulators enforce the directionality: input terminals cannot read the body
+    and output terminals cannot drive it.
 
 ``tag_rank``
     Body-gene ``tag`` alleles are expression priorities.  A mature cell inherits
@@ -22,11 +31,14 @@ centre seed and bind ports to the mature body without looking at target traces:
     instead of globally rehashing every site.
 
 ``spatial_chromosome``
-    Chromosome three is again a dedicated, non-developmental port map, but each
-    port gene stores a normalised ``(x, y)`` anchor instead of a node type.
-    After growth the port attaches to the nearest still-free living cell.
-    Coordinates mutate locally and a changed body merely slides an attachment
-    to its nearest survivor; it cannot invalidate the map by losing a type.
+    Chromosome three is again a dedicated port map, but each port gene stores a
+    normalised ``(x, y)`` anchor instead of a node type. The chromosome does not
+    express cell state directly, yet its input loci affect development through
+    the germline positions they encode.
+    Input anchors are the organism's actual germline positions, so moving an
+    input changes development as well as wiring. Output anchors attach to the
+    nearest still-free mature cell in a stable target coordinate frame.
+    Coordinates mutate locally.
 
 Every physical cell is exclusive to one logical port.  This is a semantic
 guardrail, not a geometric one: it prevents an input and output from becoming
@@ -39,16 +51,23 @@ import copy
 import random
 from typing import Dict, List, Tuple
 
+from .hexgrid import IO_STATE_INPUT, IO_STATE_OUTPUT
+
 Pos = Tuple[int, int]
 
 IO_STRATEGIES = (
-    'fixed', 'tag_rank', 'wiring_chromosome', 'spatial_chromosome')
+    'fixed', 'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+    'spatial_chromosome')
 _STRATEGY_ALIASES = {'sex_chromosome': 'wiring_chromosome'}
 
 WIRING_CHROMOSOME_INDEX = 2
 IO_PRIORITY_MAX = 65535
 SPATIAL_COORD_MAX = 65535
 _MASK64 = (1 << 64) - 1
+IO_KIND_BODY = 0
+IO_KIND_INPUT = 1
+IO_KIND_OUTPUT = 2
+IO_KINDS = (IO_KIND_BODY, IO_KIND_INPUT, IO_KIND_OUTPUT)
 
 
 def io_strategy(target) -> str:
@@ -60,11 +79,90 @@ def io_strategy(target) -> str:
     return strategy
 
 
-def growth_seeds(target, strategy=None):
-    """Pads for fixed binding; one neutral centre seed for evolvable binding."""
+def _spatial_domain(target):
+    """Canonical integer field used by heritable spatial input anchors."""
+    size = max(1, int(getattr(target, 'grid_size', 5) or 5))
+    declared = (
+        [tuple(pos) for pos in getattr(target, 'inputs', ())]
+        + [tuple(terminal.pos)
+           for terminal in getattr(target, 'outputs', ())])
+    xs = [int(pos[0]) for pos in declared]
+    ys = [int(pos[1]) for pos in declared]
+    return (
+        min([0] + xs), max([size - 1] + xs),
+        min([0] + ys), max([size - 1] + ys),
+    )
+
+
+def spatial_port_sites(genome, target):
+    """Decode distinct canonical sites for every spatial port allele.
+
+    Quantisation collisions are resolved by the nearest free canonical lattice
+    site. This is deterministic and genotype-only: evaluation never repairs or
+    rewrites an allele.
+    """
+    n_ports = (
+        int(getattr(target, 'n_inputs', 0) or 0)
+        + len(getattr(target, 'outputs', ()) or ()))
+    genes = _wiring_port_genes(genome, n_ports)
+    if genes is None or not n_ports:
+        return ()
+    low_x, high_x, low_y, high_y = _spatial_domain(target)
+    candidates = [
+        (x, y)
+        for x in range(low_x, high_x + 1)
+        for y in range(low_y, high_y + 1)]
+    if len(candidates) < n_ports:
+        return ()
+    claimed, sites = set(), []
+    for port_index, gene in enumerate(genes):
+        anchor = (
+            _decode_spatial_coord(_gene_tag(gene), low_x, high_x),
+            _decode_spatial_coord(
+                _gene_selector(gene), low_y, high_y),
+        )
+        available = [pos for pos in candidates if pos not in claimed]
+        selected = min(
+            available,
+            key=lambda pos: (
+                (float(pos[0]) - anchor[0]) ** 2
+                + (float(pos[1]) - anchor[1]) ** 2,
+                _site_rank(
+                    int(getattr(genome, 'tag', 0)) ^ port_index,
+                    pos, port_index + 1),
+            ))
+        claimed.add(selected)
+        sites.append(selected)
+    return tuple(sites)
+
+
+def spatial_input_sites(genome, target):
+    """Distinct developmental input sites from the spatial chromosome."""
+    n_inputs = int(getattr(target, 'n_inputs', 0) or 0)
+    return spatial_port_sites(genome, target)[:n_inputs]
+
+
+def growth_seeds(target, strategy=None, genome=None):
+    """Return germline cells for the selected I/O architecture.
+
+    Fixed binding grows from declared pads. Developmental spatial binding grows
+    from its heritable input anchors. Other evolvable strategies, plus
+    zero-input spatial organisms, retain the neutral centre seed.
+    """
     strategy = strategy or io_strategy(target)
     if strategy == 'fixed':
         return tuple(target.inputs)
+    if strategy == 'spatial_chromosome' and genome is not None:
+        # The explicit LUT truth-table compiler inverse-develops a one-seed
+        # phenotype and labels that provenance. Preserve that verified witness;
+        # ordinary evolved spatial genomes use developmental input anchors.
+        if getattr(genome, 'provenance', '') == 'truth-table-compiler-v1':
+            size = int(getattr(target, 'grid_size', 5) or 5)
+            return ((size // 2, size // 2),)
+        n_inputs = int(getattr(target, 'n_inputs', 0) or 0)
+        sites = spatial_input_sites(genome, target)
+        if n_inputs and len(sites) == n_inputs:
+            return sites
     size = int(getattr(target, 'grid_size', 5) or 5)
     return ((size // 2, size // 2),)
 
@@ -72,6 +170,13 @@ def growth_seeds(target, strategy=None):
 def uses_port_chromosome(strategy) -> bool:
     """Whether ``strategy`` reserves chromosome three as an I/O map."""
     return strategy in ('wiring_chromosome', 'spatial_chromosome')
+
+
+def evolves_io(strategy) -> bool:
+    """Whether a placement strategy has heritable port-placement alleles."""
+    return strategy in (
+        'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+        'spatial_chromosome')
 
 
 def wiring_chromosome(genome):
@@ -97,6 +202,130 @@ def body_type_pool(genome):
     """Nonzero node types that the developmental program can express."""
     return [int(gene.self_out) for chromosome in body_chromosomes(genome)
             for gene in chromosome.genes if getattr(gene, 'self_out', 0)]
+
+
+def _body_gene_loci(genome):
+    return [
+        (chromosome, index)
+        for chromosome in body_chromosomes(genome)
+        for index in range(len(chromosome.genes))
+    ]
+
+
+def seed_terminal_kinds(genome, n_inputs, n_outputs):
+    """Seed heritable terminal alleles on a fresh developmental genome.
+
+    Marking a gene does not guarantee that it wins anywhere; evaluation never
+    repairs missing terminals. Gene copies preserve the reproduction invariant
+    that shared gene objects are otherwise immutable.
+    """
+    loci = _body_gene_loci(genome)
+    if not loci:
+        return genome
+    requested = (
+        [IO_KIND_INPUT] * max(0, int(n_inputs))
+        + [IO_KIND_OUTPUT] * max(0, int(n_outputs)))
+    if not requested:
+        return genome
+    # Dense LUT ontogenies can carry hundreds of mostly neutral genes, while NV
+    # genomes are much smaller. Give every required role a modest number of
+    # opportunities scaled to genome size; binding still activates exactly one
+    # cell per port.
+    mandatory = []
+    if int(n_inputs) > 0:
+        mandatory.append(IO_KIND_INPUT)
+    if int(n_outputs) > 0:
+        mandatory.append(IO_KIND_OUTPUT)
+    remainder = list(requested)
+    for kind in mandatory:
+        remainder.remove(kind)
+    random.shuffle(remainder)
+    copies = max(
+        2, min(8, len(loci) // max(1, 4 * len(requested))))
+    extra = list(requested) * (copies - 1)
+    random.shuffle(extra)
+    roles = mandatory + remainder + extra
+    chosen = random.sample(loci, min(len(loci), len(roles)))
+    for (chromosome, index), kind in zip(chosen, roles):
+        gene = copy.copy(chromosome.genes[index])
+        gene.io_kind = kind
+        chromosome.genes[index] = gene
+    return genome
+
+
+def mutate_terminal_kind(genome):
+    """Change one body's inherited ordinary/input/output node identity."""
+    loci = _body_gene_loci(genome)
+    if not loci:
+        return False
+    chromosome, index = random.choice(loci)
+    gene = copy.copy(chromosome.genes[index])
+    old = int(getattr(gene, 'io_kind', IO_KIND_BODY))
+    gene.io_kind = random.choice([kind for kind in IO_KINDS if kind != old])
+    chromosome.genes[index] = gene
+    return True
+
+
+# ── nervous-net dedicated I/O node-type states (16 = input, 17 = output) ─────────
+# For the NERVOUS backend, terminal identity is the GROWN STATE, not the io_kind
+# tag (which LUT/SNN still use). A gene expresses a terminal by growing a cell
+# into the I/O state, so seeding/mutation set ``self_out`` instead of io_kind.
+
+def seed_terminal_states(genome, n_inputs, n_outputs):
+    """Nervous: seed genes that grow dedicated I/O node-type states.
+
+    Mirrors :func:`seed_terminal_kinds` but sets ``self_out`` to the input
+    (16) / output (17) node-type state — a gene grows a terminal by expressing
+    the state, so identity is developmental like every other cell fate. Binding
+    still activates exactly one cell per port; extra expressed terminals stay
+    ordinary I/O-state cells.
+    """
+    loci = _body_gene_loci(genome)
+    if not loci:
+        return genome
+    requested = ([IO_STATE_INPUT] * max(0, int(n_inputs))
+                 + [IO_STATE_OUTPUT] * max(0, int(n_outputs)))
+    if not requested:
+        return genome
+    mandatory = []
+    if int(n_inputs) > 0:
+        mandatory.append(IO_STATE_INPUT)
+    if int(n_outputs) > 0:
+        mandatory.append(IO_STATE_OUTPUT)
+    remainder = list(requested)
+    for state in mandatory:
+        remainder.remove(state)
+    random.shuffle(remainder)
+    copies = max(2, min(8, len(loci) // max(1, 4 * len(requested))))
+    extra = list(requested) * (copies - 1)
+    random.shuffle(extra)
+    states = mandatory + remainder + extra
+    chosen = random.sample(loci, min(len(loci), len(states)))
+    for (chromosome, index), state in zip(chosen, states):
+        gene = copy.copy(chromosome.genes[index])
+        gene.self_out = int(state)
+        chromosome.genes[index] = gene
+    return genome
+
+
+def mutate_terminal_state(genome):
+    """Nervous: flip one body gene's ``self_out`` to / from a dedicated I/O
+    node-type state (16 input, 17 output). A non-terminal gene may become a
+    terminal; a terminal gene may switch role or revert to an ordinary cell."""
+    loci = _body_gene_loci(genome)
+    if not loci:
+        return False
+    chromosome, index = random.choice(loci)
+    gene = copy.copy(chromosome.genes[index])
+    io_states = (IO_STATE_INPUT, IO_STATE_OUTPUT)
+    current = int(gene.self_out) & 0x1F
+    if current in io_states:
+        other = next(s for s in io_states if s != current)
+        gene.self_out = random.choice((other, 0))     # switch role or retire
+    else:
+        gene.self_out = random.choice(io_states)       # become a terminal
+    chromosome.genes[index] = gene
+    return True
 
 
 def _clone_mapping_gene(template, node_type):
@@ -256,7 +485,7 @@ def seed_spatial_from_phenotype(genome, grid, target, tags=None):
     eligible = [tuple(pos) for pos in node_types]
     if not eligible:
         return 0
-    bounds = _spatial_bounds(eligible)
+    bounds = _spatial_domain(target)
     chosen = random.sample(eligible, min(len(eligible), len(specs)))
     wiring = wiring_chromosome(genome)
     mapped = list(wiring.genes)
@@ -270,6 +499,271 @@ def seed_spatial_from_phenotype(genome, grid, target, tags=None):
         mapped[index] = gene
     wiring.genes = mapped
     return len(chosen)
+
+
+def seed_spatial_from_geometry(genome, grid, target):
+    """Seed spatial anchors from the target's DECLARED I/O geometry.
+
+    Random phenotype seeding starts every port at an arbitrary living site, so a
+    fresh spatial population must rediscover from scratch where inputs and
+    outputs belong -- the search-speed gap that leaves spatial trailing fixed at
+    a normal generation budget (it only catches up given ~3x the generations).
+    This instead initialises each port's normalised anchor at the same location
+    fixed binding uses (``target.inputs`` for input ports, each output
+    terminal's ``pos``), so a fresh genome already attaches every port to the
+    living cell nearest its intended site. The anchors remain ordinary heritable
+    alleles; evolution refines or abandons the prior freely.
+
+    Coordinates use the target's stable canonical field rather than a
+    particular random body's bounds. Consequently the input alleles can be
+    applied before growth and reproduce the declared germline geometry exactly.
+    Returns the number of ports initialised, or 0 when the map is incomplete.
+    """
+    specs = _port_specs(target)
+    genes = _wiring_port_genes(genome, len(specs))
+    if genes is None:
+        return 0
+    low_x, high_x, low_y, high_y = _spatial_domain(target)
+    declared = ([tuple(pos) for pos in target.inputs]
+                + [tuple(terminal.pos) for terminal in target.outputs])
+    # Anchor each port at its raw declared coordinate and let the ordinary
+    # nearest-free-cell resolution place it. Deliberately NOT forcing distinct
+    # cells here: greedy distinct assignment over-constrains the initial
+    # population and measurably hurt easy targets, whereas raw anchoring keeps
+    # placement diversity and lets the viability tier + mutation resolve the
+    # occasional two-ports-one-cell collision.
+    wiring = wiring_chromosome(genome)
+    mapped = list(wiring.genes)
+    for index in range(len(specs)):
+        anchor_x, anchor_y = declared[index]
+        gene = copy.copy(mapped[index])
+        gene.tag = _encode_spatial_coord(anchor_x, low_x, high_x)
+        gene.io_limit = 1
+        gene.io_selector = _encode_spatial_coord(anchor_y, low_y, high_y)
+        mapped[index] = gene
+    wiring.genes = mapped
+    return len(specs)
+
+
+def seed_spatial(genome, grid, target, tags=None, geometry_prob=0.75):
+    """Initialise a fresh spatial port map for a factory genome.
+
+    Input germlines always start from viable declared geometry. Most output
+    anchors do too; a minority is scattered across the canonical field so
+    selection sees alternate readouts without target-trace fitting or changing
+    the initial body. ``grid`` and ``tags`` remain accepted for caller
+    compatibility, but initialisation no longer needs a sacrificial phenotype.
+    Returns the number of ports initialised.
+    """
+    count = seed_spatial_from_geometry(genome, grid, target)
+    if not count:
+        return 0
+    genes = _wiring_port_genes(genome, len(_port_specs(target)))
+    if genes is None or random.random() < geometry_prob:
+        return count
+    wiring = wiring_chromosome(genome)
+    mapped = list(wiring.genes)
+    for index in range(int(getattr(target, 'n_inputs', 0) or 0), len(genes)):
+        gene = copy.copy(mapped[index])
+        gene.tag = random.randrange(SPATIAL_COORD_MAX + 1)
+        gene.io_selector = random.randrange(SPATIAL_COORD_MAX + 1)
+        mapped[index] = gene
+    wiring.genes = mapped
+    return count
+
+
+def set_spatial_port_positions(
+        genome, positions, assignments, target=None):
+    """Encode exact mature-body sites into a spatial port chromosome.
+
+    ``assignments[i]`` is the desired physical cell for logical port ``i``
+    (inputs first, then outputs in target order).  This is the deterministic
+    counterpart of ``seed_spatial_from_phenotype`` used by plateau-rescue
+    search: it creates an ordinary heritable genotype and never changes the
+    evaluator or repairs a binding during evaluation.
+    """
+    positions = [tuple(pos) for pos in positions]
+    assignments = [tuple(pos) for pos in assignments]
+    genes = _wiring_port_genes(genome, len(assignments))
+    # Ordinary spatial genomes use the stable target coordinate frame. The
+    # optional target keeps backward compatibility for the inverse-grown LUT
+    # compiler, whose verified witness predates developmental spatial inputs
+    # and intentionally uses its mature phenotype bounds.
+    bounds = (
+        _spatial_domain(target) if target is not None
+        else _spatial_bounds(positions))
+    if genes is None or bounds is None:
+        return 0
+    eligible = set(positions)
+    if (len(set(assignments)) != len(assignments)
+            or any(pos not in eligible for pos in assignments)):
+        return 0
+    low_x, high_x, low_y, high_y = bounds
+    wiring = wiring_chromosome(genome)
+    mapped = list(wiring.genes)
+    for index, desired in enumerate(assignments):
+        gene = copy.copy(mapped[index])
+        gene.tag = _encode_spatial_coord(desired[0], low_x, high_x)
+        gene.io_limit = 1
+        gene.io_selector = _encode_spatial_coord(
+            desired[1], low_y, high_y)
+        mapped[index] = gene
+    wiring.genes = mapped
+    return len(assignments)
+
+
+def spatial_output_variants(genome, target, limit=48):
+    """Ordinary-genome readout proposals for a stalled spatial run.
+
+    The proposals never inspect expected behavior or simulated traces. They
+    keep the complete body program and every developmental input allele fixed,
+    then place one output allele at well-spread sites in the target's canonical
+    field. Normal evaluation decides whether any proposal is useful. This gives
+    selection a discrete readout neighbourhood without granting fixed I/O's
+    target-aware trace fitting.
+    """
+    if io_strategy(target) != 'spatial_chromosome':
+        return []
+    limit = max(0, int(limit))
+    n_inputs = int(getattr(target, 'n_inputs', 0) or 0)
+    n_outputs = len(getattr(target, 'outputs', ()) or ())
+    genes = _wiring_port_genes(genome, n_inputs + n_outputs)
+    if not limit or genes is None or not n_outputs:
+        return []
+
+    low_x, high_x, low_y, high_y = _spatial_domain(target)
+    remaining = {
+        (x, y)
+        for x in range(low_x, high_x + 1)
+        for y in range(low_y, high_y + 1)}
+    declared = [
+        tuple(terminal.pos)
+        for terminal in getattr(target, 'outputs', ()) or ()]
+    ordered = []
+    # Start with declared terminals and field corners, then greedily choose the
+    # point farthest from those already covered. This gives a useful space-
+    # filling prefix even when a small population admits only a few proposals.
+    starters = declared + [
+        (low_x, low_y), (low_x, high_y),
+        (high_x, low_y), (high_x, high_y),
+        ((low_x + high_x) // 2, (low_y + high_y) // 2)]
+    for site in starters:
+        if site in remaining:
+            ordered.append(site)
+            remaining.remove(site)
+    while remaining:
+        site = max(
+            remaining,
+            key=lambda pos: (
+                min(
+                    (pos[0] - chosen[0]) ** 2
+                    + (pos[1] - chosen[1]) ** 2
+                    for chosen in ordered),
+                _site_rank(int(getattr(genome, 'tag', 0)), pos, len(ordered)),
+            ))
+        ordered.append(site)
+        remaining.remove(site)
+
+    variants, seen = [], set()
+    for site in ordered:
+        for output_index in range(n_outputs):
+            port_index = n_inputs + output_index
+            source = genes[port_index]
+            encoded = (
+                _encode_spatial_coord(site[0], low_x, high_x),
+                _encode_spatial_coord(site[1], low_y, high_y))
+            current = (_gene_tag(source), _gene_selector(source))
+            if encoded == current:
+                continue
+            candidate = copy.deepcopy(genome)
+            wiring = wiring_chromosome(candidate)
+            mapped = list(wiring.genes)
+            gene = copy.copy(mapped[port_index])
+            gene.tag, gene.io_selector = encoded
+            gene.io_limit = 1
+            mapped[port_index] = gene
+            wiring.genes = mapped
+            signature = tuple(
+                (_gene_tag(item), _gene_selector(item))
+                for item in wiring.genes[:n_inputs + n_outputs])
+            if signature in seen:
+                continue
+            seen.add(signature)
+            variants.append(candidate)
+            if len(variants) >= limit:
+                return variants
+    return variants
+
+
+def spatial_routing_variants(genome, target, limit=48):
+    """Heritable one-cell routing proposals for a stalled nervous organism.
+
+    Development, germlines and port alleles stay fixed. Each proposal flips one
+    bit of one mature cell's routing state through the post-development overlay,
+    so selection can assemble a junction or veto locally instead of redrawing a
+    many-cell developmental rule. Expected behavior is never inspected.
+    """
+    if io_strategy(target) != 'spatial_chromosome':
+        return []
+    if getattr(genome, 'arch', 'single') != 'single':
+        return []
+    limit = max(0, int(limit))
+    if not limit:
+        return []
+
+    from .genome import MAX_ROUTING_PATCHES, RoutingPatch
+    from .nervous import grow_nervous
+
+    seeds = growth_seeds(target, 'spatial_chromosome', genome)
+    grid = grow_nervous(
+        genome, seeds=seeds,
+        grid_size=getattr(target, 'grid_size', None),
+        iters=getattr(target, 'iters', None))
+    if not grid:
+        return []
+    bound = bind_io(genome, grid, target, 'spatial_chromosome')
+    occupied_inputs = (
+        set(flat_inputs(bound[0])) if bound is not None else set(seeds))
+    sites = [site for site in grid if site not in occupied_inputs]
+    sites.sort(key=lambda site: (
+        _site_rank(int(getattr(genome, 'tag', 0)), site, len(sites)),
+        site))
+
+    inherited = list(getattr(genome, 'routing_patches', None) or ())
+    inherited_by_site = {
+        (int(patch.x), int(patch.y)): patch for patch in inherited}
+    variants, seen = [], set()
+    bits = (31).bit_length()
+    for site in sites:
+        old_state = int(grid[site])
+        for bit in range(bits):
+            new_state = old_state ^ (1 << bit)
+            if not 0 < new_state < 32:
+                continue
+            candidate = copy.deepcopy(genome)
+            patches = list(
+                getattr(candidate, 'routing_patches', None) or ())
+            replacement = RoutingPatch(site[0], site[1], new_state)
+            if site in inherited_by_site:
+                patches = [
+                    replacement
+                    if (int(patch.x), int(patch.y)) == site else patch
+                    for patch in patches]
+            elif len(patches) < MAX_ROUTING_PATCHES:
+                patches.append(replacement)
+            else:
+                continue
+            candidate.routing_patches = patches
+            signature = tuple(
+                (int(patch.x), int(patch.y), int(patch.state))
+                for patch in patches)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            variants.append(candidate)
+            if len(variants) >= limit:
+                return variants
+    return variants
 
 
 def _wiring_port_genes(genome, n_ports: int):
@@ -307,6 +801,10 @@ def mutate_io_allele(genome, node_type_max, strategy=None):
     gene's expression priority. The wiring designation itself is structural and
     never migrates to a developmental chromosome.
     """
+    if strategy == 'terminal_nodes':
+        mutate_terminal_kind(genome)
+        return
+
     wiring = wiring_chromosome(genome)
     if wiring is None:
         loci = [(chromosome, index)
@@ -362,6 +860,37 @@ def mutate_io_allele(genome, node_type_max, strategy=None):
         # port and provided almost no heritable placement locality.
         gene.io_selector = old + random.choice((-1, 1))
     wiring.genes[index] = gene
+
+
+def mutate_io_bundle(genome, node_type_max, strategy=None, count=2):
+    """Make one coordinated, heritable edit to several I/O loci.
+
+    A spatial bundle fully relocates ``count`` distinct port anchors, changing
+    both coordinates together.  Single-axis/single-port edits cannot cross a
+    co-adaptation valley where moving either an input or its consumer alone is
+    harmful.  Other placement strategies receive several ordinary I/O edits;
+    they have no direct per-port x/y representation to relocate.
+    """
+    count = max(1, int(count))
+    wiring = wiring_chromosome(genome)
+    if strategy == 'spatial_chromosome' and wiring is not None:
+        genes = list(getattr(wiring, 'genes', ()) or ())
+        if not genes:
+            return 0
+        indices = random.sample(
+            range(len(genes)), min(count, len(genes)))
+        mapped = list(genes)
+        for index in indices:
+            gene = copy.copy(mapped[index])
+            gene.tag = random.randrange(SPATIAL_COORD_MAX + 1)
+            gene.io_limit = 1
+            gene.io_selector = random.randrange(SPATIAL_COORD_MAX + 1)
+            mapped[index] = gene
+        wiring.genes = mapped
+        return len(indices)
+    for _ in range(count):
+        mutate_io_allele(genome, node_type_max, strategy=strategy)
+    return count
 
 
 def cell_tags(genome, grid) -> Dict[Pos, int]:
@@ -522,39 +1051,55 @@ def _resolve_wiring(genome, node_types, target):
 
 
 def _resolve_spatial_partial(genome, node_types, target):
-    """Attach each encoded anchor to its nearest unclaimed living cell."""
+    """Bind germline inputs exactly and outputs by spatial proximity."""
     specs = _port_specs(target)
     chromosome = wiring_chromosome(genome)
     genes = list(getattr(chromosome, 'genes', ()) or ())
     positions = [tuple(pos) for pos in node_types
                  if _entry_types(node_types[pos])]
-    bounds = _spatial_bounds(positions)
+    developmental = (
+        getattr(genome, 'provenance', '') != 'truth-table-compiler-v1')
+    bounds = (
+        _spatial_domain(target) if developmental
+        else _spatial_bounds(positions))
     if bounds is None:
         return [], len(specs)
     low_x, high_x, low_y, high_y = bounds
+    germline_inputs = (
+        spatial_input_sites(genome, target) if developmental else ())
     claimed = set()
     ports = []
     for port_index, (kind, identity) in enumerate(specs):
         if port_index >= len(genes):
             continue
         gene = genes[port_index]
-        anchor = (
-            _decode_spatial_coord(_gene_tag(gene), low_x, high_x),
-            _decode_spatial_coord(
-                _gene_selector(gene), low_y, high_y),
-        )
+        exact_input = (
+            kind == 'in'
+            and int(identity) < len(germline_inputs)
+            and germline_inputs[int(identity)] in positions
+            and germline_inputs[int(identity)] not in claimed)
+        if exact_input:
+            anchor = tuple(map(float, germline_inputs[int(identity)]))
+        else:
+            anchor = (
+                _decode_spatial_coord(_gene_tag(gene), low_x, high_x),
+                _decode_spatial_coord(
+                    _gene_selector(gene), low_y, high_y),
+            )
         candidates = [pos for pos in positions if pos not in claimed]
         if not candidates:
             continue
-        selected = min(
-            candidates,
-            key=lambda pos: (
-                (float(pos[0]) - anchor[0]) ** 2
-                + (float(pos[1]) - anchor[1]) ** 2,
-                _site_rank(
-                    int(getattr(genome, 'tag', 0)) ^ port_index,
-                    pos, port_index + 1),
-            ))
+        selected = (
+            germline_inputs[int(identity)] if exact_input else
+            min(
+                candidates,
+                key=lambda pos: (
+                    (float(pos[0]) - anchor[0]) ** 2
+                    + (float(pos[1]) - anchor[1]) ** 2,
+                    _site_rank(
+                        int(getattr(genome, 'tag', 0)) ^ port_index,
+                        pos, port_index + 1),
+                )))
         claimed.add(selected)
         types = _entry_types(node_types[selected])
         ports.append({
@@ -576,6 +1121,62 @@ def _resolve_spatial(genome, node_types, target):
     return ports if len(ports) == total else None
 
 
+def _resolve_terminal_partial(genome, node_types, target):
+    """Bind ports only to live cells whose terminal kind was gene-expressed.
+
+    Candidate order is deterministic but genotype-keyed. It never uses target
+    coordinates, expected traces, or fitness answers. Extra expressed terminal
+    candidates remain ordinary body cells at runtime; exactly one cell is
+    activated for each logical port.
+    """
+    live = {tuple(pos) for pos in node_types}
+    expressed = getattr(genome, '_terminal_kinds', None) or {}
+    candidates = {
+        kind: sorted(
+            (tuple(pos) for pos, value in expressed.items()
+             if int(value) == kind and tuple(pos) in live),
+            key=lambda pos: (
+                _site_rank(
+                    int(getattr(genome, 'tag', 0)) ^ kind,
+                    pos, kind),
+                pos))
+        for kind in (IO_KIND_INPUT, IO_KIND_OUTPUT)
+    }
+    ports = []
+    for index, selected in enumerate(
+            candidates[IO_KIND_INPUT][:int(target.n_inputs)]):
+        ports.append({
+            'kind': 'in',
+            'index': index,
+            'role': None,
+            'tag': IO_KIND_INPUT,
+            'type': 'input_terminal',
+            'limit': 1,
+            'selector': 0,
+            'anchor': None,
+            'cells': [selected],
+        })
+    for terminal, selected in zip(
+            target.outputs, candidates[IO_KIND_OUTPUT]):
+        ports.append({
+            'kind': 'out',
+            'index': None,
+            'role': terminal.role,
+            'tag': IO_KIND_OUTPUT,
+            'type': 'output_terminal',
+            'limit': 1,
+            'selector': 0,
+            'anchor': None,
+            'cells': [selected],
+        })
+    return ports, len(_port_specs(target))
+
+
+def _resolve_terminal(genome, node_types, target):
+    ports, total = _resolve_terminal_partial(genome, node_types, target)
+    return ports if len(ports) == total else None
+
+
 def binding_progress(genome, grid, target, tags=None):
     """Return ``(successfully_bound_ports, total_ports)`` without target scoring."""
     specs = _port_specs(target)
@@ -586,6 +1187,9 @@ def binding_progress(genome, grid, target, tags=None):
     if strategy == 'fixed':
         return total, total
     node_types = cell_tags(genome, grid) if tags is None else tags
+    if strategy == 'terminal_nodes':
+        ports, _ = _resolve_terminal_partial(genome, node_types, target)
+        return len(ports), total
     if strategy == 'tag_rank':
         return min(len(node_types), total), total
     if strategy == 'spatial_chromosome':
@@ -615,6 +1219,8 @@ def _resolve_ports(genome, grid, target, strategy, node_types):
     if not grid or not _port_specs(target):
         return None
     node_types = cell_tags(genome, grid) if node_types is None else node_types
+    if strategy == 'terminal_nodes':
+        return _resolve_terminal(genome, node_types, target)
     if strategy == 'tag_rank':
         return _resolve_tag_rank(genome, node_types, target)
     if strategy == 'wiring_chromosome':
@@ -703,6 +1309,21 @@ def flat_outputs(out_pos):
     return _flat(output_groups(out_pos).values())
 
 
+def terminal_node_sets(target, in_pos, out_pos):
+    """Return ``(source_cells, sink_cells)`` for terminal-node placement.
+
+    Other strategies return two empty sets, keeping every legacy simulation
+    byte-for-byte on its original path.
+    """
+    if io_strategy(target) != 'terminal_nodes':
+        return set(), set()
+    sources = set(flat_inputs(in_pos))
+    sinks = set(flat_outputs(out_pos))
+    if sources & sinks:
+        raise ValueError('terminal input and output nodes must be distinct')
+    return sources, sinks
+
+
 def merge_intervals(sequences):
     """Union several cells' high intervals into one wired-OR bus waveform."""
     intervals = sorted((float(start), float(end))
@@ -726,14 +1347,20 @@ def describe_binding(genome, grid, target, tags=None):
         count, total = binding_progress(
             genome, grid, target, tags=tags)
         reason = (
-            'incomplete map or too few exclusive physical sites'
+            'too few gene-expressed input/output terminal cells'
+            if strategy == 'terminal_nodes'
+            else 'incomplete map or too few exclusive physical sites'
             if strategy == 'spatial_chromosome'
             else 'incomplete map, absent type, or too few exclusive physical sites')
         return ('io_placement=%s (UNBINDABLE: %s; %d/%d ports bound)'
                 % (strategy, reason, count, total))
     lines = ['io_placement=%s' % strategy]
     for entry in report:
-        if strategy == 'tag_rank':
+        if strategy == 'terminal_nodes':
+            detail = ('genome-expressed source-only input terminal'
+                      if entry['kind'] == 'in'
+                      else 'genome-expressed sink-only output terminal')
+        elif strategy == 'tag_rank':
             detail = 'priority %d' % entry['tag']
         elif strategy == 'spatial_chromosome':
             detail = ('anchor (%.2f, %.2f)'

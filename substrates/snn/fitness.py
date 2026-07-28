@@ -2,7 +2,7 @@ from __future__ import annotations
 from .lif_sim import simulate
 from .targets import (Target, get_target, CURRENT_HIGH, MIN_SPIKES,
                       DEFAULT_TARGET)
-from nv_evo.scoring import score_contract
+from substrates.nervous.scoring import score_contract
 
 SEED_A    = (0, 3)
 SEED_B    = (0, 5)
@@ -28,7 +28,7 @@ def score(neurons, synapses, target: Target, in_pos=None) -> float:
     attachment cells: the logical input drives every member neuron, and a
     neuron shared by several inputs receives the strongest drive (wired-OR).
     """
-    from nv_evo.io_placement import input_groups
+    from substrates.nervous.io_placement import input_groups
     # Map input positions and output roles to neuron ids (one id GROUP per
     # logical input).
     by_pos = {(n.x, n.y): n for n in neurons if n.is_input}

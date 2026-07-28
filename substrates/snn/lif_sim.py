@@ -46,7 +46,7 @@ class _EventLIF:
     """
 
     def __init__(self, neurons, synapses, input_currents, input_events=None,
-                 input_pulses=None, sim_time=SIM_TIME):
+                 input_pulses=None, sim_time=SIM_TIME, max_events=None):
         self.neurons = neurons
         self.n       = len(neurons)
         self.sim_time = float(sim_time)
@@ -66,6 +66,10 @@ class _EventLIF:
         self.heap    = []
         self._seq    = 0
         self.spikes  = {i: [] for i in range(self.n)}
+        self.max_events = (
+            None if max_events is None else max(1, int(max_events)))
+        self.event_count = 0
+        self.overflow = False
 
         self.input_ids = {i for i, nu in enumerate(neurons) if nu.is_input}
         self.outgoing = [[] for _ in range(self.n)]
@@ -95,14 +99,21 @@ class _EventLIF:
             if nid in self.input_ids:
                 self._push(0.0, _CURRENT, 'input_pulse', nid)
 
-        # Optional pulse inputs make the engine usable by future temporal SNN
-        # targets.  Each entry is (time_ms, neuron_id, current, duration_ms).
+        # Optional pulse inputs make the engine usable by temporal SNN targets.
+        # Each entry is (time_ms, neuron_id, current, duration_ms). Events on an
+        # input neuron are ideal source edges: amplitude/width describe the
+        # external waveform but the circuit receives its leading edge exactly.
+        # Events on ordinary neurons retain the analog-current interpretation.
         for event in input_events or ():
             time, nid, current, duration = event
             if 0 <= nid < self.n and duration > 0:
-                self._push(float(time), _CURRENT, 'external', nid, float(current))
-                self._push(float(time) + float(duration), _CURRENT,
-                           'external', nid, -float(current))
+                if nid in self.input_ids:
+                    self._push(float(time), _CURRENT, 'input_pulse', nid)
+                else:
+                    self._push(float(time), _CURRENT, 'external', nid,
+                               float(current))
+                    self._push(float(time) + float(duration), _CURRENT,
+                               'external', nid, -float(current))
 
         for nid in range(self.n):
             self._schedule_threshold(nid)
@@ -159,7 +170,8 @@ class _EventLIF:
                    int(self.version[nid]))
 
     def _fire(self, nid):
-        self.spikes[nid].append(float(self.t))
+        if not self._record_spike(nid):
+            return
         self.v[nid] = V_RESET
         self.refr_until[nid] = self.t + T_REFRAC
         self.armed[nid] = False
@@ -169,6 +181,30 @@ class _EventLIF:
             arrival = self.t + delay
             self._push(arrival, _CURRENT, 'synaptic', post, weight)
             self._push(arrival + EPSC_DUR, _CURRENT, 'synaptic', post, -weight)
+
+    def _emit_source(self, nid):
+        """Emit one ideal external edge without neuronal refractory.
+
+        Input cells are physical ports, not LIF processing elements. Every
+        distinct leading edge presented by the environment must enter the
+        circuit, including edges separated by less than ``T_REFRAC``.
+        """
+        if not self._record_spike(nid):
+            return
+        for post, weight, delay in self.outgoing[nid]:
+            arrival = self.t + delay
+            self._push(arrival, _CURRENT, 'synaptic', post, weight)
+            self._push(arrival + EPSC_DUR, _CURRENT, 'synaptic', post, -weight)
+
+    def _record_spike(self, nid):
+        self.spikes[nid].append(float(self.t))
+        self.event_count += 1
+        if (self.max_events is not None
+                and self.event_count > self.max_events):
+            self.overflow = True
+            self.heap.clear()
+            return False
+        return True
 
     def _rearm_if_quiet(self, nid):
         if self.i_ext[nid] + self.i_syn[nid] <= _EPS:
@@ -194,10 +230,9 @@ class _EventLIF:
             self._schedule_threshold(nid)
         elif kind == 'input_pulse':
             # Source ports emit an ideal, one-shot edge.  They do not need a
-            # held bias current and never accept synaptic feedback.
-            if self.refr_until[nid] <= self.t + _EPS:
-                self.armed[nid] = True
-                self._fire(nid)
+            # held bias current, never accept synaptic feedback, and are not
+            # subject to a processing neuron's refractory period.
+            self._emit_source(nid)
         elif kind == 'threshold':
             if value != int(self.version[nid]):
                 return                         # stale prediction after an event
@@ -216,7 +251,7 @@ class _EventLIF:
             self.segments.append(snap)
 
     def run(self):
-        while self.heap:
+        while self.heap and not self.overflow:
             when = self.heap[0][0]
             if when >= self.sim_time - _EPS:
                 break
@@ -255,11 +290,11 @@ class _EventLIF:
 
 
 def _run(neurons, synapses, input_currents, input_events=None,
-         input_pulses=None, sim_time=SIM_TIME):
+         input_pulses=None, sim_time=SIM_TIME, max_events=None):
     if not neurons:
         return None
     return _EventLIF(neurons, synapses, input_currents, input_events,
-                     input_pulses, sim_time).run()
+                     input_pulses, sim_time, max_events).run()
 
 
 def simulate(neurons, synapses, input_currents, sim_time=SIM_TIME):

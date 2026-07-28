@@ -1,5 +1,5 @@
 """
-nv_evo/targets.py — temporal targets for the hex nervous net.
+substrates/nervous/targets.py — temporal targets for the hex nervous net.
 
 A TemporalTarget scores behavior over time instead of a truth table.  Each
 Trial drives a stimulus stream and may define raw expected point events,
@@ -11,7 +11,7 @@ trials; only genuine state — a loop holding a circulating value — passes all
 of them. That is what makes these targets select for memory.
 
 The nervous backend also runs the combinational targets registered in
-snn_evo.targets (gates, adders, custom tables); those are plain data objects
+substrates.snn.targets (gates, adders, custom tables); those are plain data objects
 passed in by the GUI, so nothing here needs to import them.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .contracts import (BehaviorContract, cadence_contract, event_contract,
-                        state_contract)
+                        state_contract, toggle_contract)
 
 Pos = Tuple[int, int]
 
@@ -47,6 +47,12 @@ class Trial:
     # pulse widths are no longer treated as equivalent.
     expected_intervals: Dict[str, List[Tuple[float, float]]] = field(
         default_factory=dict)
+    # Explicit periodic truth-table windows. Each entry is
+    # ``(start, end, data_input_bits)``. Unlike reconstructing windows from
+    # input onsets, this represents a silent all-zero row without adding an
+    # unnecessary physical strobe port to tables whose zero row expects quiet.
+    case_windows: List[Tuple[float, float, Tuple[int, ...]]] = field(
+        default_factory=list)
 
 
 @dataclass
@@ -59,7 +65,7 @@ class TemporalTarget:
     grid_size:       int = 7
     iters:           int = 30      # safety CAP — growth stops at its attractor
     output_strategy: str = "terminals"
-    # How input/output ports bind to physical cells (nv_evo/io_placement.py):
+    # How input/output ports bind to physical cells (substrates/nervous/io_placement.py):
     #   'fixed'          — inputs are the seed pads in declared order; outputs are
     #                      trace-fitted near their terminals (the default, legacy).
     #   'tag_rank'       — ports bind to the highest-tagged cells, in order
@@ -67,8 +73,9 @@ class TemporalTarget:
     #   'wiring_chromosome' — chromosome 3 maps each port to a desired node type,
     #                      then selects one matching instance (Method B).
     #   'spatial_chromosome': chromosome 3 maps each port to an evolvable
-    #                      normalised (x, y) anchor; the nearest unclaimed live
-    #                      cell is used.
+    #                      normalised (x, y) anchor. Input anchors seed
+    #                      development; output anchors select the nearest
+    #                      unclaimed live cell.
     io_placement:    str = "fixed"
     temporal:        bool = True          # marker so the GUI/GA can dispatch
     description:     str = ''             # human explanation, shown in the GUI
@@ -90,7 +97,7 @@ class TemporalTarget:
     # opt into the asynchronous backends (nervous, lut) only, so clocked
     # backends do not silently quantize them.
     supported_backends: Tuple[str, ...] = ()
-    # Empty means every nervous node-timing model (see nv_evo/pulse.NODE_MODELS)
+    # Empty means every nervous node-timing model (see substrates/nervous/pulse.NODE_MODELS)
     # can attempt the target. Waveform-contract targets demand input-DEPENDENT
     # output durations, which the fixed-width 'uniform' node physically
     # cannot emit (regenerated widths, single-driver wires) — they declare
@@ -102,6 +109,13 @@ class TemporalTarget:
     # periodic truth-table wrappers are combinational despite scoring as
     # events, and pulse-width targets are about durations, not edge timing.
     category: str = ''
+    # Original rows for a periodic combinational wrapper. Temporal trials do
+    # not otherwise identify the all-zero row (silence has no timestamp), so
+    # retaining it is necessary for exact feasibility checks and synthesis.
+    combinational_cases: List[
+        Tuple[Tuple[int, ...], Tuple[int, ...]]] = field(default_factory=list)
+    combinational_data_inputs: int = 0
+    combinational_strobe: bool = False
 
     def __post_init__(self):
         # The established scoring primitives still read these names. They are
@@ -173,6 +187,29 @@ def describe_target(goal, tests):
     return 'Goal: %s\nTests: %s' % (goal.strip(), tests.strip())
 
 
+def _zero_row_holds_sole_negative(cases, zero_outputs, n_outputs):
+    """True when dropping the all-zero row would leave an output with no 0 case.
+
+    Periodic targets now retain a scoring window even for a silent row. This
+    compatibility check still preserves the historical physical case-valid
+    lane for tables whose zero row was the sole negative evidence.
+
+    OR is exactly this shape — its only 0 is ``00 -> 0`` — and it "solved" for a
+    blanket-firing circuit until the strobe was forced here. The check is
+    deliberately narrow: it fires only when the zero row actually SUPPLIES the
+    missing level, so a genuinely constant output is left alone.
+    """
+    presented = [output_bits for input_bits, output_bits in cases
+                 if any(input_bits)]
+    if not presented:
+        return False
+    return any(
+        len({output_bits[index] for output_bits in presented}) < 2
+        and zero_outputs[index] not in {output_bits[index]
+                                        for output_bits in presented}
+        for index in range(n_outputs))
+
+
 def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
     """Encode a static binary truth table as widely-spaced asynchronous events.
 
@@ -195,8 +232,22 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
     repeats = int(repeats)
     latency = int(latency)
 
-    n_inputs = int(target.n_inputs)
+    data_inputs = int(target.n_inputs)
     n_outputs = int(target.n_outputs)
+    cases = list(target.cases)
+    if not cases:
+        raise ValueError('periodic combinational targets require truth-table cases')
+    zero_outputs = next(
+        (output_bits for input_bits, output_bits in cases
+         if not any(input_bits)), (0,) * n_outputs)
+    # A physical case-valid pulse is necessary when the otherwise-silent zero
+    # row must produce an event or supplies an output's only negative example.
+    # Quiet zero rows still receive an explicit *scoring* window below, without
+    # needlessly changing the circuit's data-input interface.
+    has_strobe = (any(zero_outputs)
+                  or _zero_row_holds_sole_negative(
+                      cases, zero_outputs, n_outputs))
+    n_inputs = data_inputs + int(has_strobe)
     span = max(n_inputs, n_outputs, 2)
     grid_size = max(5, 2 * span + 1)
     if spacing is None:
@@ -220,10 +271,6 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
     outputs = [OutputTerminal(term.role, (2, output_ys[index]))
                for index, term in enumerate(target.outputs)]
 
-    cases = list(target.cases)
-    if not cases:
-        raise ValueError('periodic combinational targets require truth-table cases')
-
     def active_first(rows):
         """Rotate, without dropping any row, so activity seeds each schedule."""
         start = next((index for index, (bits, _) in enumerate(rows)
@@ -244,6 +291,17 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
             streams = [[0] * n_inputs for _ in range(T)]
             expected = {}
             expected_events = {}
+            case_windows = [
+                (
+                    float(phase + (
+                        repetition * len(schedule) + slot) * spacing),
+                    float(phase + (
+                        repetition * len(schedule) + slot + 1) * spacing),
+                    tuple(input_bits),
+                )
+                for repetition in range(repeats)
+                for slot, (input_bits, _output_bits) in enumerate(schedule)
+            ]
             for output_index, terminal in enumerate(outputs):
                 events = []
                 for repetition in range(repeats):
@@ -252,6 +310,8 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
                         for lane, bit in enumerate(input_bits):
                             if bit:
                                 streams[tick][lane] = 1
+                        if has_strobe:
+                            streams[tick][data_inputs] = 1
                         if output_bits[output_index]:
                             events.append(float(tick + latency))
                 event_set = set(events)
@@ -259,19 +319,27 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
                     1 if float(tick) in event_set else 0 for tick in range(T)]
                 expected_events[terminal.role] = events
             trials.append(Trial(
-                [tuple(row) for row in streams], expected, expected_events))
+                [tuple(row) for row in streams], expected, expected_events,
+                case_windows=case_windows))
 
     return TemporalTarget(
         target.name, inputs, outputs, T, trials,
         grid_size=grid_size, iters=30, contract=event_contract(), latency=latency,
         supported_backends=('nervous', 'lut'),
         category='Combinational logic',
+        combinational_cases=[
+            (tuple(input_bits), tuple(output_bits))
+            for input_bits, output_bits in cases],
+        combinational_data_inputs=data_inputs,
+        combinational_strobe=has_strobe,
         description=describe_target(
             'Compute the %s binary truth table one case at a time: each input '
             'combination gets its own %d-second test window (input 1 emits an '
-            'event, input 0 is silent), spaced far enough apart that the circuit '
+            'event, input 0 is silent%s), spaced far enough apart that the circuit '
             'settles between cases. Each output must emit its event pattern.'
-            % (target.name, spacing),
+            % (target.name, spacing,
+               '; a case-valid lane marks every row'
+               if has_strobe else ''),
             'All %d truth-table rows are tested in isolated, widely-spaced '
             'windows and repeated in full cycles under alternate row orders and '
             'two phases, so one case cannot contaminate the next and a fixed '
@@ -281,11 +349,12 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
 
 def with_io_placement(target, strategy):
     """Return a copy of ``target`` that binds its I/O ports with the given
-    evolvable strategy ('tag_rank', 'wiring_chromosome', or
-    'spatial_chromosome'; 'fixed' is the default geometric/trace-fitted
-    binding). Everything else — stimulus, contract, grid — is preserved, so
-    the ONLY changed variable is how ports attach to cells. Handy for A/B
-    comparing fixed vs evolvable I/O on one target."""
+    strategy (directional ``terminal_nodes``; evolvable ``tag_rank``,
+    ``wiring_chromosome``, or ``spatial_chromosome``; ``fixed`` is the default
+    geometric/trace-fitted binding). Stimulus, contract, and grid are
+    preserved. Spatial input anchors also become developmental germlines, so
+    that strategy intentionally changes both port placement and ontogeny.
+    Handy for A/B comparisons."""
     import dataclasses
     from .io_placement import IO_STRATEGIES
     if strategy not in IO_STRATEGIES:
@@ -331,7 +400,7 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
     ticks remain unscored startup grace for compatibility with the trace view.
 
     `latency` is now just a nominal minimum-causal offset (default 1), NOT a delay
-    the circuit must match: scoring is latency-invariant (nv_evo.temporal, best
+    the circuit must match: scoring is latency-invariant (substrates.nervous.temporal, best
     global continuous-time shift), so a circuit that produces the right spikes
     at ANY consistent delay scores the same. Describe the RELATIVE event
     structure; the absolute input->output delay is free.
@@ -425,6 +494,7 @@ def toggle_ff(grid_size=5):
     return TemporalTarget('Toggle flip-flop', [In], [out], T,
                           [_toggle_trial(T, p) for p in banks],
                           grid_size=grid_size, iters=30,
+                          contract=toggle_contract(),
                           description=describe_target(
         'Each input edge flips the stored bit: quiet to active, then active to '
         'quiet.',
@@ -776,7 +846,7 @@ ORACLE_KEY_TO_SPEC = {
     'Watchdog timeout (5 seconds)': 'Watchdog timeout (oracle)',
     'Toggle flip-flop':      'Toggle (oracle)',
     'Echo (delay 3)':        'Echo (oracle)',
-    'One-shot (5 seconds)':  'One-shot (oracle)',
+    'One-shot (12 seconds)': 'One-shot (oracle)',
     'Period doubler (2x)':   'Period doubler (oracle)',
     'Period tripler (3x)':   'Period tripler (oracle)',
     'Period halver (1/2x)':  'Period halver (oracle)',
@@ -795,6 +865,10 @@ LEGACY_ORACLE_KEY_TO_SPEC = {
     'Refractory filter (3 ticks)': 'Refractory filter (oracle)',
     'Watchdog timeout (5 ticks)': 'Watchdog timeout (oracle)',
     'One-shot (5 ticks)': 'One-shot (oracle)',
+    # The one-shot hold was widened to 12 so a single pulse can no longer cover
+    # it (see oracle.one_shot_oracle). Checkpoints saved under the old 5-second
+    # name still certify against the current spec.
+    'One-shot (5 seconds)': 'One-shot (oracle)',
 }
 
 

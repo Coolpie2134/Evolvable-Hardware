@@ -2,7 +2,7 @@
 tests/test_analog_reference.py — validate the analog engine against an
 INDEPENDENT circuit reference (the reference plan's point 6).
 
-nv_evo/analog.py is event-driven and solves the node's leak recovery and its
+substrates/nervous/analog.py is event-driven and solves the node's leak recovery and its
 threshold crossings ANALYTICALLY (no time step). This suite cross-checks that
 analytical engine against a naive fixed-Δt numerical integration of the same
 physical node — a completely separate implementation — over the sweeps the plan
@@ -22,7 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.analog import AnalogPulseSim, AnalogConfig            # noqa: E402
+from substrates.nervous.analog import AnalogPulseSim, AnalogConfig            # noqa: E402
 
 
 def integrate_reference(terminal_edges, cfg, horizon, dt=2e-4):

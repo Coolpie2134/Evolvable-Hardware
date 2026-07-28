@@ -1,5 +1,5 @@
 """
-nv_evo/tritile.py — the paper's THREE-circuit tile topology (Architecture 1).
+substrates/nervous/tritile.py — the paper's THREE-circuit tile topology (Architecture 1).
 
 Edwards EH'02 Fig. 2: "each node contains three nervous network circuits. Each
 circuit receives inputs from three directions (left, right, and down) and sends
@@ -234,12 +234,17 @@ class TriSim:
     scorer treat tri and single tiles identically.
     """
 
-    def __init__(self, grid, inputs, config=None, max_events=None):
+    def __init__(self, grid, inputs, config=None, max_events=None,
+                 outputs=None):
         from .simulation import create_simulator
         self.grid = grid
         info = interpret_tri(grid, inputs)
         self._tile_nodes = info['tile_nodes']
         self._in_nodes = info['in_nodes']
+        output_tiles = set(outputs or ())
+        output_nodes = {
+            node for tile in output_tiles
+            for node in info['tile_nodes'].get(tile, ())}
         # Preserve the external cap's per-tile meaning. Tri3 has three real
         # circuit nodes per non-input tile, so it receives three times the
         # event budget rather than being penalised merely for faithful hardware.
@@ -248,7 +253,9 @@ class TriSim:
         inner_cap = None if base_cap is None else 3 * int(base_cap)
         self._sim = create_simulator(
             info['nodes'], info['routing'], max_events=inner_cap,
-            config=config, sources=info['sources'])
+            config=config, sources=info['sources'],
+            input_nodes=set(info['in_nodes'].values()),
+            output_nodes=output_nodes)
         self.config = self._sim.config
         self.rise_times = _MergedView(self._sim.pulse_intervals, self._tile_nodes,
                                       'rises')

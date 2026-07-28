@@ -1,5 +1,5 @@
 """
-nv_evo/nervous.py — hexagonal nervous-network growth, interpretation, scoring.
+substrates/nervous/nervous.py — hexagonal nervous-network growth, interpretation, scoring.
 
 The array is a honeycomb (each node has 3 neighbours: L, R, D — see hexgrid.py).
 A grown cell's 5-bit state is decoded (ROUTING_HEX) into a routing config
@@ -16,7 +16,15 @@ what forms the excitatory / inhibitory loops.
 """
 from __future__ import annotations
 
-from .hexgrid import hex_dirs, hex_frontier_cells, ROUTING_HEX, routing_kind
+from .hexgrid import (hex_dirs, hex_frontier_cells, ROUTING_HEX, routing_kind,
+                      IO_STATE_INPUT, IO_STATE_OUTPUT)
+
+# Grown-state -> terminal kind (1 = input, 2 = output), matching io_placement's
+# IO_KIND_INPUT / IO_KIND_OUTPUT. A cell's I/O identity is now its GROWN STATE
+# (16 = input, 17 = output), not a separate gene tag, so a gene's self_out can
+# grow a dedicated terminal. Consulted only when terminal tracking is on (the
+# terminal_nodes strategy); every other path ignores it.
+_STATE_IO_KIND = {IO_STATE_INPUT: 1, IO_STATE_OUTPUT: 2}
 from .genome import germline_telomere, MAX_STATE, TRI_STATE_MAX
 from .tritile import TRI_SEED_STATE
 
@@ -88,7 +96,8 @@ def _compile_lookup(genome, bits=None):
 # telomere — telomeres limit a cell's REPLICATION, not its function, exactly as
 # in biology.
 
-def _lookup_compiled(program, sL, sR, sD, si, packed=None):
+def _lookup_compiled(program, sL, sR, sD, si, packed=None,
+                     return_kind=False):
     """Associative next-state lookup (min Hamming). No time/telomere term — the
     telomere now gates DIVISION per cell in _grow_step, not which genes exist.
 
@@ -98,7 +107,7 @@ def _lookup_compiled(program, sL, sR, sD, si, packed=None):
     Hamming is exactly the sum of the three per-channel Hammings, so context
     matching is per-channel for free."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
-        return 0
+        return (0, 0) if return_kind else 0
     bits, entries = program
     context = (_pack_context(sL, sR, sD, si, bits)
                if packed is None else packed)
@@ -108,10 +117,13 @@ def _lookup_compiled(program, sL, sR, sD, si, packed=None):
         if distance < best_dist:             # strict: first gene wins every tie
             best_dist, best_gene = distance, gene
     if best_gene is None:
-        return 0
+        return (0, 0) if return_kind else 0
     if si == 0 and best_gene.self_in != 0:         # empty cells grow only via
-        return 0                                   # growth rules (sim6 guard)
-    return best_gene.self_out                      # 0 = off / death (native)
+        return (0, 0) if return_kind else 0         # growth rules (sim6 guard)
+    state = best_gene.self_out                     # 0 = off / death (native)
+    if return_kind:
+        return state, int(getattr(best_gene, 'io_kind', 0))
+    return state
 
 
 def _lookup_nv(genome, sL, sR, sD, si):
@@ -119,24 +131,21 @@ def _lookup_nv(genome, sL, sR, sD, si):
     return _lookup_compiled(_compile_lookup(genome), sL, sR, sD, si)
 
 
-def _lookup_nv_tri(genome, sL, sR, sD, si):
-    """Back-compatible explicit tri3 lookup (normally dispatched by _lookup_nv)."""
-    return _lookup_compiled(_compile_lookup(genome, bits=_TRI_BITS),
-                            sL, sR, sD, si)
-
-
-def _next_state(program, sL, sR, sD, si, cache):
+def _next_state(program, sL, sR, sD, si, cache, return_kind=False):
     """Cached packed lookup keyed on context alone (telomere does not affect the
     lookup, so the cache is valid for the whole run — sim6 table_lookup_cached)."""
     key = _pack_context(sL, sR, sD, si, program[0])
     ns = cache.get(key)
     if ns is None:
-        ns = _lookup_compiled(program, sL, sR, sD, si, packed=key)
+        ns = _lookup_compiled(
+            program, sL, sR, sD, si, packed=key,
+            return_kind=return_kind)
         cache[key] = ns
     return ns
 
 
-def _grow_step(program, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
+def _grow_step(program, grid, tel, seeds, L, cache, seed_state=SEED_STATE,
+               terminal_kinds=None):
     """One development step. `grid` = {pos: state}, `tel` = {pos: remaining
     telomere}. Returns (next_grid, next_tel).
 
@@ -147,14 +156,22 @@ def _grow_step(program, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
         daughter inherits (max live-neighbour telomere) - 1;
       * seeds: germline / stem cells, always present at full telomere L."""
     nxt, nxt_tel = {}, {}
+    nxt_kinds = {} if terminal_kinds is not None else None
     # maintenance / survival of the existing organism
     for (x, y), state in grid.items():
         nb = hex_dirs(x, y)
-        ns = _next_state(program, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
-                         grid.get(nb['D'], 0), state, cache)
+        result = _next_state(
+            program, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
+            grid.get(nb['D'], 0), state, cache,
+            return_kind=(nxt_kinds is not None))
+        ns = result[0] if nxt_kinds is not None else result
         if ns:
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = tel.get((x, y), 0)
+            if nxt_kinds is not None:
+                io = _STATE_IO_KIND.get(ns & 0x1F)
+                if io:
+                    nxt_kinds[(x, y)] = io
     # division into empty frontier cells (Hayflick-gated)
     frontier = set()
     for (x, y) in grid:
@@ -167,14 +184,25 @@ def _grow_step(program, grid, tel, seeds, L, cache, seed_state=SEED_STATE):
                           if nb[d] in grid), default=0)
         if parent_tel <= 0:                       # every neighbour senescent
             continue                              # -> no division (Hayflick)
-        ns = _next_state(program, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
-                         grid.get(nb['D'], 0), 0, cache)
+        result = _next_state(
+            program, grid.get(nb['L'], 0), grid.get(nb['R'], 0),
+            grid.get(nb['D'], 0), 0, cache,
+            return_kind=(nxt_kinds is not None))
+        ns = result[0] if nxt_kinds is not None else result
         if ns:
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = parent_tel - 1
+            if nxt_kinds is not None:
+                io = _STATE_IO_KIND.get(ns & 0x1F)
+                if io:
+                    nxt_kinds[(x, y)] = io
     for pos in seeds:
         nxt[pos] = seed_state
         nxt_tel[pos] = L
+        if nxt_kinds is not None:
+            nxt_kinds.pop(pos, None)
+    if nxt_kinds is not None:
+        return nxt, nxt_tel, nxt_kinds
     return nxt, nxt_tel
 
 
@@ -193,6 +221,25 @@ def _grow_budget(L):
     return 3 * L + 6
 
 
+def apply_routing_patches(genome, grid):
+    """Apply heritable mature-cell routing edits without changing development."""
+    patches = getattr(genome, 'routing_patches', None) or ()
+    if not patches:
+        return grid
+    maximum = (
+        TRI_STATE_MAX if getattr(genome, 'arch', 'single') == 'tri3'
+        else MAX_STATE)
+    result = dict(grid)
+    for patch in patches:
+        pos = (int(patch.x), int(patch.y))
+        state = int(patch.state)
+        # Patches override existing routing only. Inert/out-of-range alleles
+        # remain heritable and may later mutate back onto the living body.
+        if pos in result and 0 < state < maximum:
+            result[pos] = state
+    return result
+
+
 # `grid_size` and `iters` are accepted but IGNORED — vestigial, kept only so
 # existing callers and pickles keep working. Growth is governed entirely by the
 # genome's telomere (Hayflick limit); pass nothing and it still self-limits.
@@ -204,31 +251,62 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
     program = _compile_lookup(genome)
+    # Terminal identity is now the GROWN STATE (16 = input, 17 = output), so track
+    # terminals whenever a gene can express one — not the retired io_kind tag.
+    track_terminals = any(
+        (int(gene.self_out) & 0x1F) in (IO_STATE_INPUT, IO_STATE_OUTPUT)
+        for _, gene in program[1])
     grid = {pos: seed_state for pos in seeds}
     tel  = {pos: L for pos in seeds}
     prev, cache = None, {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(program, grid, tel, seeds, L, cache, seed_state)
+        result = _grow_step(
+            program, grid, tel, seeds, L, cache, seed_state,
+            terminal_kinds=({} if track_terminals else None))
+        if track_terminals:
+            nxt, nxt_tel, nxt_kinds = result
+        else:
+            nxt, nxt_tel = result
+            nxt_kinds = {}
         if nxt == grid or nxt == prev:      # fixed point (mature) or 2-cycle
-            return nxt
+            genome._terminal_kinds = nxt_kinds
+            return apply_routing_patches(genome, nxt)
         prev, grid, tel = grid, nxt, nxt_tel
-    return grid
+    genome._terminal_kinds = nxt_kinds
+    return apply_routing_patches(genome, grid)
 
 
 def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
     program = _compile_lookup(genome)
+    # Terminal identity is now the GROWN STATE (16 = input, 17 = output), so track
+    # terminals whenever a gene can express one — not the retired io_kind tag.
+    track_terminals = any(
+        (int(gene.self_out) & 0x1F) in (IO_STATE_INPUT, IO_STATE_OUTPUT)
+        for _, gene in program[1])
     snaps = [{pos: seed_state for pos in seeds}]
     grid = dict(snaps[0])
     tel  = {pos: L for pos in seeds}
     prev, cache = None, {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(program, grid, tel, seeds, L, cache, seed_state)
+        result = _grow_step(
+            program, grid, tel, seeds, L, cache, seed_state,
+            terminal_kinds=({} if track_terminals else None))
+        if track_terminals:
+            nxt, nxt_tel, nxt_kinds = result
+        else:
+            nxt, nxt_tel = result
+            nxt_kinds = {}
         snaps.append(dict(nxt))
         if nxt == grid or nxt == prev:
+            genome._terminal_kinds = nxt_kinds
+            snaps[-1] = apply_routing_patches(genome, snaps[-1])
             break
         prev, grid, tel = grid, nxt, nxt_tel
+    else:
+        genome._terminal_kinds = nxt_kinds
+        snaps[-1] = apply_routing_patches(genome, snaps[-1])
     return snaps
 
 
@@ -303,7 +381,8 @@ def interpret_nervous(grid, target=None, arch='single'):
 
 
 def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
-                     config=None, arch='single'):
+                     config=None, arch='single', terminal_inputs=None,
+                     terminal_outputs=None):
     """Evaluate one combinational case on the asynchronous pulse engine.
     Input levels are held for the whole horizon (one long pulse on each driven
     input net — a single edge). Returns {pos: 0/1} where 1 means the cell's
@@ -314,9 +393,12 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
         steps = 2 * grid_size + 4
     if arch == 'tri3':
         from .tritile import TriSim
-        sim = TriSim(grid, input_vals.keys(), config=config)
+        sim = TriSim(grid, input_vals.keys(), config=config,
+                     outputs=terminal_outputs)
     elif arch == 'single':
-        sim = create_simulator(grid, routing, config=config)
+        sim = create_simulator(
+            grid, routing, config=config, input_nodes=terminal_inputs,
+            output_nodes=terminal_outputs)
     else:
         raise ValueError('unknown tile architecture: %r' % (arch,))
     held = {c: int(b) for c, b in input_vals.items()}
@@ -327,7 +409,7 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
 
 def _resolve_io_binding(genome, grid, target, in_pos, out_pos):
     """Swap the geometric port binding for the genome's evolvable one when the
-    target opts into an io_placement strategy (nv_evo/io_placement.py). Returns
+    target opts into an io_placement strategy (substrates/nervous/io_placement.py). Returns
     (in_pos, out_pos) — under a strategy each in_pos entry is a LIST of
     attachment cells (an input may fan out; ports may share sites) — or None
     when the strategy is active but the organism cannot bind every port.
@@ -356,9 +438,11 @@ def score_nervous(genome, target):
     from .io_placement import (growth_seeds, io_strategy, binding_progress,
                                record_binding_progress)
     strategy = io_strategy(target)
-    grid = grow_nervous(genome, seeds=growth_seeds(target),
+    grid = grow_nervous(genome, seeds=growth_seeds(
+                            target, strategy, genome),
                         grid_size=target.grid_size, iters=target.iters)
-    if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+    if strategy in (
+            'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
         record_binding_progress(
             genome, binding_progress(genome, grid, target))
     if len(grid) <= target.n_inputs:
@@ -371,7 +455,8 @@ def score_nervous(genome, target):
     in_pos, out_pos = resolved
     if any(out_pos[t.role] is None for t in target.outputs):
         return 0.0
-    from .io_placement import flat_inputs, output_groups
+    from .io_placement import (flat_inputs, output_groups,
+                               terminal_node_sets)
     live = set(grid)
     if any(p not in live for p in flat_inputs(in_pos)):
         return 0.0
@@ -379,11 +464,15 @@ def score_nervous(genome, target):
     if n_checks == 0:
         return 0.0
     observations = []
+    terminal_inputs, terminal_outputs = terminal_node_sets(
+        target, in_pos, out_pos)
     for in_bits, out_bits in target.cases:
         invals = _input_levels(in_pos, in_bits)
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
-            config=getattr(target, 'pulse_config', None), arch=arch)
+            config=getattr(target, 'pulse_config', None), arch=arch,
+            terminal_inputs=terminal_inputs,
+            terminal_outputs=terminal_outputs)
         groups = output_groups(out_pos)
         observations.append([
             float(any(outs.get(cell, 0) for cell in groups[term.role]))
@@ -392,8 +481,9 @@ def score_nervous(genome, target):
 
 
 def nervous_case_outputs(genome, target):
-    from .io_placement import growth_seeds
-    grid = grow_nervous(genome, seeds=growth_seeds(target),
+    from .io_placement import growth_seeds, io_strategy
+    grid = grow_nervous(genome, seeds=growth_seeds(
+                            target, io_strategy(target), genome),
                         grid_size=target.grid_size, iters=target.iters)
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, out_pos = interpret_nervous(grid, target, arch=arch)
@@ -404,11 +494,16 @@ def nervous_case_outputs(genome, target):
     in_pos, out_pos = resolved
     if len(grid) <= target.n_inputs or any(out_pos[t.role] is None for t in target.outputs):
         return grid, in_pos, out_pos, cases
+    from .io_placement import terminal_node_sets
+    terminal_inputs, terminal_outputs = terminal_node_sets(
+        target, in_pos, out_pos)
     for in_bits, out_bits in target.cases:
         invals = _input_levels(in_pos, in_bits)
         outs   = evaluate_nervous(
             grid, routing, invals, target.grid_size,
-            config=getattr(target, 'pulse_config', None), arch=arch)
+            config=getattr(target, 'pulse_config', None), arch=arch,
+            terminal_inputs=terminal_inputs,
+            terminal_outputs=terminal_outputs)
         from .io_placement import output_groups
         groups = output_groups(out_pos)
         acts = {t.role: int(any(outs.get(cell, 0)

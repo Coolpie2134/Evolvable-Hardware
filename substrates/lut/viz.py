@@ -1,5 +1,5 @@
 """
-lut_evo/viz.py — square-array rendering for the LUT model (paper Architecture 2).
+substrates/lut/viz.py — square-array rendering for the LUT model (paper Architecture 2).
 
 A cell is NOT fixed directional wiring — it is FOUR 16-bit lookup tables, one per
 output direction (Ln, Ls, Le, Lw). During growth (associative-memory ontogeny)
@@ -75,7 +75,7 @@ def draw_lut_net(ax, grid, grid_size=None, activity=None, in_pos=None,
     in_pos  = in_pos or []
     out_pos = out_pos or {}
     in_set  = set(in_pos)
-    from nv_evo.io_placement import output_groups
+    from substrates.nervous.io_placement import output_groups
     out_cells = {p: role for role, cells in output_groups(out_pos).items()
                  for p in cells}
     ax.clear()

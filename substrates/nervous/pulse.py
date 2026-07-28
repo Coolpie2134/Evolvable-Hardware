@@ -1,5 +1,5 @@
 """
-nv_evo/pulse.py — deterministic event-level pulse abstraction.
+substrates/nervous/pulse.py — deterministic event-level pulse abstraction.
 
 The nervous net is "a continuous-time, asynchronous system with binary-valued
 output. It propagates a pulse arriving at its input with a fixed delay" (§3).
@@ -87,50 +87,12 @@ TICK  = 1.0     # sampling period of the scoring layer (one target tick)
 #   'uniform'       — every node emits width WIDTH after delay DELAY.
 #   'pulse_delay'   — historical identifier for evolved-delay, width-preserving
 #                     edge transport: [t, t+w) -> [t+d_node, t+d_node+w).
-# 'paper_analog' selects the analog Fig. 1 node engine (nv_evo/analog.py):
+# 'paper_analog' selects the analog Fig. 1 node engine (substrates/nervous/analog.py):
 # charge/leak/comparator/hysteresis, from which coincidence width, output width
 # and refractory EMERGE instead of being fixed constants. It is a distinct
 # ENGINE, not a timing tweak of this one, but shares the model slot so the run
 # pipeline selects it uniformly. Routing-only evolution (no width/delay vectors).
 NODE_MODELS = ('uniform', 'pulse_delay', 'paper_analog')
-
-
-# ── model families (reference plan's point 5) ───────────────────────────────────
-# Readable family names for the four clearly-separated substrates, mapped to the
-# internal node_model that drives them. The legacy identifiers are KEPT as the
-# canonical values (every checkpoint and test still uses them), so these are
-# additive aliases for UI/description, not a rename:
-#   paper_event        — the current deterministic digital abstraction, retained
-#                        unchanged for checkpoints and comparisons ('uniform').
-#   paper_analog       — charge / leak / comparator / hysteresis analog node
-#                        (nv_evo/analog.py); with tri3 tiles, the closest paper
-#                        model available here, still using normalised constants.
-#   waveform_transport — width-preserving evolved-delay transport ('pulse_delay'),
-#                        explicitly a DIFFERENT substrate (not the Fig. 1 node).
-#   extended_analog    — RESERVED: programmable capacitor weights, per-direction
-#                        leak bias, bounded thresholds, each carrying an
-#                        area/energy cost so evolution cannot buy unlimited analog
-#                        precision for free. Not yet implemented.
-MODEL_FAMILIES = {
-    'paper_event':        'uniform',
-    'paper_analog':       'paper_analog',
-    'waveform_transport': 'pulse_delay',
-    'extended_analog':    None,          # reserved — see above
-}
-
-
-def resolve_model_family(name):
-    """Map a family name (or a raw node_model) to its node_model. Raises for the
-    reserved-but-unimplemented families so a run can't silently select nothing."""
-    if name in NODE_MODELS:
-        return name
-    if name in MODEL_FAMILIES:
-        model = MODEL_FAMILIES[name]
-        if model is None:
-            raise NotImplementedError(
-                "model family '%s' is reserved but not yet implemented" % name)
-        return model
-    raise ValueError('unknown model family or node_model: %r' % (name,))
 
 
 @dataclass(frozen=True)
@@ -185,7 +147,8 @@ class PulseSim:
     """
 
     def __init__(self, grid, routing, max_events=None, config=None,
-                 delays=None, sources=None):
+                 delays=None, sources=None, input_nodes=None,
+                 output_nodes=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or PulseConfig()
@@ -194,6 +157,8 @@ class PulseSim:
         # to config.delay, so an empty map reproduces 'uniform' exactly.
         self._model  = self.config.model
         self._delays = delays or {}
+        self.input_nodes = set(input_nodes or ())
+        self.output_nodes = set(output_nodes or ())
         # src[v] = (s1, s2, si): the cells feeding v's E1 / E2 / I1.
         # watch[u] = cells that read u on an excitatory input.
         #
@@ -209,6 +174,11 @@ class PulseSim:
         for v, entry in routing.items():
             if v not in grid:
                 continue
+            # A dedicated input terminal is an externally driven source. Its
+            # developmental routing state is physically disconnected from the
+            # body, so neighbour activity can never make it fire.
+            if v in self.input_nodes:
+                continue
             e1, e2, i1 = entry[0], entry[1], entry[2]
             self.op[v] = entry[3] if len(entry) > 3 else 'and'
             if sources is not None:
@@ -218,6 +188,11 @@ class PulseSim:
                 s1 = nb[e1] if e1 is not None else None
                 s2 = nb[e2] if e2 is not None else None
                 si = nb[i1] if i1 is not None else None
+            # A dedicated output terminal is observable locally but cannot
+            # drive, excite, or inhibit another node.
+            s1 = None if s1 in self.output_nodes else s1
+            s2 = None if s2 in self.output_nodes else s2
+            si = None if si in self.output_nodes else si
             self.src[v] = (s1, s2, si)
             for s in {s1, s2}:
                 if s is not None and s in self.watch:

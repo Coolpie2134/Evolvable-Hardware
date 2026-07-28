@@ -1,5 +1,5 @@
 """
-concept/common/solution_tree.py
+experiments/concept/common/solution_tree.py
 Binary-trie fitness cache used by multi9 and mhier1.
 
 The trie memoises fitness evaluations so that repeated encounters of
@@ -7,7 +7,7 @@ the same output bitstream skip the full fitness_function() call.
 
 Usage
 -----
-    from concept.common.solution_tree import (
+    from experiments.concept.common.solution_tree import (
         make_solution, find_solution, free_solution, find_searchspace
     )
 

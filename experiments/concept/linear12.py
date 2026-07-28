@@ -19,7 +19,7 @@ import sys
 import select
 
 # Genuinely-shared, platform-guarded terminal I/O (identical across all sims).
-from concept.common.terminal import (setnodelay, setnormal,
+from experiments.concept.common.terminal import (setnodelay, setnormal,
                                       read_nonblocking, read_blocking_char, NullIO)
 
 # GUI bridge: when a GUI engine sets this, main() streams per-generation stats
@@ -90,7 +90,7 @@ chemistry = [0] * RESULTSPACE     # mapping of symbols to result bits
 # Terminal raw-mode helpers (replace setnodelay/setnormal from termios)
 #----------------------------------------------------------------------#
 
-# Terminal raw-mode helpers now come from concept.common.terminal (imported above).
+# Terminal raw-mode helpers now come from experiments.concept.common.terminal (imported above).
 
 
 #----------------------------------------------------------------------#

@@ -3,7 +3,7 @@ tests/test_pulse_models.py — the nervous-net node-timing models.
 
 The paper's node regenerates ONE fixed pulse width after ONE fixed delay, so an
 input pulse's LENGTH is discarded past the first node (see the discussion in
-nv_evo/pulse.py). One variant restores width as a usable degree of freedom:
+substrates/nervous/pulse.py). One variant restores width as a usable degree of freedom:
 
   * 'uniform'       — the paper (fixed width + delay). Must be BYTE-IDENTICAL
                       to the engine before these variants existed, whether or
@@ -21,25 +21,109 @@ Run under pytest, or standalone:  py tests/test_pulse_models.py
 import os
 import random
 import sys
+import math
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.pulse import PulseSim, PulseConfig, TICK          # noqa: E402
-from nv_evo.hexgrid import hex_dirs                           # noqa: E402
-from nv_evo import random_hex_genome                          # noqa: E402
-from nv_evo.ga import (evaluate_nv_full, genome_signature,    # noqa: E402
+from substrates.nervous.pulse import PulseSim, PulseConfig, TICK          # noqa: E402
+from substrates.nervous.hexgrid import hex_dirs                           # noqa: E402
+from substrates.nervous import random_hex_genome                          # noqa: E402
+from substrates.nervous.ga import (evaluate_nv_full, genome_signature,    # noqa: E402
                        mutate_nv, _mutate_state_delay)
-from nv_evo.nervous import (node_delays, grow_nervous,  # noqa: E402
+from substrates.nervous.nervous import (node_delays, grow_nervous,  # noqa: E402
                             interpret_nervous)
-from nv_evo.genome import (default_state_delays,  # noqa: E402
-                           MAX_STATE)
-from nv_evo.targets import TEMPORAL_TARGETS                   # noqa: E402
-from nv_evo.temporal import (score_contract, TemporalTraces,  # noqa: E402
-                             _waveform_expected)
-from evo_runtime.checkpoint import (genome_to_dict, genome_from_dict,  # noqa: E402
+from substrates.nervous.genome import (default_state_delays,  # noqa: E402
+                           DELAY_LOG_STEP, MAX_STATE)
+from substrates.nervous.targets import TEMPORAL_TARGETS                   # noqa: E402
+from substrates.nervous.temporal import (score_contract, TemporalTraces,  # noqa: E402
+                             _waveform_expected,
+                             score_temporal_plastic)
+from runtime.checkpoint import (genome_to_dict, genome_from_dict,  # noqa: E402
                                     _target_to_dict, _target_from_dict)
 
 TOL = 1e-9
+
+
+def test_lifetime_tuning_nudges_one_active_delay_and_keeps_readout_fixed():
+    """Fine tuning must not redraw the vector or jump to another output cell."""
+    target = SimpleNamespace(
+        n_inputs=1,
+        outputs=[SimpleNamespace(role='Q')],
+        pulse_config=SimpleNamespace(model='pulse_delay', delay=2.0),
+        grid_size=3,
+        iters=1)
+    inherited = [1.0] * MAX_STATE
+    inherited[5] = 1.30                 # inactive allele must be preserved
+    genome = SimpleNamespace(arch='single', state_delays=inherited)
+    grid = {(0, 0): 1, (1, 0): 7}
+    readout = {'Q': (1, 0)}
+    baseline_traces = object()
+    observed = []
+
+    def fixed_trace(_grid, _routing, _inputs, out_pos, _target,
+                    delays=None, arch='single'):
+        observed.append((dict(out_pos), dict(delays), arch))
+        return SimpleNamespace(candidate=True, overflow=False)
+
+    def scored(traces, _target):
+        score = 0.75 if getattr(traces, 'candidate', False) else 0.50
+        return score, (score,), None
+
+    with mock.patch('substrates.nervous.temporal.io_strategy', return_value='fixed'), \
+            mock.patch('substrates.nervous.temporal.contract_case_count', return_value=1), \
+            mock.patch('substrates.nervous.temporal.growth_seeds', return_value=[(0, 0)]), \
+            mock.patch('substrates.nervous.temporal.grow_nervous', return_value=grid), \
+            mock.patch('substrates.nervous.temporal.interpret_nervous',
+                       return_value=({}, [(0, 0)], None)), \
+            mock.patch('substrates.nervous.temporal.place_outputs_by_trace',
+                       return_value=(readout, baseline_traces)), \
+            mock.patch('substrates.nervous.temporal.trace_fixed_outputs',
+                       side_effect=fixed_trace), \
+            mock.patch('substrates.nervous.temporal.score_contract', side_effect=scored), \
+            mock.patch('substrates.nervous.temporal._output_candidates',
+                       side_effect=AssertionError('readout was reselected')):
+        result = score_temporal_plastic(
+            genome, target, samples=1, seed=17, step=0.10,
+            return_settings=True)
+
+    learned = result[2]['state_delays']
+    changed = [index for index, (before, after)
+               in enumerate(zip(inherited, learned))
+               if abs(after - before) > TOL]
+    assert result[:2] == (0.75, (0.75,))
+    assert len(changed) == 1
+    assert changed[0] in {1, 7}
+    assert learned[5] == inherited[5]
+    assert all(out_pos == readout for out_pos, _, _ in observed)
+    assert all(arch == 'single' for _, _, arch in observed)
+
+
+def test_combinational_targets_receive_no_memory_loop_bonus():
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Half adder'))
+    traces = SimpleNamespace(overflow=False)
+    genome = SimpleNamespace(
+        chromosomes=[], state_delays=None, arch='single',
+        routing_patches=[])
+    with mock.patch(
+            'substrates.nervous.ga.prepare_net',
+            return_value=(
+                {(0, 0): 1}, {}, [[(0, 0)]],
+                {'sum': [(0, 0)], 'carry': [(0, 0)]}, traces)), \
+            mock.patch(
+                'substrates.nervous.ga.score_contract',
+                return_value=(0.75, (0.75,), None)), \
+            mock.patch(
+                'substrates.nervous.ga._loop_bonus',
+                side_effect=AssertionError(
+                    'combinational target requested memory shaping')):
+        score, cases = evaluate_nv_full(genome, target)
+    assert score == 0.75
+    assert cases == (0.75,)
 
 
 # ── a hand-built 2-cell buffer chain A -> B ──────────────────────────────────────
@@ -184,7 +268,10 @@ def test_delay_mutation_changes_signature_and_is_model_selective():
     _mutate_state_delay(g)
     assert g.state_delays is not None and len(g.state_delays) == MAX_STATE
     assert genome_signature(g) != sig0
-    assert any(abs(value - 1.0) > TOL for value in g.state_delays)
+    changed = [value for value in g.state_delays
+               if abs(value - 1.0) > TOL]
+    assert len(changed) == 1
+    assert abs(abs(math.log(changed[0])) - DELAY_LOG_STEP) <= TOL
 
     neutral = random_hex_genome(2)
     for _ in range(30):
@@ -299,8 +386,8 @@ def test_odd_selector_rejects_fixed_dead_time_filters():
     end-referenced, swept finely) below the 0.90 certification bar, on the
     training seed and on fresh held-out seeds, while the true index counter
     still scores exactly 1.0."""
-    from nv_evo.oracle import ORACLE_SPECS
-    from nv_evo.temporal import TemporalTraces, waveform_score
+    from substrates.nervous.oracle import ORACLE_SPECS
+    from substrates.nervous.temporal import TemporalTraces, waveform_score
     latency = 1.0
 
     def traces_for(target, select):
@@ -498,7 +585,7 @@ def test_pulse_delay_simultaneous_inhibition_uses_final_batch_level():
 
 def test_pulse_delay_consistent_across_scoring_paths():
     """Sampled and event paths see the same transported waveform."""
-    from nv_evo.temporal import _run_nervous
+    from substrates.nervous.temporal import _run_nervous
     grid, routing, a, b = _buffer_pair()
     cfg = PulseConfig(model='pulse_delay', delay=1.0)
     streams = [(1,), (1,), (1,)] + [(0,)] * 10
@@ -513,7 +600,7 @@ def test_pulse_delay_consistent_across_scoring_paths():
 
 
 def test_playback_preset_preserves_physical_widths():
-    from nv_evo.playback import pulses_from_trial
+    from substrates.nervous.playback import pulses_from_trial
 
     class Trial:
         pass
@@ -542,7 +629,7 @@ def test_playback_preset_preserves_physical_widths():
 def test_run_nervous_uniform_unaffected_by_preinjection():
     """The pre-injection rewrite must not change uniform: a held input still
     fires the buffer at the fixed delay (1), width regenerated."""
-    from nv_evo.temporal import _run_nervous
+    from substrates.nervous.temporal import _run_nervous
     grid, routing, a, b = _buffer_pair()
     streams = [(1,), (1,), (1,)] + [(0,)] * 10
     _, traces, rise, _ = _run_nervous(
@@ -554,7 +641,7 @@ def test_run_nervous_uniform_unaffected_by_preinjection():
 def test_carry_physics_copies_run_config():
     """REGRESSION: certification must carry the run's physics onto fresh spec
     targets, else a non-default model is validated under uniform physics."""
-    from nv_evo.certification import carry_physics
+    from substrates.nervous.certification import carry_physics
 
     class T:
         pass
@@ -587,7 +674,7 @@ def test_config_validates_model_and_physical_parameters():
 
 
 def test_run_config_migrates_retired_delay_gain():
-    from evo_runtime.config import RunConfig
+    from runtime.config import RunConfig
 
     migrated = RunConfig.from_dict({
         'pulse': {
@@ -617,7 +704,7 @@ def test_pulse_delay_rejects_invalid_injected_intervals():
 
 
 def test_ga_config_timing_toggles_default_to_model_pairing():
-    from evo_runtime.config import GAConfig
+    from runtime.config import GAConfig
     assert GAConfig().timing_mutations() is False
     assert GAConfig(node_model='pulse_delay').timing_mutations() is True
     # the fixed-delay ablation: width-preserving transport, no delay mutation
@@ -638,7 +725,7 @@ def test_retired_width_evolution_is_gone_but_old_checkpoints_still_load():
     """Width evolution was removed from the substrate. Its node model must no
     longer be constructible, and a checkpoint saved under it must migrate onto
     the paper's fixed-width node rather than fail to open."""
-    from evo_runtime.config import GAConfig, RunConfig
+    from runtime.config import GAConfig, RunConfig
     for bad in ({'node_model': 'evolved_width'},):
         try:
             GAConfig(**bad)
@@ -664,7 +751,7 @@ def test_retired_width_evolution_is_gone_but_old_checkpoints_still_load():
 
 def test_timing_toggles_round_trip_run_config():
     import dataclasses
-    from evo_runtime.config import RunConfig
+    from runtime.config import RunConfig
     config = RunConfig.from_dict({
         'pulse': {'model': 'pulse_delay'},
         'ga': {'node_model': 'pulse_delay', 'evolve_delay': False}})
@@ -680,8 +767,8 @@ def test_fixed_delay_ablation_never_grows_a_delay_vector():
     """Reproduction under node_model='pulse_delay' with evolve_delay=False (the
     width-preserving/fixed-delay ablation) must never mutate delays, while the
     paired default still can."""
-    from evo_runtime.config import GAConfig
-    from nv_evo.ga import next_population
+    from runtime.config import GAConfig
+    from substrates.nervous.ga import next_population
 
     def offspring(config, seed):
         random.seed(seed)
@@ -723,7 +810,7 @@ def test_mix_event_widths_never_reaches_the_next_same_lane_event():
     same lane: any overlap merges two labelled stimulus events into ONE physical
     edge (wired-OR / drive union), making the expected output unreachable in
     every model."""
-    from nv_evo.oracle import _mix_event_widths, _WIDTH_CLEARANCE
+    from substrates.nervous.oracle import _mix_event_widths, _WIDTH_CLEARANCE
 
     class Bag:
         pass
@@ -755,9 +842,9 @@ def test_gui_categories_group_combinational_and_pulse_width_targets():
     'Combinational logic' instead of scattering into 'Timed events'; the
     duration-semantics targets get their own 'Pulse width & duration' folder;
     checkpointed targets keep their explicit category."""
-    from target_ui import target_category, CATEGORY_ORDER
-    from nv_evo.targets import periodic_combinational_target
-    from snn_evo.targets import TARGETS
+    from ui.target_ui import target_category, CATEGORY_ORDER
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import TARGETS
 
     assert 'Combinational logic' in CATEGORY_ORDER
     assert 'Pulse width & duration' in CATEGORY_ORDER

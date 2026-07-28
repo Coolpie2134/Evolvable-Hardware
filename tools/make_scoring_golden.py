@@ -4,7 +4,7 @@ tools/make_scoring_golden.py — regenerate tests/fixtures/scoring_golden.json.
 The golden file freezes the scoring contract: a synthetic bundle battery
 (every registered target x {perfect, shift2, half, silence, always} x hold_tol
 variants) plus float-time retention/coverage scenarios, scored through
-nv_evo/scoring.py. tests/test_scoring_equivalence.py replays the stored
+substrates/nervous/scoring.py. tests/test_scoring_equivalence.py replays the stored
 bundles and demands identical scores/cases/alignments, so ANY change to
 scoring semantics fails the suite until this script is deliberately re-run.
 
@@ -21,12 +21,12 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from nv_evo.targets import TEMPORAL_TARGETS                       # noqa: E402
-from nv_evo.scoring import (TemporalTraces, score_contract,  # noqa: E402
+from substrates.nervous.targets import TEMPORAL_TARGETS                       # noqa: E402
+from substrates.nervous.scoring import (TemporalTraces, score_contract,  # noqa: E402
                             windowed_score, _waveform_expected,
                             _expected_events, _obs_len,
                             contract_relations)
-from nv_evo import scoring as sc                                  # noqa: E402
+from substrates.nervous import scoring as sc                                  # noqa: E402
 
 BUNDLE_VARIANTS = ('perfect', 'shift2', 'half', 'silence', 'always')
 
@@ -47,7 +47,7 @@ def thin_samples(samples):
 
 def build_bundle(target, variant):
     obs = _obs_len(target)
-    relation = contract_relations(target)[0]
+    relations = set(contract_relations(target))
     samples, events, intervals = {}, {}, {}
     roles = sorted({role for tr in target.trials for role in tr.expected})
     for role in roles:
@@ -57,7 +57,7 @@ def build_bundle(target, variant):
             ev = [float(t) for t in _expected_events(tr, role)] if exp else []
             iv = ([(float(a), float(b)) for a, b in
                    _waveform_expected(target, tr, role)]
-                  if relation == 'pulse_intervals' else [])
+                  if 'pulse_intervals' in relations else [])
             sm = exp_to_samples(exp, obs)
             if variant == 'shift2':
                 ev = [t + 2.0 for t in ev]
@@ -97,11 +97,12 @@ def main():
     records = []
     skipped = []
     for name, target in sorted(TEMPORAL_TARGETS.items()):
-        relation = contract_relations(target)[0]
-        if relation == 'bounded_state':
+        relations = contract_relations(target)
+        relation = relations[0]
+        if 'bounded_state' in relations:
             skipped.append(name)
             continue
-        tols = (None, 0) if relation == 'logical_state' else (None,)
+        tols = (None, 0) if 'logical_state' in relations else (None,)
         for variant in BUNDLE_VARIANTS:
             samples, events, intervals = build_bundle(target, variant)
             for tol in tols:

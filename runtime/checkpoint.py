@@ -14,26 +14,26 @@ _FIELDS = {
     'snn': ('state_n', 'state_s', 'state_e', 'state_w', 'self_in', 'self_out',
             'limit', 'tag', 'io_limit', 'io_selector'),
     'nervous': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out', 'tag',
-                'io_limit', 'io_selector'),
+                'io_limit', 'io_selector', 'io_kind'),
     'lut': ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out', 'tag',
-            'io_limit', 'io_selector'),
+            'io_limit', 'io_selector', 'io_kind'),
 }
 
 
 def _genome_types(backend):
     if backend == 'snn':
-        from snn_evo.genome import Gene, Chromosome, Genome
+        from substrates.snn.genome import Gene, Chromosome, Genome
     elif backend == 'nervous':
-        from nv_evo.genome import HexGene as Gene, Chromosome, Genome
+        from substrates.nervous.genome import HexGene as Gene, Chromosome, Genome
     elif backend == 'lut':
-        from lut_evo.genome import LutGene as Gene, Chromosome, Genome
+        from substrates.lut.genome import LutGene as Gene, Chromosome, Genome
     else:
         raise ValueError('unknown backend: %s' % backend)
     return Gene, Chromosome, Genome
 
 
 def genome_to_dict(genome, backend):
-    from nv_evo.tritile import _CHAN_BITS
+    from substrates.nervous.tritile import _CHAN_BITS
     fields = _FIELDS[backend]
     def split_for(chromosome):
         count = len(chromosome.genes)
@@ -42,6 +42,17 @@ def genome_to_dict(genome, backend):
     sd = getattr(genome, 'state_delays', None)     # nervous width-preserving model
     return {
         'tag': int(genome.tag), 'gene_fields': list(fields),
+        'seed_state': (
+            [int(value) for value in genome.seed_state]
+            if backend == 'lut' and getattr(genome, 'seed_state', None)
+            is not None else None),
+        'provenance': (
+            str(getattr(genome, 'provenance', ''))
+            if backend == 'lut' else ''),
+        'routing_patches': (
+            [[int(patch.x), int(patch.y), int(patch.state)]
+             for patch in (getattr(genome, 'routing_patches', None) or ())]
+            if backend == 'nervous' else []),
         'chromosomes': [
             {'tag': int(c.tag), 'split': split_for(c),
              'telomere': int(getattr(c, 'telomere', 1)),
@@ -78,7 +89,14 @@ def genome_from_dict(data, backend):
             tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1)),
             # 'sex' is the flag's retired spelling — readable, never written
             wiring=bool(item.get('wiring', item.get('sex', False)))))
-    genome = Genome(chromosomes=chroms, tag=int(data.get('tag', 0)))
+    seed_state = data.get('seed_state') if backend == 'lut' else None
+    genome = Genome(
+        chromosomes=chroms, tag=int(data.get('tag', 0)),
+        **({'seed_state': (
+            tuple(int(value) & 0xFFFF for value in seed_state)
+            if seed_state is not None else None),
+            'provenance': str(data.get('provenance', ''))}
+           if backend == 'lut' else {}))
     # 'state_widths' appears in checkpoints written before width evolution was
     # retired. It is deliberately ignored: the vector no longer exists on the
     # genome and no engine reads it (RunConfig.from_dict moves such runs onto
@@ -87,6 +105,11 @@ def genome_from_dict(data, backend):
     if sd and backend == 'nervous':
         genome.state_delays = [float(x) for x in sd]
     if backend == 'nervous':                       # tri3 vs single tile decode
+        from substrates.nervous.genome import RoutingPatch
+        genome.routing_patches = [
+            RoutingPatch(int(row[0]), int(row[1]), int(row[2]))
+            for row in data.get('routing_patches', ())
+            if len(row) >= 3]
         genome.arch = data.get('arch', 'single')
         # Tri channels were 4-bit AND-only before the OR twins were added. A
         # legacy checkpoint's packed bits would be re-cut at the new 5-bit field
@@ -94,7 +117,7 @@ def genome_from_dict(data, backend):
         # configs are all 0-15 (the AND half), hence behaviour is preserved.
         if (genome.arch == 'tri3'
                 and int(data.get('tri_channel_bits', 4)) == 4):
-            from nv_evo.tritile import widen_legacy_state
+            from substrates.nervous.tritile import widen_legacy_state
             for chrom in genome.chromosomes:
                 for gene in chrom.genes:
                     for field_name in ('ctx_l', 'ctx_r', 'ctx_d',
@@ -124,8 +147,8 @@ def _tuples(value):
 def _target_from_dict(item):
     data = dict(item['data'])
     if item['kind'] == 'temporal':
-        from nv_evo.targets import TemporalTarget, Trial, OutputTerminal
-        from nv_evo.contracts import contract_from_dict, legacy_contract
+        from substrates.nervous.targets import TemporalTarget, Trial, OutputTerminal
+        from substrates.nervous.contracts import contract_from_dict, legacy_contract
         legacy_mode = data.pop('score_mode', None)
         data['contract'] = (legacy_contract(legacy_mode, data)
                             if legacy_mode is not None and 'contract' not in data
@@ -148,14 +171,22 @@ def _target_from_dict(item):
                            for events in t['input_events']]),
             expected_intervals={
                 role: [tuple(interval) for interval in intervals]
-                for role, intervals in t.get('expected_intervals', {}).items()})
+                for role, intervals in t.get('expected_intervals', {}).items()},
+            case_windows=[
+                (float(window[0]), float(window[1]),
+                 tuple(int(bit) for bit in window[2]))
+                for window in t.get('case_windows', ())])
                           for t in data['trials']]
+        data['combinational_cases'] = [
+            (tuple(input_bits), tuple(output_bits))
+            for input_bits, output_bits in data.get(
+                'combinational_cases', ())]
         target = TemporalTarget(**data)
         for name, value in item.get('extras', {}).items():
             setattr(target, name, _tuples(value))
         return target
-    from snn_evo.targets import Target, OutputTerminal
-    from nv_evo.contracts import contract_from_dict, logic_contract
+    from substrates.snn.targets import Target, OutputTerminal
+    from substrates.nervous.contracts import contract_from_dict, logic_contract
     data['contract'] = (contract_from_dict(data['contract'])
                         if data.get('contract') else logic_contract())
     data['inputs'] = [tuple(p) for p in data['inputs']]
@@ -271,7 +302,7 @@ def load_checkpoint(path):
                 'fitnesses': doc.get('fitnesses'),
                 'metadata': doc.get('metadata'),
                 'certification': doc.get('certification')}
-    from snn_evo.snn import Arch
+    from substrates.snn.snn import Arch
     arch_data = dict(doc['arch']) if doc.get('arch') else None
     if arch_data:
         arch_data['vth_levels'] = tuple(arch_data['vth_levels'])

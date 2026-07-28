@@ -59,6 +59,7 @@ class TemporalTraces(dict):
         self._cadence_result = None
         self._stepper_result = None
         self._waveform_result = None
+        self._transition_result = None
 
 
 # ── temporal scoring ───────────────────────────────────────────────────────────
@@ -873,6 +874,10 @@ def contract_case_count(target):
     """Number of independently selectable behavioral checks."""
     if not getattr(target, 'temporal', False):
         return len(target.cases) * len(target.outputs)
+    if getattr(target, 'combinational_cases', ()):
+        return sum(
+            len(_combinational_windows(trial)) * len(trial.expected)
+            for trial in target.trials)
     if hasattr(target, '_sr_runs'):
         return sum(len(run['cases']) for run in target._sr_runs)
     return sum(len(trial.expected) for trial in target.trials)
@@ -927,6 +932,128 @@ def _logic_contract_score(observations, target):
     return total, tuple(cases), None
 
 
+def _combinational_windows(trial):
+    """Case windows of a periodic combinational trial, from its input onsets.
+
+    New periodic targets declare every isolated row window directly, including
+    a silent all-zero row. The onset-derived fallback keeps older checkpoints
+    readable; targets that need physical activity on 00 also carry a case-valid
+    strobe (see targets.periodic_combinational_target).
+    """
+    declared = getattr(trial, 'case_windows', None) or ()
+    if declared:
+        return [
+            (float(window[0]), float(window[1]))
+            for window in declared]
+    onsets = [tick for tick, row in enumerate(trial.streams) if any(row)]
+    if not onsets:
+        return []
+    spans = [b - a for a, b in zip(onsets, onsets[1:])]
+    width = min(spans) if spans else len(trial.streams)
+    return [(float(tick), float(tick + width)) for tick in onsets]
+
+
+def _combinational_case_confidence(observed, expected, start, end):
+    """How strongly the output asserted in one case window, in [0, 1].
+
+    Membership in the window is the whole question — a truth-table row asks
+    WHETHER the output asserted for this input combination, not whether it did
+    so at one exact second. Each row owns an isolated window several grid-widths
+    long, so judging by occupancy absorbs any propagation delay shorter than a
+    window and removes the need to fit a latency at all. Extra edges in the same
+    window still cost: a row commanding one edge that receives a burst of three
+    is not a clean readout.
+    """
+    fired = sum(1 for t in observed if start <= t < end)
+    wanted = sum(1 for t in expected if start <= t < end)
+    if not wanted:
+        return min(1.0, float(fired))
+    if not fired:
+        return 0.0
+    return wanted / max(wanted, fired)
+
+
+def _combinational_event_score(traces, target, shift):
+    """Level-BALANCED scoring of the periodic combinational encoding.
+
+    Pooled event F1 rewards a lopsided truth table for firing indiscriminately:
+    NAND puts a 1 on three of its four rows, so echoing the case-valid strobe
+    scored recall 1.0 and precision 0.75 -> F1 0.857, and a 100-generation
+    search stalled right there at 0.864. This is exactly the degeneracy
+    _logic_contract_score documents and removes for the static truth-table path;
+    the periodic wrapper that replaced that path for the asynchronous backends
+    reintroduced it. Score each row as an occupancy confidence and aggregate
+    with the same balancing, so any indiscriminate output caps at 0.5.
+
+    Returns ``(score, cases)`` with one independently selectable case per
+    ``(trial, role, truth-table row)``. Keeping the rows separate matters for
+    lexicase selection: an A-only, B-only, half-XOR, or carry specialist must
+    remain visible instead of disappearing inside one trial average.
+    """
+    roles = [terminal.role for terminal in target.outputs]
+    per_output = {role: {0: [], 1: []} for role in roles}
+    cases = []
+    for trial_index, trial in enumerate(target.trials):
+        windows = _combinational_windows(trial)
+        for role in trial.expected:
+            observed = [t - shift for t in _role_events(traces, role, trial_index)]
+            expected = list(trial.expected_events.get(role, ()))
+            levels = {0: [], 1: []}
+            for start, end in windows:
+                wanted = any(start <= t < end for t in expected)
+                confidence = _combinational_case_confidence(
+                    observed, expected, start, end)
+                correctness = confidence if wanted else 1.0 - confidence
+                correctness = max(0.0, min(1.0, correctness))
+                levels[1 if wanted else 0].append(correctness)
+                if role in per_output:
+                    per_output[role][1 if wanted else 0].append(correctness)
+                cases.append(correctness)
+
+    output_scores = []
+    for role in roles:
+        groups = [sum(cells) / len(cells)
+                  for cells in per_output[role].values() if cells]
+        if groups:
+            output_scores.append(sum(groups) / len(groups))
+    # Aggregate the outputs with mean-AND-worst, not a plain mean. A plain mean
+    # lets an easy output subsidise a hard one: a half adder whose carry (AND)
+    # is trivial and whose sum (XOR) is hard scores (1.0 + 0.5)/2 = 0.75 for
+    # solving only the carry, and — worse — the gradient toward the hard output
+    # is flat once the easy half is banked. Blending the worst output back in
+    # (the same 0.5*(mean+worst) every other relation uses) makes the HARDEST
+    # output drive roughly three-quarters of a two-output score, so selection
+    # pushes on the sum instead of coasting. 1.0 still requires every output
+    # perfect, so the solve threshold and certification are unchanged.
+    #
+    # An output-weighting sweep (mean vs mean_worst vs anneal-to-worst vs
+    # hardness-weighted vs p-norm; 4 multi-output targets x 3 seeds, 40 gens)
+    # confirmed the plain mean is the only real loser and the four non-degenerate
+    # policies are indistinguishable — identical per-target plateaus, none
+    # solved. So mean_worst wins on simplicity; the fancier schedules bought
+    # nothing, and the plateaus are representational, not a weighting problem.
+    if output_scores:
+        total = 0.5 * (sum(output_scores) / len(output_scores)
+                       + min(output_scores))
+    else:
+        total = 0.0
+    return total, tuple(cases)
+
+
+def _best_combinational_shift(traces, target):
+    """No shift search: this encoding is already latency-tolerant by design.
+
+    Each truth-table row owns an isolated window several grid-widths long, and
+    correctness only asks which window an edge fell in. Any propagation delay
+    shorter than a window is therefore absorbed for free, so fitting a global
+    offset cannot change the verdict except exactly at a window boundary —
+    while costing a full rescoring per candidate alignment. Searching them
+    made a Half-adder row roughly ten times slower for an identical score.
+    """
+    score, cases = _combinational_event_score(traces, target, 0.0)
+    return 0.0, score, cases
+
+
 def _bounded_state_score(traces, target, alignment):
     """Phase-invariant bounded memory over raw float-time rise trains."""
     offsets = ([target.latency + k for k in (0, 1, 2, 3)]
@@ -972,6 +1099,21 @@ def _bounded_state_score(traces, target, alignment):
     return (min(cases) if cases else 0.0), cases, used
 
 
+# Deliberately unused, and kept only to record why. It names the duty cycle of
+# the slowest ring the gap rule admits (one `width` pulse per `allowed_gap +
+# width` of period = 0.20 under default physics), and it is tempting to enforce
+# it as a coverage floor on active windows — _state_case_score's docstring even
+# claims coverage is checked. It was tried and reverted. Two reasons it cannot
+# be: coverage is phase-DEPENDENT at window boundaries, because a window of
+# duration d fits floor(d/P) or ceil(d/P) pulses of the same ring depending on
+# where its phase lands, which breaks the translation invariance pinned by
+# test_state_contract_is_phase_invariant_for_the_same_ring; and it refuses
+# outputs the gap rule legitimately admits, since a 12-tick window divided by a
+# period-5 slowest legal ring is only 2.4 pulses, so two pulses really is a
+# legal held bit there. A thin-but-legal ring and a short burst are genuinely
+# indistinguishable to this relation. Where that mattered — One-shot scoring
+# 1.000 for a delay line — the fault was the stimulus, not the scorer: see
+# one_shot_oracle.
 STATE_RING_COVERAGE = 0.20
 STATE_QUIET_COVERAGE = 0.20
 
@@ -1046,10 +1188,19 @@ def _state_case_score(traces, target, trial, role, trial_index, shift):
     # permanently silent output satisfies those perfectly. Refuse the free pass:
     # the state relation cannot express such a case, and scoring 0 says so
     # loudly instead of certifying a dead circuit at 1.0.
+    timed_state = (
+        hasattr(target, 'contract')
+        and has_relation(target, 'transition_correspondence'))
     if commanded_active and not judged_active:
-        return 0.0
+        # Retention alone cannot distinguish a short commanded pulse from
+        # silence, which is why the old state-only contract rejected the whole
+        # case here. Timed-state contracts now verify the activation boundary
+        # independently. Let that clause carry the short epoch while this one
+        # continues to judge any observable quiet windows.
+        if not timed_state:
+            return 0.0
     if not values:
-        return 0.0
+        return 1.0 if timed_state else 0.0
     return 0.5 * (sum(values) / len(values) + min(values))
 
 
@@ -1073,7 +1224,306 @@ def _logical_state_score(traces, target, alignment):
     return score, cases, used
 
 
+def _expected_state_changes(expected, activation_only=False, allowed_gap=0.0):
+    """Logical boundaries encoded by one expected state trace.
+
+    The trace may begin with unscored startup cells or contain settling gaps.
+    Those gaps do not reset the remembered logical level. Nervous-net scoring
+    times only observable activations; a restart after a quiet epoch shorter
+    than one legal circulation gap is omitted because it cannot be separated
+    reliably from the ring's ordinary phase.
+    """
+    changes = []
+    previous = 0
+    quiet_start = 0.0
+    seen_activation = False
+    for tick, value in enumerate(expected):
+        if value is None:
+            continue
+        level = 1 if value else 0
+        if level == previous:
+            if level == 0 and quiet_start is None:
+                quiet_start = float(tick)
+            continue
+        if level:
+            quiet_duration = (
+                float(tick) - quiet_start
+                if quiet_start is not None else float('inf'))
+            if (not activation_only or not seen_activation
+                    or quiet_duration > allowed_gap + 1e-9):
+                changes.append(float(tick))
+            seen_activation = True
+            quiet_start = None
+        else:
+            if not activation_only:
+                changes.append(float(tick))
+            quiet_start = float(tick)
+        previous = level
+    return changes
+
+
+def _expected_activation_changes(expected, allowed_gap):
+    """Required and optional 0->1 boundaries for a circulating output.
+
+    A short active epoch may contain no pulse at the observed cell, and a
+    restart after a short quiet epoch may be indistinguishable from an ordinary
+    inter-pulse gap. Such boundaries are optional: absorb them when visible,
+    but do not count them as misses when ring phase hides them.
+    """
+    required, optional = [], []
+    previous = 0
+    quiet_start = 0.0
+    seen_activation = False
+    for tick, value in enumerate(expected):
+        if value is None:
+            continue
+        level = 1 if value else 0
+        if level == previous:
+            continue
+        if level:
+            end = float(len(expected))
+            for later in range(tick + 1, len(expected)):
+                later_value = expected[later]
+                if later_value is not None and not later_value:
+                    end = float(later)
+                    break
+            quiet_duration = (
+                float(tick) - quiet_start
+                if quiet_start is not None else float('inf'))
+            observable = (
+                end - float(tick) > allowed_gap + 1e-9
+                and (not seen_activation
+                     or quiet_duration > allowed_gap + 1e-9))
+            if observable:
+                required.append(float(tick))
+            else:
+                optional.append((float(tick), end))
+            seen_activation = True
+            quiet_start = None
+        else:
+            quiet_start = float(tick)
+        previous = level
+    return required, optional
+
+
+def _merge_activity_epochs(intervals, allowed_gap):
+    """Merge physical pulses into logical active epochs."""
+    merged = []
+    for start, end in sorted(
+            (float(start), float(end)) for start, end in intervals
+            if float(end) > float(start)):
+        if merged and start - merged[-1][1] <= allowed_gap + 1e-9:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _logical_transition_pairs(traces, target):
+    """Expected and observed logical state changes for every trial/output.
+
+    A held LUT level exposes every rising and falling boundary. A nervous-net
+    stored 1 may be a circulating pulse, so its pulses are merged into active
+    epochs and only activation boundaries are timed; the accompanying logical
+    state restriction independently verifies every cleared epoch.
+    """
+    strict = getattr(traces, 'hold_tol', 1) == 0
+    config = getattr(target, 'pulse_config', None)
+    delay = pulse.DELAY if config is None else config.delay
+    width = pulse.WIDTH if config is None else config.width
+    allowed_gap = 0.0 if strict else 2.0 * (delay + width)
+    pairs = []
+    for trial_index, trial in enumerate(target.trials):
+        for role, expected in trial.expected.items():
+            samples = traces.get(role, ())
+            intervals = _state_observed_intervals(
+                traces, role, trial_index)
+            if not intervals:
+                intervals = [
+                    (float(event), float(event) + width)
+                    for event in _role_events(
+                        traces, role, trial_index)]
+            epochs = _merge_activity_epochs(intervals, allowed_gap)
+            observation_horizon = (
+                float(len(samples[trial_index]))
+                if trial_index < len(samples) and samples[trial_index]
+                else float(_obs_len(target)))
+            if strict:
+                changes = []
+                for start, end in epochs:
+                    changes.append(start)
+                    if end < observation_horizon - 1e-9:
+                        changes.append(end)
+            else:
+                # Activation is directly observable as the first pulse of a
+                # ring. Ring cessation has phase uncertainty; retention scores
+                # clearing.
+                changes = [start for start, _ in epochs]
+            if strict:
+                required = _expected_state_changes(expected)
+                optional = ()
+            else:
+                required, optional = _expected_activation_changes(
+                    expected, allowed_gap)
+            pairs.append((
+                tuple(required), tuple(changes), float(target.T),
+                0.0 if strict else allowed_gap, tuple(optional)))
+    return tuple(pairs)
+
+
+def _transition_match_scores(expected, observed, shift, tolerance, falloff,
+                             phase_slack=0.0):
+    """Best ordered one-to-one alignment at one proposed common shift."""
+    n_expected, n_observed = len(expected), len(observed)
+    dp = [[(0.0, ()) for _ in range(n_observed + 1)]
+          for _ in range(n_expected + 1)]
+    for i in range(n_expected - 1, -1, -1):
+        for j in range(n_observed - 1, -1, -1):
+            lag = (observed[j] - expected[i]) - shift
+            if phase_slack > 0.0:
+                # A nervous-net logical 1 is a ring. Its first observable pulse
+                # can follow the underlying activation by any legal ring phase,
+                # but it cannot precede that activation.
+                if -tolerance <= lag <= phase_slack + tolerance:
+                    distance = 0.0
+                elif lag < -tolerance:
+                    distance = -tolerance - lag
+                else:
+                    distance = lag - (phase_slack + tolerance)
+            else:
+                distance = max(0.0, abs(lag) - tolerance)
+            closeness = (
+                1.0 if distance <= 1e-12 else
+                math.exp(-distance / max(falloff, 1e-12)))
+            options = [
+                dp[i + 1][j],
+                dp[i][j + 1],
+                (closeness + dp[i + 1][j + 1][0],
+                 (closeness,) + dp[i + 1][j + 1][1]),
+            ]
+            dp[i][j] = max(
+                options, key=lambda item: (item[0], len(item[1])))
+    return dp[0][0][1]
+
+
+def _transition_profile(pairs, shift, tolerance, falloff):
+    trial_scores, all_scores = [], []
+    total_expected = total_observed = total_matches = 0
+    for expected, observed, horizon, phase_slack, optional in pairs:
+        # The output is deliberately observed past the target horizon so a
+        # delayed response remains visible. Map boundaries back through the
+        # proposed shift and ignore only those truly outside the target window.
+        observed = tuple(
+            change for change in observed
+            if -1e-9 <= change - shift < horizon - 1e-9)
+        if optional:
+            observed = tuple(
+                change for change in observed
+                if not any(
+                    start + shift - tolerance
+                    <= change
+                    < end + shift + tolerance
+                    for start, end in optional))
+        matched = _transition_match_scores(
+            expected, observed, shift, tolerance, falloff, phase_slack)
+        count = len(matched)
+        count_f1 = (
+            1.0 if not expected and not observed else
+            (2.0 * count / (len(expected) + len(observed))
+             if expected or observed else 0.0))
+        timing = (
+            1.0 if not expected and not observed else
+            (0.5 * (sum(matched) / count + min(matched))
+             if matched else 0.0))
+        trial_scores.append(count_f1 * timing)
+        all_scores.extend(matched)
+        total_expected += len(expected)
+        total_observed += len(observed)
+        total_matches += count
+    count_f1 = (
+        1.0 if not total_expected and not total_observed else
+        (2.0 * total_matches / (total_expected + total_observed)
+         if total_expected or total_observed else 0.0))
+    timing = (
+        1.0 if not total_expected and not total_observed else
+        (0.5 * (sum(all_scores) / len(all_scores) + min(all_scores))
+         if all_scores else 0.0))
+    pooled_score = count_f1 * timing
+    if not trial_scores:
+        return pooled_score, ()
+
+    # Preserve the population-level signal while making one broken trial
+    # visible instead of allowing it to vanish among many correct edges.
+    return 0.5 * (pooled_score + min(trial_scores)), tuple(trial_scores)
+
+
+def _transition_candidate_shifts(traces, target, clause, pairs=None,
+                                 include_state_grid=False):
+    """Plausible shared shifts from physical boundaries and the state grid."""
+    if not bool(clause.parameters.get('fit_latency', True)):
+        return {0.0}
+    nominal = float(getattr(target, 'latency', 0.0))
+    max_shift = max(
+        0.0, float(clause.parameters.get('max_shift', target.T)))
+    candidates = {0.0}
+    if include_state_grid:
+        candidates.update(
+            float(shift)
+            for shift in range(
+                -int(math.floor(max_shift)),
+                int(math.floor(max_shift)) + 1))
+    pairs = _logical_transition_pairs(
+        traces, target) if pairs is None else pairs
+    for expected, observed, _, phase_slack, _ in pairs:
+        for expected_time in expected:
+            for observed_time in observed:
+                delta = observed_time - expected_time
+                candidates.update((delta, delta - phase_slack))
+    return {
+        shift for shift in candidates
+        if abs(shift) <= max_shift + 1e-9
+        and (nominal <= 0.0 or nominal + shift >= 0.0)}
+
+
+def transition_score(traces, target, alignment=_REFIT_ALIGNMENT):
+    """State-transition score under one shift fitted across every trial."""
+    if getattr(traces, 'overflow', False):
+        return 0.0, (0.0,) * len(target.trials), 0.0
+    clause = next(
+        constraint for constraint in target.contract.constraints
+        if constraint.relation == 'transition_correspondence')
+    tolerance = max(0.0, float(clause.parameters.get('tolerance', 0.25)))
+    falloff = max(1e-12, float(clause.parameters.get('falloff', 2.0)))
+    nominal = float(getattr(target, 'latency', 0.0))
+    pairs = _logical_transition_pairs(traces, target)
+    if alignment is not _REFIT_ALIGNMENT:
+        shift = float(alignment)
+        score, cases = _transition_profile(
+            pairs, shift, tolerance, falloff)
+        return score, cases, nominal + shift
+    cached = getattr(traces, '_transition_result', None)
+    if cached is not None:
+        return cached
+    candidates = _transition_candidate_shifts(
+        traces, target, clause, pairs=pairs)
+    results = []
+    for shift in candidates:
+        score, cases = _transition_profile(
+            pairs, shift, tolerance, falloff)
+        results.append((score, cases, nominal + float(shift)))
+    best = max(
+        results,
+        key=lambda result: (
+            result[0], -abs(result[2] - nominal), -result[2]))
+    traces._transition_result = best
+    return best
+
+
 def _score_constraint(traces, target, relation, alignment):
+    if relation == 'transition_correspondence':
+        score, _, latency = transition_score(
+            traces, target, alignment=alignment)
+        return score, (), latency - float(getattr(target, 'latency', 0.0))
     if relation == 'pulse_intervals':
         if alignment is _REFIT_ALIGNMENT:
             used, score, cases = _best_waveform_shift(traces, target)
@@ -1096,6 +1546,15 @@ def _score_constraint(traces, target, relation, alignment):
             score, cases = cadence_score(traces, target, latency=used)
         return score, tuple(cases), used
     if relation == 'event_correspondence':
+        # A periodic combinational wrapper carries its truth table, and its rows
+        # are level-balanced rather than pooled (see _combinational_event_score).
+        if getattr(target, 'combinational_cases', ()):
+            if alignment is _REFIT_ALIGNMENT:
+                used, score, cases = _best_combinational_shift(traces, target)
+            else:
+                used = float(alignment)
+                score, cases = _combinational_event_score(traces, target, used)
+            return score, cases, used
         if alignment is _REFIT_ALIGNMENT:
             used, score = _best_event_shift(traces, target)
         else:
@@ -1117,6 +1576,15 @@ def _score_constraint(traces, target, relation, alignment):
     return _logical_state_score(traces, target, alignment)
 
 
+def _aggregate_contract_scores(scores, weights):
+    weighted = (
+        sum(score * weight for score, weight in zip(scores, weights))
+        / max(sum(weights), 1e-12))
+    return (
+        weighted if len(scores) == 1
+        else 0.5 * (weighted + min(scores)))
+
+
 def score_contract(observations, target, alignment=_REFIT_ALIGNMENT):
     """Evaluate any target contract and return ``(score, cases, alignment)``.
 
@@ -1131,6 +1599,33 @@ def score_contract(observations, target, alignment=_REFIT_ALIGNMENT):
         used = None if alignment is _REFIT_ALIGNMENT else alignment
         return 0.0, (0.0,) * n_cases, used
 
+    relations = contract_relations(target)
+    if (alignment is _REFIT_ALIGNMENT
+            and 'transition_correspondence' in relations
+            and 'logical_state' in relations):
+        transition_clause = next(
+            clause for clause in target.contract.constraints
+            if clause.relation == 'transition_correspondence')
+        candidates = _transition_candidate_shifts(
+            observations, target, transition_clause,
+            include_state_grid=True)
+        profiles = []
+        for candidate in candidates:
+            scores, cases, weights = [], [], []
+            for clause in target.contract.constraints:
+                score, clause_cases, _ = _score_constraint(
+                    observations, target, clause.relation, candidate)
+                scores.append(score)
+                cases.extend(clause_cases)
+                weights.append(max(0.0, float(clause.weight)))
+            total = _aggregate_contract_scores(scores, weights)
+            profiles.append((
+                max(0.0, min(1.0, total)), tuple(cases), candidate))
+        return max(
+            profiles,
+            key=lambda profile: (
+                profile[0], -abs(profile[2]), -profile[2]))
+
     scores, cases, weights = [], [], []
     used = alignment
     for clause in target.contract.constraints:
@@ -1144,8 +1639,7 @@ def score_contract(observations, target, alignment=_REFIT_ALIGNMENT):
         cases.extend(clause_cases)
     if not scores:
         return 0.0, (0.0,) * n_cases, None
-    weighted = sum(s * w for s, w in zip(scores, weights)) / max(sum(weights), 1e-12)
-    total = weighted if len(scores) == 1 else 0.5 * (weighted + min(scores))
+    total = _aggregate_contract_scores(scores, weights)
     return max(0.0, min(1.0, total)), tuple(cases), (
         None if used is _REFIT_ALIGNMENT else used)
 
@@ -1168,7 +1662,7 @@ def exact_tick_accuracy(traces, ttarget):
     return correct / total if total else 0.0
 
 
-# ── float-time coverage: the retention scorers (formerly nv_evo/robustness.py) ─────
+# ── float-time coverage: the retention scorers (formerly substrates/nervous/robustness.py) ─────
 
 # ── predeclared scoring constants (a state-1 hold rings with period ~D+W) ────────
 # The nervous-net memory holds a bit as a pulse CIRCULATING (reads as ~50%-duty
@@ -1422,6 +1916,9 @@ NV_REPORT_NOTES = {
     'commanded_cadence': 'Backend detail: nervous-net transition phase may be sub-second.',
     'sustained_cadence': 'Backend detail: cadence uses raw nervous-net edge timestamps.',
     'event_correspondence': 'Backend detail: raw nervous-net timestamps retain sub-second edges.',
+    'transition_correspondence': (
+        'Backend detail: nervous-net ring pulses are merged into logical active '
+        'epochs; activation timing is paired while retention verifies clearing.'),
     'trace_preamble': (
         'Scored as persistent behaviour across active and quiet epochs.',
         'A stored 1 may ring (1010...) because a nervous node is refractory, so',
@@ -1436,6 +1933,8 @@ LUT_REPORT_NOTES = {
     'commanded_cadence': 'Backend detail: LUT cadence transitions may occur at sub-second times.',
     'sustained_cadence': 'Backend detail: cadence uses raw LUT wire edge timestamps.',
     'event_correspondence': 'Backend detail: raw LUT wire timestamps retain sub-second edges.',
+    'transition_correspondence': (
+        'Backend detail: held LUT rise/fall boundaries are paired directly.'),
     'trace_preamble': (
         'Scored as persistent behaviour across active and quiet epochs.',
         'A LUT output is a held level, so an active epoch is scored by exact',
@@ -1519,6 +2018,63 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
             total, '   SOLVED' if total >= 0.999 else '')]
         return total, lines
 
+    if ('event_correspondence' in relations
+            and getattr(ttarget, 'combinational_cases', ())):
+        lines += [
+            '',
+            'Backend detail: each explicitly scheduled truth-table row owns one '
+            'isolated event window; only assertion or silence in that window '
+            'is scored.',
+        ]
+        if traces is not None:
+            out_lines()
+        for ti, trial in enumerate(ttarget.trials):
+            lines.append('')
+            lines.append('Schedule %d:' % (ti + 1))
+            declared = getattr(trial, 'case_windows', None) or ()
+            for window_index, (start, end) in enumerate(
+                    _combinational_windows(trial)):
+                if (window_index < len(declared)
+                        and len(declared[window_index]) >= 3):
+                    bits = tuple(
+                        int(value) for value in declared[window_index][2])
+                else:
+                    bits = tuple(
+                        int(value)
+                        for value in trial.streams[int(start)][
+                            :ttarget.combinational_data_inputs])
+                row_label = ''.join(map(str, bits))
+                parts = []
+                for role in trial.expected:
+                    expected = list(trial.expected_events.get(role, ()))
+                    wanted = int(any(start <= tick < end for tick in expected))
+                    if traces is None:
+                        parts.append('%s want=%d' % (role, wanted))
+                        continue
+                    observed = list(_role_events(traces, role, ti))
+                    fired = sum(1 for tick in observed if start <= tick < end)
+                    confidence = _combinational_case_confidence(
+                        observed, expected, start, end)
+                    correctness = (
+                        confidence if wanted else 1.0 - confidence)
+                    correctness = max(0.0, min(1.0, correctness))
+                    parts.append(
+                        '%s want=%d fired=%d score=%.3f'
+                        % (role, wanted, fired, correctness))
+                lines.append(
+                    '  row %s [%g,%g): %s'
+                    % (row_label, start, end, '; '.join(parts)))
+        total = None
+        if traces is not None:
+            total, cases, _ = score_contract(traces, ttarget)
+            lines += [
+                '',
+                'row/output cases: %d' % len(cases),
+                '=> Contract score %.4f%s  [windowed truth table]'
+                % (total, '   SOLVED' if total >= 0.999 else ''),
+            ]
+        return total, lines
+
     if 'event_correspondence' in relations:
         if notes.get('event_correspondence'):
             lines += ['', notes['event_correspondence']]
@@ -1575,7 +2131,21 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
         total, case_scores, best_s = score_contract(traces, ttarget)
         case_iter = iter(case_scores)
         out_lines()
-        lines.append('measured output latency offset: %+d second(s)' % best_s)
+        lines.append('measured output latency offset: %s'
+                     % _display_time(best_s))
+        if 'transition_correspondence' in relations:
+            transition, transition_cases, latency = transition_score(
+                traces, ttarget, alignment=best_s)
+            note = notes.get('transition_correspondence')
+            if note:
+                lines.append(note)
+            lines.append(
+                'fitted common input-to-Q latency: %s; transition score %.3f'
+                % (_display_time(latency), transition))
+            lines.append(
+                'transition trials: %s'
+                % ', '.join('%.3f' % value
+                            for value in transition_cases))
     for ti, trial in enumerate(ttarget.trials):
         lines += ['', 'Test %d: %s' % (
             ti + 1, trial_input_summary(trial, ttarget.n_inputs))]
@@ -1591,8 +2161,12 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
                              % (''.join(str(v) for v in tr_i), s,
                                 'PASS' if s >= 0.999 else 'FAIL'))
     if traces is not None:
-        lines += ['', '=> Contract score %.4f%s  [phase-invariant logical state]'
+        label = (
+            'common-latency transitions + phase-invariant logical state'
+            if 'transition_correspondence' in relations
+            else 'phase-invariant logical state')
+        lines += ['', '=> Contract score %.4f%s  [%s]'
                   '   (exact per-second %.4f)'
-                  % (total, '   SOLVED' if total >= 0.999 else '',
+                  % (total, '   SOLVED' if total >= 0.999 else '', label,
                      exact_tick_accuracy(traces, ttarget))]
     return total, lines

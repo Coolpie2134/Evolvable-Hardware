@@ -12,29 +12,29 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from evo_runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
+from runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
                                 default_max_telomere)
-from evo_runtime.checkpoint import load_checkpoint, save_checkpoint
-from evo_runtime.controller import (run_evolution, save_evaluated_generation,
+from runtime.checkpoint import load_checkpoint, save_checkpoint
+from runtime.controller import (run_evolution, save_evaluated_generation,
                                     save_solver_generation, wait_for_resume)
-import lut_evo.ga as lut_ga
-import nv_evo.ga as nv_ga
-import snn_evo.ga as snn_ga
-from lut_evo.ga import (crossover_lut, diversify as diversify_lut, mutate_lut)
-from lut_evo.genome import (MAX_CHROMS as LUT_MAX_CHROMS,
+import substrates.lut.ga as lut_ga
+import substrates.nervous.ga as nv_ga
+import substrates.snn.ga as snn_ga
+from substrates.lut.ga import (crossover_lut, diversify as diversify_lut, mutate_lut)
+from substrates.lut.genome import (MAX_CHROMS as LUT_MAX_CHROMS,
                             Chromosome as LutChromosome, Genome as LutGenome,
                             LutGene, random_lut_gene, random_lut_genome)
-from lut_evo.ontogeny import _pack
-from nv_evo.ga import (adaptive_mutation_rate, consolidate_population,
+from substrates.lut.ontogeny import _pack
+from substrates.nervous.ga import (adaptive_mutation_rate, consolidate_population,
                        crossover_nv, diversify as diversify_nv, mutate_nv,
                        next_population)
-from nv_evo.genome import (MAX_CHROMS as NV_MAX_CHROMS,
+from substrates.nervous.genome import (MAX_CHROMS as NV_MAX_CHROMS,
                            Chromosome as NvChromosome, Genome as NvGenome,
-                           HexGene, random_hex_genome)
-from nv_evo.pulse import PulseConfig
-from nv_evo.targets import TEMPORAL_TARGETS
-from snn_evo.ga import crossover as crossover_snn, mutate as mutate_snn
-from snn_evo.genome import (MAX_CHROMS as SNN_MAX_CHROMS,
+                           HexGene, RoutingPatch, random_hex_genome)
+from substrates.nervous.pulse import PulseConfig
+from substrates.nervous.targets import TEMPORAL_TARGETS
+from substrates.snn.ga import crossover as crossover_snn, mutate as mutate_snn
+from substrates.snn.genome import (MAX_CHROMS as SNN_MAX_CHROMS,
                             Chromosome as SnnChromosome, Gene as SnnGene,
                             Genome as SnnGenome, random_genome)
 
@@ -44,6 +44,29 @@ def test_lut_uses_a_smaller_fresh_run_telomere_default():
     assert default_max_telomere('nervous') == 20
     assert default_max_telomere('snn') == 20
     assert GAConfig().max_telomere == 20
+
+
+def test_nervous_routing_overlay_survives_checkpoint_and_signature():
+    genome = random_hex_genome(2)
+    genome.routing_patches = [
+        RoutingPatch(-2, 3, 17),
+        RoutingPatch(4, 1, 9),
+    ]
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(ga=GAConfig(
+        chromosome_count=2, tile_arch='single',
+        node_model='pulse_delay'),
+        pulse=PulseConfig(model='pulse_delay'))
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, 'patched.json')
+        save_checkpoint(
+            path, genome, 0.5, target, None, 17, 'nervous', config)
+        restored = load_checkpoint(path)['best_genome']
+    assert [
+        (patch.x, patch.y, patch.state)
+        for patch in restored.routing_patches
+    ] == [(-2, 3, 17), (4, 1, 9)]
+    assert nv_ga.genome_signature(restored) == nv_ga.genome_signature(genome)
 
 
 _CROSSOVER_CASES = (
@@ -248,6 +271,14 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
         raise AssertionError('chromosome_count above the backend limit was accepted')
 
 
+def test_terminal_node_io_config_round_trips_without_wiring_chromosome():
+    original = RunConfig(ga=GAConfig(
+        chromosome_count=2, io_placement='terminal_nodes'))
+    rebuilt = RunConfig.from_dict(dataclasses.asdict(original))
+    assert rebuilt.ga.io_placement == 'terminal_nodes'
+    assert rebuilt.ga.chromosome_count == 2
+
+
 def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
     config = RunConfig(ga=GAConfig(
         chromosome_count=2, stagnation_beta=1.75,
@@ -348,7 +379,7 @@ def test_nv_reproduction_preserves_configured_count_for_children_and_immigrants(
     assert {len(genome.chromosomes) for genome in children} == {3}
 
 
-def test_nv_plateau_reheating_cannot_apply_multiple_io_mutations_per_child():
+def test_nv_baseline_io_mutation_remains_a_single_edit():
     genome = random_hex_genome(
         3, wiring_chromosome=True, n_ports=3)
     random.seed(7009)
@@ -361,6 +392,382 @@ def test_nv_plateau_reheating_cannot_apply_multiple_io_mutations_per_child():
                 genome, mean_mutations=8.0, chromosome_count=3,
                 evolve_delay=True, evolve_io=True)
             assert edit.call_count <= 1
+
+
+def test_coordinated_spatial_io_mutation_relocates_distinct_ports():
+    from substrates.nervous.io_placement import mutate_io_bundle, wiring_chromosome
+
+    genome = random_lut_genome(
+        3, wiring_chromosome=True, n_ports=4,
+        spatial_chromosome=True)
+    wiring = wiring_chromosome(genome)
+    before = [(gene.tag, gene.io_selector) for gene in wiring.genes]
+    random.seed(7010)
+    assert mutate_io_bundle(
+        genome, 1 << 16, strategy='spatial_chromosome', count=2) == 2
+    after = [(gene.tag, gene.io_selector) for gene in wiring.genes]
+
+    changed = [index for index, pair in enumerate(after)
+               if pair != before[index]]
+    assert len(changed) == 2
+    assert all(after[index][0] != before[index][0]
+               and after[index][1] != before[index][1]
+               for index in changed)
+
+
+def test_lut_plateau_rescue_proposes_motifs_and_output_rule_bits():
+    from substrates.nervous.io_placement import (
+        bind_io, flat_inputs, flat_outputs, set_spatial_port_positions)
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Half adder'))
+    target.io_placement = 'spatial_chromosome'
+    genome = random_lut_genome(
+        3, wiring_chromosome=True, n_ports=4,
+        spatial_chromosome=True)
+    # Make one maintenance rule visibly expressed at every fake output cell.
+    genome.chromosomes[0].genes[0] = dataclasses.replace(
+        genome.chromosomes[0].genes[0], self_in=1, self_out=1)
+    grid = {
+        (0, 0): (1, 0, 0, 0), (1, 0): (1, 0, 0, 0),
+        (0, 1): (1, 0, 0, 0), (1, 1): (1, 0, 0, 0),
+    }
+    initial = [(0, 0), (1, 1), (1, 0), (0, 1)]
+    assert set_spatial_port_positions(
+        genome, grid, initial) == len(initial)
+
+    with mock.patch.object(lut_ga, 'grow_lut', return_value=grid):
+        candidates = lut_ga.plateau_rescue_candidates(
+            genome, target, limit=16)
+
+    assert candidates
+    signatures = [lut_ga._recombination_signature(g) for g in candidates]
+    assert len(signatures) == len(set(signatures))
+    # A compact-motif proposal coordinates all four logical ports.
+    bindings = []
+    from substrates.lut.lut import cell_io_tags
+    for candidate in candidates:
+        bound = bind_io(
+            candidate, grid, target, 'spatial_chromosome',
+            tags=cell_io_tags(candidate, grid))
+        if bound is not None:
+            bindings.append(flat_inputs(bound[0]) + flat_outputs(bound[1]))
+    assert any(binding != initial for binding in bindings)
+    # A local-rule proposal flips exactly one output bit on the maintenance gene.
+    assert any(
+        candidate.chromosomes[0].genes[0].self_out == 0
+        for candidate in candidates)
+
+
+def test_lut_synthesizes_every_hard_combinational_target_as_a_grown_genome():
+    from substrates.lut.synthesis import (
+        POLARISED_SEED, synthesize_combinational_genome)
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    names = (
+        'Full adder', '2-bit adder', '2:1 MUX', 'Majority-3',
+        'Parity-3 (XOR3)', '2-to-4 decoder', '2-bit comparator',
+        '2x2 multiplier',
+    )
+    compiled = {}
+    for name in names:
+        target = periodic_combinational_target(get_target(name))
+        target.io_placement = 'spatial_chromosome'
+        result = synthesize_combinational_genome(
+            target, chromosome_count=3, max_telomere=8)
+        fitness, cases = lut_ga.evaluate_lut_full(result.genome, target)
+        assert result.inverse_report['exact']
+        assert result.inverse_report['radius'] <= 8
+        assert result.genome.seed_state == POLARISED_SEED
+        assert result.genome.provenance == 'truth-table-compiler-v1'
+        assert len(result.genome.chromosomes) == 3
+        assert result.genome.chromosomes[2].wiring
+        assert max(
+            len(chromosome.genes)
+            for chromosome in result.genome.chromosomes
+            if not chromosome.wiring) <= lut_ga.ONTOGENY_CAP
+        assert fitness == 1.0
+        assert min(cases) == 1.0
+        compiled[name] = (target, result)
+
+    # The new developmental seed is real genotype state: checkpoint round-trip
+    # and cache/signature identity must retain it.
+    target, result = compiled['2-bit comparator']
+    config = RunConfig(ga=GAConfig(
+        chromosome_count=3, io_placement='spatial_chromosome',
+        max_telomere=8))
+    with tempfile.TemporaryDirectory() as directory:
+        path = os.path.join(directory, 'compiled.json')
+        save_checkpoint(
+            path, result.genome, 1.0, target, None, 73, 'lut', config)
+        restored = load_checkpoint(path)
+    assert restored['best_genome'].seed_state == POLARISED_SEED
+    assert restored['best_genome'].provenance == 'truth-table-compiler-v1'
+    assert restored['target'].combinational_strobe
+    assert restored['target'].combinational_data_inputs == 4
+    assert restored['target'].combinational_cases == target.combinational_cases
+    assert [
+        trial.case_windows for trial in restored['target'].trials
+    ] == [trial.case_windows for trial in target.trials]
+    assert lut_ga.genome_signature(
+        restored['best_genome']) == lut_ga.genome_signature(result.genome)
+
+
+def test_hard_target_compiler_is_the_first_plateau_rescue_candidate():
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('2x2 multiplier'))
+    target.io_placement = 'spatial_chromosome'
+    champion = random_lut_genome(
+        3, wiring_chromosome=True,
+        spatial_chromosome=True,
+        n_ports=target.n_inputs + len(target.outputs))
+    candidates = lut_ga.plateau_rescue_candidates(
+        champion, target, limit=4, max_telomere=8)
+    assert candidates
+    fitness, cases = lut_ga.evaluate_lut_full(candidates[0], target)
+    assert fitness == 1.0
+    assert min(cases) == 1.0
+
+
+def test_plateau_archive_keeps_breeding_the_all_time_lut_champion():
+    random.seed(7011)
+    population = [random_lut_genome(3) for _ in range(10)]
+    champion = lut_ga.clone_genome(population[0])
+    fitnesses = [0.8] + [0.1] * 9
+    config = GAConfig(
+        chromosome_count=3, immigrant_fraction=0.0, elite_count=2,
+        io_placement='fixed')
+
+    with mock.patch.object(
+            lut_ga, 'mutate_lut', wraps=lut_ga.mutate_lut) as mutate:
+        children = lut_ga.next_population(
+            population, fitnesses, mean_mutations=2.0, ga_config=config,
+            archive_parent=champion,
+            stagnation=nv_ga.STRESS_PATIENCE)
+
+    archive_calls = [
+        call for call in mutate.call_args_list
+        if call.args and call.args[0] is champion]
+    assert archive_calls
+    assert len(children) == len(population)
+    assert all(child is not champion for child in children)
+
+
+def test_spatial_plateau_preserves_one_champion_and_mixes_local_edits():
+    random.seed(70115)
+    population = [
+        random_hex_genome(
+            3, spatial_chromosome=True, n_ports=4)
+        for _ in range(20)]
+    for index, genome in enumerate(population):
+        genome.routing_patches = [RoutingPatch(index, 0, 3)]
+    champion = nv_ga.clone_genome(population[0])
+    fitnesses = [0.8] + [0.1] * (len(population) - 1)
+    config = GAConfig(
+        chromosome_count=3, immigrant_fraction=0.0, elite_count=4,
+        io_placement='spatial_chromosome', tile_arch='single',
+        node_model='pulse_delay')
+
+    with mock.patch.object(
+            nv_ga, 'mutate_nv', wraps=nv_ga.mutate_nv) as mutate:
+        children = nv_ga.next_population(
+            population, fitnesses, mean_mutations=8.0, ga_config=config,
+            archive_parent=champion,
+            stagnation=nv_ga.STRESS_PATIENCE)
+
+    champion_signature = nv_ga.genome_signature(champion)
+    assert sum(
+        nv_ga.genome_signature(child) == champion_signature
+        for child in children) == 1
+    local_flags = [
+        bool(call.kwargs.get('local_only'))
+        for call in mutate.call_args_list]
+    assert any(local_flags)
+    assert any(not flag for flag in local_flags)
+
+
+def test_controller_invokes_lut_rescue_only_after_plateau_patience():
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(ga=GAConfig(chromosome_count=2))
+    messages = queue.Queue()
+    stop = threading.Event()
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    def evaluate(genomes, *_args, **_kwargs):
+        return [0.5] * len(genomes), None
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch.object(
+                lut_ga, 'make_seed_genome',
+                side_effect=lambda count: random_lut_genome(count)), \
+            mock.patch.object(lut_ga, 'eval_batch_cases',
+                              side_effect=evaluate), \
+            mock.patch.object(
+                lut_ga, 'plateau_rescue_candidates',
+                return_value=[]) as rescue, \
+            mock.patch('substrates.nervous.certification.certify', return_value=None):
+        run_evolution(
+            gens=nv_ga.STRESS_PATIENCE + 1, pop=2, n_chroms=2,
+            tries=1, target=target, arch=None, messages=messages,
+            stop_event=stop, base_seed=7012, backend='lut',
+            run_config=config, results_dir=directory)
+
+    assert rescue.call_count == 1
+    assert rescue.call_args.kwargs['limit'] == 1
+
+
+def test_controller_uses_row_lexicase_for_combinational_nervous_targets():
+    from substrates.nervous.scoring import contract_case_count
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Half adder'))
+    config = RunConfig(
+        ga=GAConfig(
+            chromosome_count=2, selection='tournament',
+            tile_arch='single', node_model='pulse_delay'),
+        pulse=PulseConfig(model='pulse_delay'))
+    messages = queue.Queue()
+    stop = threading.Event()
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    def evaluate(genomes, *_args, **_kwargs):
+        cases = [[0.5] * contract_case_count(target) for _ in genomes]
+        return [0.5] * len(genomes), cases
+
+    def reproduce(population, *_args, **_kwargs):
+        return [nv_ga.clone_genome(genome) for genome in population]
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch.object(nv_ga, 'eval_batch_cases',
+                              side_effect=evaluate), \
+            mock.patch.object(nv_ga, 'next_population',
+                              side_effect=reproduce) as step, \
+            mock.patch('substrates.nervous.certification.certify', return_value=None):
+        run_evolution(
+            gens=1, pop=3, n_chroms=2, tries=1, target=target, arch=None,
+            messages=messages, stop_event=stop, base_seed=70125,
+            backend='nervous', run_config=config, results_dir=directory)
+
+    assert step.call_count == 1
+    assert step.call_args.kwargs['selection'] == 'lexicase'
+
+
+def test_spatial_rescue_scans_each_unchanged_body_candidate_once():
+    target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
+    config = RunConfig(
+        ga=GAConfig(
+            chromosome_count=3, io_placement='spatial_chromosome',
+            tile_arch='single', node_model='pulse_delay'),
+        pulse=PulseConfig(model='pulse_delay'))
+    messages = queue.Queue()
+    stop = threading.Event()
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    def evaluate(genomes, *_args, **_kwargs):
+        return [0.5] * len(genomes), None
+
+    def reproduce(population, *_args, **_kwargs):
+        return [nv_ga.clone_genome(genome) for genome in population]
+
+    one_output = lambda champion, _target, limit: [
+        nv_ga.clone_genome(champion)]
+    one_routing = lambda champion, _target, limit: [
+        nv_ga.clone_genome(champion)]
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch.object(nv_ga, 'eval_batch_cases',
+                              side_effect=evaluate), \
+            mock.patch.object(nv_ga, 'next_population',
+                              side_effect=reproduce), \
+            mock.patch(
+                'substrates.nervous.io_placement.spatial_output_variants',
+                side_effect=one_output) as output_scan, \
+            mock.patch(
+                'substrates.nervous.io_placement.spatial_routing_variants',
+                side_effect=one_routing) as routing_scan, \
+            mock.patch('substrates.nervous.certification.certify', return_value=None):
+        run_evolution(
+            gens=nv_ga.STRESS_PATIENCE + 3, pop=2, n_chroms=3,
+            tries=1, target=target, arch=None, messages=messages,
+            stop_event=stop, base_seed=70126, backend='nervous',
+            run_config=config, results_dir=directory)
+
+    assert output_scan.call_count == 1
+    assert routing_scan.call_count == 1
+    assert output_scan.call_args.kwargs['limit'] == 10_000
+    assert routing_scan.call_args.kwargs['limit'] == 10_000
+
+
+def test_controller_gives_the_snn_backend_the_same_plateau_machinery():
+    """The SNN step must forward the plateau arguments, not drop them.
+
+    ``substrates.snn.ga.next_population`` accepts the annealed/reheated mutation rate,
+    an io-aware immigrant factory, a stressed archive parent and rescue
+    proposals, and ``substrates.snn.ga.evolve`` passes all four. The controller's step
+    lambda used to accept them and forward none, so the desktop/app run was a
+    strictly weaker search than the standalone one: a fixed mutation rate, no
+    plateau reheating, no archive parent, and immigrants built by the fallback
+    ``random_genome`` that has no spatial port chromosome.
+    """
+    target = TEMPORAL_TARGETS['Veto gate']
+    config = RunConfig(ga=GAConfig(chromosome_count=3,
+                                   io_placement='spatial_chromosome'))
+    messages = queue.Queue()
+    stop = threading.Event()
+
+    class FakePool:
+        def shutdown(self, **_kwargs):
+            pass
+
+    def evaluate(genomes, *_args, **_kwargs):
+        return [0.5] * len(genomes)
+
+    real_next = snn_ga.next_population
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch.object(snn_ga, '_eval_batch', side_effect=evaluate), \
+            mock.patch.object(snn_ga, 'next_population',
+                              side_effect=real_next) as step, \
+            mock.patch('substrates.nervous.certification.certify', return_value=None):
+        run_evolution(
+            gens=snn_ga.STRESS_PATIENCE + 2, pop=4, n_chroms=3,
+            tries=1, target=target, arch=None, messages=messages,
+            stop_event=stop, base_seed=7013, backend='snn',
+            run_config=config, results_dir=directory)
+
+    assert step.call_count >= snn_ga.STRESS_PATIENCE + 1
+    for call in step.call_args_list:
+        assert call.kwargs['make_genome'] is not None
+        assert call.kwargs['mean_mutations'] is not None
+        assert 'archive_parent' in call.kwargs
+        assert 'rescue_candidates' in call.kwargs
+    # Fitness never improves above, so stagnation must climb past the patience
+    # threshold and hand the archived champion to the stressed branch.
+    assert max(call.kwargs['stagnation']
+               for call in step.call_args_list) >= snn_ga.STRESS_PATIENCE
+    assert any(call.kwargs['archive_parent'] is not None
+               for call in step.call_args_list)
 
 
 def test_recombination_can_be_disabled_without_disabling_reproduction():
@@ -423,9 +830,9 @@ def test_controller_archives_the_champion_without_carrying_parents_forward():
             pass
 
     with tempfile.TemporaryDirectory() as directory, \
-            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+            mock.patch('runtime.controller.ProcessPoolExecutor',
                        return_value=FakePool()), \
-            mock.patch('nv_evo.certification.certify', return_value=None), \
+            mock.patch('substrates.nervous.certification.certify', return_value=None), \
             mock.patch.object(
                 nv_ga, 'eval_batch_cases',
                 side_effect=lambda *_args, **_kwargs: next(evaluations)):
@@ -465,10 +872,10 @@ def test_terminal_convergence_starts_only_after_a_perfect_offspring():
             pass
 
     with tempfile.TemporaryDirectory() as directory, \
-            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+            mock.patch('runtime.controller.ProcessPoolExecutor',
                        return_value=FakePool()), \
-            mock.patch('nv_evo.certification.certify', return_value=None), \
-            mock.patch('evo_runtime.controller.SOLVER_VALID', 1.1), \
+            mock.patch('substrates.nervous.certification.certify', return_value=None), \
+            mock.patch('runtime.controller.SOLVER_VALID', 1.1), \
             mock.patch.object(
                 nv_ga, 'eval_batch_cases',
                 side_effect=lambda *_args, **_kwargs: next(evaluations)):
@@ -683,7 +1090,7 @@ def test_stop_saves_the_latest_fully_evaluated_solver_generation():
         return [1.0, 0.5, 0.25], [None] * len(genomes)
 
     with tempfile.TemporaryDirectory() as directory, \
-            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+            mock.patch('runtime.controller.ProcessPoolExecutor',
                        return_value=FakePool()), \
             mock.patch.object(nv_ga, 'eval_batch_cases',
                               side_effect=complete_initial_evaluation):
@@ -730,7 +1137,7 @@ def test_stop_before_initial_evaluation_still_finishes_and_releases_pool():
             shutdown_args.append(kwargs)
 
     with tempfile.TemporaryDirectory() as directory, \
-            mock.patch('evo_runtime.controller.ProcessPoolExecutor',
+            mock.patch('runtime.controller.ProcessPoolExecutor',
                        return_value=FakePool()), \
             mock.patch.object(nv_ga, 'eval_batch_cases') as evaluate:
         run_evolution(
@@ -746,3 +1153,72 @@ def test_stop_before_initial_evaluation_still_finishes_and_releases_pool():
     queued = list(messages.queue)
     assert not any(message[0] == 'error' for message in queued)
     assert queued[-1] == ('done', None, 0.0)
+
+
+def test_seeded_lut_runs_do_not_depend_on_what_ran_before_them():
+    """A seeded evolve_lut must build the same population whenever it runs.
+
+    make_seed_genome caches its first _ONTO_POOL_SIZE ontogeny biomorphs in a
+    module-level pool that lives as long as the PROCESS. The first run of a
+    process grows them fresh; every later run draws its whole population from
+    that cache instead — masters grown under an EARLIER target's RNG stream.
+    Re-seeding cannot undo that, so the same seed and config gave different
+    answers depending on execution order: LUT AND scored 1.000 run first and
+    0.750 run after Half adder, silently contaminating rows 2..N of every
+    multi-target sweep. Compare populations rather than fitness so the check
+    cannot pass by two orderings happening to converge to the same score.
+    """
+    from substrates.lut.ga import genome_signature
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import gate_target
+
+    def seeded_population(name, seed):
+        recorded = []
+        original = lut_ga.make_seed_genome
+
+        def recorder(n_chroms=2):
+            genome = original(n_chroms)
+            recorded.append(genome_signature(genome))
+            return genome
+
+        target = periodic_combinational_target(gate_target(name))
+        with mock.patch.object(lut_ga, 'make_seed_genome', recorder):
+            lut_ga.evolve_lut(target, generations=1, pop=6, n_chroms=2,
+                              verbose=False, seed=seed)
+        return recorded
+
+    # A small pool keeps the test quick while still filling: growing one
+    # ontogeny biomorph costs ~0.3s, and the real pool holds 24.
+    with mock.patch.object(lut_ga, '_ONTO_POOL_SIZE', 3):
+        lut_ga._ONTO_POOL.clear()
+        first = seeded_population('AND', 4242)
+        seeded_population('XOR', 99)          # pollute from another RNG stream
+        later = seeded_population('AND', 4242)
+
+    assert first, 'the factory was never exercised'
+    assert later == first, (
+        'a seeded LUT run depends on what ran before it: %d of %d seed genomes '
+        'differ' % (sum(1 for a, b in zip(first, later) if a != b), len(first)))
+
+
+def test_timing_assimilation_clones_parent_before_writing_learned_delays():
+    """Write-back must not mutate an evaluated population/cache identity."""
+    random.seed(919)
+    population = [random_hex_genome(2), random_hex_genome(2)]
+    learned = [1.0] * 32
+    learned[7] = 1.125
+    target = TEMPORAL_TARGETS['Toggle flip-flop']
+
+    with mock.patch(
+            'substrates.nervous.temporal.score_temporal_plastic',
+            return_value=(0.9, (0.9,), {'state_delays': learned})) as tune:
+        parents, changed = nv_ga._assimilate_timing_parents(
+            population, [0.9, 0.1], target, count=1,
+            samples=4, seed=23, step=0.08)
+
+    assert changed == {0}
+    assert parents[0] is not population[0]
+    assert parents[0].state_delays == learned
+    assert population[0].state_delays is None
+    assert parents[1] is population[1]
+    assert tune.call_args.kwargs['step'] == 0.08

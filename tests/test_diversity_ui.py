@@ -17,8 +17,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from diversity_ui import DiversityTab, _Cancelled          # noqa: E402
-from nv_evo import diversity as dv                         # noqa: E402
+from ui.diversity_ui import DiversityTab, _Cancelled          # noqa: E402
+from substrates.nervous import diversity as dv                         # noqa: E402
 
 
 class _Var:
@@ -193,7 +193,7 @@ def test_empty_solver_snapshot_explains_which_population_to_use():
         'genomes': [],
         'metadata': {'source': 'latest-fully-evaluated-generation'},
     }
-    with mock.patch('evo_runtime.checkpoint.load_checkpoint',
+    with mock.patch('runtime.checkpoint.load_checkpoint',
                     return_value=state):
         tab._work('solver_generation.json', limit=60, samples=8,
                   want_robustness=False)

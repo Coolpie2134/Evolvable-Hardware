@@ -1,5 +1,5 @@
 """
-tests/test_tritile.py — the paper's THREE-circuit tile (nv_evo/tritile.py).
+tests/test_tritile.py — the paper's THREE-circuit tile (substrates/nervous/tritile.py).
 
 Edwards EH'02 Fig. 2 puts THREE independent nervous circuits in every tile, one
 per output direction (L/R/D). The legacy engine collapses that to one circuit /
@@ -24,22 +24,22 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.hexgrid import hex_dirs, _ROUTING_BASE               # noqa: E402
-from nv_evo.pulse import PulseConfig                             # noqa: E402
-from nv_evo.tritile import (back_dir, channel_configs, interpret_tri,
+from substrates.nervous.hexgrid import hex_dirs, _ROUTING_BASE               # noqa: E402
+from substrates.nervous.pulse import PulseConfig                             # noqa: E402
+from substrates.nervous.tritile import (back_dir, channel_configs, interpret_tri,
                             widen_legacy_state,  # noqa: E402
                             pack_channels, TriSim, TRI_SEED_STATE, TRI_DIRS,
                             _MergedView)
-from nv_evo.genome import (Genome, Chromosome, HexGene,          # noqa: E402
+from substrates.nervous.genome import (Genome, Chromosome, HexGene,          # noqa: E402
                            random_hex_genome, TRI_STATE_MAX)
-from nv_evo.nervous import grow_nervous                          # noqa: E402
-from nv_evo.nervous import interpret_nervous                     # noqa: E402
-from nv_evo.simulation import run_schedule                        # noqa: E402
-from nv_evo.playback import NervousPlayer                         # noqa: E402
-from nv_evo.ga import (eval_batch_cases, next_population,        # noqa: E402
+from substrates.nervous.nervous import grow_nervous                          # noqa: E402
+from substrates.nervous.nervous import interpret_nervous                     # noqa: E402
+from substrates.nervous.simulation import run_schedule                        # noqa: E402
+from substrates.nervous.playback import NervousPlayer                         # noqa: E402
+from substrates.nervous.ga import (eval_batch_cases, next_population,        # noqa: E402
                        genome_signature, mutate_nv, clone_genome)
-from nv_evo.targets import coincidence_detector                  # noqa: E402
-from evo_runtime.config import GAConfig                          # noqa: E402
+from substrates.nervous.targets import coincidence_detector                  # noqa: E402
+from runtime.config import GAConfig                          # noqa: E402
 
 
 def _pack(cL, cR, cD):
@@ -215,7 +215,7 @@ def test_genome_signature_separates_arch():
 
 
 def test_crossover_rejects_mixed_architectures():
-    from nv_evo.ga import crossover_nv
+    from substrates.nervous.ga import crossover_nv
     gs = random_hex_genome(2, arch='single')
     gt = random_hex_genome(2, arch='tri3')
     try:
@@ -312,7 +312,7 @@ def test_widening_a_legacy_state_preserves_its_three_channels():
 
 
 def test_legacy_tri_checkpoint_is_widened_exactly_once():
-    from evo_runtime.checkpoint import genome_from_dict, genome_to_dict
+    from runtime.checkpoint import genome_from_dict, genome_to_dict
     legacy_gene = [0x111, 0x222, 0x333, 0x000, 0x123]     # 12-bit states
     saved = {'tag': 0, 'arch': 'tri3',
              'gene_fields': ['ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'],

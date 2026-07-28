@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple
 
 from .genome import GRID_SIZE, MAX_ITER
-from nv_evo.contracts import BehaviorContract, logic_contract
+from substrates.nervous.contracts import BehaviorContract, logic_contract
 
 CURRENT_HIGH = 4.0   # nA — logical "1" input current
 MIN_SPIKES   = 1     # spikes needed to count as "fired"

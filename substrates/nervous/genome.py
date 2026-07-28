@@ -1,7 +1,7 @@
 """
-nv_evo/genome.py — genome native to the hexagonal nervous net.
+substrates/nervous/genome.py — genome native to the hexagonal nervous net.
 
-Fully self-contained: the nervous net shares *no* code with snn_evo. The SNN's
+Fully self-contained: the nervous net shares *no* code with substrates.snn. The SNN's
 Gene has four neighbour fields (N/S/E/W) and forbids self_out==0; the hex node
 has only three directions (L/R/D) and *wants* to express "off" (a dead /
 unrouted cell), so it gets its own gene and its own container types:
@@ -16,21 +16,22 @@ of the neighbouring cells + the cell's own state) mapped to a new state, chosen
 by minimum Hamming distance. There is no per-gene time field — the paper's genes
 are timeless. Growth is bounded biologically instead of by the paper's "artificial
 methods" (§7): each chromosome carries a telomere (a Hayflick division limit) so
-the organism halts its own growth (see Chromosome + nv_evo/nervous.py).
+the organism halts its own growth (see Chromosome + substrates/nervous/nervous.py).
 
-The genetic operators (mutation, crossover, selection) live in nv_evo/ga.py.
+The genetic operators (mutation, crossover, selection) live in substrates/nervous/ga.py.
 """
 from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from typing import List
 
-from evo_runtime.limits import MAX_CHROMOSOME_COUNT
+from runtime.limits import MAX_CHROMOSOME_COUNT
 
 MAX_STATE    = 32       # 5-bit cell state: 0-15 = paper AND routing, 16-31 = OR
 MAX_GENES    = 24
 MAX_CHROMS   = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
+MAX_ROUTING_PATCHES = 16  # heritable mature-cell routing overrides
 
 # ── tile architectures ─────────────────────────────────────────────────────────
 # 'single' — the legacy engine: ONE Fig. 3 circuit per tile (5-bit state, one
@@ -64,6 +65,9 @@ class HexGene:
     ctx_d:    int = 0
     self_in:  int = 0
     self_out: int = 0        # 0 = off / dead (native — no shift needed)
+    # Heritable developmental node identity. 0 = ordinary body cell,
+    # 1 = source-only input terminal, 2 = sink-only output terminal.
+    io_kind:  int = 0
     # I/O allele. On a BODY gene this is its expression priority for tag_rank.
     # On chromosome 3 it is either the desired mature node type (type wiring)
     # or the normalised x coordinate (spatial wiring).
@@ -108,6 +112,21 @@ def germline_telomere(genome) -> int:
 
 
 @dataclass
+class RoutingPatch:
+    """One phenotype-local edit applied after development has settled.
+
+    Coordinates live in the organism's ordinary hex frame. The patch changes
+    only the routing state of an already-living mature cell; it never
+    participates in growth, so a useful local circuit edit does not regrow the
+    rest of the body.
+    """
+
+    x: int = 0
+    y: int = 0
+    state: int = 1
+
+
+@dataclass
 class Genome:
     chromosomes: List[Chromosome] = field(default_factory=list)
     tag: int = 0
@@ -123,10 +142,15 @@ class Genome:
     # Tile architecture this genome's states are written in (see TILE_ARCHS).
     # Old pickles predate the field: always read via getattr(g,'arch','single').
     arch: str = 'single'
+    # Optional somatic routing overlay. Empty preserves every historical
+    # genome and evaluation path; populated patches are heritable, mutate and
+    # recombine like ordinary alleles, but act only after development settles.
+    routing_patches: List[RoutingPatch] = field(default_factory=list)
 
 
 DELAY_MULT_MIN = 0.25    # evolvable propagation-delay bounds (of PulseConfig.delay)
 DELAY_MULT_MAX = 4.0
+DELAY_LOG_STEP = 0.12    # one fine mutation/tuning step (about +/-12.7 percent)
 
 
 def default_state_delays():
@@ -178,7 +202,9 @@ def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE,
 
 def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
                       arch='single', wiring_chromosome=False, n_ports=None,
-                      tag_rank=False, spatial_chromosome=False) -> Genome:
+                      tag_rank=False, spatial_chromosome=False,
+                      terminal_nodes=False, n_inputs=0,
+                      n_outputs=0) -> Genome:
     """Random genome with optional evolvable I/O metadata.
 
     Fixed runs take the original byte-identical path. Method A seeds body-gene
@@ -199,4 +225,7 @@ def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
         seed_io_metadata(genome, wiring_chromosome=wiring_chromosome,
                          n_ports=n_ports, tag_rank=tag_rank,
                          spatial_chromosome=spatial_chromosome)
+    if terminal_nodes:
+        from .io_placement import seed_terminal_states
+        seed_terminal_states(genome, n_inputs, n_outputs)
     return genome

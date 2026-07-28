@@ -1,8 +1,8 @@
 """
-nv_evo — "nervous network" backend (Edwards, *Circuit Morphologies and
+substrates/nervous — "nervous network" backend (Edwards, *Circuit Morphologies and
 Ontogenies*, EH'02, Architecture 1).
 
-Fully independent of snn_evo: its own hex genome + growth, its own targets and
+Fully independent of substrates/snn: its own hex genome + growth, its own targets and
 its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
 
   * each grown cell is a nervous-net node whose state routes its neighbours to
@@ -24,7 +24,7 @@ its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
 
 Quick start
 -----------
-from nv_evo import evolve_nervous, TEMPORAL_TARGETS
+from substrates.nervous import evolve_nervous, TEMPORAL_TARGETS
 best, fit = evolve_nervous(TEMPORAL_TARGETS['SR latch'], generations=60)
 """
 from .hexgrid import hex_dirs, hex_pixel, ROUTING_HEX, routing_kind, node_fires
@@ -46,12 +46,10 @@ from .io_placement import (IO_STRATEGIES, io_strategy, cell_tags, bind_io,
 from .oracle import (oracle_target, holdout_score, ORACLE_TARGETS, ORACLE_SPECS,
                      sample_streams, label_trace)
 from .evaluation import FittedReadout, fit_readout, score_frozen
-from .persistence import (sr_set_hold_oracle, sr_reset_oracle, sr_full_oracle,
-                          evolve_sr_curriculum)
 from .contracts import (BehaviorContract, Constraint, logic_contract,
                         event_contract, state_contract, interval_contract,
                         cadence_contract, cadence_step_contract,
-                        bounded_state_contract)
+                        bounded_state_contract, toggle_contract)
 from .scoring import score_contract
 from .temporal import (run_nervous, run_nervous_events, score_temporal, temporal_report,
                        prepare_net, windowed_score, exact_tick_accuracy,

@@ -1,5 +1,5 @@
 """
-tests/test_analog.py — the analog Fig. 1 node engine (nv_evo/analog.py).
+tests/test_analog.py — the analog Fig. 1 node engine (substrates/nervous/analog.py).
 
 The digital engine hard-codes coincidence width, output width and refractory as
 independent constants. The analog node DERIVES them from one charge/leak/
@@ -22,9 +22,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.analog import AnalogPulseSim, AnalogConfig            # noqa: E402
-from nv_evo.pulse import PulseConfig                              # noqa: E402
-from nv_evo.simulation import create_simulator                    # noqa: E402
+from substrates.nervous.analog import AnalogPulseSim, AnalogConfig            # noqa: E402
+from substrates.nervous.pulse import PulseConfig                              # noqa: E402
+from substrates.nervous.simulation import create_simulator                    # noqa: E402
 
 
 # Build tiny explicit graphs with pre-resolved sources so the geometry is exact.
@@ -225,7 +225,7 @@ def test_analog_node_honours_the_or_routing_op():
     solved it). OR is wired as the buffer's own trick: each input couples to
     both terminals, so one edge delivers 2*step.
     """
-    from nv_evo.analog import AnalogPulseSim
+    from substrates.nervous.analog import AnalogPulseSim
 
     grid = {(0, 0): 1, (0, 1): 1, (1, 0): 1}
     src = {(1, 0): ((0, 0), (0, 1), None)}       # two distinct excitatory feeds

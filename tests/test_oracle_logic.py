@@ -12,9 +12,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo import (TEMPORAL_TARGETS,                      # noqa: E402
+from substrates.nervous import (TEMPORAL_TARGETS,                      # noqa: E402
                     periodic_combinational_target)
-from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
+from substrates.nervous.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            orc_toggle, make_pulse_doubler,
                            orc_period_doubler, orc_period_tripler, ORACLE_SPECS,
                            make_refractory_filter,
@@ -22,9 +22,9 @@ from nv_evo.oracle import (make_c_element, orc_sr_latch,   # noqa: E402
                            make_collision_serializer,
                            make_watchdog, make_a_parity_query,
                            make_a_mod3_query, make_a_batch_parity_query)
-from nv_evo.temporal import TemporalTraces, event_score     # noqa: E402
-from nv_evo.scoring import contract_relations               # noqa: E402
-from snn_evo.targets import gate_target                     # noqa: E402
+from substrates.nervous.temporal import TemporalTraces, event_score     # noqa: E402
+from substrates.nervous.scoring import contract_relations               # noqa: E402
+from substrates.snn.targets import gate_target, get_target         # noqa: E402
 
 
 def _trace(fn, seq):
@@ -162,6 +162,173 @@ def test_binary_truth_tables_become_phase_locked_periodic_targets():
     free_running = TemporalTraces(
         {role: [[] for _ in target.trials]}, events={role: oscillator})
     assert event_score(free_running, target) < 1.0
+
+
+def test_multi_output_gate_cannot_coast_on_the_easy_output():
+    """A half adder has an easy output (carry = AND) and a hard one (sum = XOR).
+    A plain mean over outputs let a circuit solve only the carry and blanket the
+    sum for (1.0 + 0.5)/2 = 0.75 — a comfortable plateau with no gradient toward
+    the hard bit. Mean-AND-worst aggregation must (a) penalise that solve well
+    below 0.75, (b) make the WEAK output dominate, and (c) still award 1.0 only
+    when BOTH outputs are perfect."""
+    from substrates.nervous.scoring import TemporalTraces as Traces, score_contract
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Half adder'))
+    roles = [terminal.role for terminal in target.outputs]
+    assert len(roles) == 2
+
+    def score(strong_only=None):
+        """strong_only=None → both outputs follow truth; else that role follows
+        truth and the other blankets (fires in every case window)."""
+        data, events = {}, {}
+        for role in roles:
+            data[role], events[role] = [], []
+            for trial in target.trials:
+                if strong_only is None or role == strong_only:
+                    times = [float(t) for t in trial.expected_events.get(role, ())]
+                else:
+                    times = [
+                        float(window[0] + target.latency)
+                        for window in trial.case_windows]
+                times = sorted(times)
+                trace = [0.0] * target.T
+                for t in times:
+                    if 0 <= int(t) < target.T:
+                        trace[int(t)] = 1.0
+                data[role].append(trace)
+                events[role].append(times)
+        return score_contract(Traces(data, events=events), target)[0]
+
+    both_perfect = score(None)
+    carry_only = score(strong_only=roles[0])
+    sum_only = score(strong_only=roles[1])
+
+    assert both_perfect >= 0.999                       # (c) all outputs perfect
+    # (a) solving one output and blanketing the other is penalised past the old
+    # 0.75 mean, toward the ~0.625 the mean-AND-worst blend gives.
+    assert carry_only < 0.70 and sum_only < 0.70
+    # (b) the score is dragged toward the weak (blanketed, ~0.5) output, not the
+    # perfect one — i.e. the hard output carries the weight.
+    assert carry_only < 0.5 + 0.5 * (1.0 - 0.5)         # < midpoint of 0.5..1.0
+
+
+def test_lopsided_truth_tables_do_not_reward_indiscriminate_firing():
+    """Firing on every case window must cap at 0.5, however lopsided the table.
+
+    NAND puts a 1 on three of its four rows. Under pooled event F1 an output
+    that simply echoed the case-valid strobe scored recall 1.0, precision 0.75
+    -> 0.857, and evolution parked there instead of computing anything. The
+    static truth-table path has always balanced expected-1 against expected-0
+    rows for exactly this reason; the periodic encoding must too.
+    """
+    from substrates.nervous.scoring import TemporalTraces as Traces, score_contract
+
+    def score(target, make_events):
+        roles = [terminal.role for terminal in target.outputs]
+        data, events = {}, {}
+        for role in roles:
+            data[role], events[role] = [], []
+            for trial in target.trials:
+                times = sorted(float(t) for t in make_events(role, trial))
+                trace = [0.0] * target.T
+                for t in times:
+                    if 0 <= int(t) < target.T:
+                        trace[int(t)] = 1.0
+                data[role].append(trace)
+                events[role].append(times)
+        return score_contract(Traces(data, events=events), target)[0]
+
+    def every_window(target):
+        return lambda role, trial: [
+            float(window[0] + target.latency)
+            for window in trial.case_windows]
+
+    def truth(role, trial):
+        return trial.expected_events.get(role, ())
+
+    # EVERY combinational target, not a hand-picked few. This list used to name
+    # NAND/NOR/XNOR/Majority-3 only, and OR — whose sole 0 is the dropped
+    # all-zero row — scored a perfect 1.0 for blanket firing underneath it.
+    from substrates.snn.targets import TARGETS
+
+    checked = 0
+    for name, base in TARGETS.items():
+        if getattr(base, 'temporal', False) or not getattr(base, 'cases', ()):
+            continue
+        target = periodic_combinational_target(base)
+        assert score(target, truth) >= 0.999, name
+        blanket = score(target, every_window(target))
+        assert blanket <= 0.5 + 1e-9, (
+            '%s rewards indiscriminate firing: %.4f' % (name, blanket))
+        silent = score(target, lambda role, trial: ())
+        assert silent <= 0.5 + 1e-9, (
+            '%s rewards silence: %.4f' % (name, silent))
+        checked += 1
+    assert checked >= 15, 'expected the whole combinational suite, got %d' % checked
+
+
+def test_every_periodic_truth_table_receives_an_explicit_zero_row_window():
+    """Every row is scored; only zero rows that must signal need a strobe."""
+    ordinary = periodic_combinational_target(get_target('Full adder'))
+    assert ordinary.combinational_data_inputs == 3
+    assert ordinary.n_inputs == 3
+    assert not ordinary.combinational_strobe
+    assert all(len(trial.case_windows) == 16 for trial in ordinary.trials)
+
+    decoder = periodic_combinational_target(get_target('2-to-4 decoder'))
+    assert decoder.combinational_data_inputs == 2
+    assert decoder.combinational_strobe
+    assert decoder.n_inputs == 3
+    assert 'case-valid lane' in decoder.description
+    for trial in decoder.trials:
+        marked_zero_rows = [
+            tick for tick, row in enumerate(trial.streams)
+            if row == (0, 0, 1)]
+        assert len(marked_zero_rows) == 2
+        expected = set(trial.expected_events['D0'])
+        assert all(
+            float(tick + decoder.latency) in expected
+            for tick in marked_zero_rows)
+
+    comparator = periodic_combinational_target(get_target('2-bit comparator'))
+    assert comparator.combinational_data_inputs == 4
+    assert comparator.combinational_strobe
+    assert comparator.n_inputs == 5
+
+
+def test_all_zero_rows_are_presented_even_when_their_level_is_redundant():
+    """OR's sole 0 sits on the all-zero row, which silence cannot present.
+
+    Without a strobe every PRESENTED OR window expects 1, level balancing has
+    one group to average, and a constant output scores a flawless 1.0 — OR
+    "solved" that way in the contract benchmark. The strobe rule is therefore
+    not 'the zero row must fire' but 'presenting the zero row changes what is
+    measurable', and a low zero row can be just as load-bearing as a high one.
+    """
+    target = periodic_combinational_target(gate_target('OR'))
+    assert target.combinational_strobe
+    assert target.combinational_data_inputs == 2
+    assert target.n_inputs == 3
+
+    role = target.outputs[0].role
+    for trial in target.trials:
+        expected = set(trial.expected_events[role])
+        onsets = [tick for tick, row in enumerate(trial.streams) if any(row)]
+        assert len(onsets) == 8, 'all four rows must be presented, twice each'
+        levels = {any(abs(e - (tick + target.latency)) < 1e-9 for e in expected)
+                  for tick in onsets}
+        assert levels == {False, True}, (
+            'OR still has no negative case: levels=%s' % (levels,))
+
+    # AND's zero level is already represented elsewhere, so no physical strobe
+    # is needed; 00 still owns an explicit scheduled scoring window.
+    and_target = periodic_combinational_target(gate_target('AND'))
+    assert not and_target.combinational_strobe
+    assert all(
+        len(trial.case_windows) == 8
+        for trial in and_target.trials)
 
 
 def test_c_element_is_a_rendezvous():
@@ -487,6 +654,54 @@ def test_collision_serializer_preserves_tokens():
     assert sum(out) == sum(a + b for a, b in seq)
 
 
+def test_stimuli_actually_present_the_clause_that_needs_memory():
+    """Each of these targets was once satisfiable by a stateless delay line, not
+    because the scorer was wrong but because its own stimulus never posed the
+    part that needs state. These assertions are on the SCHEDULES, so they fail
+    if a future retune quietly removes the hard cases again.
+    """
+    from substrates.nervous.targets import TEMPORAL_TARGETS
+
+    # One-shot: a trigger arriving mid-pulse must be swallowed. With the old
+    # min_gap = width + 4 no trigger ever landed inside an active interval.
+    one_shot = TEMPORAL_TARGETS['One-shot (12 seconds)']
+    width, inside = 12, 0
+    for trial in one_shot.trials:
+        ticks = [t for t, row in enumerate(trial.streams) if row[0]]
+        inside += sum(1 for a, b in zip(ticks, ticks[1:]) if b - a <= width)
+    assert inside >= 5, 'only %d retriggers land inside an active window' % inside
+
+    # SR latch: hold duration must be set by Reset, not by a fixed decay. With
+    # every hold in the band 10..14 one burst length fitted all of them.
+    latch = TEMPORAL_TARGETS['SR latch']
+    holds = []
+    for trial in latch.trials:
+        sets = [t for t, row in enumerate(trial.streams) if row[0]]
+        resets = [t for t, row in enumerate(trial.streams) if row[1]]
+        for at in sets:
+            after = [r for r in resets if r > at]
+            holds.append((after[0] if after else latch.T) - at)
+    assert holds and max(holds) >= 3 * min(holds), (
+        'hold durations span only %d..%d — a fixed-length burst fits them all'
+        % (min(holds), max(holds)))
+
+    # Collision serializer: the queue must actually back up, and every token
+    # must still emerge inside the horizon.
+    serializer = TEMPORAL_TARGETS['Collision serializer (2-to-1)']
+    tokens = sum(sum(row) for trial in serializer.trials
+                 for row in trial.streams)
+    events = sum(1 for trial in serializer.trials
+                 for value in trial.expected['Q'] if value == 1)
+    assert tokens == events, (
+        '%d tokens in but %d events out — the horizon is dropping tokens'
+        % (tokens, events))
+    ticks = sum(len({t for t, row in enumerate(trial.streams) if any(row)})
+                for trial in serializer.trials)
+    assert tokens >= 1.35 * ticks, (
+        'only %.2f tokens per input tick — too few collisions to punish a '
+        'wired-OR' % (tokens / ticks))
+
+
 def test_watchdog_deadline_rearm_and_never_armed_silence():
     """Deadline heartbeats win; quiet alarms once; later heartbeat re-arms."""
     f = make_watchdog(5)
@@ -530,9 +745,69 @@ def test_registered_target_copy_uses_seconds_not_ticks():
     for name, target in TEMPORAL_TARGETS.items():
         assert 'tick' not in name.lower(), name
         assert 'tick' not in target.description.lower(), (name, target.description)
-    assert 'One-shot (5 seconds)' in TEMPORAL_TARGETS
+    assert 'One-shot (12 seconds)' in TEMPORAL_TARGETS
     assert 'Refractory filter (3 seconds)' in TEMPORAL_TARGETS
     assert 'Watchdog timeout (5 seconds)' in TEMPORAL_TARGETS
+
+
+def test_one_shot_hold_outlasts_a_single_pulse():
+    """A bare delay line must NOT be a perfect one-shot.
+
+    This degeneracy has appeared twice. The first time the hold was 3 ticks and
+    the old +/-1 ring tolerance let one pulse cover it; widening to 5 fixed that
+    scorer but not the next one. Under the current state contract an active
+    window is credited when its longest silence is within
+    allowed_gap = 2*(delay + pulse width) = 4, and a lone pulse at the centre of
+    a d-tick window leaves silences of (d - 1)/2 — so d must exceed 9 or an echo
+    scores 1.000 again. Pin the property, not the number.
+    """
+    from substrates.nervous import pulse
+    from substrates.nervous.scoring import TemporalTraces as Traces, score_contract
+    from substrates.nervous.scoring import _expected_windows
+
+    target = TEMPORAL_TARGETS['One-shot (12 seconds)']
+    role = target.outputs[0].role
+    allowed_gap = 2.0 * (pulse.DELAY + pulse.WIDTH)
+    # Holds that run into the end of the horizon are legitimately truncated, so
+    # judge the full-length ones: those are what must outlast a single pulse.
+    holds = [len(ticks) for trial in target.trials
+             for state, ticks in _expected_windows(trial.expected[role])
+             if state == 1]
+    assert holds, 'one-shot must command active windows'
+    full = max(holds)
+    assert full > 2 * allowed_gap + pulse.WIDTH, (
+        'even a full hold is short enough for one pulse to cover: %d' % full)
+    assert sum(h == full for h in holds) > len(holds) // 2, (
+        'most holds should be full length, got %r' % (holds,))
+
+    def score(make_events):
+        data, events = {role: []}, {role: []}
+        for trial in target.trials:
+            fires = [tick for tick, row in enumerate(trial.streams) if row[0]]
+            times = sorted({float(t) for t in make_events(fires, trial)
+                            if 0 <= t < target.T})
+            trace = [0.0] * target.T
+            for t in times:
+                trace[int(t)] = 1.0
+            data[role].append(trace)
+            events[role].append(times)
+        return score_contract(Traces(data, events=events), target)[0]
+
+    truth = score(lambda fires, trial: [
+        tick for tick, value in enumerate(trial.expected[role]) if value == 1])
+    assert truth >= 0.999, 'the oracle trace itself must score 1.0, got %r' % truth
+
+    # A ring is how this substrate actually holds a bit; it must stay perfect.
+    ring = score(lambda fires, trial: [
+        tick for tick, value in enumerate(trial.expected[role])
+        if value == 1 and tick % 2 == 0])
+    assert ring >= 0.999, 'a circulating hold must still score 1.0, got %r' % ring
+
+    for offset in (1, 2, len(target.trials) // 2, 8):
+        echo = score(lambda fires, trial, d=offset: [f + d for f in fires])
+        assert echo < 0.95, (
+            'a bare echo at offset %d scores %.4f — one-shot is degenerate again'
+            % (offset, echo))
 
 
 def test_echo_delay_three_requires_absolute_timing():

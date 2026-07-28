@@ -75,9 +75,9 @@ CLAIMS = {
 
 
 def _run_claim(name, spec):
-    from nv_evo import TEMPORAL_TARGETS
-    from nv_evo.ga import evolve_nervous
-    from nv_evo.oracle import ORACLE_SPECS, holdout_score
+    from substrates.nervous import TEMPORAL_TARGETS
+    from substrates.nervous.ga import evolve_nervous
+    from substrates.nervous.oracle import ORACLE_SPECS, holdout_score
 
     target = TEMPORAL_TARGETS[spec['target']]
     print("\n" + "=" * 62)
@@ -98,7 +98,7 @@ def _run_claim(name, spec):
               % (", ".join("%.3f" % h for h in holdouts),
                  sum(holdouts) / len(holdouts)))
 
-    from nv_evo.certification import classify
+    from substrates.nervous.certification import classify
     thr = spec['threshold']
     mean_ho = sum(holdouts) / len(holdouts) if holdouts else None
     verdict = classify(train, mean_ho, thr, kind=spec['kind'])

@@ -44,11 +44,6 @@ def mono_family(root=None):
     return _mono_cache
 
 
-def mono_font(size=9, root=None):
-    """(family, size) tuple ready to pass as a Tk widget `font=` option."""
-    return (mono_family(root), size)
-
-
 def apply_theme(root):
     """Pin a consistent ttk theme so metrics/colours match across platforms.
     Returns the ttk.Style (already themed). Safe if 'clam' is unavailable."""

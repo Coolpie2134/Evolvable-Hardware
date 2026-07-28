@@ -1,5 +1,5 @@
 """
-concept/common/ancestry.py
+experiments/concept/common/ancestry.py
 Two-generation ancestry check used by coderack7 and hierarch4.
 
 Organisms carry a tag[] list where tag[1..6] hold parent/grandparent IDs.

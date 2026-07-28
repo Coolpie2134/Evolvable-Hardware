@@ -1,11 +1,11 @@
 """
-nv_evo/temporal.py — the temporal evaluation HARNESS over the pulse engine:
+substrates/nervous/temporal.py — the temporal evaluation HARNESS over the pulse engine:
 running trials, placing outputs, and preparing score bundles.
 
 The nervous net is a temporal system: a pulse injected by an input circulates
 around a loop of buffers (a stored bit = a circulating pulse) until inhibition
 stops it. The dynamics themselves are the asynchronous edge-triggered pulse
-simulation in nv_evo/pulse.py (PulseSim). Event/cadence fitness schedules input
+simulation in substrates/nervous/pulse.py (PulseSim). Event/cadence fitness schedules input
 edges directly in continuous time; only playback and coverage-scored targets
 request sampled tick states (scoring.needs_samples decides).
 
@@ -15,16 +15,16 @@ Core (shared by interactive playback and temporal scoring):
     score_temporal(genome, ttarget)                 -> behavioural fitness [0,1]
     loop_profile(grid, routing, in_pos, out_pos)    -> feedback-loop stats
 
-All scoring MATH lives in nv_evo/scoring.py — the single scoring contract
+All scoring MATH lives in substrates/nervous/scoring.py — the single scoring contract
 (relation registry, matchers, alignment discipline, report body). This module
-re-exports every scorer name for the historical `from nv_evo.temporal import`
-path; new code should import from nv_evo.scoring directly.
+re-exports every scorer name for the historical `from substrates.nervous.temporal import`
+path; new code should import from substrates.nervous.scoring directly.
 
-Loop analysis feeds the GA's fitness shaping (nv_evo/ga.py): memory needs a
+Loop analysis feeds the GA's fitness shaping (substrates/nervous/ga.py): memory needs a
 directed cycle in the signal graph, and a cycle only matters if the inputs can
 write into it and it can drive an output.
 
-The target types (Trial, TemporalTarget, presets) live in nv_evo/targets.py;
+The target types (Trial, TemporalTarget, presets) live in substrates/nervous/targets.py;
 they are re-exported here for back-compat with older imports and pickles.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from .nervous import (grow_nervous, interpret_nervous, node_delays)
 from .io_placement import (io_strategy, bind_io, input_groups, output_groups,
                            flat_inputs, flat_outputs, merge_intervals,
                            growth_seeds, binding_progress,
-                           record_binding_progress)
+                           record_binding_progress, terminal_node_sets)
 from .hexgrid import hex_dirs
 from .pulse import TICK
 from .simulation import create_simulator
@@ -42,10 +42,10 @@ from .targets import (OutputTerminal, Trial, TemporalTarget,  # noqa: F401
                       sr_latch, toggle_ff, oscillator, echo)
 
 # ── scoring re-exports ───────────────────────────────────────────────────────
-# All scoring math lives in nv_evo/scoring.py (the single scoring contract:
+# All scoring math lives in substrates/nervous/scoring.py (the single scoring contract:
 # relation registry, matchers, alignment discipline, report body). The names
 # are re-exported here because every historical consumer imports them from
-# nv_evo.temporal; new code should import from nv_evo.scoring directly.
+# substrates.nervous.temporal; new code should import from substrates.nervous.scoring directly.
 from .scoring import (                                          # noqa: F401
     PhysicalEvents, TemporalTraces,
     contract_relations, has_relation, needs_samples,
@@ -64,7 +64,7 @@ from .scoring import (                                          # noqa: F401
     cadence_score,
     _pulse_events, _stepper_epoch, _stepper_trial_score, _stepper_at_shift,
     _best_stepper_shift, period_stepper_score,
-    windowed_score, _REFIT_ALIGNMENT, score_contract,
+    windowed_score, _REFIT_ALIGNMENT, score_contract, contract_case_count,
     exact_tick_accuracy, _score_output_candidate,
     NV_REPORT_NOTES, LUT_REPORT_NOTES, score_report_lines)
 from .contracts import behavior_contract_lines
@@ -125,7 +125,8 @@ def _inject_physical_events(sim, in_pos, input_events):
 
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
                  max_events=None, sample=True, config=None, input_events=None,
-                 delays=None, arch='single'):
+                 delays=None, arch='single', terminal_inputs=None,
+                 terminal_outputs=None):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -146,7 +147,7 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         # Tri sub-node fan-out makes routing/hex_dirs pruning inapplicable and
         # the graph is small anyway, so simulate the whole grown organism.
         sim = TriSim(grid, flat_inputs(in_pos), config=config,
-                     max_events=max_events)
+                     max_events=max_events, outputs=terminal_outputs)
     else:
         sub = grid
         if prune:
@@ -154,7 +155,9 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
             if len(cone) < len(grid):
                 sub = {c: grid[c] for c in cone}
         sim    = create_simulator(sub, routing, max_events=max_events,
-                                  config=config, delays=delays)
+                                  config=config, delays=delays,
+                                  input_nodes=terminal_inputs,
+                                  output_nodes=terminal_outputs)
     # Queue one physical schedule for both sampled and event scoring. The
     # width-preserving engine transports rising and falling edges causally, so
     # it also agrees with incremental ``step`` input; pre-queuing here simply
@@ -212,7 +215,8 @@ def run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
 def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                        max_events=None, sample=True, config=None,
                        input_events=None, delays=None,
-                       arch='single'):
+                       arch='single', terminal_inputs=None,
+                       terminal_outputs=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
     ``rise_times`` maps every simulated cell to its continuous leading-edge
@@ -220,7 +224,9 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
-                        config=config, input_events=input_events, delays=delays, arch=arch)
+                        config=config, input_events=input_events, delays=delays,
+                        arch=arch, terminal_inputs=terminal_inputs,
+                        terminal_outputs=terminal_outputs)
 
 
 # The output is read at a cell NEAR the target's terminal, not anywhere in the
@@ -351,6 +357,8 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, ar
     obs = _obs_len(ttarget)
     need_samples = needs_samples(ttarget)
     config = getattr(ttarget, 'pulse_config', None)
+    terminal_inputs, terminal_outputs = terminal_node_sets(
+        ttarget, in_pos, out_pos)
     if arch == 'tri3':
         sub = grid
     else:
@@ -360,7 +368,10 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, ar
                 sub, routing, in_pos, out_pos, trial.streams, obs,
                 prune=False, max_events=getattr(ttarget, 'max_events', 2048),
                 sample=need_samples, config=config,
-                input_events=getattr(trial, 'input_events', None), delays=delays, arch=arch)
+                input_events=getattr(trial, 'input_events', None),
+                delays=delays, arch=arch,
+                terminal_inputs=terminal_inputs,
+                terminal_outputs=terminal_outputs)
             for trial in ttarget.trials]
     traces = TemporalTraces(
         {role: [run[1].get(role, []) for run in runs] for role in groups},
@@ -387,17 +398,18 @@ def prepare_net(genome, ttarget):
     is unusable (too small, no candidate output cells, or an input seed dead).
 
     When the target opts into an evolvable io_placement strategy (see
-    nv_evo/io_placement.py), the input and output CELLS are chosen by the
+    substrates/nervous/io_placement.py), the input and output CELLS are chosen by the
     genome's heritable tags instead of by geometry/trace-match, and the traces
     are read at those fixed cells."""
     strategy = io_strategy(ttarget)
-    # Fixed binding grows outward FROM the input pads (the legacy seeds); an
-    # evolvable strategy nucleates from ONE neutral center cell instead — the
-    # I/O attaches to the mature body afterward, so nothing about growth is
-    # anchored to the declared pad positions.
-    grid = grow_nervous(genome, seeds=growth_seeds(ttarget, strategy),
+    # Fixed binding grows from declared pads. Spatial binding grows from the
+    # genome's heritable input anchors; the other evolvable strategies retain
+    # one neutral centre because they do not encode developmental coordinates.
+    grid = grow_nervous(genome, seeds=growth_seeds(
+                            ttarget, strategy, genome),
                         grid_size=ttarget.grid_size, iters=ttarget.iters)
-    if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+    if strategy in (
+            'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
         record_binding_progress(
             genome, binding_progress(genome, grid, ttarget))
     if len(grid) <= ttarget.n_inputs:
@@ -442,6 +454,103 @@ def score_temporal(genome, ttarget):
         return 0.0
     _, _, _, _, traces = prep
     return score_contract(traces, ttarget)[0]
+
+
+def score_temporal_plastic(genome, ttarget, samples=8, seed=0, step=None,
+                           return_settings=False):
+    """Locally tune heritable propagation delays without changing the circuit.
+
+    Growth and the trace-fitted output readout happen once. Starting at the
+    genome's inherited ``state_delays``, each tuning step nudges ONE routing state
+    up or down by ``exp(step)`` and keeps the change only when it improves the
+    score. Only routing states present in the grown body are considered. This is
+    deliberately a fine, topology-preserving coordinate search: it never redraws
+    the whole delay vector and never changes the output cell while judging a
+    delay adjustment.
+
+    The function itself does not mutate ``genome``. ``return_settings=True``
+    reports the locally improved vector so the GA can copy it into a breeder and
+    make the adjustment heritable. Returns ``(best_score, best_cases)`` — or
+    ``(best_score, best_cases, {'state_delays': vector|None})`` when settings are
+    requested — or None if the target does not use supported fixed binding.
+    """
+    import math as _math
+    import random as _random
+    from .genome import (DELAY_MULT_MIN, DELAY_MULT_MAX, DELAY_LOG_STEP, MAX_STATE,
+                         default_state_delays)
+    step = DELAY_LOG_STEP if step is None else float(step)
+
+    if io_strategy(ttarget) != 'fixed':
+        return None                      # prototype: fixed-I/O growth only
+    n_cases = contract_case_count(ttarget)
+    arch = getattr(genome, 'arch', 'single')
+
+    def _ret(score, cases, mult):
+        if return_settings:
+            return score, cases, {'state_delays': mult}
+        return score, cases
+
+    grid = grow_nervous(
+        genome, seeds=growth_seeds(ttarget, 'fixed', genome),
+        grid_size=ttarget.grid_size, iters=ttarget.iters)
+    if len(grid) <= ttarget.n_inputs:
+        return _ret(0.0, (0.0,) * n_cases, None)
+    routing, in_pos, _ = interpret_nervous(grid, ttarget, arch=arch)
+    if any(pos not in grid for pos in in_pos):
+        return _ret(0.0, (0.0,) * n_cases, None)
+    config = getattr(ttarget, 'pulse_config', None)
+
+    # Establish the inherited phenotype and choose its readout once. The readout
+    # stays fixed below so an apparent timing improvement cannot actually be a
+    # lucky jump to a different output cell.
+    base_delays = None if arch == 'tri3' else node_delays(genome, grid, config)
+    best_score, best_cases, best_mult = -1.0, None, None
+    out0, traces0 = place_outputs_by_trace(
+        grid, routing, in_pos, ttarget, delays=base_delays, arch=arch)
+    if all(out0.get(t.role) is not None for t in ttarget.outputs):
+        best_score, best_cases, _ = score_contract(traces0, ttarget)
+    tune_delays = (arch != 'tri3' and config is not None
+                   and getattr(config, 'model', 'uniform') == 'pulse_delay')
+    if best_cases is None or not tune_delays or step <= 0:
+        return _ret(best_score if best_cases is not None else 0.0,
+                    best_cases or (0.0,) * n_cases, None)
+
+    inherited = getattr(genome, 'state_delays', None)
+    current_mult = default_state_delays()
+    if inherited:
+        copied = min(len(inherited), MAX_STATE)
+        current_mult[:copied] = list(inherited[:copied])
+    active_states = sorted({
+        state & 0x1F for state in grid.values()
+        if 0 < (state & 0x1F) < MAX_STATE
+    })
+    if not active_states:
+        return _ret(best_score, best_cases, None)
+
+    rng = _random.Random(seed)
+    for _ in range(max(0, int(samples))):
+        state_index = rng.choice(active_states)
+        direction = -1.0 if rng.random() < 0.5 else 1.0
+        candidate = list(current_mult)
+        candidate[state_index] = min(
+            DELAY_MULT_MAX,
+            max(DELAY_MULT_MIN,
+                candidate[state_index] * _math.exp(direction * step)))
+        if candidate[state_index] == current_mult[state_index]:
+            continue
+        delays = {
+            pos: config.delay * candidate[state & 0x1F]
+            for pos, state in grid.items()
+        }
+        traces = trace_fixed_outputs(
+            grid, routing, in_pos, out0, ttarget, delays=delays, arch=arch)
+        if traces is None or getattr(traces, 'overflow', False):
+            continue
+        score, cases, _ = score_contract(traces, ttarget)
+        if score > best_score:
+            current_mult = candidate
+            best_score, best_cases, best_mult = score, cases, list(candidate)
+    return _ret(best_score, best_cases, best_mult)
 
 
 def temporal_report(ttarget, genome=None):

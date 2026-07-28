@@ -1,7 +1,7 @@
 """
-lut_evo/reverse.py — best-effort INVERSE of grow_lut (LUT network -> genome).
+substrates/lut/reverse.py — best-effort INVERSE of grow_lut (LUT network -> genome).
 
-The mirror of nv_evo/reverse.py for Architecture 2. Growth develops four 16-bit
+The mirror of substrates/nervous/reverse.py for Architecture 2. Growth develops four 16-bit
 LUTs per cell by the same associative-memory rule as the nervous net, only the
 context is five 16-bit LUTs (the four neighbours' facing tables + the cell's own
 table for that direction), looked up with the context ROTATED so the output
@@ -75,17 +75,20 @@ def _record(growth, conflicts, ctx, out):
         growth.setdefault(ctx, out)
 
 
-def _collect_contexts_lut(grid, seeds, L):
+def _collect_contexts_lut(grid, seeds, L, seed_state=SEED_STATE):
     """Replay a MONOTONE development with the target grid as an oracle (the LUT
-    analogue of nv_evo.reverse._collect_contexts). Mirrors grow_lut's step —
+    analogue of substrates.nervous.reverse._collect_contexts). Mirrors grow_lut's step —
     parallel frontier growth, per-direction rotated lookup, telomere-gated
     births — but pins every cell at its TARGET four-LUT state the moment it is
-    born. Logs the birth context of each direction as a growth gene (self_in=0 ->
-    target LUT, 0 for a dead direction so it can't switch on) and each live
-    direction's running context as a hold gene. Returns
+    born. Logs the birth context of EVERY evaluated frontier direction: target
+    cells map to their requested LUT and exterior cells map to zero.  Those
+    negative-space rules are essential with nearest-context lookup; without
+    them, an exterior cell merely borrows the closest positive birth rule and a
+    carefully designed sparse circuit grows long unintended arms.  Each live
+    direction's running context is also logged as a hold gene. Returns
     (growth, maint, conflicts, reached)."""
     growth, maint, conflicts = {}, {}, {}
-    organism = {s: SEED_STATE for s in seeds}
+    organism = {s: seed_state for s in seeds}
     for step in range(3 * L + 8):
         # log the contexts every live cell currently presents
         for (x, y), st in organism.items():
@@ -96,24 +99,30 @@ def _collect_contexts_lut(grid, seeds, L):
                     _record(growth, conflicts, ctx, 0)
         if step >= L:                      # telomere expired: growth rules stop
             break
-        # parallel division into empty target frontier cells
+        # grow_lut evaluates every empty neighbour of the current organism, not
+        # just cells that belong to the requested phenotype. Record that whole
+        # frontier so empty exterior sites receive exact self_in=0 -> 0 rules.
+        # This is the developmental equivalent of drawing the whitespace around
+        # a glyph: it prevents the associative lookup from extending a nearby
+        # positive stroke into that space.
         frontier = set()
         for (x, y) in organism:
             for dx, dy in _N4:
                 nb = (x + dx, y + dy)
-                if nb in grid and nb not in organism:
+                if nb not in organism:
                     frontier.add(nb)
         births = {}
         for (x, y) in frontier:
-            st = grid[(x, y)]
+            st = grid.get((x, y), _Z)
             for self_lut, ctx in _dir_contexts(organism, x, y, st):
                 _record(growth, conflicts, ctx, self_lut)   # 0 for a dead dir
-            births[(x, y)] = st
+            if (x, y) in grid:
+                births[(x, y)] = st
         if not births:
             break
         organism.update(births)
         for s in seeds:
-            organism[s] = SEED_STATE
+            organism[s] = seed_state
     return growth, maint, conflicts, set(organism)
 
 
@@ -148,9 +157,11 @@ def repair_genome_lut(source_genome, target_grid, seeds, grid_size=7, iters=30,
                 genes=repair_genes,
                 split=(0 if len(repair_genes) < 2 else len(repair_genes) // 2),
                 tag=-1, telomere=L)
-            genome = Genome(chromosomes=[repair_chrom]
-                            + list(source_genome.chromosomes),
-                            tag=source_genome.tag)
+            genome = Genome(
+                chromosomes=[repair_chrom] + list(source_genome.chromosomes),
+                tag=source_genome.tag,
+                seed_state=getattr(source_genome, 'seed_state', None),
+                provenance=getattr(source_genome, 'provenance', ''))
         grown = grow_lut(genome, seeds=seeds,
                          grid_size=grid_size, iters=iters)
         unchanged_ok = sum(grown.get(pos) == target[pos] for pos in unchanged)
@@ -229,12 +240,17 @@ def repair_genome_lut(source_genome, target_grid, seeds, grid_size=7, iters=30,
 
 
 def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
-                       telomere_cap=MAX_TELOMERE, repair_rounds=6):
+                       telomere_cap=MAX_TELOMERE, repair_rounds=6,
+                       seed_state=None):
     """Reconstruct a genome whose growth reproduces the LUT `grid` from `seeds`.
     Returns (genome, report) with the same report shape as the nervous inverse."""
     grid = {tuple(p): tuple(int(v) & 0xFFFF for v in st) for p, st in grid.items()}
     seeds = [tuple(s) for s in seeds]
     seedset = set(seeds)
+    seed_state = (SEED_STATE if seed_state is None else
+                  tuple(int(value) & 0xFFFF for value in seed_state))
+    if len(seed_state) != 4:
+        raise ValueError('LUT seed_state must contain four directional LUTs')
     report = {'backend': 'lut'}
 
     if not seeds:
@@ -243,9 +259,12 @@ def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
                       radius=0, telomere=1, exact=False, grown={},
                       note='no seeds/inputs — mark at least one input (the growth '
                            'seed) before reversing.')
-        return Genome(chromosomes=[Chromosome(genes=[LutGene()], telomere=1)]), report
+        return Genome(
+            chromosomes=[Chromosome(genes=[LutGene()], telomere=1)],
+            seed_state=(None if seed_state == SEED_STATE else seed_state)), report
 
-    seed_mismatch = [s for s in seeds if grid.get(s, SEED_STATE) != SEED_STATE]
+    seed_mismatch = [
+        s for s in seeds if grid.get(s, seed_state) != seed_state]
 
     dist = _hop_distances(set(grid) | seedset, seeds)
     unreachable = [p for p in grid if p not in dist and p not in seedset]
@@ -256,7 +275,8 @@ def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
     L = max(1, min(int(telomere_cap), radius))
 
     # replay a monotone development to log the exact (context -> LUT) genes
-    growth, maint, conflicts, reached = _collect_contexts_lut(grid, seeds, L)
+    growth, maint, conflicts, reached = _collect_contexts_lut(
+        grid, seeds, L, seed_state=seed_state)
     unreachable = sorted(set(unreachable) | {p for p in grid if p not in reached})
 
     def build(suppressors):
@@ -271,9 +291,12 @@ def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
         genes += [LutGene(ctx_n=cn, ctx_s=cs, ctx_e=ce, ctx_w=cw,
                           self_in=self_lut, self_out=self_lut)
                   for ((cn, cs, ce, cw), self_lut) in maint if self_lut]
-        return Genome(chromosomes=[Chromosome(
-            genes=genes, split=(0 if len(genes) < 2 else len(genes) // 2),
-            tag=1, telomere=L)], tag=1)
+        return Genome(
+            chromosomes=[Chromosome(
+                genes=genes, split=(0 if len(genes) < 2 else len(genes) // 2),
+                tag=1, telomere=L)],
+            tag=1,
+            seed_state=(None if seed_state == SEED_STATE else seed_state))
 
     def evaluate(genome):
         # Verify with exactly the safety cap the Designer's Grow button uses;

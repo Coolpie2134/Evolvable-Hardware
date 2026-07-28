@@ -1,6 +1,6 @@
 """
 tests/test_diversity.py — the evaluated-population diversity contract
-(nv_evo/diversity.py).
+(substrates/nervous/diversity.py).
 
 Fitness spread is identically zero once everyone solves, so these levels are
 what remains. Each test pins one claim about what a level must and must not
@@ -16,13 +16,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo import diversity as dv                            # noqa: E402
-from nv_evo.ga import clone_genome, mutate_nv                 # noqa: E402
-from nv_evo.genome import random_hex_genome                   # noqa: E402
-from nv_evo.pulse import PulseConfig                          # noqa: E402
-from nv_evo.targets import (TEMPORAL_TARGETS,
+from substrates.nervous import diversity as dv                            # noqa: E402
+from substrates.nervous.ga import clone_genome, mutate_nv                 # noqa: E402
+from substrates.nervous.genome import random_hex_genome                   # noqa: E402
+from substrates.nervous.pulse import PulseConfig                          # noqa: E402
+from substrates.nervous.targets import (TEMPORAL_TARGETS,
                             with_io_placement)                 # noqa: E402
-from evo_runtime.config import GAConfig, RunConfig            # noqa: E402
+from runtime.config import GAConfig, RunConfig            # noqa: E402
 
 
 def _target(name='Coincidence (2-in)', model='pulse_delay'):

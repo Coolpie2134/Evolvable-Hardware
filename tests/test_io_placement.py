@@ -9,22 +9,29 @@ selector. Every port owns exactly one physical cell, and cells are exclusive so
 an input and output cannot collapse onto the same node.
 
 ``spatial_chromosome`` uses the same chromosome, but gene i evolves a
-normalised (x,y) anchor and attaches to the nearest free living cell.
+normalised (x,y) anchor. Input anchors seed development and remain their exact
+logical cells; output anchors attach to the nearest free living cell.
 
 The legacy fixed path and its random stream remain unchanged.
 """
 import copy
 import random
 
-from nv_evo.genome import (random_hex_genome, random_hex_gene, MAX_STATE,
-                           HexGene, Chromosome, Genome)
-from nv_evo.nervous import grow_nervous
-from nv_evo import io_placement as iop
-from nv_evo.ga import (mutate_nv, clone_genome, crossover_nv,
+from substrates.nervous.genome import (random_hex_genome, random_hex_gene, MAX_STATE,
+                           HexGene, Chromosome, Genome, RoutingPatch)
+from substrates.nervous.nervous import apply_routing_patches, grow_nervous
+from substrates.nervous import io_placement as iop
+from substrates.nervous.ga import (mutate_nv, clone_genome, crossover_nv,
                        genome_signature, rank_key)
-from nv_evo.targets import sr_latch, coincidence_detector, with_io_placement
-from nv_evo.temporal import prepare_net, score_temporal
-from nv_evo.evaluation import fit_readout, score_frozen
+from substrates.nervous.targets import sr_latch, coincidence_detector, with_io_placement
+from substrates.nervous.temporal import prepare_net, score_temporal
+from substrates.nervous.evaluation import fit_readout, score_frozen
+from substrates.snn.targets import get_target
+from substrates.lut.genome import (
+    LutGene, Chromosome as LutChromosome, Genome as LutGenome)
+from substrates.lut.ga import make_seed_genome
+from substrates.lut.lut import grow_lut, cell_io_tags
+from runtime.checkpoint import genome_to_dict, genome_from_dict
 
 
 def _tagged_genome(seed, n_chroms=3, wiring=False, spatial=False):
@@ -39,9 +46,10 @@ def _tagged_genome(seed, n_chroms=3, wiring=False, spatial=False):
 
 
 def _grown(genome, target):
-    """Grow with the target's actual developmental origin: pads under fixed,
-    the single neutral center under an evolvable strategy (growth_seeds)."""
-    return grow_nervous(genome, seeds=iop.growth_seeds(target))
+    """Grow from pads, spatial germlines, or the neutral centre as configured."""
+    return grow_nervous(
+        genome, seeds=iop.growth_seeds(
+            target, iop.io_strategy(target), genome))
 
 
 # ── default-path invariance ─────────────────────────────────────────────────────
@@ -53,6 +61,7 @@ def test_default_random_gene_is_byte_identical():
     random.seed(12345)
     gene = random_hex_gene()
     assert gene.tag == 0
+    assert gene.io_kind == iop.IO_KIND_BODY
     random.seed(12345)
     ctx_l = random.randrange(32); ctx_r = random.randrange(32)
     ctx_d = random.randrange(32)
@@ -85,6 +94,176 @@ def test_fixed_strategy_binding_is_a_noop():
     grid = _grown(g, tgt)
     assert iop.io_strategy(tgt) == 'fixed'
     assert iop.bind_io(g, grid, tgt) is None
+
+
+def test_terminal_nodes_bind_one_source_per_input_and_one_sink_per_output():
+    """Only genome-expressed terminal cells bind; target geometry is ignored."""
+    target = copy.copy(get_target('Half adder'))
+    target.io_placement = 'terminal_nodes'
+    grid = {
+        (-4, 2): 1, (3, -5): 1,
+        (8, 9): 1, (-2, -7): 1,
+        (4, 4): 1, (0, 3): 1,
+    }
+    genome = random_hex_genome(n_chroms=2)
+    genome._terminal_kinds = {
+        (-4, 2): iop.IO_KIND_INPUT,
+        (3, -5): iop.IO_KIND_INPUT,
+        (8, 9): iop.IO_KIND_OUTPUT,
+        (-2, -7): iop.IO_KIND_OUTPUT,
+        # An ordinary cell at a declared target input must not bind.
+        (0, 3): iop.IO_KIND_BODY,
+    }
+    binding = iop.bind_io(
+        genome, grid, target, tags={cell: 1 for cell in grid})
+    assert binding is not None
+    inputs, outputs = binding
+    assert set(iop.flat_inputs(inputs)) == {(-4, 2), (3, -5)}
+    assert set(iop.flat_outputs(outputs)) == {(8, 9), (-2, -7)}
+    assert list(outputs) == ['sum', 'carry']
+    assert not (set(iop.flat_inputs(inputs)) & set(iop.flat_outputs(outputs)))
+    centre = target.grid_size // 2
+    assert iop.growth_seeds(target, 'terminal_nodes', genome) == (
+        (centre, centre),)
+
+
+def test_terminal_nodes_single_output_contract_has_exactly_one_sink():
+    target = with_io_placement(coincidence_detector(), 'terminal_nodes')
+    grid = {(0, 0): 1, (1, 0): 1, (2, 1): 1, (2, 3): 1}
+    genome = random_hex_genome(n_chroms=2)
+    genome._terminal_kinds = {
+        (0, 0): iop.IO_KIND_INPUT,
+        (1, 0): iop.IO_KIND_INPUT,
+        (2, 1): iop.IO_KIND_OUTPUT,
+        (2, 3): iop.IO_KIND_OUTPUT,
+    }
+    inputs, outputs = iop.bind_io(
+        genome, grid, target, tags={cell: 1 for cell in grid})
+    assert len(inputs) == target.n_inputs
+    assert list(outputs) == ['Q']
+    assert len(outputs['Q']) == 1
+
+
+def test_terminal_states_are_seeded_and_mutate_as_a_body_gene_allele():
+    # Nervous terminal identity is the GROWN STATE (16 = input, 17 = output), so
+    # seeding and mutation express it through ``self_out`` — not the io_kind tag.
+    random.seed(321)
+    genome = random_hex_genome(
+        n_chroms=2, terminal_nodes=True, n_inputs=2, n_outputs=1)
+    states = [
+        int(gene.self_out) & 0x1F
+        for chromosome in genome.chromosomes for gene in chromosome.genes]
+    assert iop.IO_STATE_INPUT in states
+    assert iop.IO_STATE_OUTPUT in states
+    before = tuple(
+        gene.self_out for chromosome in genome.chromosomes
+        for gene in chromosome.genes)
+    assert iop.mutate_terminal_state(genome)
+    after = tuple(
+        gene.self_out for chromosome in genome.chromosomes
+        for gene in chromosome.genes)
+    assert after != before
+
+
+def test_nv_growth_marks_grown_io_state_cells_as_terminals():
+    # A gene that grows the input node-type state (16) makes every cell it grows
+    # a dedicated input terminal; identity comes from the grown state, not a tag.
+    gene = HexGene(self_in=0, self_out=iop.IO_STATE_INPUT)
+    genome = Genome(chromosomes=[
+        Chromosome(genes=[gene], split=0, telomere=1)])
+    seed = (4, 4)
+    grid = grow_nervous(genome, seeds=(seed,))
+    assert grid
+    assert seed not in genome._terminal_kinds
+    assert genome._terminal_kinds
+    assert set(genome._terminal_kinds.values()) == {iop.IO_KIND_INPUT}
+
+
+def test_dedicated_io_states_are_one_way_in_the_pulse_engine():
+    # A dedicated INPUT (state 16) cannot fire from a neighbour (source-only); a
+    # dedicated OUTPUT (state 17) cannot drive a neighbour (sink-only). The
+    # one-way physics applies only when the cell is passed as an I/O terminal.
+    from substrates.nervous.pulse import PulseSim, PulseConfig
+    cfg = PulseConfig(model='pulse_delay')
+    src = {'X': (None, None, None), 'IN': ('X', 'X', None),
+           'DR': (None, None, None), 'OUT': ('DR', 'DR', None),
+           'Y': ('OUT', 'OUT', None)}
+    grid = {c: 0 for c in src}
+    routing = {c: (src[c][0], src[c][1], src[c][2], 'and') for c in src}
+
+    def fires(input_nodes, output_nodes):
+        sim = PulseSim(grid, routing, config=cfg, sources=src,
+                       input_nodes=input_nodes, output_nodes=output_nodes)
+        sim.inject_pulse('X', 2.0, 1.0)
+        sim.inject_pulse('DR', 2.0, 1.0)
+        sim.advance_to(12.0)
+        return bool(sim.rise_times.get('IN')), bool(sim.rise_times.get('Y'))
+
+    assert fires(set(), set()) == (True, True)          # ordinary cells relay
+    assert fires({'IN'}, {'OUT'}) == (False, False)     # terminals are one-way
+
+
+def test_lut_growth_expresses_unambiguous_terminal_kind():
+    growth_gene = LutGene(
+        self_in=0, self_out=0xFFFE, io_kind=iop.IO_KIND_OUTPUT)
+    maintenance_gene = LutGene(
+        self_in=0xFFFE, self_out=0xFFFE,
+        io_kind=iop.IO_KIND_OUTPUT)
+    genome = LutGenome(chromosomes=[
+        LutChromosome(
+            genes=[growth_gene, maintenance_gene], split=1, telomere=1)])
+    seed = (3, 3)
+    grid = grow_lut(genome, seeds=(seed,), grid_size=7, iters=4)
+    assert grid
+    assert seed not in genome._terminal_kinds
+    assert genome._terminal_kinds
+    assert set(genome._terminal_kinds.values()) == {iop.IO_KIND_OUTPUT}
+
+
+def test_terminal_kind_checkpoint_round_trip_for_nv_and_lut():
+    nv = Genome(chromosomes=[Chromosome(
+        genes=[HexGene(self_out=1, io_kind=iop.IO_KIND_INPUT)],
+        split=0)])
+    lut = LutGenome(chromosomes=[LutChromosome(
+        genes=[LutGene(self_out=1, io_kind=iop.IO_KIND_OUTPUT)],
+        split=0)])
+    nv_loaded = genome_from_dict(genome_to_dict(nv, 'nervous'), 'nervous')
+    lut_loaded = genome_from_dict(genome_to_dict(lut, 'lut'), 'lut')
+    assert nv_loaded.chromosomes[0].genes[0].io_kind == iop.IO_KIND_INPUT
+    assert lut_loaded.chromosomes[0].genes[0].io_kind == iop.IO_KIND_OUTPUT
+
+
+def test_terminal_bindings_are_not_fixed_across_genome_seeds():
+    target = copy.copy(get_target('Half adder'))
+    target.io_placement = 'terminal_nodes'
+
+    nv_bindings = []
+    for seed in (0, 2):
+        random.seed(seed)
+        genome = random_hex_genome(
+            2, terminal_nodes=True,
+            n_inputs=target.n_inputs, n_outputs=len(target.outputs))
+        grid = grow_nervous(
+            genome, iop.growth_seeds(target, 'terminal_nodes', genome))
+        nv_bindings.append(iop.bind_io(
+            genome, grid, target, 'terminal_nodes'))
+
+    lut_bindings = []
+    for seed in (0, 4):
+        random.seed(seed)
+        genome = make_seed_genome(2)
+        iop.seed_terminal_kinds(
+            genome, target.n_inputs, len(target.outputs))
+        grid = grow_lut(
+            genome, iop.growth_seeds(target, 'terminal_nodes', genome),
+            target.grid_size, target.iters)
+        lut_bindings.append(iop.bind_io(
+            genome, grid, target, 'terminal_nodes',
+            tags=cell_io_tags(genome, grid)))
+
+    assert all(binding is not None for binding in nv_bindings + lut_bindings)
+    assert nv_bindings[0] != nv_bindings[1]
+    assert lut_bindings[0] != lut_bindings[1]
 
 
 def test_default_mutation_stream_is_unchanged_by_evolve_io_flag():
@@ -382,14 +561,153 @@ def test_spatial_chromosome_maps_anchors_to_nearest_distinct_live_cells():
     # depends only on living positions, never on a mutable node type.
     grid = {
         (0, 0): 31,
-        (10, 0): 7,
-        (0, 10): 19,
-        (10, 10): 2,
+        (4, 0): 7,
+        (0, 4): 19,
+        (4, 4): 2,
     }
     inputs, outputs = iop.bind_io(genome, grid, tgt)
-    assert inputs == [[(0, 0)], [(10, 0)]]
-    assert outputs == {'Q': [(10, 10)]}
+    assert inputs == [[(0, 0)], [(4, 0)]]
+    assert outputs == {'Q': [(4, 4)]}
     assert iop.binding_progress(genome, grid, tgt) == (3, 3)
+
+
+def test_spatial_input_anchors_are_distinct_developmental_germlines():
+    """Input placement changes ontogeny instead of being bolted on afterward."""
+    tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
+    random.seed(0)
+    genome = _spatial_genome()
+    assert iop.seed_spatial_from_geometry(genome, None, tgt) == 3
+
+    seeds = iop.growth_seeds(tgt, 'spatial_chromosome', genome)
+    assert seeds == tuple(tgt.inputs)
+    assert len(set(seeds)) == tgt.n_inputs
+
+    grid = grow_nervous(genome, seeds=seeds)
+    inputs, _outputs = iop.bind_io(genome, grid, tgt)
+    assert inputs == [[cell] for cell in seeds]
+
+
+def test_spatial_input_mutation_moves_germline_and_regrows_body():
+    tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
+    random.seed(0)
+    genome = _spatial_genome()
+    iop.seed_spatial_from_geometry(genome, None, tgt)
+    before_seeds = iop.growth_seeds(tgt, 'spatial_chromosome', genome)
+    before_grid = grow_nervous(genome, seeds=before_seeds)
+
+    wiring = iop.wiring_chromosome(genome)
+    gene = copy.copy(wiring.genes[0])
+    gene.tag = iop.SPATIAL_COORD_MAX
+    gene.io_selector = iop.SPATIAL_COORD_MAX
+    wiring.genes[0] = gene
+
+    after_seeds = iop.growth_seeds(tgt, 'spatial_chromosome', genome)
+    after_grid = grow_nervous(genome, seeds=after_seeds)
+    assert after_seeds != before_seeds
+    assert all(seed in after_grid for seed in after_seeds)
+    assert after_grid != before_grid
+    inputs, _outputs = iop.bind_io(genome, after_grid, tgt)
+    assert inputs == [[cell] for cell in after_seeds]
+
+
+def test_spatial_colliding_input_anchors_resolve_to_distinct_germlines():
+    tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
+    genome = _spatial_genome()
+    wiring = iop.wiring_chromosome(genome)
+    for index in range(tgt.n_inputs):
+        gene = copy.copy(wiring.genes[index])
+        gene.tag = iop.SPATIAL_COORD_MAX // 2
+        gene.io_selector = iop.SPATIAL_COORD_MAX // 2
+        wiring.genes[index] = gene
+    seeds = iop.growth_seeds(tgt, 'spatial_chromosome', genome)
+    assert len(seeds) == tgt.n_inputs
+    assert len(set(seeds)) == tgt.n_inputs
+
+
+def test_spatial_factory_diversifies_outputs_without_randomising_germlines():
+    tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
+    random.seed(17)
+    genome = _spatial_genome()
+    assert iop.seed_spatial(
+        genome, None, tgt, geometry_prob=0.0) == 3
+    assert iop.spatial_input_sites(genome, tgt) == tuple(tgt.inputs)
+    sites = iop.spatial_port_sites(genome, tgt)
+    assert sites[tgt.n_inputs:] != tuple(
+        terminal.pos for terminal in tgt.outputs)
+
+
+def test_spatial_output_rescue_keeps_body_and_input_alleles_fixed():
+    tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
+    random.seed(19)
+    genome = _spatial_genome()
+    iop.seed_spatial_from_geometry(genome, None, tgt)
+    body_before = [
+        tuple((gene.ctx_l, gene.ctx_r, gene.ctx_d,
+               gene.self_in, gene.self_out)
+              for gene in chromosome.genes)
+        for chromosome in iop.body_chromosomes(genome)]
+    input_before = [
+        (gene.tag, gene.io_selector)
+        for gene in iop.wiring_chromosome(genome).genes[:tgt.n_inputs]]
+
+    variants = iop.spatial_output_variants(genome, tgt, limit=8)
+    assert len(variants) == 8
+    assert len({
+        (iop.wiring_chromosome(candidate).genes[tgt.n_inputs].tag,
+         iop.wiring_chromosome(candidate).genes[tgt.n_inputs].io_selector)
+        for candidate in variants}) == 8
+    for candidate in variants:
+        assert [
+            tuple((gene.ctx_l, gene.ctx_r, gene.ctx_d,
+                   gene.self_in, gene.self_out)
+                  for gene in chromosome.genes)
+            for chromosome in iop.body_chromosomes(candidate)] == body_before
+        assert [
+            (gene.tag, gene.io_selector)
+            for gene in iop.wiring_chromosome(
+                candidate).genes[:tgt.n_inputs]] == input_before
+
+
+def test_mature_routing_patch_changes_one_live_cell_only():
+    genome = Genome(routing_patches=[RoutingPatch(1, 0, 7)])
+    original = {(0, 0): 1, (1, 0): 3, (2, 0): 5}
+    patched = apply_routing_patches(genome, original)
+    assert original == {(0, 0): 1, (1, 0): 3, (2, 0): 5}
+    assert patched == {(0, 0): 1, (1, 0): 7, (2, 0): 5}
+
+
+def test_spatial_routing_rescue_is_one_cell_local_and_heritable():
+    tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
+    random.seed(1901)
+    genome = _spatial_genome()
+    iop.seed_spatial_from_geometry(genome, None, tgt)
+    baseline = _grown(genome, tgt)
+    body_before = [
+        tuple((gene.ctx_l, gene.ctx_r, gene.ctx_d,
+               gene.self_in, gene.self_out)
+              for gene in chromosome.genes)
+        for chromosome in iop.body_chromosomes(genome)]
+    ports_before = [
+        (gene.tag, gene.io_selector)
+        for gene in iop.wiring_chromosome(genome).genes]
+
+    variants = iop.spatial_routing_variants(genome, tgt, limit=12)
+    assert variants
+    for candidate in variants:
+        assert [
+            tuple((gene.ctx_l, gene.ctx_r, gene.ctx_d,
+                   gene.self_in, gene.self_out)
+                  for gene in chromosome.genes)
+            for chromosome in iop.body_chromosomes(candidate)] == body_before
+        assert [
+            (gene.tag, gene.io_selector)
+            for gene in iop.wiring_chromosome(candidate).genes] == ports_before
+        assert len(candidate.routing_patches) == 1
+        patch = candidate.routing_patches[0]
+        site = (patch.x, patch.y)
+        assert site in baseline
+        delta = int(patch.state) ^ int(baseline[site])
+        assert delta and delta & (delta - 1) == 0
 
 
 def test_spatial_seed_is_viable_and_mutation_changes_one_coordinate():
@@ -437,8 +755,8 @@ def test_spatial_chromosome_only_fails_when_there_are_too_few_cells():
 
 
 def test_spatial_genome_factory_reserves_three_random_anchor_genes_all_backends():
-    from lut_evo.genome import random_lut_genome
-    from snn_evo.genome import random_genome
+    from substrates.lut.genome import random_lut_genome
+    from substrates.snn.genome import random_genome
     factories = (
         lambda: random_hex_genome(
             3, spatial_chromosome=True, n_ports=4),
@@ -632,13 +950,13 @@ def test_signature_separates_genomes_that_differ_only_in_port_map():
 # ── LUT backend ──────────────────────────────────────────────────────────────────
 
 def _lut_genome(seed, wiring=False):
-    from lut_evo.genome import random_lut_genome
+    from substrates.lut.genome import random_lut_genome
     random.seed(seed)
     return random_lut_genome(3, wiring_chromosome=wiring)
 
 
 def test_lut_default_random_gene_is_byte_identical():
-    from lut_evo.genome import random_lut_gene
+    from substrates.lut.genome import random_lut_gene
     random.seed(4242)
     gene = random_lut_gene()
     assert gene.tag == 0
@@ -653,7 +971,7 @@ def test_lut_default_random_gene_is_byte_identical():
 def test_lut_cell_io_tags_are_the_direction_luts():
     """A LUT cell's TYPES are its nonzero directional tables — a cell may be
     several types at once, and a port binds if its desired type matches ANY."""
-    from lut_evo.lut import grow_lut, cell_io_tags
+    from substrates.lut.lut import grow_lut, cell_io_tags
     g = _lut_genome(5)
     base = sr_latch()
     grid = grow_lut(g, seeds=iop.growth_seeds(with_io_placement(base, 'tag_rank')),
@@ -665,8 +983,8 @@ def test_lut_cell_io_tags_are_the_direction_luts():
 
 
 def test_lut_prepare_honors_strategy_and_freezes_inputs():
-    from lut_evo.ga import prepare_lut
-    from lut_evo.lut import grow_lut, cell_io_tags
+    from substrates.lut.ga import prepare_lut
+    from substrates.lut.lut import grow_lut, cell_io_tags
     base = sr_latch()
     seeds = iop.growth_seeds(with_io_placement(base, 'tag_rank'))
     for strat in ('tag_rank', 'wiring_chromosome'):
@@ -695,7 +1013,7 @@ def test_lut_prepare_honors_strategy_and_freezes_inputs():
 
 
 def test_lut_fixed_prep_shape_and_seed_inputs():
-    from lut_evo.ga import prepare_lut
+    from substrates.lut.ga import prepare_lut
     g = _lut_genome(5)
     tgt = sr_latch()
     prep = prepare_lut(g, tgt)
@@ -705,7 +1023,7 @@ def test_lut_fixed_prep_shape_and_seed_inputs():
 
 
 def test_lut_evolve_io_gates_port_map_mutations():
-    from lut_evo.ga import mutate_lut
+    from substrates.lut.ga import mutate_lut
     g = _lut_genome(5, wiring=True)
     parent = [(gene.tag, gene.io_limit, gene.io_selector)
               for gene in iop.wiring_chromosome(g).genes]
@@ -728,7 +1046,7 @@ def test_lut_evolve_io_gates_port_map_mutations():
 
 
 def test_seed_io_metadata_seeds_the_port_map_from_body_types():
-    from lut_evo.ga import make_seed_genome
+    from substrates.lut.ga import make_seed_genome
     random.seed(11)
     g = make_seed_genome(3)
     assert all(gene.tag == 0 for c in g.chromosomes for gene in c.genes)
@@ -748,7 +1066,7 @@ def test_seed_io_metadata_seeds_the_port_map_from_body_types():
 # ── SNN backend ──────────────────────────────────────────────────────────────────
 
 def _snn_genome(seed, wiring=False):
-    from snn_evo.genome import random_genome
+    from substrates.snn.genome import random_genome
     random.seed(seed)
     return random_genome(3, wiring_chromosome=wiring,
                          tag_rank=not wiring)
@@ -756,7 +1074,7 @@ def _snn_genome(seed, wiring=False):
 
 def _snn_target(strategy='fixed'):
     import dataclasses
-    from snn_evo.targets import get_target, DEFAULT_TARGET
+    from substrates.snn.targets import get_target, DEFAULT_TARGET
     t = get_target(DEFAULT_TARGET)
     # snn targets predate the io_placement field; the controller stamps it
     setattr(t, 'io_placement', strategy)
@@ -764,7 +1082,7 @@ def _snn_target(strategy='fixed'):
 
 
 def test_snn_default_random_gene_is_byte_identical():
-    from snn_evo.genome import random_gene, MAX_ITER
+    from substrates.snn.genome import random_gene, MAX_ITER
     random.seed(777)
     gene = random_gene()
     assert gene.tag == 0
@@ -777,23 +1095,27 @@ def test_snn_default_random_gene_is_byte_identical():
 
 
 def test_snn_cell_io_tags_are_the_cell_states():
-    from snn_evo.growth import grow_snn, cell_io_tags
+    from substrates.snn.growth import grow_snn, cell_io_tags
     g = _snn_genome(5)
     t = _snn_target('tag_rank')
-    grid = grow_snn(g, seeds=iop.growth_seeds(t), grid_size=t.grid_size)
+    grid = grow_snn(
+        g, seeds=iop.growth_seeds(t, iop.io_strategy(t), g),
+        grid_size=t.grid_size)
     tags = cell_io_tags(g, grid)
     assert tags == {pos: int(state) for pos, state in grid.items()}
 
 
 def test_snn_binding_marks_bound_neurons_and_scores():
-    from snn_evo.growth import grow_snn, cell_io_tags
-    from snn_evo.snn import interpret_grid
-    from snn_evo.ga import evaluate_genome
+    from substrates.snn.growth import grow_snn, cell_io_tags
+    from substrates.snn.snn import interpret_grid
+    from substrates.snn.ga import evaluate_genome
     g = _snn_genome(5, wiring=True)
     t = _snn_target()
     for strat in ('tag_rank', 'wiring_chromosome'):
         setattr(t, 'io_placement', strat)
-        grid = grow_snn(g, seeds=iop.growth_seeds(t), grid_size=t.grid_size)
+        grid = grow_snn(
+            g, seeds=iop.growth_seeds(t, iop.io_strategy(t), g),
+            grid_size=t.grid_size)
         tags = cell_io_tags(g, grid)
         bound = iop.bind_io(g, grid, t, tags=tags)
         if bound is None:
@@ -814,7 +1136,7 @@ def test_snn_binding_marks_bound_neurons_and_scores():
 
 
 def test_snn_evolve_io_gates_port_map_mutations():
-    from snn_evo.ga import mutate
+    from substrates.snn.ga import mutate
     g = _snn_genome(5, wiring=True)
     parent = [(gene.tag, gene.io_limit, gene.io_selector)
               for gene in iop.wiring_chromosome(g).genes]
@@ -839,7 +1161,7 @@ def test_snn_evolve_io_gates_port_map_mutations():
 # ── nervous combinational path ───────────────────────────────────────────────────
 
 def test_nervous_combinational_honors_strategy():
-    from nv_evo.nervous import (interpret_nervous, _resolve_io_binding,
+    from substrates.nervous.nervous import (interpret_nervous, _resolve_io_binding,
                                 score_nervous)
     g = _tagged_genome(7)
     t = _snn_target('tag_rank')                  # Half adder truth table
@@ -858,10 +1180,10 @@ def test_nervous_combinational_honors_strategy():
 # ── checkpoint round-trip ────────────────────────────────────────────────────────
 
 def test_checkpoint_roundtrips_tags_and_wiring_all_backends():
-    from evo_runtime.checkpoint import genome_to_dict, genome_from_dict
-    import nv_evo.ga as nga
-    import lut_evo.ga as lga
-    import snn_evo.ga as sga
+    from runtime.checkpoint import genome_to_dict, genome_from_dict
+    import substrates.nervous.ga as nga
+    import substrates.lut.ga as lga
+    import substrates.snn.ga as sga
     cases = [
         ('nervous', _tagged_genome(9, wiring=True), nga.genome_signature),
         ('nervous', _spatial_genome(), nga.genome_signature),
@@ -877,7 +1199,7 @@ def test_checkpoint_roundtrips_tags_and_wiring_all_backends():
 # ── center-seeded growth under evolvable strategies ─────────────────────────────
 
 def test_checkpoint_migrates_retired_multisite_limits_to_one():
-    from evo_runtime.checkpoint import genome_to_dict, genome_from_dict
+    from runtime.checkpoint import genome_to_dict, genome_from_dict
     genome = _tagged_genome(9, wiring=True)
     document = genome_to_dict(genome, 'nervous')
     limit_index = document['gene_fields'].index('io_limit')
@@ -923,7 +1245,7 @@ def test_strategy_growth_is_not_anchored_to_the_pads():
 
 
 def test_carry_physics_carries_io_placement():
-    from nv_evo.certification import carry_physics
+    from substrates.nervous.certification import carry_physics
     src = with_io_placement(sr_latch(), 'tag_rank')
     dst = sr_latch()
     carry_physics(src, dst)
@@ -938,8 +1260,8 @@ def test_multi_site_input_injection_drives_every_attachment_cell():
     """A nervous input bound to several cells injects at ALL of them: the
     driven cone from the grouped binding equals the union of the single-site
     cones."""
-    from nv_evo.temporal import input_cone
-    from nv_evo.nervous import interpret_nervous
+    from substrates.nervous.temporal import input_cone
+    from substrates.nervous.nervous import interpret_nervous
     tgt = with_io_placement(coincidence_detector(), 'tag_rank')
     g, grid, _ = _genome_expressing_values(
         tgt, tgt.n_inputs + tgt.n_outputs)
@@ -975,7 +1297,7 @@ def test_random_genomes_rarely_score_under_the_wiring_lock():
 
 
 def test_genome_text_shows_wiring_marker_and_binding():
-    import app as app_module
+    import ui.app as app_module
     g = _tagged_genome(7, wiring=True)
     binding = 'io_placement=wiring_chromosome\n  in[0] <- type 5 @ (0, 0)'
     text = app_module.build_genome_text(g, 0.5, binding=binding)
@@ -990,7 +1312,7 @@ def test_genome_text_shows_wiring_marker_and_binding():
 
 
 def test_old_checkpoint_without_tags_still_loads():
-    from evo_runtime.checkpoint import genome_to_dict, genome_from_dict
+    from runtime.checkpoint import genome_to_dict, genome_from_dict
     g = _tagged_genome(9, wiring=True)
     d = genome_to_dict(g, 'nervous')
     # simulate a pre-tag checkpoint: strip the tag column and the wiring flag

@@ -3,8 +3,9 @@ import copy, math, random, os
 from concurrent.futures import ProcessPoolExecutor
 
 from functools import partial
-from evo_runtime.cache import LRUCache
-from evo_runtime.parallel import map_ordered
+from runtime.cache import LRUCache
+from runtime.mutation import adaptive_mutation_rate, STRESS_PATIENCE
+from runtime.parallel import map_ordered
 
 from .genome import (Genome, Chromosome, random_gene, random_chromosome,
                      random_genome, germline_telomere,
@@ -16,9 +17,11 @@ from .targets import get_target, DEFAULT_TARGET
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10
+IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
-MEAN_MUTATIONS = 1.2
-N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see nv_evo.ga
+MEAN_MUTATIONS = 4.0
+MUT_DECAY      = 0.997
+N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see substrates.nervous.ga
 FITNESS_CACHE_MAX = 200_000
 # Below this fitness, rank on fitness alone — don't let body/gene parsimony bias
 # the search before the behaviour is solved (a counter needs its structure).
@@ -27,7 +30,7 @@ PARSIMONY_START_FITNESS = 0.999
 
 def clone_genome(g):
     """Shallow structural copy: new chromosome/gene lists, shared (never mutated
-    in place) gene objects. Mirrors nv_evo.clone_genome — far cheaper than
+    in place) gene objects. Mirrors substrates.nervous.clone_genome — far cheaper than
     deepcopy, which dominated reproduction."""
     clone = Genome(
         chromosomes=[Chromosome(genes=list(c.genes), split=c.split, tag=c.tag,
@@ -46,7 +49,7 @@ def n_genes(g):
 
 def rank_key(genome, fitness):
     """Selection key: wiring viability, honest fitness, then solved parsimony."""
-    from nv_evo.io_placement import binding_viability
+    from substrates.nervous.io_placement import binding_viability
     viability = binding_viability(genome)
     if fitness < PARSIMONY_START_FITNESS:
         return (viability, fitness, 0, 0)
@@ -54,20 +57,24 @@ def rank_key(genome, fitness):
             -germline_telomere(genome))
 
 # ── evaluation ────────────────────────────────────────────────────
-# (the nervous / temporal backends have their own GA: see nv_evo/ga.py)
+# (the nervous / temporal backends have their own GA: see substrates/nervous/ga.py)
 
 def evaluate_genome(genome, target=None, arch=None):
     if target is None:
         target = get_target(DEFAULT_TARGET)
-    # Evolvable I/O binding (nv_evo/io_placement.py): the genome's heritable
-    # tags choose the driven/read cells, and the organism nucleates from ONE
-    # neutral center cell (growth_seeds) instead of the input pads; 'fixed'
-    # keeps the pad-seeded growth and terminal layout byte-identical.
-    from nv_evo.io_placement import (
+    if getattr(target, 'temporal', False):
+        from .temporal import score_snn_temporal
+        return score_snn_temporal(genome, target, arch)
+    # Evolvable I/O binding (substrates/nervous/io_placement.py): the genome's heritable
+    # tags choose the driven/read cells. Spatial input anchors also define the
+    # germline; type/tag strategies retain neutral-centre growth. Fixed keeps
+    # pad-seeded growth and terminal layout byte-identical.
+    from substrates.nervous.io_placement import (
         io_strategy, bind_io, flat_inputs, growth_seeds, binding_progress,
         record_binding_progress)
     strategy = io_strategy(target)
-    grid = grow_snn(genome, seeds=growth_seeds(target, strategy),
+    grid = grow_snn(genome, seeds=growth_seeds(
+                        target, strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
     node_types = None
     if strategy != 'fixed':
@@ -97,7 +104,7 @@ def _evaluate_selection_record(genome, target=None, arch=None):
     if target is None:
         target = get_target(DEFAULT_TARGET)
     fitness = evaluate_genome(genome, target, arch)
-    from nv_evo.io_placement import io_strategy
+    from substrates.nervous.io_placement import io_strategy
     total = target.n_inputs + len(target.outputs)
     if io_strategy(target) not in (
             'wiring_chromosome', 'spatial_chromosome'):
@@ -120,7 +127,7 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
     """Evaluate a population -> list of fitnesses. A persistent `executor`
     (ProcessPoolExecutor) is reused instead of spawning a fresh pool every call —
     on Windows the per-generation spawn+re-import dominated runtime, so reuse is a
-    large speed-up (matches nv_evo/lut_evo). Omitting it keeps the one-shot pool.
+    large speed-up (matches substrates/nervous/substrates/lut). Omitting it keeps the one-shot pool.
     `should_stop`/`on_progress` are threaded to map_ordered (saturated, no chunk
     barrier, cancellable)."""
     fn = partial(_evaluate_selection_record, target=target, arch=arch)
@@ -128,13 +135,13 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
         if executor is not None:
             records = map_ordered(
                 executor, fn, genomes, should_stop, on_progress)
-            from nv_evo.io_placement import record_binding_progress
+            from substrates.nervous.io_placement import record_binding_progress
             for genome, record in zip(genomes, records):
                 record_binding_progress(genome, record[1])
             return [record[0] for record in records]
         with ProcessPoolExecutor(max_workers=N_WORKERS) as ex:
             records = map_ordered(ex, fn, genomes, should_stop, on_progress)
-        from nv_evo.io_placement import record_binding_progress
+        from substrates.nervous.io_placement import record_binding_progress
         for genome, record in zip(genomes, records):
             record_binding_progress(genome, record[1])
         return [record[0] for record in records]
@@ -149,7 +156,7 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
     representatives = [(sig, indices[0]) for sig, indices in unique.items()]
     subset = [genomes[i] for _, i in representatives]
     if not subset:
-        from nv_evo.io_placement import record_binding_progress
+        from substrates.nervous.io_placement import record_binding_progress
         for genome, record in zip(genomes, out):
             record_binding_progress(genome, record[1])
         return [record[0] for record in out]
@@ -162,7 +169,7 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
         cache[sig] = result
         for i in unique[sig]:
             out[i] = result
-    from nv_evo.io_placement import record_binding_progress
+    from substrates.nervous.io_placement import record_binding_progress
     for genome, record in zip(genomes, out):
         record_binding_progress(genome, record[1])
     return [record[0] for record in out]
@@ -273,7 +280,7 @@ def _poisson(lam):
 
 def _mutate_io_tag(genome, io_placement=None):
     """Mutate one body priority, type/selector pair, or spatial anchor."""
-    from nv_evo.io_placement import mutate_io_allele
+    from substrates.nervous.io_placement import mutate_io_allele
     mutate_io_allele(genome, MAX_STATE, strategy=io_placement)
 
 
@@ -342,7 +349,7 @@ def _mutate_once(genome, chromosome_count=None, evolve_io=False,
 
 
 def mutate(genome, chromosome_count=None, evolve_io=False,
-           io_placement=None):
+           io_placement=None, mean_mutations=None):
     if (chromosome_count is not None
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
@@ -353,7 +360,8 @@ def mutate(genome, chromosome_count=None, evolve_io=False,
     # This is an offspring-only GA: recombination is always followed by at
     # least one real mutation.  For a multi-edit transaction, reserve the final
     # allele edit so earlier inverse operations cannot cancel back to a clone.
-    events = max(1, _poisson(MEAN_MUTATIONS))
+    events = max(1, _poisson(
+        MEAN_MUTATIONS if mean_mutations is None else mean_mutations))
     for _ in range(events - 1):
         _mutate_once(
             g, chromosome_count=chromosome_count, evolve_io=evolve_io,
@@ -417,7 +425,9 @@ def tournament(population, fitnesses):
 
 def next_population(population, fitnesses, chromosome_count=None,
                     recombination=True, evolve_io=False,
-                    io_placement=None):
+                    io_placement=None, mean_mutations=None, make_genome=None,
+                    archive_parent=None, stagnation=0,
+                    rescue_candidates=None):
     """One generation of offspring only.
 
     Elites are a recombination parent pool, not verbatim survivors.  The
@@ -436,6 +446,7 @@ def next_population(population, fitnesses, chromosome_count=None,
             raise ValueError('population violates configured chromosome count')
     pop     = len(population)
     n_elite = max(1, int(pop * ELITE_FRAC))
+    n_imm = min(int(round(pop * IMMIGRANT_FRAC)), pop)
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]), reverse=True)
     elite   = order[:n_elite]
@@ -473,18 +484,35 @@ def next_population(population, fitnesses, chromosome_count=None,
         ib = pick_index(second_pool)
         return population[ia], population[ib]
 
-    new_pop = []
+    if make_genome is None:
+        make_genome = lambda: random_genome(chromosome_count or 2)
+    new_pop = [
+        clone_genome(candidate)
+        for candidate in list(rescue_candidates or ())[:pop]]
+    remaining = pop - len(new_pop)
+    new_pop += [make_genome() for _ in range(min(n_imm, remaining))]
+    if (archive_parent is not None and stagnation >= STRESS_PATIENCE
+            and len(new_pop) < pop):
+        archive_count = min(
+            max(1, int(round(pop * 0.10))), pop - len(new_pop))
+        for _index in range(archive_count):
+            new_pop.append(mutate(
+                archive_parent, chromosome_count=chromosome_count,
+                evolve_io=evolve_io, io_placement=io_placement,
+                mean_mutations=mean_mutations))
     while len(new_pop) < pop:
         pa, pb = parent_pair()
         ca, cb = (crossover(pa, pb) if recombination else
                   (clone_genome(pa), clone_genome(pb)))
         new_pop.append(mutate(ca, chromosome_count=chromosome_count,
                               evolve_io=evolve_io,
-                              io_placement=io_placement))
+                              io_placement=io_placement,
+                              mean_mutations=mean_mutations))
         if len(new_pop) < pop:
             new_pop.append(mutate(cb, chromosome_count=chromosome_count,
                                   evolve_io=evolve_io,
-                                  io_placement=io_placement))
+                                  io_placement=io_placement,
+                                  mean_mutations=mean_mutations))
     return new_pop[:pop]
 
 # ── main loop ─────────────────────────────────────────────────────
@@ -498,8 +526,8 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
     if not 1 <= n_chroms <= MAX_CHROMS:
         raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
     popsize    = pop or POPSIZE
-    from nv_evo.io_placement import (
-        growth_seeds, io_strategy, seed_spatial_from_phenotype,
+    from substrates.nervous.io_placement import (
+        growth_seeds, io_strategy, seed_spatial,
         seed_wiring_from_phenotype, uses_port_chromosome)
     strategy = io_strategy(target)
     if uses_port_chromosome(strategy) and n_chroms < 3:
@@ -512,23 +540,21 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
             wiring_chromosome=(strategy == 'wiring_chromosome'),
             spatial_chromosome=(strategy == 'spatial_chromosome'),
             n_ports=n_ports, tag_rank=(strategy == 'tag_rank'))
-        if uses_port_chromosome(strategy):
+        if strategy == 'spatial_chromosome':
+            seed_spatial(genome, None, target)
+        elif uses_port_chromosome(strategy):
             from .growth import grow_snn, cell_io_tags
             grid = grow_snn(
-                genome, seeds=growth_seeds(target),
+                genome, seeds=growth_seeds(target, strategy, genome),
                 grid_size=target.grid_size, iters=target.iters)
             tags = cell_io_tags(genome, grid)
-            if strategy == 'spatial_chromosome':
-                seed_spatial_from_phenotype(
-                    genome, grid, target, tags=tags)
-            else:
-                seed_wiring_from_phenotype(
-                    genome, grid, target, tags=tags)
+            seed_wiring_from_phenotype(
+                genome, grid, target, tags=tags)
         return genome
 
     population = [make_genome() for _ in range(popsize)]
     cache = LRUCache(FITNESS_CACHE_MAX)
-    # Reuse ONE worker pool across generations (matches nv_evo/lut_evo). Spawning
+    # Reuse ONE worker pool across generations (matches substrates/nervous/substrates/lut). Spawning
     # a fresh pool every generation dominated runtime on Windows.
     ex = ProcessPoolExecutor(max_workers=N_WORKERS)
     try:
@@ -536,24 +562,48 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
         best_idx   = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
         best_genome  = clone_genome(population[best_idx])
         best_fitness = fitnesses[best_idx]
+        best_rank = rank_key(best_genome, best_fitness)
+        stagnation = 0
+        mutation_rate = MEAN_MUTATIONS
 
         if verbose:
             print("%5s  %6s  %6s  Summary" % ("Gen", "Best", "Mean"))
             print("-" * 72)
 
         for gen in range(generations):
+            mutation_rate *= MUT_DECAY
+            actual_rate = adaptive_mutation_rate(
+                mutation_rate, stagnation, solved=best_fitness >= 1.0)
+            rescue = ()
+            if (strategy == 'spatial_chromosome'
+                    and best_fitness < 1.0
+                    and stagnation >= STRESS_PATIENCE):
+                from substrates.nervous.io_placement import spatial_output_variants
+                rescue = spatial_output_variants(
+                    best_genome, target,
+                    limit=min(48, max(1, popsize // 2)))
             population = next_population(
                 population, fitnesses, chromosome_count=n_chroms,
-                evolve_io=evolve_io, io_placement=strategy)
+                evolve_io=evolve_io, io_placement=strategy,
+                mean_mutations=actual_rate, make_genome=make_genome,
+                archive_parent=best_genome, stagnation=stagnation,
+                rescue_candidates=rescue)
             fitnesses  = _eval_batch(population, target, arch, ex, cache)
             gi = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
-            if rank_key(population[gi], fitnesses[gi]) > rank_key(best_genome, best_fitness):
+            generation_rank = rank_key(population[gi], fitnesses[gi])
+            if fitnesses[gi] > best_fitness + 1e-12:
+                stagnation = 0
+            else:
+                stagnation += 1
+            if generation_rank > best_rank:
                 best_fitness = fitnesses[gi]
                 best_genome  = clone_genome(population[gi])
+                best_rank = generation_rank
             if verbose and (gen % 10 == 0 or fitnesses[gi] >= 1.0):
-                from nv_evo.io_placement import growth_seeds
+                from substrates.nervous.io_placement import growth_seeds
                 mean_f = sum(fitnesses) / popsize
-                grid   = grow_snn(best_genome, seeds=growth_seeds(target),
+                grid   = grow_snn(best_genome, seeds=growth_seeds(
+                                      target, strategy, best_genome),
                                   grid_size=target.grid_size)
                 ns, ss = interpret_grid(grid, target=target, arch=arch)
                 print("%5d  %6.4f  %6.4f  %s" % (gen, best_fitness, mean_f,

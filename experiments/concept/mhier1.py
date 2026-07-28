@@ -29,7 +29,7 @@ import select
 import functools
 
 # Genuinely-shared, platform-guarded terminal I/O (identical across all sims).
-from concept.common.terminal import (setnodelay, setnormal,
+from experiments.concept.common.terminal import (setnodelay, setnormal,
                                       read_nonblocking, read_blocking_char, NullIO)
 
 # GUI bridge: when a GUI engine sets this, main() streams per-generation stats
@@ -129,7 +129,7 @@ solution = [[0] * SIZEY for _ in range(SIZEX)]   # the actual solution
 stree = None
 
 
-# Terminal raw-mode helpers now come from concept.common.terminal (imported above).
+# Terminal raw-mode helpers now come from experiments.concept.common.terminal (imported above).
 
 #----------------------------------------------------------------------#
 # Routine to set the random seed from the current time in microseconds

@@ -1,5 +1,5 @@
 """
-evo_runtime/parallel.py — one saturated, cancellation-aware population map.
+runtime/parallel.py — one saturated, cancellation-aware population map.
 
 `ProcessPoolExecutor.map` and hand-rolled chunk loops both stall on a straggler:
 the caller waits for a whole batch before the next one is submitted, so a single

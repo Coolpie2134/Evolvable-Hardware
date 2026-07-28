@@ -1,6 +1,6 @@
 """
 tests/test_lut_synchrony.py — metamorphic "no hidden clock" audit for the LUT
-array's asynchronous engine (lut_evo.pulse.AsyncLutSim), plus the lattice
+array's asynchronous engine (substrates.lut.pulse.AsyncLutSim), plus the lattice
 quantization contract against the synchronous reference engine.
 
 The nervous net earned its "genuinely asynchronous" claim through the
@@ -40,9 +40,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from lut_evo.genome import Genome, random_lut_chromosome        # noqa: E402
-from lut_evo.lut import grow_lut, LutSim, SEED_STATE            # noqa: E402
-from lut_evo.pulse import AsyncLutSim, LutConfig                # noqa: E402
+from substrates.lut.genome import Genome, random_lut_chromosome        # noqa: E402
+from substrates.lut.lut import grow_lut, LutSim, SEED_STATE            # noqa: E402
+from substrates.lut.pulse import AsyncLutSim, LutConfig                # noqa: E402
 
 TOL = 1e-9
 SEEDS = ((0, 0), (2, 0))
@@ -95,6 +95,32 @@ def _assert_affine(base, other, shift=0.0, k=1.0, tol=TOL):
         for x, y in zip(a, b):
             assert abs(k * x + shift - y) <= tol, (
                 "cell %r: expected %.9f, got %.9f" % (cell, k * x + shift, y))
+
+
+def test_lut_terminal_input_is_source_only():
+    source, body = (1, 0), (2, 0)
+    grid = {(0, 0): _SHIFT, source: _SHIFT, body: _SHIFT}
+
+    reverse = AsyncLutSim(grid, input_nodes={source})
+    reverse.inject_pulse((0, 0), 0.0, 1.0)
+    reverse.advance_to(4.0)
+    assert reverse.rise_times[source] == []
+
+    forward = AsyncLutSim(grid, input_nodes={source})
+    forward.inject_pulse(source, 0.0, 1.0)
+    forward.advance_to(4.0)
+    assert forward.rise_times[body] == [1.0]
+
+
+def test_lut_terminal_output_is_observable_sink_only():
+    source, sink, downstream = (0, 0), (1, 0), (2, 0)
+    grid = {source: _SHIFT, sink: _SHIFT, downstream: _SHIFT}
+    sim = AsyncLutSim(
+        grid, input_nodes={source}, output_nodes={sink})
+    sim.inject_pulse(source, 0.0, 1.0)
+    sim.advance_to(5.0)
+    assert sim.rise_times[sink] == [1.0]
+    assert sim.rise_times[downstream] == []
 
 
 _SCHED = [((0, 1), 1.0, 1.0), ((0, 1), 5.0, 1.0), ((0, 0), 3.0, 1.0)]
@@ -201,11 +227,11 @@ def test_spontaneous_power_on_is_honest():
 
 
 def test_lut_player_matches_direct_run():
-    """The GUI playback path (lut_evo.playback.LutPlayer — the LUT twin of
+    """The GUI playback path (substrates.lut.playback.LutPlayer — the LUT twin of
     NervousPlayer, driven from the same pulse timeline) reproduces a direct
     engine run exactly: same edges whether the schedule is played through the
     dt-stepped cursor or injected and advanced in one go."""
-    from lut_evo.playback import LutPlayer
+    from substrates.lut.playback import LutPlayer
     grid = _shift_lines()
     direct = _run_events(grid, _SCHED, 40.0)
 
@@ -227,8 +253,8 @@ def test_lut_player_matches_direct_run():
 def test_float_time_target_runs_on_lut_backend():
     """The continuous-time pair target (fractional input_events) is now open
     to the LUT backend and scores deterministically without quantising."""
-    from nv_evo.oracle import ORACLE_SPECS
-    from lut_evo.ga import evaluate_lut_full, make_seed_genome
+    from substrates.nervous.oracle import ORACLE_SPECS
+    from substrates.lut.ga import evaluate_lut_full, make_seed_genome
     target = ORACLE_SPECS['Pair gap 2x width (oracle)'](seed=99,
                                                         pulse_width=0.75)
     assert 'lut' in target.supported_backends
@@ -305,7 +331,7 @@ if __name__ == '__main__':
 # gradient toward settling instead of a hard settle/no-settle cliff.
 
 def test_steady_duty_is_exact_for_fixed_points_and_phase_invariant():
-    from lut_evo.ga import _steady_duty
+    from substrates.lut.ga import _steady_duty
     assert _steady_duty([1] * 10) == 1.0               # fixed point high
     assert _steady_duty([0] * 10) == 0.0               # fixed point low
     assert _steady_duty([1, 0] * 6) == 0.5             # period-2
@@ -321,7 +347,7 @@ def test_steady_duty_refuses_to_call_a_chaotic_output_settled():
     0.0 (perfectly correct for an expected-0 case), and evolution 'solved' gates
     it was only oscillating on. A chaotic tail must instead fall back to its mean
     and earn only chance-level credit."""
-    from lut_evo.ga import _steady_duty
+    from substrates.lut.ga import _steady_duty
     chaotic_low_tail = [0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0]
     chaotic_high_tail = [0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1]
     # neither collapses to an exact 0.0/1.0 — they sit near their true mean.
@@ -334,8 +360,8 @@ def test_steady_duty_refuses_to_call_a_chaotic_output_settled():
 def test_cycling_output_earns_fraction_of_period_credit():
     """A period-2 output scored against a wanted bit yields 0.5, not 0 (cliff)
     and not 1 (phase-luck) — the fraction of the period it is correct."""
-    from nv_evo.scoring import score_contract
-    from snn_evo.targets import gate_target
+    from substrates.nervous.scoring import score_contract
+    from substrates.snn.targets import gate_target
     target = gate_target('AND')                        # 4 cases, output 'out'
     # Feed a 0.5 duty (perfectly balanced cycle) for every case: each cell is
     # half-correct regardless of the expected bit, so balanced aggregation = 0.5.
@@ -351,9 +377,9 @@ def test_lut_combinational_gives_graded_not_cliff_credit():
     between a wrong constant (0.5 balanced) and perfect (1.0), where the old
     settle-or-nothing rule would have pinned every non-fixed-point case to 0."""
     import random
-    from lut_evo.genome import random_lut_genome
-    from lut_evo.ga import score_lut_combinational
-    from snn_evo.targets import get_target
+    from substrates.lut.genome import random_lut_genome
+    from substrates.lut.ga import score_lut_combinational
+    from substrates.snn.targets import get_target
     target = get_target('AND')
     random.seed(5)
     seen_partial = False
@@ -373,11 +399,11 @@ def test_combinational_output_is_placed_by_function_not_proximity():
     (measured: it capped random-genome AND best at ~0.68 while a functional read
     reached ~0.93), which is why LUTs 'could not' do combinational logic."""
     import random
-    from lut_evo.genome import random_lut_genome
-    from lut_evo.lut import grow_lut
-    from lut_evo.ga import (_fit_combinational_outputs, _place_outputs_combinational,
+    from substrates.lut.genome import random_lut_genome
+    from substrates.lut.lut import grow_lut
+    from substrates.lut.ga import (_fit_combinational_outputs, _place_outputs_combinational,
                             _all_cell_duties, _balanced_match, score_lut_combinational)
-    from snn_evo.targets import get_target
+    from substrates.snn.targets import get_target
 
     target = get_target('AND')
     random.seed(1)
@@ -416,9 +442,9 @@ def test_lut_solves_basic_gates_when_evolved():
     ceiling', not a perfect score: 0.5 is chance and 0.75 is a lopsided-gate
     constant, so >= 0.85 proves real, robust computation. The fitted output must
     also genuinely FOLLOW the truth table, not sit constant."""
-    from lut_evo.ga import evolve_lut, _fit_combinational_outputs
-    from lut_evo.lut import grow_lut
-    from snn_evo.targets import get_target
+    from substrates.lut.ga import evolve_lut, _fit_combinational_outputs
+    from substrates.lut.lut import grow_lut
+    from substrates.snn.targets import get_target
     target = get_target('OR')
     champ, best = None, -1.0
     for seed in (3, 7):
@@ -450,8 +476,8 @@ def test_combinational_input_pulses_align_starts_with_varied_widths():
     start) but hold for independently random widths, and delays/widths vary
     across trials (a robustness battery, not one clean held level). The battery
     is seeded-fixed so fitness stays deterministic and cacheable."""
-    from lut_evo.ga import _combinational_schedule, N_COMB_TRIALS, _comb_timing
-    from snn_evo.targets import get_target
+    from substrates.lut.ga import _combinational_schedule, N_COMB_TRIALS, _comb_timing
+    from substrates.snn.targets import get_target
     target = get_target('Half adder')            # 2 inputs
     sched = _combinational_schedule(target)
     assert len(sched) == N_COMB_TRIALS >= 2
@@ -485,9 +511,9 @@ def test_interactive_case_pulses_match_the_fitness_presentation():
     have no temporal trials, so playback builds pulses from the truth table via
     pulses_from_case; for LUT those must be the same aligned-start, same-width
     pulses the scorer's _combinational_schedule uses."""
-    from nv_evo.playback import pulses_from_case
-    from lut_evo.ga import _combinational_schedule
-    from snn_evo.targets import get_target
+    from substrates.nervous.playback import pulses_from_case
+    from substrates.lut.ga import _combinational_schedule
+    from substrates.snn.targets import get_target
     target = get_target('AND')
     delay, widths = _combinational_schedule(target)[0]     # representative trial
 

@@ -35,12 +35,12 @@ evolved genome and refine it by hand. Saves designs in the app's pickle
 schema plus {grid, in_pos, out_pos, hand_built} so hand-built phenotypes
 round-trip even without a genome.
 
-Run standalone:  py designer.py
+Run standalone:  py -m ui.designer
 """
 from __future__ import annotations
 import os, sys, math, json, pickle, dataclasses
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
@@ -54,42 +54,42 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Circle, Rectangle, Patch
 from matplotlib.lines import Line2D
 
-from nv_evo.hexgrid import hex_dirs, hex_pixel, ROUTING_HEX
-from nv_evo.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGenome,
+from substrates.nervous.hexgrid import hex_dirs, hex_pixel, ROUTING_HEX
+from substrates.nervous.genome import (HexGene, Chromosome as NvChromosome, Genome as NvGenome,
                            random_hex_gene, random_hex_genome,
                            MAX_STATE, TRI_STATE_MAX,
                            MAX_TELOMERE as NV_MAX_TEL)
-from nv_evo.tritile import (TRI_SEED_STATE, TRI_DIRS, channel_configs,
+from substrates.nervous.tritile import (TRI_SEED_STATE, TRI_DIRS, channel_configs,
                             pack_channels)
-from nv_evo.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
+from substrates.nervous.nervous import (grow_nervous, interpret_nervous, evaluate_nervous,
                             circuit_summary_nervous, node_delays,
                             SEED_STATE as NV_SEED_STATE)
-from nv_evo.reverse import grid_to_genome_nervous, repair_genome_nervous
-from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
+from substrates.nervous.reverse import grid_to_genome_nervous, repair_genome_nervous
+from substrates.nervous.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
                              charge_levels)
-from nv_evo.temporal import (run_nervous_events,
+from substrates.nervous.temporal import (run_nervous_events,
                              place_outputs_by_trace, TemporalTraces,
                              _obs_len)
-from nv_evo.scoring import score_report_lines
-from nv_evo.targets import TEMPORAL_TARGETS
-from nv_evo.viz import draw_hex_net
+from substrates.nervous.scoring import score_report_lines
+from substrates.nervous.targets import TEMPORAL_TARGETS
+from substrates.nervous.viz import draw_hex_net
 
-from lut_evo.genome import (LutGene, Chromosome as LutChromosome, Genome as LutGenome,
+from substrates.lut.genome import (LutGene, Chromosome as LutChromosome, Genome as LutGenome,
                             random_lut_gene, MAX_TELOMERE as LUT_MAX_TEL)
-from lut_evo.lut import grow_lut, SEED_STATE as LUT_SEED_STATE
-from lut_evo.playback import LutPlayer
-from lut_evo.reverse import grid_to_genome_lut, repair_genome_lut
-from lut_evo.ga import (place_outputs_by_trace as lut_place_by_trace,
+from substrates.lut.lut import grow_lut, SEED_STATE as LUT_SEED_STATE
+from substrates.lut.playback import LutPlayer
+from substrates.lut.reverse import grid_to_genome_lut, repair_genome_lut
+from substrates.lut.ga import (place_outputs_by_trace as lut_place_by_trace,
                         trace_fixed_outputs as lut_trace_fixed_outputs,
                         make_seed_genome as make_lut_seed_genome,
                         compact_genome as lut_compact_genome)
-from lut_evo.viz import draw_lut_net, draw_lut_table
-from lut_evo.boolfn import lut_sop
+from substrates.lut.viz import draw_lut_net, draw_lut_table
+from substrates.lut.boolfn import lut_sop
 
-from snn_evo.targets import TARGETS as COMB_TARGETS
-from target_ui import TargetPicker
+from substrates.snn.targets import TARGETS as COMB_TARGETS
+from .target_ui import TargetPicker
 
-import ui_compat
+from . import ui_compat
 
 RESULTS_DIR = os.path.join(ROOT, 'results')
 
@@ -193,7 +193,7 @@ def read_saved_file(path):
     except (UnicodeDecodeError, ValueError, OSError):
         doc = None
     if isinstance(doc, dict) and str(doc.get('format', '')).startswith('evohw-checkpoint'):
-        from evo_runtime.checkpoint import load_checkpoint
+        from runtime.checkpoint import load_checkpoint
         return load_checkpoint(path)
     if isinstance(doc, dict) and str(doc.get('format', '')).startswith('evohw-design'):
         backend = doc.get('backend', 'nervous')
@@ -772,7 +772,7 @@ class DesignerTab:
 
     def _reverse_to_genome(self):
         """Best-effort INVERSE of Grow: reconstruct a genome that develops back
-        into the current working grid (see nv_evo/reverse.py, lut_evo/reverse.py).
+        into the current working grid (see substrates/nervous/reverse.py, substrates/lut/reverse.py).
         Growth is many-to-one, so the reconstruction replays a monotone
         development with the grid as an oracle — it reproduces every cell it can,
         allowing harmless EXTRA cells (the user's contract). The genome is loaded
@@ -1690,6 +1690,10 @@ class DesignerTab:
 
     def _build_player(self):
         target = self._current_target()          # may be None (free playback)
+        from substrates.nervous.io_placement import terminal_node_sets
+        terminal_inputs, terminal_outputs = (
+            terminal_node_sets(target, self.in_pos, self.out_pos)
+            if target is not None else (set(), set()))
         if self.backend == 'nervous':
             arch = self._nv_arch()
             routing = self._nv_routing()
@@ -1701,11 +1705,13 @@ class DesignerTab:
                 self.grid, routing, horizon=self._sim_horizon(),
                 max_events=getattr(target, 'max_events', 2048),
                 config=config, delays=delays,
-                arch=arch, inputs=self.in_pos)
+                arch=arch, inputs=self.in_pos, outputs=terminal_outputs,
+                terminal_inputs=terminal_inputs)
         else:                                    # LUT — same player, level engine
             self._player = LutPlayer(
                 self.grid, horizon=self._sim_horizon(),
-                config=getattr(target, 'lut_config', None))
+                config=getattr(target, 'lut_config', None),
+                inputs=terminal_inputs, outputs=terminal_outputs)
         sched = (self._editor.schedule(self.in_pos)
                  if getattr(self, '_editor', None) is not None else {})
         self._player.set_schedule(sched)

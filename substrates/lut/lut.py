@@ -1,5 +1,5 @@
 """
-lut_evo/lut.py — square LUT array, faithful to sim6 (the reference) and the
+substrates/lut/lut.py — square LUT array, faithful to sim6 (the reference) and the
 paper's Architecture 2 (automaton_arrays.pdf: "square array, 4 neighbours,
 4 lookup tables per cell, each 16 states").
 
@@ -43,6 +43,16 @@ def _live(state):
     return state[0] or state[1] or state[2] or state[3]
 
 
+def genome_seed_state(genome):
+    """Return the genome's pinned developmental seed, or the legacy default."""
+    state = getattr(genome, 'seed_state', None)
+    if state is None:
+        return SEED_STATE
+    if len(state) != 4:
+        raise ValueError('LUT seed_state must contain four directional LUTs')
+    return tuple(int(value) & 0xFFFF for value in state)
+
+
 def _genome_lut_arrays(genome):
     """Pack a genome's genes into column arrays (chromosome-major order) for the
     vectorised min-Hamming lookup: the five context fields, the outputs, a
@@ -61,6 +71,15 @@ def _genome_lut_arrays(genome):
     a = lambda xs: np.array(xs, dtype=np.int64) if xs else np.zeros(0, np.int64)
     Ain = a(si)
     return (a(cn), a(cs), a(ce), a(cw), Ain, so, (Ain == 0), a(tel))
+
+
+def _genome_io_kinds(genome):
+    """Flat terminal-kind alleles in LUT lookup-array order."""
+    return tuple(
+        int(getattr(gene, 'io_kind', 0))
+        for chromosome in genome.chromosomes
+        if not getattr(chromosome, 'wiring', False)
+        for gene in chromosome.genes)
 
 
 def _lookup_vec(garr, front, back, right, left, self_lut, iteration):
@@ -83,7 +102,7 @@ def _lookup_vec_idx(garr, front, back, right, left, self_lut, iteration):
     expired growth rules remained). The empty-cell guard still returns the
     winner's index: that gene WON the argmin and its identity caused the 0, so
     it counts as expressed — removing it would change the argmin (not neutral).
-    Used for expression tracking / neutral compaction; see lut_evo.ga."""
+    Used for expression tracking / neutral compaction; see substrates.lut.ga."""
     An, As, Ae, Aw, Ain, Aout, Agrow, Atel = garr
     if An.shape[0] == 0:
         return 0, -1
@@ -114,7 +133,8 @@ def _lookup(genome, front, back, right, left, self_lut, iteration):
                        self_lut, iteration)
 
 
-def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None):
+def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None,
+               seed_state=None, terminal_kinds=None):
     # expand the frontier: every empty 4-neighbour of a live cell — the field
     # is unbounded; telomeres + the empty-cell guard bound the organism.
     # `counts` (list per flat gene, chromosome-major) tallies gene EXPRESSION
@@ -134,7 +154,7 @@ def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None):
                  for c in genome.chromosomes
                  if not getattr(c, 'wiring', False))
 
-    if counts is None:                          # fast path (unchanged)
+    if counts is None and terminal_kinds is None:  # fast path (unchanged)
         def look(f, b, r, l, s):
             key = (f, b, r, l, s, mask)
             v = cache.get(key)
@@ -151,7 +171,9 @@ def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None):
             le = look(e, w, s, n, st[2]); lw = look(w, e, n, s, st[3])
             if ln or ls or le or lw:
                 nxt[(x, y)] = (ln, ls, le, lw)
-    else:                                       # tracking path (expression tally)
+    else:                                       # tracking/provenance path
+        gene_kinds = (
+            _genome_io_kinds(genome) if terminal_kinds is not None else ())
         def look(f, b, r, l, s):
             key = (f, b, r, l, s, mask)
             vj = cache.get(key)
@@ -170,12 +192,26 @@ def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None):
             # gene's identity is what produced the 0, so removing it could change
             # the argmin and bring the cell to life — it is NOT neutral to drop.
             for j in (jn, js, je, jw):
-                if j >= 0:
+                if counts is not None and j >= 0:
                     counts[j] += 1
             if ln or ls or le or lw:
                 nxt[(x, y)] = (ln, ls, le, lw)
+                if terminal_kinds is not None:
+                    expressed = {
+                        gene_kinds[j]
+                        for j in (jn, js, je, jw)
+                        if 0 <= j < len(gene_kinds) and gene_kinds[j]
+                    }
+                    # A LUT cell has four independently developed directional
+                    # tables. Conflicting input/output identities are ambiguous
+                    # and therefore resolve to an ordinary body cell.
+                    if len(expressed) == 1:
+                        terminal_kinds[(x, y)] = expressed.pop()
+    pinned = genome_seed_state(genome) if seed_state is None else seed_state
     for pos in seeds:
-        nxt[pos] = SEED_STATE
+        nxt[pos] = pinned
+        if terminal_kinds is not None:
+            terminal_kinds.pop(pos, None)
     return nxt
 
 
@@ -184,13 +220,21 @@ def grow_lut(genome, seeds, grid_size, iters):
     `grid_size` is only the target's I/O layout scale; `iters` is a safety cap.
     Returns {(x,y): (Ln, Ls, Le, Lw)}."""
     garr = _genome_lut_arrays(genome)
-    grid = {pos: SEED_STATE for pos in seeds}
+    track_terminals = any(_genome_io_kinds(genome))
+    seed_state = genome_seed_state(genome)
+    grid = {pos: seed_state for pos in seeds}
     prev, cache = None, {}
+    terminal_kinds = {}
     for it in range(iters):
-        nxt = _grow_step(genome, garr, grid, seeds, it, cache)
+        terminal_kinds = {} if track_terminals else None
+        nxt = _grow_step(
+            genome, garr, grid, seeds, it, cache, seed_state=seed_state,
+            terminal_kinds=terminal_kinds)
         if nxt == grid or nxt == prev:
+            genome._terminal_kinds = terminal_kinds or {}
             return nxt
         prev, grid = grid, nxt
+    genome._terminal_kinds = terminal_kinds or {}
     return grid
 
 
@@ -198,14 +242,17 @@ def grow_lut_tracked(genome, seeds, grid_size, iters):
     """Grow exactly like grow_lut, but also return a per-gene EXPRESSION count
     (chromosome-major, one entry per gene) tallying how many cell-directions each
     gene builds across the whole developmental trajectory. A gene with count 0
-    won no growth lookup and so is phenotype-neutral — see lut_evo.ga.compact.
+    won no growth lookup and so is phenotype-neutral — see substrates.lut.ga.compact.
     Returns (grid, counts)."""
     garr = _genome_lut_arrays(genome)
     counts = [0] * garr[0].shape[0]
-    grid = {pos: SEED_STATE for pos in seeds}
+    seed_state = genome_seed_state(genome)
+    grid = {pos: seed_state for pos in seeds}
     prev, cache = None, {}
     for it in range(iters):
-        nxt = _grow_step(genome, garr, grid, seeds, it, cache, counts)
+        nxt = _grow_step(
+            genome, garr, grid, seeds, it, cache, counts,
+            seed_state=seed_state)
         if nxt == grid or nxt == prev:
             return nxt, counts
         prev, grid = grid, nxt
@@ -220,7 +267,7 @@ def cell_io_tags(genome, grid):
     equals ANY of them binds here. The ``genome`` parameter is kept for the
     shared call signature but the type is purely phenotypic.
 
-    Powers the evolvable io_placement strategies (nv_evo/io_placement.bind_io);
+    Powers the evolvable io_placement strategies (substrates/nervous/io_placement.bind_io);
     deterministic and side-effect free.
     """
     return {pos: tuple(sorted({int(v) for v in state if v}))
@@ -229,20 +276,29 @@ def cell_io_tags(genome, grid):
 
 def grow_lut_snapshots(genome, seeds, grid_size, iters):
     garr = _genome_lut_arrays(genome)
-    snaps = [{pos: SEED_STATE for pos in seeds}]
+    track_terminals = any(_genome_io_kinds(genome))
+    seed_state = genome_seed_state(genome)
+    snaps = [{pos: seed_state for pos in seeds}]
     grid, prev, cache = dict(snaps[0]), None, {}
+    terminal_kinds = {}
     for it in range(iters):
-        nxt = _grow_step(genome, garr, grid, seeds, it, cache)
+        terminal_kinds = {} if track_terminals else None
+        nxt = _grow_step(
+            genome, garr, grid, seeds, it, cache, seed_state=seed_state,
+            terminal_kinds=terminal_kinds)
         snaps.append(dict(nxt))
         if nxt == grid or nxt == prev:
+            genome._terminal_kinds = terminal_kinds or {}
             break
         prev, grid = grid, nxt
+    else:
+        genome._terminal_kinds = terminal_kinds or {}
     return snaps
 
 
 # ── synchronous latched dynamics (sim6 step_network) ────────────────────────────
 # NOTE: this engine is now the REFERENCE, not the production dynamics. Scoring,
-# playback and the Designer all run lut_evo.pulse.AsyncLutSim — the asynchronous
+# playback and the Designer all run substrates.lut.pulse.AsyncLutSim — the asynchronous
 # continuous-time engine whose tick-lattice behaviour this one quantises to
 # (verified bit-identical in tests/test_lut_synchrony.py). LutSim is kept as the
 # sim6-faithful clocked baseline that equivalence is audited against.
@@ -262,15 +318,24 @@ class LutSim:
     {cell: 0/1}; ``sim.out`` is the {cell: nibble} map; ``sim.ever`` marks cells
     that have ever emitted. ``sim.run_bits(streams, in_pos, T)`` is a fast bulk
     runner (T ticks with no per-tick dict) returning a [T, ncells] bit matrix
-    for scoring — see lut_evo.ga.place_outputs_by_trace.
+    for scoring — see substrates.lut.ga.place_outputs_by_trace.
     """
 
-    def __init__(self, grid, _unused=None):
+    def __init__(self, grid, _unused=None, input_nodes=None,
+                 output_nodes=None):
         self.grid  = grid
         cells      = list(grid)
         self._cells = cells
         self.n     = n = len(cells)
         self._cidx = {c: i for i, c in enumerate(cells)}
+        self.input_nodes = set(input_nodes or ())
+        self.output_nodes = set(output_nodes or ())
+        self._input_mask = np.fromiter(
+            (c in self.input_nodes for c in cells), dtype=bool, count=n)
+        self._output_mask = np.fromiter(
+            (c in self.output_nodes for c in cells), dtype=bool, count=n)
+        if (self._input_mask & self._output_mask).any():
+            raise ValueError('LUT terminal inputs and outputs must be distinct')
         # four LUT columns as int arrays (index n is a zero-padding sentinel so
         # an absent neighbour reads 0 without a branch)
         self._Ln = np.fromiter((grid[c][0] for c in cells), dtype=np.int64, count=n)
@@ -294,14 +359,18 @@ class LutSim:
         (wired-OR sensory injection) this tick. Returns the new nibble array."""
         pe = self._pe
         pe[:self.n] = self._out
+        pe[:self.n][self._output_mask] = 0
         idx = (((pe[self._nN] & 0x4) >> 2)         # from N -> bit0
                | ((pe[self._nS] & 0x8) >> 2)       # from S -> bit1
                | ((pe[self._nE] & 0x1) << 2)       # from E -> bit2
                | ((pe[self._nW] & 0x2) << 2))      # from W -> bit3
         o = ((((self._Ln >> idx) & 1) << 3) | (((self._Ls >> idx) & 1) << 2)
              | (((self._Le >> idx) & 1) << 1) | ((self._Lw >> idx) & 1))
+        o[self._input_mask] = 0
         if inject_cols is not None and len(inject_cols):
-            o[inject_cols] = 0xF
+            allowed = [col for col in inject_cols
+                       if not self._output_mask[col]]
+            o[allowed] = 0xF
         self._out = o
         self._ever |= o.astype(bool)
         self._out_dict = None

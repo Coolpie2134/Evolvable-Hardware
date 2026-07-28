@@ -17,8 +17,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.pulse import PulseSim, PulseConfig                # noqa: E402
-from nv_evo.hexgrid import hex_dirs                           # noqa: E402
+from substrates.nervous.pulse import PulseSim, PulseConfig                # noqa: E402
+from substrates.nervous.hexgrid import hex_dirs                           # noqa: E402
 
 TOL = 1e-9
 INF = float('inf')

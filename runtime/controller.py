@@ -11,6 +11,8 @@ from concurrent.futures import ProcessPoolExecutor
 from .cache import LRUCache
 from .checkpoint import save_population
 from .config import RunConfig, MAX_CHROMOSOME_COUNT, validate_new_nv_profile
+from .mutation import STRESS_PATIENCE
+from .mutation import adaptive_mutation_rate as snn_adaptive_mutation_rate
 from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
@@ -97,12 +99,17 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                   results_dir='results', pause_event=None,
                   recombination_event=None):
     """Backend-neutral evolution worker used by the desktop application."""
-    from snn_evo.genome import random_genome
-    from snn_evo.ga import (_eval_batch as eval_snn,
+    from substrates.snn.genome import random_genome
+    from substrates.snn.ga import (_eval_batch as eval_snn,
                             next_population as next_snn,
                             rank_key as snn_rank_key)
 
     config = run_config or RunConfig()
+    if backend == 'snn' and config.ga.io_placement == 'terminal_nodes':
+        raise ValueError(
+            "io_placement='terminal_nodes' is available for nervous and LUT "
+            'substrates; the SNN substrate has no directional terminal-cell '
+            'physics')
     if backend == 'nervous':
         validate_new_nv_profile(config.ga)
     chromosome_count = (config.ga.chromosome_count
@@ -128,13 +135,14 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     pool = None
     diversify_fn = None
     consolidate_fn = None
+    plateau_rescue_fn = None
     rank_fn = snn_rank_key
     rate_fn = lambda rate, stagnation, solved=False, beta=0.0, limit=8.0: rate
     base_rate, decay = config.ga.mean_mutations, config.ga.mutation_decay
 
     if backend == 'nervous':
-        from nv_evo import random_hex_genome
-        from nv_evo.ga import (eval_batch_cases, next_population, diversify,
+        from substrates.nervous import random_hex_genome
+        from substrates.nervous.ga import (eval_batch_cases, next_population, diversify,
                                consolidate_population,
                                adaptive_mutation_rate, rank_key, N_WORKERS)
         # Evolvable I/O binding: the strategy lives on the target. Method A
@@ -142,7 +150,9 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # either type/selector mappings or normalised x/y anchors.
         io_strategy = getattr(config.ga, 'io_placement', 'fixed')
         setattr(target, 'io_placement', io_strategy)
-        evolve_io = io_strategy != 'fixed'
+        evolve_io = io_strategy in (
+            'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+            'spatial_chromosome')
         port_chromosome = io_strategy in (
             'wiring_chromosome', 'spatial_chromosome')
         cache = LRUCache(config.ga.cache_size)
@@ -154,29 +164,84 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 arch=getattr(config.ga, 'tile_arch', 'single'),
                 wiring_chromosome=(io_strategy == 'wiring_chromosome'),
                 spatial_chromosome=(io_strategy == 'spatial_chromosome'),
-                n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'))
-            if port_chromosome:
-                from nv_evo.io_placement import (
-                    growth_seeds, seed_spatial_from_phenotype,
-                    seed_wiring_from_phenotype)
-                from nv_evo.nervous import grow_nervous
+                n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'),
+                terminal_nodes=(io_strategy == 'terminal_nodes'),
+                n_inputs=target.n_inputs, n_outputs=len(target.outputs))
+            if io_strategy == 'spatial_chromosome':
+                from substrates.nervous.io_placement import seed_spatial
+                seed_spatial(genome, None, target)
+            elif port_chromosome:
+                from substrates.nervous.io_placement import (
+                    growth_seeds, seed_wiring_from_phenotype)
+                from substrates.nervous.nervous import grow_nervous
                 grid = grow_nervous(
-                    genome, seeds=growth_seeds(target),
+                    genome, seeds=growth_seeds(
+                        target, io_strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
-                if io_strategy == 'spatial_chromosome':
-                    seed_spatial_from_phenotype(genome, grid, target)
-                else:
-                    seed_wiring_from_phenotype(genome, grid, target)
+                seed_wiring_from_phenotype(genome, grid, target)
             return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
-        step = lambda p, f, c, mm, recombine: next_population(
+        selection_mode = (
+            'lexicase'
+            if getattr(target, 'combinational_cases', ())
+            else config.ga.selection)
+        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
+            selection=selection_mode,
             chromosome_count=chromosome_count, recombination=recombine,
-            evolve_io=evolve_io, io_placement=io_strategy)
+            evolve_io=evolve_io, io_placement=io_strategy,
+            archive_parent=archive, stagnation=stagnation,
+            rescue_candidates=rescue)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
+        if io_strategy == 'spatial_chromosome':
+            from substrates.nervous.io_placement import (
+                growth_seeds, spatial_input_sites,
+                spatial_output_variants, spatial_routing_variants)
+            from substrates.nervous.nervous import grow_nervous
+            rescue_queues = {}
+
+            def nervous_spatial_rescue(champion, limit):
+                grid = grow_nervous(
+                    champion,
+                    seeds=growth_seeds(
+                        target, 'spatial_chromosome', champion),
+                    grid_size=target.grid_size, iters=target.iters)
+                body_key = (
+                    tuple(sorted(grid.items())),
+                    tuple(spatial_input_sites(champion, target)))
+                queues = rescue_queues.get(body_key)
+                if queues is None:
+                    # At most ports*field-size proposals (small on the GUI
+                    # domains). Serve the deterministic readout scan in chunks;
+                    # once exhausted, this body spends no more generations
+                    # repeating the same output placements or routing flips.
+                    # Only the current champion body matters; discard scans for
+                    # obsolete bodies instead of retaining a run-long history.
+                    rescue_queues.clear()
+                    queues = {
+                        'outputs': spatial_output_variants(
+                            champion, target, limit=10_000),
+                        'routing': spatial_routing_variants(
+                            champion, target, limit=10_000),
+                    }
+                    rescue_queues[body_key] = queues
+                output_queue = queues['outputs']
+                output_count = min(
+                    len(output_queue), max(1, limit // 3))
+                output_candidates = output_queue[:output_count]
+                del output_queue[:output_count]
+                routing_queue = queues['routing']
+                routing_count = min(
+                    len(routing_queue),
+                    max(0, limit - len(output_candidates)))
+                local_candidates = routing_queue[:routing_count]
+                del routing_queue[:routing_count]
+                return output_candidates + local_candidates
+
+            plateau_rescue_fn = nervous_spatial_rescue
         # Resolve the delay-mutation toggle once so diversification mutates
         # under exactly the same operator set as the main GA loop.
         evolve_delay = config.ga.timing_mutations()
@@ -190,15 +255,19 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     elif backend == 'lut':
-        from lut_evo.ga import (eval_batch_cases, next_population, diversify,
-                                consolidate_population, make_seed_genome,
-                                adaptive_mutation_rate, rank_key, N_WORKERS)
-        from nv_evo.io_placement import seed_io_metadata
+        from substrates.lut.ga import (
+            eval_batch_cases, next_population, diversify,
+            consolidate_population, make_seed_genome,
+            adaptive_mutation_rate, rank_key, N_WORKERS,
+            plateau_rescue_candidates)
+        from substrates.nervous.io_placement import seed_io_metadata
         # Evolvable I/O binding (see the nervous branch): body priorities or a
         # dedicated chromosome of type/selector or spatial anchor alleles.
         io_strategy = getattr(config.ga, 'io_placement', 'fixed')
         setattr(target, 'io_placement', io_strategy)
-        evolve_io = io_strategy != 'fixed'
+        evolve_io = io_strategy in (
+            'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+            'spatial_chromosome')
         port_chromosome = io_strategy in (
             'wiring_chromosome', 'spatial_chromosome')
         cache = LRUCache(config.ga.cache_size)
@@ -216,28 +285,37 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     spatial_chromosome=(
                         io_strategy == 'spatial_chromosome'),
                     n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'))
-            if port_chromosome:
-                from lut_evo.lut import grow_lut, cell_io_tags
-                from nv_evo.io_placement import (
-                    growth_seeds, seed_spatial_from_phenotype,
-                    seed_wiring_from_phenotype)
+            if io_strategy == 'terminal_nodes':
+                from substrates.nervous.io_placement import seed_terminal_kinds
+                seed_terminal_kinds(
+                    genome, target.n_inputs, len(target.outputs))
+            if io_strategy == 'spatial_chromosome':
+                from substrates.nervous.io_placement import seed_spatial
+                seed_spatial(genome, None, target)
+            elif port_chromosome:
+                from substrates.lut.lut import grow_lut, cell_io_tags
+                from substrates.nervous.io_placement import (
+                    growth_seeds, seed_wiring_from_phenotype)
                 grid = grow_lut(
-                    genome, seeds=growth_seeds(target),
+                    genome, seeds=growth_seeds(
+                        target, io_strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
                 tags = cell_io_tags(genome, grid)
-                if io_strategy == 'spatial_chromosome':
-                    seed_spatial_from_phenotype(
-                        genome, grid, target, tags=tags)
-                else:
-                    seed_wiring_from_phenotype(
-                        genome, grid, target, tags=tags)
+                seed_wiring_from_phenotype(
+                    genome, grid, target, tags=tags)
             return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
-        step = lambda p, f, c, mm, recombine: next_population(
+        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
             chromosome_count=chromosome_count, recombination=recombine,
-            evolve_io=evolve_io, io_placement=io_strategy)
+            evolve_io=evolve_io, io_placement=io_strategy,
+            archive_parent=archive, stagnation=stagnation,
+            rescue_candidates=rescue)
+        plateau_rescue_fn = lambda champion, limit: \
+            plateau_rescue_candidates(
+                champion, target, limit=limit,
+                max_telomere=config.ga.max_telomere)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
@@ -250,11 +328,12 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     else:
-        from snn_evo.ga import N_WORKERS
+        from substrates.snn.ga import N_WORKERS
         # Evolvable I/O binding for the SNN combinational scorer.
         io_strategy = getattr(config.ga, 'io_placement', 'fixed')
         setattr(target, 'io_placement', io_strategy)
-        evolve_io = io_strategy != 'fixed'
+        evolve_io = io_strategy in (
+            'tag_rank', 'wiring_chromosome', 'spatial_chromosome')
         port_chromosome = io_strategy in (
             'wiring_chromosome', 'spatial_chromosome')
         cache = LRUCache(config.ga.cache_size)
@@ -266,29 +345,43 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 wiring_chromosome=(io_strategy == 'wiring_chromosome'),
                 spatial_chromosome=(io_strategy == 'spatial_chromosome'),
                 n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'))
-            if port_chromosome:
-                from snn_evo.growth import grow_snn, cell_io_tags
-                from nv_evo.io_placement import (
-                    growth_seeds, seed_spatial_from_phenotype,
-                    seed_wiring_from_phenotype)
+            if io_strategy == 'spatial_chromosome':
+                from substrates.nervous.io_placement import seed_spatial
+                seed_spatial(genome, None, target)
+            elif port_chromosome:
+                from substrates.snn.growth import grow_snn, cell_io_tags
+                from substrates.nervous.io_placement import (
+                    growth_seeds, seed_wiring_from_phenotype)
                 grid = grow_snn(
-                    genome, seeds=growth_seeds(target),
+                    genome, seeds=growth_seeds(
+                        target, io_strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
                 tags = cell_io_tags(genome, grid)
-                if io_strategy == 'spatial_chromosome':
-                    seed_spatial_from_phenotype(
-                        genome, grid, target, tags=tags)
-                else:
-                    seed_wiring_from_phenotype(
-                        genome, grid, target, tags=tags)
+                seed_wiring_from_phenotype(
+                    genome, grid, target, tags=tags)
             return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: (
             eval_snn(genomes, target, arch, pool, cache, should_stop, on_progress),
             None)
-        step = lambda p, f, c, mm, recombine: next_snn(
+        # Same plateau machinery the other two backends get: the annealed and
+        # reheated mutation rate, fresh immigrants, a stressed archive parent,
+        # and spatial output-rescue proposals. substrates.snn.ga.next_population and
+        # substrates.snn.ga.evolve already support all of it; only this lambda was
+        # still dropping mm/archive/stagnation/rescue on the floor, which left
+        # the SNN backend running at a fixed mutation rate with no plateau
+        # response at all.
+        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_snn(
             p, f, chromosome_count=chromosome_count,
             recombination=recombine, evolve_io=evolve_io,
-            io_placement=io_strategy)
+            io_placement=io_strategy,
+            mean_mutations=mm, make_genome=make_genome,
+            archive_parent=archive, stagnation=stagnation,
+            rescue_candidates=rescue)
+        rate_fn = snn_adaptive_mutation_rate
+        if io_strategy == 'spatial_chromosome':
+            from substrates.nervous.io_placement import spatial_output_variants
+            plateau_rescue_fn = lambda champion, limit: \
+                spatial_output_variants(champion, target, limit=limit)
 
     def recombination_enabled():
         if recombination_event is not None:
@@ -392,9 +485,16 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     mutation_rate, stagnation, run_fit >= 1.0,
                     config.ga.stagnation_beta, config.ga.mutation_limit)
                 parents, parent_fitnesses, parent_cases = population, fitnesses, cases
+                rescue = ()
+                if (plateau_rescue_fn is not None and run_fit < 1.0
+                        and stagnation >= STRESS_PATIENCE):
+                    rescue = plateau_rescue_fn(
+                        champion, min(48, max(1, pop // 2)))
                 offspring = step(
                     parents, parent_fitnesses, parent_cases, actual_rate,
-                    recombination_enabled())
+                    recombination_enabled(),
+                    champion if run_fit < 1.0 else None,
+                    stagnation, rescue)
                 offspring_fitnesses, offspring_cases = evaluate(
                     offspring, 'Evaluating population', try_i, generation)
                 offspring_best = max(offspring_fitnesses)
@@ -441,7 +541,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         if (backend in ('nervous', 'lut') and best_genome is not None
                 and not stop_event.is_set()):
             try:
-                from nv_evo.certification import certify
+                from substrates.nervous.certification import certify
                 certification = certify(best_genome, target, train=best_fit,
                                         backend=backend)
                 messages.put(('certified', certification))

@@ -2,7 +2,7 @@
 
 A target describes *what must be true* as a collection of constraints.  The
 simulators remain substrate-specific, but they all return observations to the
-single :func:`nv_evo.scoring.score_contract` entry point.
+single :func:`substrates.nervous.scoring.score_contract` entry point.
 
 The constraint relation names are deliberately data, not evaluator modes.  A
 contract may combine any number of them, which lets a target require, for
@@ -22,6 +22,10 @@ RELATION_PRESENTATION = {
     'event_correspondence': (
         'One-to-one timed events',
         'Required and produced leading edges are paired; misses and extras both cost.'),
+    'transition_correspondence': (
+        'Common-latency state transitions',
+        'Input commands and logical output changes are paired in order under '
+        'one fitted response latency; jitter, misses, and extras all cost.'),
     'logical_state': (
         'Phase-invariant logical state',
         'Active and quiet epochs must hold without requiring an arbitrary pulse phase.'),
@@ -50,6 +54,7 @@ PARAMETER_PRESENTATION = {
     'tolerance': 'tolerance',
     'max_shift': 'maximum shared latency',
     'fit_latency': 'fit shared latency',
+    'falloff': 'timing falloff',
     'period': 'required period',
     'settle': 'settling allowance',
     'min_events': 'minimum events',
@@ -104,6 +109,8 @@ def behavior_contract_lines(target_or_contract):
     ``score_contract`` so the GUI cannot silently describe a different method.
     """
     contract = getattr(target_or_contract, 'contract', target_or_contract)
+    periodic_logic = bool(
+        getattr(target_or_contract, 'combinational_cases', ()))
     lines = [
         'Behavior Contract v%d  |  evaluator: score_contract (shared by every backend)'
         % contract.version,
@@ -111,18 +118,26 @@ def behavior_contract_lines(target_or_contract):
         'Restrictions:',
     ]
     for index, clause in enumerate(contract.constraints, 1):
-        label, explanation = RELATION_PRESENTATION.get(
-            clause.relation,
-            (clause.relation.replace('_', ' ').title(),
-             'The declared behavioral restriction must be satisfied.'))
-        observable = OBSERVABLE_PRESENTATION.get(
-            clause.observable, clause.observable.replace('_', ' '))
+        if periodic_logic and clause.relation == 'event_correspondence':
+            label = 'Windowed truth-table correspondence'
+            explanation = (
+                'Every output must assert or remain quiet in each explicitly '
+                'scheduled truth-table row; latency within the isolated row '
+                'window is free.')
+            observable = 'per-row event presence'
+        else:
+            label, explanation = RELATION_PRESENTATION.get(
+                clause.relation,
+                (clause.relation.replace('_', ' ').title(),
+                 'The declared behavioral restriction must be satisfied.'))
+            observable = OBSERVABLE_PRESENTATION.get(
+                clause.observable, clause.observable.replace('_', ' '))
         weight = '' if abs(float(clause.weight) - 1.0) < 1e-12 \
             else '; weight %g' % float(clause.weight)
         lines.append('  %d. %s  [observes %s%s]' %
                      (index, label, observable, weight))
         lines.append('     ' + explanation)
-        if clause.parameters:
+        if clause.parameters and not periodic_logic:
             settings = ', '.join(
                 '%s=%s' % (PARAMETER_PRESENTATION.get(key, key.replace('_', ' ')),
                            _display_value(value))
@@ -138,9 +153,15 @@ def behavior_contract_text(target_or_contract):
 def behavior_contract_badge(target_or_contract):
     """Compact summary for the Interactive playback tab."""
     contract = getattr(target_or_contract, 'contract', target_or_contract)
-    labels = [RELATION_PRESENTATION.get(
-        clause.relation, (clause.relation.replace('_', ' ').title(), ''))[0]
-              for clause in contract.constraints]
+    periodic_logic = bool(
+        getattr(target_or_contract, 'combinational_cases', ()))
+    labels = [
+        ('Windowed truth table'
+         if periodic_logic and clause.relation == 'event_correspondence'
+         else RELATION_PRESENTATION.get(
+             clause.relation,
+             (clause.relation.replace('_', ' ').title(), ''))[0])
+        for clause in contract.constraints]
     return 'Behavior Contract v%d  |  %s  |  mean + worst' % (
         contract.version, ' + '.join(labels))
 
@@ -158,12 +179,37 @@ def event_contract(tolerance=0.5, max_shift=12.0, fit_latency=True):
         })])
 
 
-def state_contract(max_shift=12.0, fit_latency=True):
-    return BehaviorContract([Constraint(
-        'logical_state', 'samples', {
+def state_contract(max_shift=12.0, fit_latency=True, transition_tolerance=0.25,
+                   transition_falloff=2.0, timed_transitions=True):
+    """Persistent state with one response alignment shared by every change.
+
+    ``timed_transitions=False`` is reserved for diagnostics that intentionally
+    inspect retention alone. Normal targets pair expected and observed logical
+    state changes first, then judge the held epochs at that fitted alignment.
+    """
+    retention = Constraint('logical_state', 'samples', {
+        'max_shift': float(max_shift),
+        'fit_latency': bool(fit_latency),
+    })
+    if not timed_transitions:
+        return BehaviorContract([retention])
+    return BehaviorContract([
+        Constraint('transition_correspondence', 'intervals', {
+            'tolerance': float(transition_tolerance),
+            'falloff': float(transition_falloff),
             'max_shift': float(max_shift),
             'fit_latency': bool(fit_latency),
-        })])
+        }),
+        retention,
+    ])
+
+
+def toggle_contract(tolerance=0.25, falloff=2.0, max_shift=12.0):
+    """Backward-compatible name for the standard timed-state contract."""
+    return state_contract(
+        max_shift=max_shift,
+        transition_tolerance=tolerance,
+        transition_falloff=falloff)
 
 
 def interval_contract(tolerance=0.25, max_shift=12.0, fit_latency=True):

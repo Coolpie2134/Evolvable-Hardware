@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-concept_gui.py — a GUI playground for the `concept/` proof-of-concept GAs.
+concept_gui.py — a GUI playground for the `experiments/concept/` proof-of-concept GAs.
 
 Each sim runs its own faithful `main()` loop in a background thread, bridged to
-the GUI (see concept/engines.py). Instead of the original ASCII output you get
+the GUI (see experiments/concept/engines.py). Instead of the original ASCII output you get
 live matplotlib visuals:
 
     - Fitness histogram   population fitness distribution (replaces the ASCII bars)
@@ -12,16 +12,16 @@ live matplotlib visuals:
 
 Controls: pick a sim, set population size, then Run / Pause / Step / Reset.
 
-The concept sims now share concept/common/terminal.py (platform-guarded), so
+The concept sims now share experiments/concept/common/terminal.py (platform-guarded), so
 they import on Windows too — but they're designed for Linux; this GUI runs the
 GA logic on any platform that can import them.
 
 Usage:
-    python concept_gui.py
+    python -m ui.concept_gui
 """
 import os, sys, queue
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 import tkinter as tk
@@ -33,8 +33,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 
-from concept.engines import available_engines, make_engine, CONFIGS, DEFAULT_SIM
-import ui_compat
+from experiments.concept.engines import available_engines, make_engine, CONFIGS, DEFAULT_SIM
+from . import ui_compat
 
 
 class ConceptGUI:

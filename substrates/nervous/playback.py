@@ -1,9 +1,9 @@
 """
-nv_evo/playback.py — asynchronous (continuous-time) playback and a clickable
+substrates/nervous/playback.py — asynchronous (continuous-time) playback and a clickable
 pulse-timeline, shared by the Interactive and Designer substrate views.
 
-Both asynchronous substrates — the nervous net (nv_evo/pulse.py) and the LUT
-array (lut_evo/pulse.py) — are continuous-time, event-driven elements whose
+Both asynchronous substrates — the nervous net (substrates/nervous/pulse.py) and the LUT
+array (substrates/lut/pulse.py) — are continuous-time, event-driven elements whose
 fitness reads real edge timestamps.  These helpers let the GUI DRIVE and SHOW
 them in that same continuous time instead of a synchronous tick lattice:
 
@@ -13,7 +13,7 @@ them in that same continuous time instead of a synchronous tick lattice:
     a physical-time cursor, reporting wire activity and the real leading-edge
     times of any cell. No GUI dependency.
   * NervousPlayer builds it over the configured digital or analog simulator —
-    the same engine used by Nervous evolution. The LUT twin (lut_evo.playback.LutPlayer)
+    the same engine used by Nervous evolution. The LUT twin (substrates.lut.playback.LutPlayer)
     builds it over AsyncLutSim.
   * PulseLaneEditor binds a matplotlib axis to editable input pulses: click for
     the default width, drag for a custom width, or click one to remove it. It draws
@@ -102,7 +102,8 @@ class NervousPlayer(AsyncPlayer):
 
     def __init__(self, grid, routing, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
                  pulse_width=None, max_events=PLAY_MAX_EVENTS, config=None,
-                 delays=None, arch='single', inputs=None):
+                 delays=None, arch='single', inputs=None, outputs=None,
+                 terminal_inputs=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config
@@ -112,6 +113,8 @@ class NervousPlayer(AsyncPlayer):
         self.delays  = delays
         self.arch    = arch
         self.inputs  = list(inputs or ())
+        self.outputs = list(outputs or ())
+        self.terminal_inputs = list(terminal_inputs or ())
         default_width = (pulse_engine.WIDTH if config is None else config.width)
         super().__init__(horizon=horizon, dt=dt, pulse_width=pulse_width,
                          default_width=default_width)
@@ -120,12 +123,14 @@ class NervousPlayer(AsyncPlayer):
         if self.arch == 'tri3':
             from .tritile import TriSim
             return TriSim(self.grid, self.inputs, config=self.config,
-                          max_events=self.max_events)
+                          max_events=self.max_events, outputs=self.outputs)
         if self.arch != 'single':
             raise ValueError('unknown tile architecture: %r' % (self.arch,))
         return create_simulator(self.grid, self.routing,
                                 max_events=self.max_events, config=self.config,
-                                delays=self.delays)
+                                delays=self.delays,
+                                input_nodes=self.terminal_inputs,
+                                output_nodes=self.outputs)
 
 
 # Display-only RC constants for capacitor-style playback (charge_levels).
@@ -205,7 +210,7 @@ def pulses_from_case(target, n_inputs, case_index=0, backend='lut',
     :func:`pulses_from_trial` (which would find no trials and show nothing) to
     reproduce what fitness tested. The LUT array scores each case as a battery of
     pulses that share a rising edge after a delay and hold for random per-input
-    widths (see ``lut_evo.ga._combinational_schedule``), reading the output while
+    widths (see ``substrates.lut.ga._combinational_schedule``), reading the output while
     they are held; one representative trial of that battery is shown here. Every
     other backend holds the active inputs for the whole run (``score_nervous``
     semantics), shown as one long pulse."""
@@ -215,7 +220,7 @@ def pulses_from_case(target, n_inputs, case_index=0, backend='lut',
         return out
     in_bits = cases[max(0, min(int(case_index), len(cases) - 1))][0]
     if backend == 'lut':
-        from lut_evo.ga import _combinational_schedule
+        from substrates.lut.ga import _combinational_schedule
         schedule = _combinational_schedule(target)
         delay, widths = schedule[max(0, min(int(trial_index),
                                             len(schedule) - 1))]
@@ -228,19 +233,6 @@ def pulses_from_case(target, n_inputs, case_index=0, backend='lut',
             if bit and i < n_inputs:
                 out[i] = [(0.5, horizon)]
     return out
-
-
-def toggle_pulse(times, t, snap):
-    """Add ``t`` to a sorted pulse list, or remove the nearby one if present.
-    Pure helper so the click behaviour is testable without a canvas."""
-    near = [p for p in times if abs(p - t) < snap * 0.75]
-    if near:
-        for p in near:
-            times.remove(p)
-    else:
-        times.append(t)
-        times.sort()
-    return times
 
 
 class PulseLaneEditor:

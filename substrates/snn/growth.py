@@ -12,7 +12,7 @@ _PC4 = [bin(i).count("1") for i in range(16)]
 # The per-gene time `limit` is gone: growth is now bounded by the Hayflick
 # telomere (see _grow_step), not by which genes are active on which iteration, so
 # the lookup depends on CONTEXT ALONE and its result is cacheable for the whole
-# grow (mirrors nv_evo._next_state / sim6 table_lookup_cached).
+# grow (mirrors substrates.nervous._next_state / sim6 table_lookup_cached).
 
 def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int, si: int) -> int:
     if sn == 0 and ss == 0 and se == 0 and sw == 0 and si == 0:
@@ -35,7 +35,7 @@ def cell_io_tags(genome: Genome, grid) -> Dict[Tuple[int, int], int]:
     """Map each live cell to its CELL TYPE: the settled 4-bit state itself —
     the node-type number the growth view shows. The ``genome`` parameter is
     kept for the shared call signature but the type is purely phenotypic.
-    Powers the evolvable io_placement strategies (nv_evo/io_placement.bind_io);
+    Powers the evolvable io_placement strategies (substrates/nervous/io_placement.bind_io);
     deterministic and side-effect free."""
     return {pos: int(state) for pos, state in grid.items()}
 

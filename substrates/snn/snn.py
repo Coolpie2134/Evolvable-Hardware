@@ -41,6 +41,10 @@ class Arch:
     syn_weight: float = SYN_WEIGHT
     vth_levels: Tuple[float, float, float, float] = (0.3, 0.5, 0.7, 0.9)
     tau_levels: Tuple[float, float] = (8.0, 15.0)
+    # Static truth-table runs preserve the original feed-forward lattice.
+    # Temporal SNN runs opt into reciprocal physical adjacencies so evolved
+    # bodies can contain feedback loops, oscillators and retained state.
+    recurrent: bool = False
 
 
 DEFAULT_ARCH = Arch()
@@ -56,7 +60,7 @@ def interpret_grid(grid, n_outputs=1, target=None, arch=None,
     (controlled by n_outputs) so existing callers keep working unchanged.
 
     `input_pos` / `output_pos` override the port binding — the evolvable
-    io_placement path (nv_evo/io_placement.py) passes the genome's tag-chosen
+    io_placement path (substrates/nervous/io_placement.py) passes the genome's tag-chosen
     cells here: `input_pos` is the ordered list of driven cells, `output_pos` is
     {role: (x, y)}. None keeps the target/legacy layout unchanged.
     """
@@ -89,7 +93,7 @@ def interpret_grid(grid, n_outputs=1, target=None, arch=None,
 
     if output_pos is not None:
         # Evolvable binding: every selected site joins the role's wired-OR bus.
-        from nv_evo.io_placement import output_groups
+        from substrates.nervous.io_placement import output_groups
         by_pos = {(n.x, n.y): n for n in neurons}
         for role, cells in output_groups(output_pos).items():
             for pos in cells:
@@ -123,6 +127,12 @@ def interpret_grid(grid, n_outputs=1, target=None, arch=None,
 
     synapses = []
     seen     = set()
+    # The four positive lattice offsets visit every physical adjacency once.
+    # The original architecture orients that edge from the lower lexicographic
+    # coordinate to the higher one and is therefore a DAG. Temporal SNN runs
+    # opt into reciprocal adjacencies through Arch.recurrent; this preserves
+    # every combinational checkpoint while making feedback an explicit,
+    # serialized hardware choice rather than an accidental target-side trick.
     for (x, y), pre_id in pos_to_id.items():
         for dx, dy in ((1,0),(0,1),(1,1),(1,-1)):
             nx, ny = x+dx, y+dy
@@ -136,6 +146,14 @@ def interpret_grid(grid, n_outputs=1, target=None, arch=None,
             sign = 1.0 if neurons[pre_id].excit else -1.0
             synapses.append(Synapse(pre=pre_id, post=post_id,
                                     weight=sign * arch.syn_weight))
+            if arch.recurrent:
+                reverse = (post_id, pre_id)
+                if reverse not in seen:
+                    seen.add(reverse)
+                    reverse_sign = 1.0 if neurons[post_id].excit else -1.0
+                    synapses.append(Synapse(
+                        pre=post_id, post=pre_id,
+                        weight=reverse_sign * arch.syn_weight))
     return neurons, synapses
 
 def circuit_summary(neurons, synapses):

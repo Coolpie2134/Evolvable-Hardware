@@ -6,12 +6,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from designer import DesignerTab, _genome_to_dict, _genome_from_dict
-from app import App
-from nv_evo.targets import TEMPORAL_TARGETS
-from nv_evo.pulse import PulseConfig
-from nv_evo.genome import random_hex_genome
-from evo_runtime.config import (NV_NEW_RUN_PROFILES, GAConfig,
+from ui.designer import DesignerTab, _genome_to_dict, _genome_from_dict
+from ui.app import App
+from substrates.nervous.targets import TEMPORAL_TARGETS
+from substrates.nervous.pulse import PulseConfig
+from substrates.nervous.genome import random_hex_genome
+from runtime.config import (NV_NEW_RUN_PROFILES, GAConfig,
                                 is_current_nv_profile,
                                 validate_new_nv_profile)
 
@@ -90,6 +90,7 @@ def test_wiring_io_selection_automatically_provides_chromosome_three():
     app = App.__new__(App)
     app._IO_PLACEMENT_LABELS = {
         'Fixed': 'fixed',
+        'Terminals': 'terminal_nodes',
         'Wiring': 'wiring_chromosome',
         'Spatial': 'spatial_chromosome',
     }
@@ -110,6 +111,12 @@ def test_wiring_io_selection_automatically_provides_chromosome_three():
     app._chroms_var.set('5')
     App._on_io_placement_change(app)
     assert app._chroms_var.get() == '5'
+
+    app._io_placement_var.set('Terminals')
+    app._chroms_var.set('2')
+    App._on_io_placement_change(app)
+    assert App._selected_io_placement(app) == 'terminal_nodes'
+    assert app._chroms_var.get() == '2'
 
 
 def test_new_nv_run_validation_rejects_every_retired_pairing():
@@ -240,8 +247,8 @@ def test_interactive_case_dropdown_loads_each_trial():
     selecting a case loads exactly that trial's physical schedule into the
     timeline, and a subsequent hand edit flips the box to '(custom schedule)'
     instead of silently claiming to still show the case."""
-    from interactive import InteractiveTab
-    from nv_evo.playback import pulses_from_trial
+    from ui.interactive import InteractiveTab
+    from substrates.nervous.playback import pulses_from_trial
 
     target = TEMPORAL_TARGETS['Odd pulse selector']
     n_inputs = len(target.inputs)
@@ -302,10 +309,10 @@ def test_interactive_combinational_cases_load_fitness_pulses():
     Interactive tab must enumerate its cases and load the SAME input pulses
     fitness scores (aligned-start, schedule widths for LUT) — otherwise 'see what
     fitness scored' shows nothing for gates/adders."""
-    from interactive import InteractiveTab
-    from nv_evo.playback import pulses_from_case
-    from lut_evo.ga import _combinational_schedule
-    from snn_evo.targets import get_target
+    from ui.interactive import InteractiveTab
+    from substrates.nervous.playback import pulses_from_case
+    from substrates.lut.ga import _combinational_schedule
+    from substrates.snn.targets import get_target
 
     target = get_target('AND')
     n_inputs = len(target.inputs)
@@ -364,7 +371,7 @@ def test_interactive_width_strip_clips_open_intervals_to_cursor():
     their real span, a still-high pulse is clipped to the cursor and marked
     open, not-yet-started pulses are hidden, and engines without a waveform
     log degrade to an empty panel instead of crashing."""
-    from interactive import InteractiveTab
+    from ui.interactive import InteractiveTab
 
     tab = InteractiveTab.__new__(InteractiveTab)
 
@@ -387,7 +394,7 @@ def test_charge_levels_follow_the_waveform_like_a_capacitor():
     exponentially after it falls (display-only RC follower of the binary
     waveform); engines without a waveform log return None."""
     import math
-    from nv_evo.playback import charge_levels, CHARGE_TAU, DISCHARGE_TAU
+    from substrates.nervous.playback import charge_levels, CHARGE_TAU, DISCHARGE_TAU
 
     class _Sim:
         pulse_intervals = {'w': [[1.0, 3.0], [6.0, float('inf')]]}
@@ -460,3 +467,19 @@ def test_fitness_chart_reports_effective_mutation_rate():
     assert app._std_line.y == [0.08, 0.11, 0.09]
     assert app._mutation_text.value == 'Mutation: 5.000'
     assert app._mut_ax.limits[1] > 5.0
+def test_root_app_launcher_delegates_to_the_packaged_entry_point():
+    import app as compatibility_app
+    from ui import app as packaged_app
+
+    assert compatibility_app.main is packaged_app.main
+
+
+def test_ui_app_source_can_be_loaded_as_a_direct_script():
+    import runpy
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    namespace = runpy.run_path(
+        os.path.join(project_root, 'ui', 'app.py'),
+        run_name='ui_direct_launch_probe')
+    assert namespace['App'].__name__ == 'App'
+    assert callable(namespace['main'])

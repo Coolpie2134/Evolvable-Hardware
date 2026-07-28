@@ -7,10 +7,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.genome import (Chromosome, Genome, HexGene, germline_telomere,
+from substrates.nervous.genome import (Chromosome, Genome, HexGene, germline_telomere,
                            random_hex_genome, MAX_STATE, TRI_STATE_MAX)
-from nv_evo.hexgrid import hex_dirs, hex_frontier_cells
-from nv_evo.nervous import (_compile_lookup, _grow_budget, _lookup_compiled,
+from substrates.nervous.hexgrid import hex_dirs, hex_frontier_cells
+from substrates.nervous.nervous import (_compile_lookup, _grow_budget, _lookup_compiled,
                             _lookup_nv, _seed_state, grow_nervous,
                             grow_nervous_snapshots)
 

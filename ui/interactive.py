@@ -5,12 +5,11 @@ After a circuit is evolved (or loaded), this lets you drive its inputs and watch
 the response. All three backends share Step / Run / Reset controls, while each
 uses the input and time representation appropriate to its physics:
 
-  * SNN      — LIF playback: the membrane potentials charge (grey → hot), neurons
-               flash as they spike, and the signal wave propagates along the
-               excitatory (green) / inhibitory (red) synapses. Alongside the
-               network: a spike raster and the output neurons' membrane traces vs
-               their fire thresholds. The 20 ms response is precomputed once
-               (`simulate_trace`) and scrubbed frame by frame.
+  * SNN      — LIF playback: static truth tables use Boolean source toggles and
+               a 20 ms view; temporal targets load their scored trials into an
+               editable seconds-based pulse timeline and run the recurrent LIF
+               graph for the target horizon. Both show membrane charge, a spike
+               raster, and fitted-output voltage traces.
   * Nervous  — ASYNCHRONOUS continuous-time playback: place input pulses on a
                clickable timeline, then Step / Run in real (possibly sub-tick)
                time and watch pulses propagate with their actual delays, loops
@@ -30,20 +29,22 @@ import tkinter as tk
 from tkinter import ttk
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from snn_evo import grow_snn, interpret_grid, simulate_trace, draw_snn_net, N_STEPS, DT
-from nv_evo import grow_nervous, interpret_nervous, place_outputs_by_trace
-from nv_evo.viz import draw_hex_net
-from nv_evo.contracts import behavior_contract_badge
-from nv_evo.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
+from substrates.snn import (grow_snn, interpret_grid, simulate_trace, draw_snn_net,
+                     prepare_snn_temporal, N_STEPS, DT)
+from substrates.nervous import grow_nervous, interpret_nervous, place_outputs_by_trace
+from substrates.nervous.viz import draw_hex_net
+from substrates.nervous.contracts import behavior_contract_badge
+from substrates.nervous.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
                              pulses_from_case, charge_levels)
-from lut_evo import grow_lut
-from lut_evo.playback import LutPlayer
+from substrates.lut import grow_lut
+from substrates.lut.playback import LutPlayer
 
 
-from lut_evo import place_outputs_by_trace as lut_place_by_trace
-from lut_evo.ga import _place_outputs_combinational as lut_place_combinational
-from lut_evo.viz import draw_lut_net
+from substrates.lut import place_outputs_by_trace as lut_place_by_trace
+from substrates.lut.ga import _place_outputs_combinational as lut_place_combinational
+from substrates.lut.viz import draw_lut_net
 
 # LIF playback advances this many 0.1 ms *display samples* per frame; the
 # underlying LIF response is event-driven rather than stepped.
@@ -107,6 +108,8 @@ class InteractiveTab:
         self._circuit = c
         target, backend = c['target'], c['backend']
         self._backend = backend
+        self._temporal_snn = (
+            backend == 'snn' and getattr(target, 'temporal', False))
         self._contract_var.set(behavior_contract_badge(target))
 
         # drop any prior pulse-timeline click handler before rebuilding
@@ -114,8 +117,8 @@ class InteractiveTab:
             self._editor.disconnect()
             self._editor = None
 
-        # input bar: the nervous net is asynchronous, so it is driven by a
-        # clickable pulse TIMELINE; LUT/SNN keep level toggles.
+        # Temporal circuits use an editable pulse timeline; only static SNN
+        # truth tables keep compact Boolean level toggles.
         for w in self._inbar.winfo_children():
             w.destroy()
         self._inputs = []
@@ -126,7 +129,7 @@ class InteractiveTab:
         self._case_kind = ('trials' if getattr(target, 'trials', None)
                            else 'cases' if getattr(target, 'cases', None)
                            else None)
-        if backend in ('nervous', 'lut'):
+        if backend in ('nervous', 'lut') or self._temporal_snn:
             # every stored test case is loadable, not just trial 0: pick one
             # from the dropdown to see exactly what fitness scored, then edit
             # the timeline freely (the box flips to '(custom schedule)').
@@ -144,7 +147,7 @@ class InteractiveTab:
             ttk.Label(self._inbar, text='pulses: click the timeline',
                       foreground='#888').pack(side='left', padx=4)
             ttk.Button(self._inbar, text='Clear', width=6,
-                       command=self._nv_clear_pulses).pack(side='left', padx=3)
+                       command=self._clear_pulses).pack(side='left', padx=3)
         else:
             for i in range(len(target.inputs)):
                 v = tk.BooleanVar(value=False)
@@ -156,10 +159,12 @@ class InteractiveTab:
         # controls
         for w in self._ctrl.winfo_children():
             w.destroy()
-        from nv_evo.io_placement import io_strategy, bind_io, growth_seeds
+        from substrates.nervous.io_placement import io_strategy, bind_io, growth_seeds
         if backend == 'nervous':
             self._nv_arch = getattr(c['genome'], 'arch', 'single')
-            self._grid = grow_nervous(c['genome'], seeds=growth_seeds(target),
+            self._grid = grow_nervous(
+                c['genome'], seeds=growth_seeds(
+                    target, io_strategy(target), c['genome']),
                                       grid_size=target.grid_size, iters=target.iters)
             self._routing, self._in_pos, self._out_pos = interpret_nervous(
                 self._grid, target, arch=self._nv_arch)
@@ -167,7 +172,7 @@ class InteractiveTab:
             # highlighted output cell is the one fitness actually read) and the
             # playback engine below. node_delays returns None off the
             # width-preserving model, so this is uniform-safe.
-            from nv_evo.nervous import node_delays
+            from substrates.nervous.nervous import node_delays
             pulse_config = getattr(target, 'pulse_config', None)
             self._nv_delays = (None if self._nv_arch == 'tri3' else
                                node_delays(c['genome'], self._grid, pulse_config))
@@ -189,12 +194,14 @@ class InteractiveTab:
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
         elif backend == 'lut':                             # LUT array (async levels)
-            self._grid = grow_lut(c['genome'], seeds=growth_seeds(target),
+            self._grid = grow_lut(
+                c['genome'], seeds=growth_seeds(
+                    target, io_strategy(target), c['genome']),
                                   grid_size=target.grid_size, iters=target.iters)
             self._in_pos = list(target.inputs)
             bound = None
             if io_strategy(target) != 'fixed':
-                from lut_evo.lut import cell_io_tags
+                from substrates.lut.lut import cell_io_tags
                 bound = bind_io(c['genome'], self._grid, target,
                                 tags=cell_io_tags(c['genome'], self._grid))
             if bound is not None:
@@ -208,41 +215,78 @@ class InteractiveTab:
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
         else:                                              # SNN — LIF playback
-            from nv_evo.io_placement import flat_inputs, input_groups
-            self._grid = grow_snn(c['genome'], seeds=growth_seeds(target),
-                                  grid_size=target.grid_size, iters=target.iters)
-            bound = None
-            if io_strategy(target) != 'fixed':
-                from snn_evo.growth import cell_io_tags
-                bound = bind_io(c['genome'], self._grid, target,
-                                tags=cell_io_tags(c['genome'], self._grid))
-            if bound is not None:
-                in_pos, out_pos = bound
-                self._neurons, self._synapses = interpret_grid(
-                    self._grid, target=target, arch=c['arch'],
-                    input_pos=flat_inputs(in_pos), output_pos=out_pos)
+            from substrates.nervous.io_placement import flat_inputs, input_groups
+            if self._temporal_snn:
+                prep = prepare_snn_temporal(
+                    c['genome'], target, c['arch'])
+                if prep is None:
+                    self._placeholder(
+                        'The temporal SNN did not grow a complete I/O circuit.')
+                    self._status.set(
+                        'Temporal SNN incomplete — no playback is available.')
+                    return
+                (self._grid, self._neurons, self._synapses,
+                 self._in_pos, self._out_pos) = prep[:5]
+                # Fixed temporal outputs are trace-fitted after interpretation.
+                # Mark those exact cells in the playback views.
+                from substrates.nervous.io_placement import output_groups
+                by_pos = {(n.x, n.y): n for n in self._neurons}
+                for neuron in self._neurons:
+                    neuron.is_output = False
+                    neuron.out_role = ''
+                for role, cells in output_groups(self._out_pos).items():
+                    for cell in cells:
+                        neuron = by_pos.get(cell)
+                        if neuron is not None:
+                            neuron.is_output = True
+                            neuron.out_role = role
+                self._setup_snn_temporal(target)
+                self._playback_controls(
+                    '   (edit/load a trial; Step/Run in contract seconds)')
+                self._reset()
             else:
-                in_pos = list(target.inputs)
-                self._neurons, self._synapses = interpret_grid(
-                    self._grid, target=target, arch=c['arch'])
-            # one id GROUP per logical input (fan-out under evolvable binding)
-            self._in_pos = in_pos                 # groups; for the status note
-            by_pos = {(m.x, m.y): m for m in self._neurons if m.is_input}
-            self._in_ids = [
-                [by_pos[cell].id for cell in cells if cell in by_pos]
-                for cells in input_groups(in_pos)]
-            self._playback_controls(
-                '   (toggle an input to inject one source pulse; Step/Run watches its wave)')
-            self._reset()
+                self._grid = grow_snn(
+                    c['genome'], seeds=growth_seeds(
+                        target, io_strategy(target), c['genome']),
+                    grid_size=target.grid_size, iters=target.iters)
+                bound = None
+                if io_strategy(target) != 'fixed':
+                    from substrates.snn.growth import cell_io_tags
+                    bound = bind_io(
+                        c['genome'], self._grid, target,
+                        tags=cell_io_tags(c['genome'], self._grid))
+                if bound is not None:
+                    in_pos, out_pos = bound
+                    self._neurons, self._synapses = interpret_grid(
+                        self._grid, target=target, arch=c['arch'],
+                        input_pos=flat_inputs(in_pos), output_pos=out_pos)
+                else:
+                    in_pos = list(target.inputs)
+                    self._neurons, self._synapses = interpret_grid(
+                        self._grid, target=target, arch=c['arch'])
+                self._in_pos = in_pos
+                by_pos = {
+                    (m.x, m.y): m for m in self._neurons if m.is_input}
+                self._in_ids = [
+                    [by_pos[cell].id for cell in cells if cell in by_pos]
+                    for cells in input_groups(in_pos)]
+                self._playback_controls(
+                    '   (toggle an input to inject one source pulse; '
+                    'Step/Run watches its wave)')
+                self._reset()
         strategy = io_strategy(target)
         note = ''
         if strategy != 'fixed':
-            from nv_evo.io_placement import input_groups
+            from substrates.nervous.io_placement import input_groups
             groups = input_groups(getattr(self, '_in_pos', []) or [])
             sites = sum(len(g) for g in groups)
-            note = ('   [I/O binding: %s — evolved placement; %d input%s on '
+            placement = (
+                'dedicated source/sink terminals'
+                if strategy == 'terminal_nodes' else 'evolved placement')
+            note = ('   [I/O binding: %s — %s; %d input%s on '
                     '%d site%s]'
-                    % (strategy, len(groups), '' if len(groups) == 1 else 's',
+                    % (strategy, placement, len(groups),
+                       '' if len(groups) == 1 else 's',
                        sites, '' if sites == 1 else 's'))
         self._status.set('Loaded %s [%s] — drive the inputs.%s'
                          % (target.name, backend, note))
@@ -254,6 +298,26 @@ class InteractiveTab:
         ttk.Button(self._ctrl, text='Reset', command=self._reset).pack(side='left', padx=3)
         ttk.Label(self._ctrl, text=hint, foreground='#888').pack(side='left', padx=6)
 
+    def _setup_snn_temporal(self, target):
+        """Build an editable seconds-based timeline for recurrent LIF runs."""
+        labels = [
+            chr(65 + i) if i < 26 else 'i%d' % i
+            for i in range(len(self._in_pos))]
+        self._snn_horizon = float(max(1, getattr(target, 'T', 20) or 20))
+        self.fig.clf()
+        gs = self.fig.add_gridspec(
+            3, 2, height_ratios=[0.55, 0.65, 0.65],
+            width_ratios=[1.15, 1.0], hspace=0.8, wspace=0.25)
+        self._ax_lanes = self.fig.add_subplot(gs[0, :])
+        self._snn_axg = self.fig.add_subplot(gs[1:, 0])
+        self._snn_axr = self.fig.add_subplot(gs[1, 1])
+        self._snn_axv = self.fig.add_subplot(gs[2, 1])
+        self._editor = PulseLaneEditor(
+            self._ax_lanes, self.canvas, labels,
+            horizon=self._snn_horizon, snap=0.5,
+            on_change=self._snn_schedule_changed, default_width=1.0)
+        self._editor.set_pulses(self._case_pulses(target, 0))
+
     # ── nervous + LUT: asynchronous continuous-time playback ──────────────────────
 
     def _setup_async(self, target):
@@ -264,7 +328,7 @@ class InteractiveTab:
         # widths (see _combinational_schedule); stretch the timeline so the whole
         # held window fitness reads is visible.
         if self._case_kind == 'cases' and self._backend == 'lut':
-            from lut_evo.ga import _combinational_schedule
+            from substrates.lut.ga import _combinational_schedule
             schedule = _combinational_schedule(target)
             horizon = max(horizon,
                           max(d + max(ws) for d, ws in schedule) + 4.0)
@@ -287,17 +351,26 @@ class InteractiveTab:
             config = pulse_config
             # sync() and shared with the trace-matched placement, so playback and
             # the highlighted output cell agree on the physics.
-            from nv_evo.io_placement import flat_inputs
+            from substrates.nervous.io_placement import (
+                flat_inputs, terminal_node_sets)
+            terminal_inputs, terminal_outputs = terminal_node_sets(
+                target, self._in_pos, self._out_pos)
             self._player = NervousPlayer(
                 self._grid, self._routing, horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048),
                 config=config, delays=getattr(self, '_nv_delays', None),
                 arch=getattr(self, '_nv_arch', 'single'),
-                inputs=flat_inputs(self._in_pos))
+                inputs=flat_inputs(self._in_pos),
+                outputs=terminal_outputs,
+                terminal_inputs=terminal_inputs)
         else:                                  # LUT — same player, level engine
+            from substrates.nervous.io_placement import terminal_node_sets
+            terminal_inputs, terminal_outputs = terminal_node_sets(
+                target, self._in_pos, self._out_pos)
             self._player = LutPlayer(
                 self._grid, horizon=horizon,
-                config=getattr(target, 'lut_config', None))
+                config=getattr(target, 'lut_config', None),
+                inputs=terminal_inputs, outputs=terminal_outputs)
         self._player.set_schedule(self._editor.schedule(self._in_pos))
 
     def _case_kind_for(self, target):
@@ -357,7 +430,10 @@ class InteractiveTab:
         try:
             self._editor.set_pulses(
                 self._case_pulses(self._circuit['target'], index))
-            self._nv_schedule_changed()   # set_schedule resets playback to t=0
+            if getattr(self, '_temporal_snn', False):
+                self._snn_schedule_changed()
+            else:
+                self._nv_schedule_changed()  # set_schedule resets playback
         finally:
             self._loading_case = False
 
@@ -370,9 +446,22 @@ class InteractiveTab:
         self._player.set_schedule(self._editor.schedule(self._in_pos))
         self._draw_async()
 
-    def _nv_clear_pulses(self):
+    def _snn_schedule_changed(self):
+        """Recompute temporal LIF playback after a timeline edit."""
+        self._stop()
+        if (getattr(self, '_case_cb', None) is not None
+                and not getattr(self, '_loading_case', False)):
+            self._case_var.set('(custom schedule)')
+        self._snn_prepare()
+        self._cursor = 0
+        self._draw_snn()
+
+    def _clear_pulses(self):
         if getattr(self, '_editor', None) is not None:
             self._editor.clear()
+
+    # Backward-compatible name retained for direct UI tests.
+    _nv_clear_pulses = _clear_pulses
 
     def _draw_async(self):
         target = self._circuit['target']
@@ -382,7 +471,7 @@ class InteractiveTab:
         title = 't = %.1f%s' % (self._player.cursor,
                                 '   (event cap hit)' if self._player.overflow
                                 else '')
-        from nv_evo.io_placement import flat_inputs
+        from substrates.nervous.io_placement import flat_inputs
         if self._backend == 'nervous':
             # capacitor-style playback: nodes charge while pulsing and fade
             # after the pulse ends (display only — physics stays binary)
@@ -410,7 +499,7 @@ class InteractiveTab:
     def _draw_event_strip(self, axt):
         target = self._circuit['target']
         axt.clear()
-        from nv_evo.io_placement import output_groups
+        from substrates.nervous.io_placement import output_groups
         groups = output_groups(self._out_pos)
         for k, term in enumerate(target.outputs):
             evs = [start for start, _, _ in
@@ -431,7 +520,7 @@ class InteractiveTab:
         raw = getattr(self._player.sim, 'pulse_intervals', None)
         if raw is None:
             return []
-        from nv_evo.io_placement import merge_intervals, output_groups
+        from substrates.nervous.io_placement import merge_intervals, output_groups
         cells = output_groups({'output': cells})['output']
         cursor = self._player.cursor
         spans = []
@@ -453,7 +542,7 @@ class InteractiveTab:
         # text spills across neighbouring pulses. One character is roughly this
         # much of the time axis at the strip's font size.
         char_span = 0.012 * max(self._player.horizon, 1e-9)
-        from nv_evo.io_placement import output_groups
+        from substrates.nervous.io_placement import output_groups
         groups = output_groups(self._out_pos)
         for k, term in enumerate(target.outputs):
             for start, end, open_ended in self._output_spans(
@@ -479,7 +568,7 @@ class InteractiveTab:
     def _nv_output_summary(self):
         target = self._circuit['target']
         parts = []
-        from nv_evo.io_placement import output_groups
+        from substrates.nervous.io_placement import output_groups
         groups = output_groups(self._out_pos)
         for term in target.outputs:
             n = len(self._output_spans(groups.get(term.role, ())))
@@ -563,6 +652,9 @@ class InteractiveTab:
         """Run the LIF sim for the current input bits and cache the full trace.
         The response is deterministic, so we compute it once and just scrub a
         playback cursor over it (like the nervous/LUT tick playback)."""
+        if self._temporal_snn:
+            self._snn_prepare_temporal()
+            return
         target = self._circuit['target']
         bits = self._in_bits()
         # A logical high is interpreted by lif_sim as one source pulse.  Reusing
@@ -578,10 +670,51 @@ class InteractiveTab:
          self._snn_spikes, self._snn_fired) = simulate_trace(
             self._neurons, self._synapses, currents)
 
+    def _snn_prepare_temporal(self):
+        """Run the edited contract-seconds schedule through recurrent LIF."""
+        from substrates.snn.lif_sim import _run
+        from substrates.snn.temporal import LIF_MS_PER_SECOND
+
+        by_pos = {(n.x, n.y): n.id for n in self._neurons}
+        schedule = self._editor.schedule(self._in_pos)
+        input_events = [
+            (float(start) * LIF_MS_PER_SECOND, by_pos[cell],
+             float(self._circuit['target'].high),
+             float(width) * LIF_MS_PER_SECOND)
+            for cell, pulses in schedule.items() if cell in by_pos
+            for start, width in pulses]
+        run = _run(
+            self._neurons, self._synapses, {},
+            input_events=input_events,
+            sim_time=self._snn_horizon * LIF_MS_PER_SECOND,
+            max_events=getattr(self._circuit['target'], 'max_events', 2048))
+        sample_count = max(2, int(round(self._snn_horizon / 0.1)) + 1)
+        self._snn_times = np.linspace(
+            0.0, self._snn_horizon, sample_count)
+        self._snn_V = run.sample_voltage(
+            self._snn_times * LIF_MS_PER_SECOND)
+        self._snn_spikes = {
+            nid: [when / LIF_MS_PER_SECOND for when in values]
+            for nid, values in run.spikes.items()}
+        self._snn_fired = np.zeros(
+            (sample_count, len(self._neurons)), dtype=bool)
+        for nid, values in self._snn_spikes.items():
+            for when in values:
+                sample = min(
+                    sample_count - 1,
+                    max(0, int(round(
+                        when / self._snn_horizon * (sample_count - 1)))))
+                self._snn_fired[sample, nid] = True
+                self._snn_V[sample, nid] = max(
+                    self._snn_V[sample, nid],
+                    self._neurons[nid].vth + 0.1)
+        self._snn_overflow = run.overflow
+
     def _snn_step(self):
         nxt = self._cursor + SNN_STRIDE
-        if nxt >= N_STEPS:
-            nxt = 0 if self._running else N_STEPS - 1     # loop while Running
+        limit = len(self._snn_times) if self._temporal_snn else N_STEPS
+        if nxt >= limit:
+            nxt = 0 if self._running else limit - 1       # loop while Running
         self._cursor = nxt
         self._draw()
 
@@ -593,19 +726,33 @@ class InteractiveTab:
         fired = (self._snn_fired[lo:cur + 1].any(axis=0)
                  if self._snn_fired.shape[1] else None)
 
-        self.fig.clf()
-        gs = self.fig.add_gridspec(2, 2, width_ratios=[1.2, 1.0],
-                                   height_ratios=[1.0, 0.72], wspace=0.2, hspace=0.36)
-        axg = self.fig.add_subplot(gs[:, 0])
-        axr = self.fig.add_subplot(gs[0, 1])
-        axv = self.fig.add_subplot(gs[1, 1])
+        if self._temporal_snn:
+            self._editor.set_cursor(t_ms, redraw=False)
+            axg, axr, axv = self._snn_axg, self._snn_axr, self._snn_axv
+            axg.clear()
+        else:
+            self.fig.clf()
+            gs = self.fig.add_gridspec(
+                2, 2, width_ratios=[1.2, 1.0],
+                height_ratios=[1.0, 0.72], wspace=0.2, hspace=0.36)
+            axg = self.fig.add_subplot(gs[:, 0])
+            axr = self.fig.add_subplot(gs[0, 1])
+            axv = self.fig.add_subplot(gs[1, 1])
+        unit = 's' if self._temporal_snn else 'ms'
+        input_note = (
+            'timeline' if self._temporal_snn
+            else ''.join(map(str, self._in_bits())))
         draw_snn_net(axg, self._neurons, self._synapses, v=V, fired=fired,
-                     title='t = %4.1f ms   inputs = %s'
-                           % (t_ms, ''.join(map(str, self._in_bits()))))
+                     title='t = %4.1f %s   inputs = %s'
+                           % (t_ms, unit, input_note))
         self._draw_raster(axr, t_ms)
         self._draw_out_traces(axv, cur)
         self.canvas.draw_idle()
-        self._status.set('t = %.1f ms    %s' % (t_ms, self._snn_outcome_text()))
+        cap = ('   (event cap hit)' if self._temporal_snn
+               and self._snn_overflow else '')
+        self._status.set(
+            't = %.1f %s%s    %s'
+            % (t_ms, unit, cap, self._snn_outcome_text(t_ms)))
 
     def _draw_raster(self, ax, t_ms):
         """All-neuron spike raster with a moving play cursor; inputs red, outputs blue."""
@@ -623,7 +770,9 @@ class InteractiveTab:
         ax.set_xlim(0, self._snn_times[-1] + DT)
         ax.set_ylim(-0.6, max(1, len(ns)) - 0.4)
         ax.set_title('spike raster', fontsize=9)
-        ax.set_xlabel('ms', fontsize=8); ax.set_yticks([])
+        ax.set_xlabel(
+            'seconds' if self._temporal_snn else 'ms', fontsize=8)
+        ax.set_yticks([])
         ax.tick_params(labelsize=7)
 
     def _draw_out_traces(self, ax, cur):
@@ -640,18 +789,22 @@ class InteractiveTab:
         ax.set_xlim(0, self._snn_times[-1] + DT)
         ax.set_ylim(-0.04, vmax)
         ax.set_title('output membrane V  (— fire threshold)', fontsize=9)
-        ax.set_xlabel('ms', fontsize=8); ax.tick_params(labelsize=7)
+        ax.set_xlabel(
+            'seconds' if self._temporal_snn else 'ms', fontsize=8)
+        ax.tick_params(labelsize=7)
         if outs:
             ax.legend(fontsize=7, loc='upper right')
         else:
             ax.text(0.5, 0.5, '(no output neuron)', ha='center', va='center',
                     color='#999', transform=ax.transAxes)
 
-    def _snn_outcome_text(self):
+    def _snn_outcome_text(self, cursor=None):
         parts = []
         for n in self._neurons:
             if n.is_output:
-                nsp = len(self._snn_spikes.get(n.id, []))
+                values = self._snn_spikes.get(n.id, [])
+                nsp = len(values) if cursor is None else sum(
+                    when <= cursor + 1e-9 for when in values)
                 parts.append('%s→%s' % ((n.out_role or 'out'),
                                         'FIRES(1)' if nsp else 'silent(0)'))
         return '   '.join(parts) if parts else '(no output)'

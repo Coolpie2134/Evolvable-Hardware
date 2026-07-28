@@ -10,7 +10,8 @@ that 'fixed' baseline against the two evolvable strategies the request asked for
                      ordinal instance in a stable shuffled list of matches.
 
   * spatial_chromosome: chromosome three maps each port to a normalised x/y
-                     anchor and claims the nearest available living cell.
+                     anchor. Inputs are developmental seeds; outputs claim the
+                     nearest available living cell.
 
 Everything else is held constant (same target, grid, contract, seeds, gens, pop),
 so the only variable is HOW ports attach to cells. For each strategy we run a
@@ -28,25 +29,27 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo.ga import evolve_nervous                         # noqa: E402
-from nv_evo.targets import (TEMPORAL_TARGETS, with_io_placement,  # noqa: E402
+from substrates.nervous.ga import evolve_nervous                         # noqa: E402
+from substrates.nervous.targets import (TEMPORAL_TARGETS, with_io_placement,  # noqa: E402
                             ORACLE_KEY_TO_SPEC)
-from nv_evo.io_placement import bind_io, cell_tags, io_strategy  # noqa: E402
-from nv_evo.nervous import grow_nervous                      # noqa: E402
-from nv_evo.evaluation import fit_readout                    # noqa: E402
-from nv_evo.oracle import holdout_score, ORACLE_SPECS        # noqa: E402
+from substrates.nervous.io_placement import bind_io, cell_tags, io_strategy  # noqa: E402
+from substrates.nervous.nervous import grow_nervous                      # noqa: E402
+from substrates.nervous.evaluation import fit_readout                    # noqa: E402
+from substrates.nervous.oracle import holdout_score, ORACLE_SPECS        # noqa: E402
 
 STRATEGIES = (
-    'fixed', 'tag_rank', 'wiring_chromosome', 'spatial_chromosome')
+    'fixed', 'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+    'spatial_chromosome')
 DEFAULT_TARGETS = ['Echo (delay 3)', 'Coincidence (2-in)', 'Toggle flip-flop']
 
 
 def _binding_summary(genome, target):
     """One compact line describing where the evolved ports landed."""
-    from nv_evo.io_placement import binding_report, growth_seeds
+    from substrates.nervous.io_placement import binding_report, growth_seeds
     if io_strategy(target) == 'fixed':
         return 'inputs=seed pads, outputs=trace-fitted'
-    grid = grow_nervous(genome, seeds=growth_seeds(target))
+    grid = grow_nervous(
+        genome, seeds=growth_seeds(target, io_strategy(target), genome))
     report = binding_report(genome, grid, target)
     if report is None:
         return 'unbindable (organism has no live cells)'
@@ -88,7 +91,7 @@ def _held_out(genome, target_name, target):
     return sum(scores) / len(scores)
 
 
-def run(target_name, gens, pop, n_chroms, seeds):
+def run(target_name, gens, pop, n_chroms, seeds, strategies=STRATEGIES):
     base = TEMPORAL_TARGETS.get(target_name)
     if base is None:
         raise SystemExit('unknown target %r (see TEMPORAL_TARGETS)' % target_name)
@@ -96,7 +99,7 @@ def run(target_name, gens, pop, n_chroms, seeds):
           % (target_name, gens, pop, n_chroms, ','.join(map(str, seeds))))
     print('%-16s  %-7s  %-9s  %s' % ('strategy', 'train', 'held-out', 'binding'))
     print('-' * 78)
-    for strategy in STRATEGIES:
+    for strategy in strategies:
         target = with_io_placement(base, strategy)
         trains, helds = [], []
         best_genome = None
@@ -126,14 +129,23 @@ def main():
     ap.add_argument('--n-chroms', type=int, default=3)
     ap.add_argument('--seeds', default='1,2',
                     help='comma-separated RNG seeds (one evolution each)')
+    ap.add_argument(
+        '--strategies', default=','.join(STRATEGIES),
+        help='comma-separated binding strategies to compare')
     args = ap.parse_args()
     if args.n_chroms < 3:
         ap.error('--n-chroms must be at least 3 because the comparison includes '
                  'the wiring-chromosome strategy')
     seeds = [int(s) for s in args.seeds.split(',') if s.strip()]
+    strategies = [
+        strategy.strip() for strategy in args.strategies.split(',')
+        if strategy.strip()]
+    unknown = set(strategies) - set(STRATEGIES)
+    if unknown:
+        ap.error('unknown strategies: %s' % ', '.join(sorted(unknown)))
     targets = args.targets or DEFAULT_TARGETS
     for name in targets:
-        run(name, args.gens, args.pop, args.n_chroms, seeds)
+        run(name, args.gens, args.pop, args.n_chroms, seeds, strategies)
 
 
 if __name__ == '__main__':

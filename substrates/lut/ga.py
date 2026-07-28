@@ -1,5 +1,5 @@
 """
-lut_evo/ga.py — scoring and GA for the LUT array.
+substrates/lut/ga.py — scoring and GA for the LUT array.
 
 Problem definitions and executable behavior contracts are shared with the rest
 of the project; only the substrate-to-observation adapter differs. Selection uses the same recipe as the
@@ -12,15 +12,15 @@ import copy, math, os, random
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from itertools import combinations
-from evo_runtime.cache import LRUCache
-from evo_runtime.mutation import adaptive_mutation_rate
-from evo_runtime.parallel import map_ordered
+from runtime.cache import LRUCache
+from runtime.mutation import adaptive_mutation_rate, STRESS_PATIENCE
+from runtime.parallel import map_ordered
 
-from nv_evo.temporal import (_obs_len, _output_candidates, TemporalTraces,
+from substrates.nervous.temporal import (_obs_len, _output_candidates, TemporalTraces,
                              _score_output_candidate)
-from nv_evo.scoring import (contract_relations, needs_samples, score_contract,
+from substrates.nervous.scoring import (contract_relations, needs_samples, score_contract,
                             score_report_lines, LUT_REPORT_NOTES)
-from nv_evo.contracts import behavior_contract_lines
+from substrates.nervous.contracts import behavior_contract_lines
 from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
                      random_lut_gene, random_lut_chromosome)
@@ -31,13 +31,15 @@ from .pulse import AsyncLutSim
 def clone_genome(genome):
     """Fast structural copy (shared, never-in-place-mutated gene objects; fresh
     structure) — an identical-behaviour, ~10x cheaper replacement for
-    copy.deepcopy on the reproduction hot path. See nv_evo.ga.clone_genome."""
+    copy.deepcopy on the reproduction hot path. See substrates.nervous.ga.clone_genome."""
     clone = Genome(
         chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
                                 telomere=getattr(c, 'telomere', MAX_TELOMERE),
                                 wiring=getattr(c, 'wiring', False))
                      for c in genome.chromosomes],
-        tag=genome.tag)
+        tag=genome.tag,
+        seed_state=getattr(genome, 'seed_state', None),
+        provenance=getattr(genome, 'provenance', ''))
     if hasattr(genome, '_io_binding_progress'):
         clone._io_binding_progress = genome._io_binding_progress
     return clone
@@ -48,16 +50,16 @@ ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELIT
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
 EXPLORATION_PARENT_FRAC = 0.30
-MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see nv_evo.ga)
+MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see substrates.nervous.ga)
 MUT_DECAY      = 0.997       # slow cooldown: 4.0 -> ~0.89 by gen 500
-N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see nv_evo.ga
+N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see substrates.nervous.ga
 FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 
 # LUT temporal search has the same flat recurrent landscapes as the nervous
 # net; reheat after a plateau instead of cooling indefinitely.
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
 # Output candidates are the OUT_RADIUS cells nearest each terminal, via the
-# shared nv_evo.temporal._output_candidates (same radius, same tie-breaks).
+# shared substrates.nervous.temporal._output_candidates (same radius, same tie-breaks).
 
 
 def _expand_input_lanes(in_pos):
@@ -65,7 +67,7 @@ def _expand_input_lanes(in_pos):
     GROUPS (evolvable binding): lane_map[k] is the logical input that drives
     flat_cells[k]. A plain flat in_pos maps 1:1 and is returned as-is, so the
     fixed path is untouched."""
-    from nv_evo.io_placement import input_groups
+    from substrates.nervous.io_placement import input_groups
     groups = input_groups(in_pos)
     if all(len(g) == 1 for g in groups):
         return [g[0] for g in groups], list(range(len(groups)))
@@ -78,7 +80,7 @@ def _expand_input_lanes(in_pos):
 
 
 def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
-    """Run every trial once on the asynchronous engine (lut_evo.pulse).
+    """Run every trial once on the asynchronous engine (substrates.lut.pulse).
 
     Returns (trial_B, trial_events, overflow): the [obs, ncells] mid-tick
     sample matrix per trial (empty when the score mode consumes edges, not
@@ -95,7 +97,12 @@ def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
     need_samples = needs_samples(ttarget)
     flat_pos, lanes = _expand_input_lanes(in_pos)
     expand = lanes != list(range(len(flat_pos)))
-    sim = AsyncLutSim(grid, config=getattr(ttarget, 'lut_config', None))
+    from substrates.nervous.io_placement import terminal_node_sets
+    terminal_inputs, terminal_outputs = terminal_node_sets(
+        ttarget, in_pos, {'watch': list(watch_cells)})
+    sim = AsyncLutSim(
+        grid, config=getattr(ttarget, 'lut_config', None),
+        input_nodes=terminal_inputs, output_nodes=terminal_outputs)
     trial_B, trial_events, trial_intervals, overflow = [], [], [], False
     first = True
     for tr in ttarget.trials:
@@ -128,7 +135,7 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     its terminal whose trace best matches the expectation across all trials
     (terminal-distance tie-break), exactly like the nervous backend.
 
-    The dynamics are the asynchronous engine (lut_evo.pulse.AsyncLutSim):
+    The dynamics are the asynchronous engine (substrates.lut.pulse.AsyncLutSim):
     trace/persistence modes score the mid-tick sample matrix (a column slice
     per candidate cell — no per-tick dicts), while event/cadence modes read
     the wires' raw continuous leading-edge timestamps, exactly as the nervous
@@ -147,7 +154,7 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     cands_by_role = {term.role: _output_candidates(grid, in_set, term)
                      for term in ttarget.outputs}
     watch = sorted(set().union(*cands_by_role.values()))
-    sim, trial_B, trial_events, _, overflow = _run_lut_trials(
+    sim, trial_B, trial_events, trial_intervals, overflow = _run_lut_trials(
         grid, in_pos, ttarget, watch)
     traces.overflow = overflow
     cidx = sim._cidx
@@ -160,25 +167,29 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
             if c in used:
                 continue
             col = cidx[c]
-            ctr, cevents, cexp = [], [], []
+            ctr, cevents, cintervals, cexp = [], [], [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
                 ctr.append(trial_B[ti][:, col].tolist() if need_samples else [])
                 cevents.append(list(trial_events[ti].get(c, ())))
+                cintervals.append(list(trial_intervals[ti].get(c, ())))
                 cexp.append(exp)
             if not ctr:
                 s, aux = 0.0, None
             else:
-                signature = (tuple(tuple(seq) for seq in ctr),
-                             tuple(tuple(seq) for seq in cevents))
+                signature = (
+                    tuple(tuple(seq) for seq in ctr),
+                    tuple(tuple(seq) for seq in cevents),
+                    tuple(tuple(tuple(pair) for pair in seq)
+                          for seq in cintervals))
                 cached = score_cache.get(signature)
                 s, aux = cached if cached is not None else (None, None)
             if ctr and s is None:
                 s, aux = _score_output_candidate(
                     ctr, cevents, cexp, term.role, ttarget, traces.overflow,
-                    tol=0)                              # LUT: strict hold
+                    tol=0, intervals=cintervals)        # LUT: strict hold
             if ctr:
                 score_cache[signature] = (s, aux)
             key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
@@ -193,12 +204,15 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
                               for ti in range(len(ttarget.trials))]
         traces.events[term.role] = [list(trial_events[ti].get(best, ()))
                                     for ti in range(len(ttarget.trials))]
+        traces.intervals[term.role] = [
+            list(trial_intervals[ti].get(best, ()))
+            for ti in range(len(ttarget.trials))]
     return out_pos, traces
 
 
 def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
     """Run LUT trials at pre-selected output cells without validation search."""
-    from nv_evo.io_placement import (output_groups, flat_outputs,
+    from substrates.nervous.io_placement import (output_groups, flat_outputs,
                                      merge_intervals)
     groups = output_groups(out_pos)
     if any(pos not in grid for pos in flat_outputs(out_pos)):
@@ -229,22 +243,25 @@ def prepare_lut(genome, ttarget):
     Returns ``(grid, out_pos, traces, in_pos)`` — ``in_pos`` is the driven input
     cells (the target's seed pads under the default 'fixed' binding; the
     genome's tag-chosen cells under an evolvable io_placement strategy, see
-    nv_evo/io_placement.py) — or None if the net is unusable.
+    substrates/nervous/io_placement.py) — or None if the net is unusable.
 
-    Under an evolvable strategy the organism nucleates from ONE neutral center
-    cell (growth_seeds) instead of the input pads — the body is not anchored to
-    the declared I/O positions; the tags wire it afterward."""
-    from nv_evo.io_placement import (
+    Spatial genomes nucleate from their heritable input anchors. Tag-rank and
+    type-wiring genomes use one neutral centre because their I/O alleles do not
+    encode developmental coordinates."""
+    from substrates.nervous.io_placement import (
         io_strategy, bind_io, growth_seeds, binding_progress,
         record_binding_progress)
     strategy = io_strategy(ttarget)
-    grid = grow_lut(genome, seeds=growth_seeds(ttarget, strategy),
+    grid = grow_lut(genome, seeds=growth_seeds(
+                        ttarget, strategy, genome),
                     grid_size=ttarget.grid_size, iters=ttarget.iters)
     node_types = None
     if strategy != 'fixed':
         from .lut import cell_io_tags
         node_types = cell_io_tags(genome, grid)
-        if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+        if strategy in (
+                'terminal_nodes', 'wiring_chromosome',
+                'spatial_chromosome'):
             record_binding_progress(
                 genome,
                 binding_progress(genome, grid, ttarget, tags=node_types))
@@ -416,6 +433,10 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
     in_pos  = list(target.inputs) if in_pos is None else list(in_pos)
     flat_pos, lanes = _expand_input_lanes(in_pos)
     in_set  = set(flat_pos)
+    from substrates.nervous.io_placement import terminal_node_sets
+    terminal_inputs, terminal_outputs = terminal_node_sets(
+        target, in_pos,
+        {index: list(group) for index, group in enumerate(watch_groups)})
     active  = [i for i, b in enumerate(in_bits) if b]
     totals  = None
     for delay, widths in schedule:
@@ -434,7 +455,9 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
                           else 0)
                          for k in range(len(flat_pos)))
                    for t in range(hi)]
-        sim    = AsyncLutSim(grid)
+        sim = AsyncLutSim(
+            grid, input_nodes=terminal_inputs,
+            output_nodes=terminal_outputs)
         levels = sim.run_bits(streams, flat_pos, hi)
         window = levels[lo:hi]
         cells  = sim._cells
@@ -511,19 +534,22 @@ def score_lut_combinational(genome, target):
 
     Under an evolvable io_placement strategy the driven input cells AND the read
     output cells come from the genome's tags instead (no duty-fitting search —
-    the binding is heritable, not fitted), and the organism nucleates from ONE
-    neutral center cell rather than the input pads."""
-    from nv_evo.io_placement import (
+    the binding is heritable, not fitted). Spatial input anchors also serve as
+    germline positions; other evolvable modes nucleate from one neutral centre."""
+    from substrates.nervous.io_placement import (
         io_strategy, bind_io, growth_seeds, binding_progress,
         record_binding_progress)
     strategy = io_strategy(target)
-    grid = grow_lut(genome, seeds=growth_seeds(target, strategy),
+    grid = grow_lut(genome, seeds=growth_seeds(
+                        target, strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
     node_types = None
     if strategy != 'fixed':
         from .lut import cell_io_tags
         node_types = cell_io_tags(genome, grid)
-        if strategy in ('wiring_chromosome', 'spatial_chromosome'):
+        if strategy in (
+                'terminal_nodes', 'wiring_chromosome',
+                'spatial_chromosome'):
             record_binding_progress(
                 genome,
                 binding_progress(genome, grid, target, tags=node_types))
@@ -533,7 +559,7 @@ def score_lut_combinational(genome, target):
         return 0.0
 
     if strategy != 'fixed':
-        from nv_evo.io_placement import output_groups
+        from substrates.nervous.io_placement import output_groups
         bound = bind_io(genome, grid, target, strategy,
                         tags=node_types)
         if bound is None:
@@ -568,10 +594,11 @@ def lut_case_outputs(genome, target):
     """Grow, place outputs, and run each combinational case to the horizon.
     Returns (grid, out_pos, cases); each case carries the settled node activity
     (`node_outputs` 0/1 and `node_nibbles` 4-bit N/S/E/W) so the GUI can draw the
-    array's response. The LUT analogue of nv_evo.nervous_case_outputs."""
-    from nv_evo.io_placement import io_strategy, bind_io, growth_seeds
+    array's response. The LUT analogue of substrates.nervous.nervous_case_outputs."""
+    from substrates.nervous.io_placement import io_strategy, bind_io, growth_seeds
     strategy = io_strategy(target)
-    grid = grow_lut(genome, seeds=growth_seeds(target, strategy),
+    grid = grow_lut(genome, seeds=growth_seeds(
+                        target, strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
     cases = []
     if len(grid) <= target.n_inputs or not target.cases or not target.outputs:
@@ -583,7 +610,7 @@ def lut_case_outputs(genome, target):
     # that averaged duty is an exact 0/1 (a fixed point in every trial).
     if strategy != 'fixed':
         from .lut import cell_io_tags
-        from nv_evo.io_placement import output_groups
+        from substrates.nervous.io_placement import output_groups
         bound = bind_io(genome, grid, target, strategy,
                         tags=cell_io_tags(genome, grid))
         if bound is None:
@@ -619,7 +646,12 @@ def lut_case_outputs(genome, target):
                           else 0)
                          for k in range(len(flat_pos)))
                    for t in range(hi)]
-        sim = AsyncLutSim(grid)
+        from substrates.nervous.io_placement import terminal_node_sets
+        terminal_inputs, terminal_outputs = terminal_node_sets(
+            target, in_pos, out_pos)
+        sim = AsyncLutSim(
+            grid, input_nodes=terminal_inputs,
+            output_nodes=terminal_outputs)
         sim.run_bits(streams, flat_pos, hi)
         node_out = {c: (1 if sim.out[c] else 0) for c in grid}
         duty = {
@@ -638,13 +670,13 @@ def lut_case_outputs(genome, target):
 
 def lut_truth_table(genome, target):
     """Per-case truth-table report for a combinational target on the LUT array
-    (mirrors nv_evo.nervous_truth_table)."""
+    (mirrors substrates.nervous.nervous_truth_table)."""
     grid, out_pos, cases = lut_case_outputs(genome, target)
     lines = ['Target: %s   [LUT array]' % target.name,
              'Circuit: %d live cells  (square array, four 16-bit LUTs/cell,'
              % len(grid),
              '          asynchronous level logic — paper Architecture 2)']
-    from nv_evo.io_placement import output_groups
+    from substrates.nervous.io_placement import output_groups
     groups = output_groups(out_pos)
     for term in target.outputs:
         cells = groups.get(term.role, [])
@@ -697,7 +729,7 @@ def evaluate_lut_full(genome, target):
     the units ε-lexicase streams over (None for combinational targets)."""
     if not getattr(target, 'temporal', False):
         return score_lut_combinational(genome, target), None
-    from nv_evo.scoring import contract_case_count
+    from substrates.nervous.scoring import contract_case_count
     n_cases = contract_case_count(target)
     prep = prepare_lut(genome, target)
     if prep is None:
@@ -707,26 +739,23 @@ def evaluate_lut_full(genome, target):
     return score, cases
 
 
-def evaluate_lut(genome, target):
-    return evaluate_lut_full(genome, target)[0]
-
-
 def _evaluate_lut_selection_record(genome, target):
     fitness, cases = evaluate_lut_full(genome, target)
-    from nv_evo.io_placement import io_strategy
+    from substrates.nervous.io_placement import io_strategy
     total = target.n_inputs + len(target.outputs)
     if io_strategy(target) not in (
-            'wiring_chromosome', 'spatial_chromosome'):
+            'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
         return fitness, cases, (total, total)
     progress = getattr(genome, '_io_binding_progress', (total, total))
     return fitness, cases, progress
 
 
 def genome_signature(genome):
-    return tuple(
+    return (getattr(genome, 'seed_state', None),) + tuple(
         (c.tag, c.split, getattr(c, 'telomere', 0), getattr(c, 'wiring', False),
          tuple((g.ctx_n, g.ctx_e, g.ctx_s, g.ctx_w, g.self_in, g.self_out,
-                getattr(g, 'tag', 0), getattr(g, 'io_selector', 0))
+                getattr(g, 'tag', 0), getattr(g, 'io_selector', 0),
+                getattr(g, 'io_kind', 0))
                for g in c.genes))
         for c in genome.chromosomes)
 
@@ -769,16 +798,12 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
                 out[i] = r
             if cache is not None:
                 cache[sig] = r
-    from nv_evo.io_placement import record_binding_progress
+    from substrates.nervous.io_placement import record_binding_progress
     for genome, record in zip(genomes, out):
         progress = record[2] if len(record) > 2 else (
             target.n_inputs + len(target.outputs),) * 2
         record_binding_progress(genome, progress)
     return [r[0] for r in out], [r[1] for r in out]
-
-
-def eval_batch_lut(genomes, target, cache=None):
-    return eval_batch_cases(genomes, target, cache)[0]
 
 
 # ── genetic operators ────────────────────────────────────────────────────────────
@@ -802,7 +827,9 @@ def _normalize_split(chromosome):
 
 def _recombine_gene_fields(gene_a, gene_b, fields=None):
     """Uniformly recombine a single LUT rule's active alleles."""
-    fields = tuple(_GENE_FIELDS) + ('tag',) if fields is None else fields
+    fields = (
+        tuple(_GENE_FIELDS) + ('tag', 'io_kind')
+        if fields is None else fields)
     differing = [field for field in fields
                   if getattr(gene_a, field) != getattr(gene_b, field)]
     if len(differing) < 2:
@@ -819,10 +846,11 @@ def _recombine_gene_fields(gene_a, gene_b, fields=None):
 
 def _recombination_signature(genome):
     """Alleles crossover can actually exchange (not slot/object identity)."""
-    return tuple(
+    return (getattr(genome, 'seed_state', None),) + tuple(
         (getattr(chromosome, 'wiring', False),
          tuple((*(getattr(gene, field) for field in _GENE_FIELDS),
-                getattr(gene, 'tag', 0), getattr(gene, 'io_selector', 0))
+                getattr(gene, 'tag', 0), getattr(gene, 'io_selector', 0),
+                getattr(gene, 'io_kind', 0))
                for gene in chromosome.genes))
         for chromosome in genome.chromosomes)
 
@@ -895,7 +923,7 @@ def _tweak_gene(gene):
 
 def _mutate_io_tag(genome, io_placement=None):
     """Mutate one body priority, type/selector pair, or spatial anchor."""
-    from nv_evo.io_placement import mutate_io_allele
+    from substrates.nervous.io_placement import mutate_io_allele
     mutate_io_allele(genome, LUT_STATES, strategy=io_placement)
 
 
@@ -994,7 +1022,8 @@ def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
 
 
 def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
-               chromosome_count=None, evolve_io=False, io_placement=None):
+               chromosome_count=None, evolve_io=False, io_placement=None,
+               io_mutations=1, coordinated_io=False):
     if (chromosome_count is not None
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
@@ -1017,7 +1046,14 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
     else:
         _force_nonparent_tweak(g, genome)
     if evolve_io and random.random() < IO_MUTATION_PROB:
-        _mutate_io_tag(g, io_placement=io_placement)
+        if coordinated_io:
+            from substrates.nervous.io_placement import mutate_io_bundle
+            mutate_io_bundle(
+                g, LUT_STATES, strategy=io_placement,
+                count=max(2, int(io_mutations)))
+        else:
+            for _ in range(max(1, int(io_mutations))):
+                _mutate_io_tag(g, io_placement=io_placement)
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
     return g
@@ -1113,10 +1149,13 @@ def compact_genome(genome, seeds, grid_size=7, iters=30):
         new_chroms.insert(0, Chromosome(
             genes=c0.genes[:1], split=0, tag=c0.tag,
             telomere=getattr(c0, 'telomere', MAX_TELOMERE), wiring=False))
-    return Genome(chromosomes=new_chroms, tag=genome.tag)
+    return Genome(
+        chromosomes=new_chroms, tag=genome.tag,
+        seed_state=getattr(genome, 'seed_state', None),
+        provenance=getattr(genome, 'provenance', ''))
 
 
-# ── ontogeny seeding is THE seed path (see lut_evo/ontogeny.py) ──────────────────
+# ── ontogeny seeding is THE seed path (see substrates/lut/ontogeny.py) ──────────────────
 # Sparse random genomes grow near-uniform DIAMONDS — the "uninteresting" LUTs.
 # Richness tracks gene density (sim6's table_create invents a gene per unseen
 # context), so the population/immigrants are seeded with sim6-style biomorph
@@ -1158,7 +1197,7 @@ def _tiebreak(genome):
 
 def rank_key(genome, fitness):
     """Selection-only wiring viability, then honest behavior, then tie-break."""
-    from nv_evo.io_placement import binding_viability
+    from substrates.nervous.io_placement import binding_viability
     return (binding_viability(genome), fitness, _tiebreak(genome))
 
 
@@ -1168,6 +1207,152 @@ def _gene_cap():
     return ONTOGENY_CAP
 
 
+def plateau_rescue_candidates(
+        genome, target, limit=48, max_telomere=MAX_TELOMERE):
+    """Legitimate rescue genomes for a stalled spatial-I/O LUT run.
+
+    Three failure modes are covered:
+
+    * A retained periodic truth table with at most four inputs/outputs is
+      compiled into a compact crossbar, inverse-grown into an ordinary genome,
+      and verified. This is an explicit feasibility witness and gives genuinely
+      hard arithmetic targets a reachable rescue seed.
+
+    * For a two-input/two-output body, enumerate compact 2x2 port motifs.  The
+      four ports are moved together, allowing selection to cross valleys where
+      every one-port intermediate is worse.
+    * Flip one bit of a rule whose output LUT is expressed at a currently bound
+      output cell.  Maintenance rules are tried before growth rules so a local
+      logic repair need not disturb morphology.
+
+    Every proposal remains an ordinary genome and is evaluated by the unchanged
+    target contract. The compiler uses the target's declared truth table; the
+    local motif/rule neighbourhood does not.
+    """
+    limit = max(0, int(limit))
+    if limit == 0:
+        return []
+    from substrates.nervous.io_placement import (
+        bind_io, flat_inputs, flat_outputs, growth_seeds, io_strategy,
+        set_spatial_port_positions)
+    if io_strategy(target) != 'spatial_chromosome':
+        return []
+    seen = {_recombination_signature(genome)}
+
+    def unique(candidate, destination):
+        signature = _recombination_signature(candidate)
+        if signature in seen:
+            return
+        seen.add(signature)
+        destination.append(candidate)
+
+    compiled = []
+    from .synthesis import (
+        SynthesisError, synthesize_combinational_genome)
+    try:
+        result = synthesize_combinational_genome(
+            target, chromosome_count=len(genome.chromosomes),
+            max_telomere=max_telomere)
+        unique(result.genome, compiled)
+    except SynthesisError:
+        pass
+
+    if len(compiled) >= limit:
+        return compiled[:limit]
+    from substrates.nervous.io_placement import spatial_output_variants
+    readouts = []
+    for candidate in spatial_output_variants(
+            genome, target,
+            limit=max(1, (limit - len(compiled)) // 2)):
+        unique(candidate, readouts)
+    grid = grow_lut(
+        genome, seeds=growth_seeds(
+            target, io_strategy(target), genome),
+        grid_size=target.grid_size, iters=target.iters)
+    if not grid:
+        return (compiled + readouts)[:limit]
+    from .lut import cell_io_tags
+    bound = bind_io(
+        genome, grid, target, 'spatial_chromosome',
+        tags=cell_io_tags(genome, grid))
+    if bound is None:
+        return (compiled + readouts)[:limit]
+    in_pos, out_pos = bound
+    current = flat_inputs(in_pos) + flat_outputs(out_pos)
+    positions = sorted(grid)
+    motif = []
+    if target.n_inputs == 2 and len(target.outputs) == 2 and len(current) == 4:
+        from itertools import permutations
+        cells = set(grid)
+        assignments = []
+        for x, y in positions:
+            square = {
+                (x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)}
+            if not square.issubset(cells):
+                continue
+            diagonals = (
+                ([(x, y), (x + 1, y + 1)],
+                 [(x + 1, y), (x, y + 1)]),
+                ([(x + 1, y), (x, y + 1)],
+                 [(x, y), (x + 1, y + 1)]),
+            )
+            for inputs, outputs in diagonals:
+                for input_order in permutations(inputs):
+                    for output_order in permutations(outputs):
+                        assignment = list(input_order + output_order)
+                        distance = sum(
+                            abs(old[0] - new[0]) + abs(old[1] - new[1])
+                            for old, new in zip(current, assignment))
+                        assignments.append((distance, assignment))
+        assignments.sort(key=lambda item: (item[0], item[1]))
+        for _distance, assignment in assignments:
+            candidate = clone_genome(genome)
+            if set_spatial_port_positions(
+                    candidate, positions, assignment,
+                    target=target) == len(assignment):
+                unique(candidate, motif)
+
+    rule = []
+    output_values = {
+        int(value)
+        for pos in flat_outputs(out_pos)
+        for value in grid.get(pos, ())
+        if int(value)
+    }
+    loci = []
+    for chromosome_index, chromosome in enumerate(genome.chromosomes):
+        if getattr(chromosome, 'wiring', False):
+            continue
+        for gene_index, gene in enumerate(chromosome.genes):
+            if int(gene.self_out) in output_values:
+                # Maintenance before growth, then deterministic locus order.
+                loci.append((
+                    0 if int(gene.self_in) else 1,
+                    chromosome_index, gene_index))
+    loci.sort()
+    for _kind, chromosome_index, gene_index in loci:
+        for bit in range(16):
+            candidate = clone_genome(genome)
+            chromosome = candidate.chromosomes[chromosome_index]
+            gene = copy.copy(chromosome.genes[gene_index])
+            gene.self_out ^= 1 << bit
+            chromosome.genes[gene_index] = gene
+            unique(candidate, rule)
+
+    # Reserve room for both rescue families.  Unused quota from one is filled
+    # by the other, so small/simple bodies do not waste evaluation slots.
+    remaining = limit - len(compiled) - len(readouts)
+    motif_quota = remaining // 2
+    rule_quota = remaining - motif_quota
+    selected = (
+        compiled + readouts + motif[:motif_quota] + rule[:rule_quota])
+    if len(selected) < limit:
+        selected += motif[motif_quota:motif_quota + limit - len(selected)]
+    if len(selected) < limit:
+        selected += rule[rule_quota:rule_quota + limit - len(selected)]
+    return selected[:limit]
+
+
 def tournament_lut(population, fitnesses):
     idx = random.sample(range(len(population)), min(TOURNAMENT_K, len(population)))
     return population[max(
@@ -1175,7 +1360,7 @@ def tournament_lut(population, fitnesses):
 
 
 def select_parent(population, fitnesses, case_vecs=None):
-    import nv_evo.ga as _nga
+    import substrates.nervous.ga as _nga
     if (_nga.SELECTION == 'lexicase' and case_vecs is not None
             and case_vecs[0] is not None):
         return _nga._lexicase_parent(population, case_vecs)
@@ -1211,7 +1396,8 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, ga_config=None,
                     chromosome_count=None, recombination=True,
-                    evolve_io=False, io_placement=None):
+                    evolve_io=False, io_placement=None, archive_parent=None,
+                    stagnation=0, rescue_candidates=None):
     """One generation of a steady, exploratory GA — elitism + immigrants +
     recombination/mutation, parents via ε-lexicase when per-case vectors are
     available (temporal targets), else tournament. Elites are breeders only;
@@ -1233,26 +1419,44 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         if any(len(genome.chromosomes) != chromosome_count
                for genome in population):
             raise ValueError('population violates configured chromosome count')
-    import nv_evo.ga as _nga
+    import substrates.nervous.ga as _nga
     selection = (_nga.SELECTION if ga_config is None else ga_config.selection)
     strategy = (io_placement or (
         getattr(ga_config, 'io_placement', 'fixed')
         if ga_config is not None else 'fixed'))
-    evolve_io = evolve_io or strategy != 'fixed'
+    evolve_io = evolve_io or strategy in (
+        'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+        'spatial_chromosome')
     if make_genome is None:
         if evolve_io:
-            from nv_evo.io_placement import seed_io_metadata
+            from substrates.nervous.io_placement import (
+                seed_io_metadata, seed_terminal_kinds)
             inferred_ports = 0
             if strategy in (
                     'wiring_chromosome', 'spatial_chromosome') and population:
-                from nv_evo.io_placement import wiring_chromosome
+                from substrates.nervous.io_placement import wiring_chromosome
                 mapping = wiring_chromosome(population[0])
                 inferred_ports = len(mapping.genes) if mapping is not None else 0
-            make_genome = lambda: seed_io_metadata(
-                make_seed_genome(chromosome_count or 2),
-                wiring_chromosome=(strategy == 'wiring_chromosome'),
-                spatial_chromosome=(strategy == 'spatial_chromosome'),
-                n_ports=inferred_ports, tag_rank=(strategy == 'tag_rank'))
+            def make_genome():
+                genome = seed_io_metadata(
+                    make_seed_genome(chromosome_count or 2),
+                    wiring_chromosome=(strategy == 'wiring_chromosome'),
+                    spatial_chromosome=(strategy == 'spatial_chromosome'),
+                    n_ports=inferred_ports,
+                    tag_rank=(strategy == 'tag_rank'))
+                if strategy == 'terminal_nodes':
+                    # Direct next_population callers do not provide a target.
+                    # Preserve the population's approximate role inventory.
+                    reference = population[0] if population else None
+                    kinds = [
+                        int(getattr(gene, 'io_kind', 0))
+                        for chromosome in (
+                            reference.chromosomes if reference else ())
+                        for gene in chromosome.genes]
+                    seed_terminal_kinds(
+                        genome, max(1, kinds.count(1) // 2),
+                        max(1, kinds.count(2) // 2))
+                return genome
         else:
             make_genome = lambda: make_seed_genome(chromosome_count or 2)
     n_elite = elite_count if elite_count is not None else int(pop * ELITE_FRAC)
@@ -1263,7 +1467,26 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         key=lambda i: rank_key(population[i], fitnesses[i]),
         reverse=True)
     # Elites choose parents here but are never copied into the next generation.
-    new_pop = [make_genome() for _ in range(n_imm)]                  # immigrants
+    # Plateau-rescue proposals and archived-champion descendants are still new,
+    # mutated genomes; no evaluated parent survives into this generation.
+    new_pop = [
+        clone_genome(candidate)
+        for candidate in list(rescue_candidates or ())[:pop]]
+    remaining = pop - len(new_pop)
+    new_pop += [make_genome() for _ in range(min(n_imm, remaining))]
+    if (archive_parent is not None and stagnation >= STRESS_PATIENCE
+            and len(new_pop) < pop):
+        archive_count = min(
+            max(1, int(round(pop * 0.10))), pop - len(new_pop))
+        for index in range(archive_count):
+            new_pop.append(mutate_lut(
+                archive_parent, mean_mutations, max_telomere=(
+                    MAX_TELOMERE if ga_config is None
+                    else ga_config.max_telomere),
+                chromosome_count=chromosome_count, evolve_io=evolve_io,
+                io_placement=strategy,
+                io_mutations=2,
+                coordinated_io=(evolve_io and index % 2 == 0)))
     use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
     residual = order[n_elite:] if n_elite < pop else order
@@ -1340,16 +1563,29 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                seed=None):
     if seed is not None:
         random.seed(seed)
+        # _ONTO_POOL survives for the life of the PROCESS, so without this a
+        # seeded run is only reproducible when it happens to run first. The
+        # first call into a fresh process grows 24 seed genomes and caches
+        # them; every later call draws its whole population from that cache
+        # instead — masters grown under a PREVIOUS target's RNG stream. Same
+        # seed, same config, different answer depending on what ran before:
+        # LUT AND scored 1.000 run first and 0.750 run after Half adder, which
+        # silently contaminated rows 2..46 of every multi-target sweep.
+        # Clearing it costs ~24 ontogeny growths (~7s) against 100-600s rows,
+        # and only on the seeded path, so interactive runs keep the cache.
+        _ONTO_POOL.clear()
     if not 1 <= n_chroms <= MAX_CHROMS:
         raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
-    from nv_evo.io_placement import (
+    from substrates.nervous.io_placement import (
         growth_seeds, io_strategy, seed_io_metadata,
-        seed_spatial_from_phenotype, seed_wiring_from_phenotype,
+        seed_spatial, seed_wiring_from_phenotype,
         uses_port_chromosome)
     strategy = io_strategy(target)
     if uses_port_chromosome(strategy) and n_chroms < 3:
         raise ValueError('chromosome-based I/O requires n_chroms >= 3')
-    evolve_io = strategy != 'fixed'
+    evolve_io = strategy in (
+        'terminal_nodes', 'tag_rank', 'wiring_chromosome',
+        'spatial_chromosome')
     n_ports = target.n_inputs + len(target.outputs)
     if evolve_io:
         def make_genome():
@@ -1358,18 +1594,20 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                 wiring_chromosome=(strategy == 'wiring_chromosome'),
                 spatial_chromosome=(strategy == 'spatial_chromosome'),
                 n_ports=n_ports, tag_rank=(strategy == 'tag_rank'))
-            if uses_port_chromosome(strategy):
+            if strategy == 'terminal_nodes':
+                from substrates.nervous.io_placement import seed_terminal_kinds
+                seed_terminal_kinds(
+                    genome, target.n_inputs, len(target.outputs))
+            if strategy == 'spatial_chromosome':
+                seed_spatial(genome, None, target)
+            elif uses_port_chromosome(strategy):
                 from .lut import grow_lut, cell_io_tags
                 grid = grow_lut(
-                    genome, seeds=growth_seeds(target),
+                    genome, seeds=growth_seeds(target, strategy, genome),
                     grid_size=target.grid_size, iters=target.iters)
                 tags = cell_io_tags(genome, grid)
-                if strategy == 'spatial_chromosome':
-                    seed_spatial_from_phenotype(
-                        genome, grid, target, tags=tags)
-                else:
-                    seed_wiring_from_phenotype(
-                        genome, grid, target, tags=tags)
+                seed_wiring_from_phenotype(
+                    genome, grid, target, tags=tags)
             return genome
     else:
         make_genome = lambda: make_seed_genome(n_chroms)  # ontogeny biomorph seeds
@@ -1391,10 +1629,16 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
             mm = adaptive_mutation_rate(mut_rate, stagnation,
                                         solved=best_fitness >= 1.0)
             parents, parent_fitnesses, parent_cases = population, fitnesses, cases
+            rescue = (
+                plateau_rescue_candidates(
+                    best_genome, target, limit=min(48, max(1, pop // 2)))
+                if (stagnation >= STRESS_PATIENCE
+                    and best_fitness < 1.0) else ())
             offspring = next_population(
                 parents, parent_fitnesses, make_genome, parent_cases, mm,
                 chromosome_count=n_chroms, evolve_io=evolve_io,
-                io_placement=strategy)
+                io_placement=strategy, archive_parent=best_genome,
+                stagnation=stagnation, rescue_candidates=rescue)
             offspring_fitnesses, offspring_cases = eval_batch_cases(
                 offspring, target, cache, ex)
             if max(best_fitness, max(offspring_fitnesses)) >= 1.0:

@@ -1,5 +1,5 @@
 """
-lut_evo/boolfn.py — make a 16-bit LUT understandable as boolean logic.
+substrates/lut/boolfn.py — make a 16-bit LUT understandable as boolean logic.
 
 Each live LUT cell holds four 16-bit lookup tables (Ln, Ls, Le, Lw). A single
 16-bit table is not an opaque number: it is a boolean function of the FOUR bits
@@ -29,12 +29,6 @@ def minterms(lut):
     """The input indices (0..15) for which the LUT outputs 1."""
     lut &= 0xFFFF
     return [i for i in range(16) if (lut >> i) & 1]
-
-
-def truth_string(lut):
-    """The 16 output bits in index order 0..15 (index = N + 2S + 4E + 8W)."""
-    lut &= 0xFFFF
-    return ''.join(str((lut >> i) & 1) for i in range(16))
 
 
 def popcount(lut):
@@ -132,48 +126,6 @@ def lut_sop(lut, names=INPUT_NAMES):
                 for b in range(len(names))]
         terms.append(_AND.join(lits))
     return _OR.join(terms)
-
-
-def lut_summary(lut):
-    """One-line human description of a 16-bit LUT: the boolean expression plus a
-    density hint. ``0`` reads as a dead direction; ``0xFFFF`` as constant-on."""
-    lut &= 0xFFFF
-    if lut == 0:
-        return 'dead (always 0)'
-    if lut == 0xFFFF:
-        return 'always 1'
-    return '%s   [%d/16 on]' % (lut_sop(lut), popcount(lut))
-
-
-def lut_class_char(lut):
-    """A one-glyph class for a LUT, for compact per-wedge labelling on the net:
-    '' dead · '1' constant-on · a variable (buffer, e.g. 'N') or ¬variable
-    (inverter) · '·' single product (AND of ≥2) · '+' sum (≥2 terms)."""
-    lut &= 0xFFFF
-    ones = minterms(lut)
-    if not ones:
-        return ''
-    if len(ones) == 16:
-        return '1'
-    terms = lut_sop(lut).split(_OR)
-    if len(terms) == 1:
-        lits = terms[0].split(_AND)
-        return lits[0] if len(lits) == 1 else _AND
-    return '+'
-
-
-def karnaugh(lut):
-    """A 4x4 Karnaugh-style ON/OFF grid of the LUT as ASCII — rows vary EW,
-    columns vary NS — for an at-a-glance view of the raw table. '#' = 1, '.' = 0."""
-    lut &= 0xFFFF
-    rows = []
-    for ew in range(4):                # E,W bits -> row
-        cells = []
-        for ns in range(4):            # N,S bits -> column
-            idx = ns | (ew << 2)
-            cells.append('#' if (lut >> idx) & 1 else '.')
-        rows.append(' '.join(cells))
-    return rows
 
 
 if __name__ == '__main__':      # exhaustive self-test: SOP must match every LUT

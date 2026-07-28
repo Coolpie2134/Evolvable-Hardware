@@ -1,5 +1,5 @@
 """
-lut_evo/genome.py — genome for the boolean-logic lookup (LUT) array.
+substrates/lut/genome.py — genome for the boolean-logic lookup (LUT) array.
 
 Paper Architecture 2 (Edwards EH'02 §5-6; sim6 reference): each cell of a
 square, 4-neighbour grid holds four 16-bit lookup tables (one per output
@@ -16,7 +16,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
-from evo_runtime.limits import MAX_CHROMOSOME_COUNT
+from runtime.limits import MAX_CHROMOSOME_COUNT
 
 LUT_BITS     = 16
 LUT_STATES   = 1 << LUT_BITS     # 65536 possible cell states
@@ -33,6 +33,9 @@ class LutGene:
     ctx_w:    int = 0
     self_in:  int = 0
     self_out: int = 0            # 0 = off / dead
+    # Heritable developmental node identity. 0 = ordinary body cell,
+    # 1 = source-only input terminal, 2 = sink-only output terminal.
+    io_kind:  int = 0
     # Body-gene expression priority under tag_rank; desired direction-LUT type
     # or normalised x coordinate on a chromosome-3 port gene.
     tag:      int = 0
@@ -52,7 +55,7 @@ class Chromosome:
     split: int = 0
     tag:   int = 0
     telomere: int = MAX_TELOMERE
-    # Non-developmental port-chromosome marker (see nv_evo/genome.py). Its genes
+    # Non-developmental port-chromosome marker (see substrates/nervous/genome.py). Its genes
     # hold either type/selector or x/y I/O mappings. Default False leaves every
     # existing genome unchanged.
     wiring:   bool = False
@@ -62,6 +65,14 @@ class Chromosome:
 class Genome:
     chromosomes: List[Chromosome] = field(default_factory=list)
     tag: int = 0
+    # Optional heritable polarisation of the developmental seed cell.  ``None``
+    # preserves the historical isotropic SEED_STATE exactly.  A four-LUT state
+    # lets designed/evolved organisms break the otherwise unavoidable fourfold
+    # symmetry of growth from one neutral centre cell.
+    seed_state: tuple[int, int, int, int] | None = None
+    # Non-behavioural audit label. Compiler rescues retain their origin through
+    # mutation/checkpointing so they cannot be mistaken for unaided discoveries.
+    provenance: str = ''
 
 
 def random_lut_gene() -> LutGene:
@@ -93,7 +104,9 @@ def random_lut_chromosome(n_genes=None, wiring=False) -> Chromosome:
 
 
 def random_lut_genome(n_chroms=2, wiring_chromosome=False, n_ports=None,
-                      tag_rank=False, spatial_chromosome=False) -> Genome:
+                      tag_rank=False, spatial_chromosome=False,
+                      terminal_nodes=False, n_inputs=0,
+                      n_outputs=0) -> Genome:
     """Build a fixed genome or seed one of the evolvable I/O strategies."""
     chroms = [random_lut_chromosome() for _ in range(n_chroms)]
     genome = Genome(
@@ -101,8 +114,11 @@ def random_lut_genome(n_chroms=2, wiring_chromosome=False, n_ports=None,
         tag = random.randint(0, 9999),
     )
     if wiring_chromosome or spatial_chromosome or tag_rank:
-        from nv_evo.io_placement import seed_io_metadata
+        from substrates.nervous.io_placement import seed_io_metadata
         seed_io_metadata(genome, wiring_chromosome=wiring_chromosome,
                          n_ports=n_ports, tag_rank=tag_rank,
                          spatial_chromosome=spatial_chromosome)
+    if terminal_nodes:
+        from substrates.nervous.io_placement import seed_terminal_kinds
+        seed_terminal_kinds(genome, n_inputs, n_outputs)
     return genome

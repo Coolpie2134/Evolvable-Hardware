@@ -6,8 +6,8 @@ The project's north-star claim is that the substrate is *genuinely asynchronous*
 (continuous-time, event-driven), not merely a synchronous machine clocked at TICK
 granularity. A single lucky trace cannot establish that; a clock cheat has bitten
 this project before ("combinational scoring was phantom / fixed-tick"). These
-tests exercise the engine (nv_evo.pulse.PulseSim, driven through the audited
-float path in nv_evo.simulation) with metamorphic relations that a truly
+tests exercise the engine (substrates.nervous.pulse.PulseSim, driven through the audited
+float path in substrates.nervous.simulation) with metamorphic relations that a truly
 time-invariant system must satisfy and a tick-quantized one cannot:
 
   * TRANSLATION — shifting all inputs by an arbitrary (sub-tick) delta shifts all
@@ -30,10 +30,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nv_evo import random_hex_genome                       # noqa: E402
-from nv_evo import pulse, simulation as sim                # noqa: E402
-from nv_evo.pulse import PulseConfig                       # noqa: E402
-from nv_evo.nervous import grow_nervous, interpret_nervous # noqa: E402
+from substrates.nervous import random_hex_genome                       # noqa: E402
+from substrates.nervous import pulse, simulation as sim                # noqa: E402
+from substrates.nervous.pulse import PulseConfig                       # noqa: E402
+from substrates.nervous.nervous import grow_nervous, interpret_nervous # noqa: E402
 
 SEEDS = ((0, 0), (2, 0))
 TOL = 1e-6

@@ -28,7 +28,7 @@ class FittedReadout:
     # genome's tags pick the injection cells, so they too are a fitted parameter
     # that validation must reuse unchanged — otherwise validation would silently
     # re-bind inputs to fresh cells. Defaulted so legacy 4-arg construction (e.g.
-    # nv_evo/persistence.py) still works.
+    # substrates/nervous/persistence.py) still works.
     # Under an evolvable strategy each entry is itself a tuple of attachment
     # cells (an input may fan out to several sites); fixed binding stores ().
     inputs: Tuple = ()
@@ -62,7 +62,7 @@ def fit_readout(genome, target, backend='nervous'):
             return None
         in_pos, out_pos, traces = _freeze_inputs(prep[2]), prep[3], prep[4]
     elif backend == 'lut':
-        from lut_evo.ga import prepare_lut
+        from substrates.lut.ga import prepare_lut
         from .scoring import score_contract
         prep = prepare_lut(genome, target)
         if prep is None:
@@ -94,16 +94,18 @@ def score_frozen(genome, target, fitted):
     expected_roles = {terminal.role for terminal in target.outputs}
     if set(out_pos) != expected_roles:
         raise ValueError('fitted output roles do not match validation target')
+    from .io_placement import io_strategy
+    strategy = io_strategy(target)
 
     if fitted.backend == 'nervous':
         from .nervous import (grow_nervous, interpret_nervous, node_delays)
         from .temporal import trace_fixed_outputs
         from .scoring import score_contract
         from .io_placement import growth_seeds
-        # Same developmental origin as training: pads under fixed binding, ONE
-        # neutral center cell under an evolvable strategy — else validation
-        # would grow a different organism than the one the binding was fitted on.
-        grid = grow_nervous(genome, seeds=growth_seeds(target),
+        # Use the same genome-aware developmental origin as training; otherwise
+        # validation could grow a different organism from the fitted one.
+        grid = grow_nervous(genome, seeds=growth_seeds(
+                                target, strategy, genome),
                             grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return 0.0
@@ -123,11 +125,12 @@ def score_frozen(genome, target, fitted):
         traces = trace_fixed_outputs(
             grid, routing, in_pos, out_pos, target, delays=delays, arch=arch)
     elif fitted.backend == 'lut':
-        from lut_evo.lut import grow_lut
-        from lut_evo.ga import trace_fixed_outputs
+        from substrates.lut.lut import grow_lut
+        from substrates.lut.ga import trace_fixed_outputs
         from .scoring import score_contract
         from .io_placement import growth_seeds
-        grid = grow_lut(genome, seeds=growth_seeds(target),
+        grid = grow_lut(genome, seeds=growth_seeds(
+                            target, strategy, genome),
                         grid_size=target.grid_size, iters=target.iters)
         # Drive the FITTED input cells (the genome's evolved binding under an
         # io_placement strategy); the seed pads for fixed binding.

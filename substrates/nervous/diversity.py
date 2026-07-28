@@ -1,5 +1,5 @@
 """
-nv_evo/diversity.py — how much genuine variety is in an evaluated population?
+substrates/nervous/diversity.py — how much genuine variety is in an evaluated population?
 
 Once every genome scores 1.0, every fitness-derived spread measure (sigma,
 best-minus-mean, ...) is identically zero: they go blind exactly where the
@@ -188,9 +188,10 @@ def _nv_adapter():
     from .temporal import score_temporal
 
     def grow(genome, target, config):
-        from .io_placement import growth_seeds
+        from .io_placement import growth_seeds, io_strategy
         arch = getattr(genome, 'arch', 'single')
-        grid = grow_nervous(genome, seeds=growth_seeds(target),
+        grid = grow_nervous(genome, seeds=growth_seeds(
+                                target, io_strategy(target), genome),
                             grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return None
@@ -215,22 +216,24 @@ def _nv_adapter():
 
 def _nv_mutate(genome, config, chromosome_count):
     from .ga import mutate_nv, clone_genome
+    from .io_placement import evolves_io
     ga = getattr(config, 'ga', None)
     strategy = getattr(ga, 'io_placement', 'fixed')
     return mutate_nv(clone_genome(genome), 1.0,
                      chromosome_count=chromosome_count,
                      evolve_delay=bool(getattr(ga, 'evolve_delay', None)),
-                     evolve_io=(strategy != 'fixed'))
+                     evolve_io=evolves_io(strategy))
 
 
 def _lut_adapter():
-    from lut_evo.ga import (genome_signature, prepare_lut, score_lut_temporal,
+    from substrates.lut.ga import (genome_signature, prepare_lut, score_lut_temporal,
                             trace_fixed_outputs, mutate_lut, clone_genome)
-    from lut_evo.lut import grow_lut
+    from substrates.lut.lut import grow_lut
 
     def grow(genome, target, config):
-        from .io_placement import growth_seeds
-        grid = grow_lut(genome, seeds=growth_seeds(target),
+        from .io_placement import growth_seeds, io_strategy
+        grid = grow_lut(genome, seeds=growth_seeds(
+                            target, io_strategy(target), genome),
                         grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs:
             return None
@@ -250,11 +253,12 @@ def _lut_adapter():
                                    probe_target)
 
     def mutate(genome, config, chromosome_count):
+        from .io_placement import evolves_io
         strategy = getattr(getattr(config, 'ga', None),
                            'io_placement', 'fixed')
         return mutate_lut(clone_genome(genome), 1.0,
                           chromosome_count=chromosome_count,
-                          evolve_io=(strategy != 'fixed'))
+                          evolve_io=evolves_io(strategy))
 
     return {'signature': genome_signature, 'grow': grow, 'probe': probe,
             'score': score_lut_temporal, 'mutate': mutate}
@@ -320,6 +324,8 @@ def functional_signature(genome, backend, config=None):
         fields = ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out')
         if strategy == 'tag_rank':
             fields += ('tag',)
+        if strategy == 'terminal_nodes':
+            fields += ('io_kind',)
         alleles = tuple(
             tuple(tuple(getattr(gene, f) for f in fields)
                   for gene in chromosome.genes)
@@ -330,6 +336,8 @@ def functional_signature(genome, backend, config=None):
     fields = ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out')
     if strategy == 'tag_rank':
         fields += ('tag',)
+    if strategy == 'terminal_nodes':
+        fields += ('io_kind',)
     alleles = tuple(
         tuple(tuple(getattr(gene, f) for f in fields)
               for gene in chromosome.genes)
@@ -346,7 +354,7 @@ def _evolved_binding_signature(genome, backend, target, grid):
         return None
     node_types = None
     if backend == 'lut':
-        from lut_evo.lut import cell_io_tags
+        from substrates.lut.lut import cell_io_tags
         node_types = cell_io_tags(genome, grid)
     bound = bind_io(genome, grid, target, tags=node_types)
     if bound is None:
@@ -419,6 +427,9 @@ def make_probe_bank(target, seed=PROBE_SEED, n_trials=PROBE_TRIALS):
     lut_config = getattr(target, 'lut_config', None)
     if lut_config is not None:
         setattr(probe, 'lut_config', lut_config)
+    strategy = getattr(target, 'io_placement', 'fixed')
+    if strategy != 'fixed':
+        setattr(probe, 'io_placement', strategy)
     return probe
 
 
@@ -539,11 +550,6 @@ def format_legend():
     for term, meaning in METRIC_MEANING:
         lines += _wrapped(term, meaning)
     return '\n'.join(lines)
-
-
-def format_levels_table(report):
-    """Alias for the per-level group table (see format_funnel)."""
-    return format_funnel(report)
 
 
 def format_cluster_breakdown(report):

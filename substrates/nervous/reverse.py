@@ -1,5 +1,5 @@
 """
-nv_evo/reverse.py — best-effort INVERSE of grow_nervous (network -> genome).
+substrates/nervous/reverse.py — best-effort INVERSE of grow_nervous (network -> genome).
 
 Growth (ontogeny) is many-to-one and not analytically invertible, so a hand-
 edited working grid usually has no genome behind it. This module reconstructs

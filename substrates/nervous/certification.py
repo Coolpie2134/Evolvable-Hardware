@@ -1,5 +1,5 @@
 """
-nv_evo/certification.py — turn a "solved" fitness into a defensible verdict.
+substrates/nervous/certification.py — turn a "solved" fitness into a defensible verdict.
 
 A training fitness near 1.0 is not a claim: temporal targets can be gamed by a
 circuit that memorised the training schedules' exact timing, or by a leaky ring
@@ -72,11 +72,10 @@ def carry_physics(src_target, dst_target):
     """Copy the run's physics config from the training target onto a freshly
     built spec target (returns dst).
 
-    Also carries ``io_placement``: an evolvable binding changes the
-    DEVELOPMENTAL ORIGIN (growth nucleates from one neutral center cell, not
-    the input pads — nv_evo/io_placement.growth_seeds), so a validation target
-    left at 'fixed' would grow a different organism than the one the fitted
-    binding belongs to."""
+    Also carries ``io_placement`` because it can change both binding and
+    developmental origin. In particular, spatial input alleles are germline
+    positions; a validation target left at ``fixed`` could grow a different
+    organism from the fitted one."""
     for attr in _PHYSICS_ATTRS:
         cfg = getattr(src_target, attr, None)
         if cfg is not None:

@@ -1,5 +1,5 @@
 """
-nv_evo/hexgrid.py — honeycomb geometry + the paper's routing table.
+substrates/nervous/hexgrid.py — honeycomb geometry + the paper's routing table.
 
 The nervous net is a hexagonal (honeycomb) array: each node has exactly THREE
 neighbours — Left, Right, and a vertical Down/up that alternates with position
@@ -96,6 +96,24 @@ _ROUTING_BASE = [
 # 0-15 = AND (the paper's Fig. 3); 16-31 = OR twins (fire on EITHER excitatory).
 ROUTING_HEX = ([(e1, e2, i1, 'and') for (e1, e2, i1) in _ROUTING_BASE] +
                [(e1, e2, i1, 'or')  for (e1, e2, i1) in _ROUTING_BASE])
+
+
+# ── dedicated I/O node types (terminal_nodes io_placement only) ──────────────────
+# Two functionally-REDUNDANT OR-twin alias states are repurposed as dedicated
+# input / output NODE TYPES. A cell IS an I/O terminal precisely by growing into
+# one of these states (a gene's self_out can encode it), so evolution can grow
+# its own I/O. The one-way pulse physics is applied ONLY under the terminal_nodes
+# binding strategy:
+#   * INPUT  (state 16): source-only — its routing is (None,None,None) so it never
+#     fires from neighbours; its wire is driven ONLY by external injection, yet
+#     neighbours may still read it, so the input propagates. ("cannot receive")
+#   * OUTPUT (state 17): sink-only — it computes/fires from its neighbours (so it
+#     is readable as the answer) but NOTHING reads it; it drives nothing into the
+#     net. At most ONE output node. ("cannot output")
+# Under EVERY OTHER strategy these two states keep their harmless alias behaviour
+# (16 == off, 17 == buffer D), so existing runs / checkpoints stay byte-identical.
+IO_STATE_INPUT  = 16
+IO_STATE_OUTPUT = 17
 
 
 def _entry_op(entry):

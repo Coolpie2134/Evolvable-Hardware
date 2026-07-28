@@ -1,5 +1,5 @@
 """
-concept/engines.py — GUI bridge for the concept simulations.
+experiments/concept/engines.py — GUI bridge for the concept simulations.
 
 Each concept sim is a self-driving CLI loop (`main()`). Rather than reimplement
 each one's selection/crossover, we let `main()` run as-is in a background thread
@@ -8,7 +8,7 @@ and tap it through a tiny module-level hook: when `sim.GUI` is set to a GuiBridg
 control via `GUI.checkpoint()` (which supports pause/stop). When `sim.GUI` is
 None the sim behaves exactly as the original CLI.
 
-The genuinely-shared terminal I/O lives in concept/common/terminal.py (imported
+The genuinely-shared terminal I/O lives in experiments/concept/common/terminal.py (imported
 by every sim); only the divergent selection/fitness code stays per-sim.
 
 stats dict (produced by each sim's hook):
@@ -121,20 +121,20 @@ class HookEngine:
 # overrides:    other module globals to set before running (kept modest).
 
 CONFIGS = {
-    "proof7":    {"module": "concept.proof7",    "board": "2d",
+    "proof7":    {"module": "experiments.concept.proof7",    "board": "2d",
                   "popsize_attr": "POPSIZE", "popsize_default": 150,
                   "overrides": {"SOLUTIONSPACE": 2048}},
-    "multi9":    {"module": "concept.multi9",    "board": "2d",
+    "multi9":    {"module": "experiments.concept.multi9",    "board": "2d",
                   "popsize_attr": "POPSIZE", "popsize_default": 150},
-    "mhier1":    {"module": "concept.mhier1",    "board": "2d",
+    "mhier1":    {"module": "experiments.concept.mhier1",    "board": "2d",
                   "popsize_attr": "POPSIZE", "popsize_default": 150},
-    "coderack7": {"module": "concept.coderack7", "board": "2d",
+    "coderack7": {"module": "experiments.concept.coderack7", "board": "2d",
                   "popsize_attr": "POPSIZE", "popsize_default": 60},
-    "hierarch4": {"module": "concept.hierarch4", "board": "2d",
+    "hierarch4": {"module": "experiments.concept.hierarch4", "board": "2d",
                   "popsize_attr": "POPSIZE", "popsize_default": 60},
-    "linear12":  {"module": "concept.linear12",  "board": "1d",
+    "linear12":  {"module": "experiments.concept.linear12",  "board": "1d",
                   "popsize_attr": "POPSIZE", "popsize_default": 200},
-    "species2":  {"module": "concept.species2",  "board": "1d",
+    "species2":  {"module": "experiments.concept.species2",  "board": "1d",
                   "popsize_attr": "POPSIZE", "popsize_default": 200},
 }
 for _name, _c in CONFIGS.items():

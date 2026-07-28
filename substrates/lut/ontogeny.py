@@ -1,7 +1,7 @@
 """
-lut_evo/ontogeny.py — sim6-faithful morphogenesis (STAGE 0 diagnostic).
+substrates/lut/ontogeny.py — sim6-faithful morphogenesis (STAGE 0 diagnostic).
 
-The lut_evo GA evolves FIXED genomes: a small random gene set, matched by
+The substrates/lut GA evolves FIXED genomes: a small random gene set, matched by
 minimum Hamming distance during growth. sim6 (sim6_faster.py) does something
 different and richer — it *generates* the genome during growth via
 `table_create`: an on-the-fly ontogeny that invents a new gene for every context
@@ -18,7 +18,7 @@ into the GA (Stage 1). It shares nothing with the GA path; it only borrows the
 grid tuple format `(Ln, Ls, Le, Lw)` and directional conventions from lut.py so
 the result renders with the existing `draw_lut_net`.
 
-Run it:  py -m lut_evo.ontogeny [seed] [n_morphs]
+Run it:  py -m substrates.lut.ontogeny [seed] [n_morphs]
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ _PC16 = bytes(bin(i).count("1") for i in range(1 << 16))
 @dataclass
 class Gene:
     """sim6's Gene, in sim6's own field order (N,S,E,W) — kept faithful so the
-    ontogeny reads like genetic.c. Converted to lut_evo's LutGene by
+    ontogeny reads like genetic.c. Converted to substrates/lut's LutGene by
     `to_lut_genome` (which reorders to N,E,S,W)."""
     limit:    int = 255
     state_n:  int = 0
@@ -196,8 +196,8 @@ def grow_ontogeny(seed: Optional[int] = None, genome: Optional[List[Gene]] = Non
 
 
 def _lutgene(g: Gene) -> LutGene:
-    """sim6-order gene (N,S,E,W) -> lut_evo LutGene (N,E,S,W). Limits dropped
-    (lut_evo bounds growth by telomere, not per-gene limits)."""
+    """sim6-order gene (N,S,E,W) -> substrates/lut LutGene (N,E,S,W). Limits dropped
+    (substrates/lut bounds growth by telomere, not per-gene limits)."""
     return LutGene(ctx_n=g.state_n, ctx_e=g.state_e, ctx_s=g.state_s,
                    ctx_w=g.state_w, self_in=g.self_in, self_out=g.self_out)
 
@@ -219,7 +219,7 @@ def _pack(lg: List[LutGene], n_chroms: int) -> Genome:
 
 
 def to_lut_genome(genes: List[Gene], n_chroms: int = 1) -> Genome:
-    """Convert an ontogeny gene list to a lut_evo Genome (see _lutgene/_pack)."""
+    """Convert an ontogeny gene list to a substrates/lut Genome (see _lutgene/_pack)."""
     return _pack([_lutgene(g) for g in genes], n_chroms)
 
 
@@ -248,7 +248,7 @@ def random_ontogeny_genome(n_chroms: int = 2, cap_genes: int = 350,
     """GA seed factory (Stage 1): grow a sim6-style biomorph and keep it only if
     it is DENSE (raw genome >= `min_genes` — density is what makes shapes rich;
     trivial few-gene biomorphs just fill a uniform diamond) and, capped to
-    `cap_genes` (see _cap_genes) and regrown by lut_evo's own grow_lut, makes at
+    `cap_genes` (see _cap_genes) and regrown by substrates/lut's own grow_lut, makes at
     least `min_cells` live cells (sim6's `good < 10` retry). Falls back to the
     last dense attempt, or a random-lut genome if none was dense enough."""
     from .lut import grow_lut

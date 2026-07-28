@@ -2,7 +2,7 @@
 tools/diversity_report.py — characterise an evaluated population.
 
 Fitness spread is zero once everyone solves, so this reports structure instead:
-the four-level collapse funnel (nv_evo/diversity.py) and, optionally, the
+the four-level collapse funnel (substrates/nervous/diversity.py) and, optionally, the
 mutational-robustness panel.
 
     py tools/diversity_report.py results/latest_population.json
@@ -20,8 +20,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from evo_runtime.checkpoint import load_checkpoint          # noqa: E402
-from nv_evo import diversity as dv                          # noqa: E402
+from runtime.checkpoint import load_checkpoint          # noqa: E402
+from substrates.nervous import diversity as dv                          # noqa: E402
 
 
 def main(argv=None):

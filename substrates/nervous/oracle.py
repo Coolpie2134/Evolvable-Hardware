@@ -1,5 +1,5 @@
 """
-nv_evo/oracle.py — targets defined by a reference model, not hand-picked traces.
+substrates/nervous/oracle.py — targets defined by a reference model, not hand-picked traces.
 
 Hand-writing "input pulses at ticks 3,5 -> output at tick 8" bakes OUR timing
 into the goal, and a circuit can plateau not because it fails the function but
@@ -28,6 +28,7 @@ import random
 from .targets import (TemporalTarget, Trial, OutputTerminal,
                       describe_target)
 from .contracts import (cadence_step_contract, event_contract,
+                        toggle_contract,
                         interval_contract, state_contract)
 
 
@@ -402,7 +403,7 @@ def label_trace(oracle, streams, T, latency):
 # ── target builder ──────────────────────────────────────────────────────────────
 
 def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
-                  seed=20260702, latency=2, min_gap=5, align_prob=0.0,
+                  seed=20260702, latency=2, min_gap=5, jitter=4, align_prob=0.0,
                   out_pos=(2, 2), grid_size=5, description='',
                   contract=None, global_gap=False):
     contract = contract or state_contract()
@@ -414,7 +415,7 @@ def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
     trials = []
     for _ in range(n_trials):
         streams = sample_streams(
-            rng, T, n_in, min_gap=min_gap, align_prob=align_prob,
+            rng, T, n_in, min_gap=min_gap, jitter=jitter, align_prob=align_prob,
             global_gap=global_gap)
         exp = label_trace(oracle, streams, T, latency)
         events = ([float(t) for t, value in enumerate(exp) if value == 1]
@@ -534,25 +535,46 @@ def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None,
 # ── preset oracle targets (input-driven relations) ──────────────────────────────
 
 def sr_latch_oracle(seed=20260702):
+    # min_gap 10 with the default jitter put EVERY hold interval in the band
+    # 10..14, and a stored bit whose duration never varies is not a stored bit:
+    # a fixed-length burst fits all of them at once. Measured on the old
+    # spacing, a 4-tap delay line driven by Set alone -- Reset not connected to
+    # anything -- scored a perfect 1.000, because at alignment -2 the burst's
+    # natural death (4 taps x 3 ticks) landed where the Reset happened to be.
+    # The spread has to come from the jitter, not from a lower floor: commands
+    # closer than ~10 ticks leave too little time to tell a ringing output from
+    # a quiet one (test_memory_targets_leave_time_to_observe_each_state), so
+    # min_gap stays at 10 and the range widens upward to 10..30. That is enough
+    # that no single burst length can both cover the long holds and fall silent
+    # through the short ones.
     target = oracle_target('SR latch (oracle)', orc_sr_latch, [(0, 1), (0, 3)], 'Q',
                          T=40, n_trials=12, seed=seed, latency=2, min_gap=10,
-                         global_gap=True,
+                         jitter=20, global_gap=True,
                          description=describe_target(
         'Input A sets one stored bit; input B resets it; otherwise Q retains its '
         'previous state.',
-        'Twelve seeded random schedules plus explicit never-set and '
-        'Set→Reset→Set tests exercise storage, clearing, and reloading.'))
-    # Persistence guardrails: silence without Set, and a Set->Reset->Set trial
-    # that requires the same circuit to store, clear, and store again.  A
-    # one-shot response to Set or an unconditional ring fails these contrasts.
+        'Twelve seeded random schedules spanning a wide range of hold durations, '
+        'plus explicit never-set, short-hold, long-hold and Set→Reset→Set tests, '
+        'exercise storage, clearing, and reloading.'))
+    # Persistence guardrails: silence without Set, a Set->Reset->Set trial that
+    # requires the same circuit to store, clear, and store again, and a pair
+    # that contrasts the shortest hold with the longest. A one-shot response to
+    # Set, an unconditional ring, or any fixed-duration burst fails these.
     silent = [(0, 0)] * target.T
     cycle = [(0, 0)] * target.T
     cycle[3] = (1, 0)
     cycle[16] = (0, 1)
     cycle[29] = (1, 0)
+    short = [(0, 0)] * target.T
+    short[4] = (1, 0)           # shortest observable hold: a long burst
+    short[14] = (0, 1)          # overruns it into the cleared interval
+    short[26] = (1, 0)
+    short[36] = (0, 1)
+    long_hold = [(0, 0)] * target.T
+    long_hold[4] = (1, 0)       # never reset: must still be set at the horizon
     target.trials.extend([
-        Trial(silent, {'Q': label_trace(orc_sr_latch, silent, target.T, 2)}),
-        Trial(cycle, {'Q': label_trace(orc_sr_latch, cycle, target.T, 2)}),
+        Trial(streams, {'Q': label_trace(orc_sr_latch, streams, target.T, 2)})
+        for streams in (silent, cycle, short, long_hold)
     ])
     return target
 
@@ -561,6 +583,7 @@ def toggle_oracle(seed=20260702):
     return oracle_target('Toggle (oracle)', orc_toggle, [(0, 2)], 'Q',
                          T=40, n_trials=12, seed=seed, latency=2, min_gap=10,
                          global_gap=True,
+                         contract=toggle_contract(),
                          description=describe_target(
         'Each input edge flips the stored output state.',
         'Twelve seeded random pulse trains vary phase and spacing.'))
@@ -586,21 +609,39 @@ def coincidence_oracle(seed=20260702):
         'offset input events.'))
 
 
-def one_shot_oracle(seed=20260702, width=5):
-    # width MUST exceed 3: the persistence scorer's +/-1 ring tolerance lets a
-    # SINGLE output pulse cover a 3-tick active window (a pulse at the centre hits
-    # all three expected ticks), so a plain delay-line/echo scored a perfect
-    # one-shot. A 5-tick window cannot be covered by one pulse, so it forces a
-    # genuine self-terminating BURST (a ~10101 ring that stops) — the actual
-    # monostable behaviour. (Verified: width 3 solves with single pulses; width 5
-    # solves with sustained bursts.)
+def one_shot_oracle(seed=20260702, width=12):
+    # The hold MUST outlast what one pulse can cover, or a bare delay line is a
+    # perfect one-shot. The bound comes from the state contract, not from taste:
+    # scoring._state_case_score credits an active window whose longest silence is
+    # within allowed_gap = 2*(delay + width_pulse) = 4, and a single pulse sitting
+    # at the CENTRE of a d-tick window leaves silences of (d - width_pulse)/2. So
+    # one pulse is refuted only when d > 2*allowed_gap + width_pulse = 9.
+    #
+    # The old width of 5 was chosen against the +/-1 ring tolerance of the earlier
+    # scorer and no longer binds: measured on the current code, a plain input echo
+    # scored a perfect 1.000 here, and every "solved" One-shot row in the audit was
+    # that artifact. 12 clears the bound with margin and still self-terminates well
+    # inside the horizon.
+    #
+    # Widening alone does not make the target need state, and the old spacing
+    # (min_gap = width + 4, jitter 4 -> gaps 16..20) guaranteed every trigger
+    # landed in an already-quiet output. The `rem == 0` guard in make_one_shot --
+    # the ONE clause here that cannot be built without memory -- was therefore
+    # never exercised by a single trial, and a 3-tap delay line scored 1.000
+    # honestly rather than by a scoring artifact. Gaps of 6..20 straddle the
+    # width so roughly half the triggers now arrive mid-pulse and must be
+    # swallowed without extending or restarting the interval; a feedforward tap
+    # answers them and spills past the window into the quiet epoch.
     return oracle_target('One-shot (oracle)', make_one_shot(width), [(0, 2)], 'Q',
-                         T=28, n_trials=10, seed=seed, latency=2, min_gap=width + 4,
+                         T=52, n_trials=10, seed=seed, latency=2, min_gap=6,
+                         jitter=14,
                          description=describe_target(
-        'Each input edge starts a %d-second active interval that self-terminates.'
-        % width,
-        'Ten seeded random schedules space triggers far enough to verify '
-        'termination and re-arming.'))
+        'Each input edge starts a %d-second active interval that self-terminates. '
+        'A trigger arriving while the interval is still active is ignored: it '
+        'neither extends nor restarts it.' % width,
+        'Ten seeded random schedules straddle the pulse width, so triggers both '
+        'inside and outside the active interval verify suppression, termination '
+        'and re-arming.'))
 
 
 def pair_oracle(seed=20260702, gap=2):
@@ -1314,14 +1355,70 @@ def a_first_rendezvous_oracle(seed=20260702):
 
 def collision_serializer_oracle(seed=20260702, spacing=2):
     """Banks where singles remain single and A+B collisions become two events."""
+    # Collisions used to be a third of the episodes and every episode was given
+    # enough room to drain, so the queue never held more than one token and the
+    # output grid never left the input grid. Against that, a wired-OR -- which
+    # is what this substrate does for free at any merge -- was right about every
+    # isolated event and lost only the second pulse of each collision: F1 0.86,
+    # i.e. the collision handling that IS the target was worth 0.14 of its score.
+    #
+    # Counting alone cannot fix that. A wired-OR under-emits and a fixed k-tap
+    # delay line over-emits, so trading one off against the other bottoms out
+    # near F1 0.83 whatever the collision fraction. What separates a serializer
+    # from BOTH is that it is not a shift-invariant filter: when tokens arrive
+    # faster than `spacing` the queue backs up and the output grid detaches from
+    # the input grid, and it re-attaches whenever the queue drains. So the banks
+    # below interleave three regimes -- isolated singles (queue empty, output
+    # rides the input), collisions (depth 2), and irregular bursts whose
+    # inter-arrival times vary INSIDE the burst (depth 3-5, output phase set by
+    # the backlog rather than by any input edge). A uniform burst would not do:
+    # tokens arriving at a constant rate produce a constant-rate output, which is
+    # exactly a multi-tap wire.
     rng = random.Random(seed)
     banks = []
-    for _ in range(10):
+    for _ in range(12):
         a_ticks, b_ticks = set(), set()
         cursor = rng.randint(2, 4)
-        episodes = ['A', 'B', 'AB', rng.choice(('A', 'B', 'AB'))]
+        episodes = ['A', 'B', 'AB', 'AB', 'burst', 'burst',
+                    rng.choice(('A', 'B', 'AB'))]
         rng.shuffle(episodes)
         for kind in episodes:
+            if kind == 'burst':
+                # 3-5 tokens at irregular spacing. Same-lane events stay >= 2
+                # ticks apart so two stimuli never merge into one wide pulse.
+                arrivals = [0]
+                # Backlog DEPTH is the discriminator, so vary it widely: a
+                # delay line has one fixed tap count and can only match one
+                # depth, while a queue is indifferent to how deep it gets.
+                for _step in range(rng.choice((1, 2, 5, 7))):
+                    arrivals.append(arrivals[-1] + rng.choice((1, 2, 3)))
+                # Alternate which lane leads the burst. With A always leading,
+                # every backlog began on an A edge and a multi-tap delay line
+                # watching lane A alone tracked the whole output.
+                lead = rng.choice((0, 1))
+                added = 0
+                for index, offset in enumerate(arrivals):
+                    before = offset - arrivals[index - 1] if index else 99
+                    after = (arrivals[index + 1] - offset
+                             if index + 1 < len(arrivals) else 99)
+                    # Consecutive arrivals alternate lanes, so a lane repeats
+                    # only every other arrival and its gap is at least 1+1=2.
+                    # Doubling onto BOTH lanes is allowed only where both
+                    # neighbours are >= 2 away, for the same reason.
+                    both = before >= 2 and after >= 2 and (
+                        index == 0 or rng.random() < 0.7)
+                    if both or (index + lead) % 2 == 0:
+                        a_ticks.add(cursor + offset)
+                        added += 1
+                    if both or (index + lead) % 2 == 1:
+                        b_ticks.add(cursor + offset)
+                        added += 1
+                # Every queued token still owes `spacing` ticks of service, so
+                # the headroom has to scale with the BACKLOG, not with the burst
+                # width. Fixed headroom let a deep burst run past the horizon
+                # and silently drop tokens the description promises will emerge.
+                cursor += arrivals[-1] + added * spacing + rng.randint(2, 4)
+                continue
             if kind in ('A', 'AB'):
                 a_ticks.add(cursor)
             if kind in ('B', 'AB'):
@@ -1331,7 +1428,7 @@ def collision_serializer_oracle(seed=20260702, spacing=2):
     banks.append({})                               # no spontaneous output
     return _event_bank_target(
         'Collision serializer (oracle)', make_collision_serializer(spacing),
-        [(0, 1), (0, 3)], banks, T=40, latency=1,
+        [(0, 1), (0, 3)], banks, T=112, latency=1,
         description=describe_target(
             'Merge A and B onto Q without losing event count: an isolated input '
             'makes one Q event, while simultaneous A+B is serialized into two '

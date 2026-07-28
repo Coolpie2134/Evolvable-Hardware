@@ -1,5 +1,5 @@
 """
-concept/common/ga.py
+experiments/concept/common/ga.py
 Fitness-proportional (roulette-wheel) GA selection loop shared by all
 2-D concept simulations (multi9, mhier1, coderack7, hierarch4).
 

@@ -1,8 +1,8 @@
 """
-lut_evo/pulse.py — asynchronous, event-driven dynamics for the LUT array.
+substrates/lut/pulse.py — asynchronous, event-driven dynamics for the LUT array.
 
 This puts the LUT substrate on the same physical footing as the nervous net
-(nv_evo/pulse.py): a continuous-time, event-driven system with no global clock.
+(substrates/nervous/pulse.py): a continuous-time, event-driven system with no global clock.
 The two substrates keep their distinct characters —
 
   * a nervous WIRE carries PULSES (edge-triggered nodes, refractory);
@@ -51,7 +51,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from nv_evo.pulse import TICK
+from substrates.nervous.pulse import TICK
 
 
 @dataclass(frozen=True)
@@ -86,13 +86,22 @@ class AsyncLutSim:
     event/wave budget (scorers turn overflow into zero).
     """
 
-    def __init__(self, grid, config=None, max_events=None):
+    def __init__(self, grid, config=None, max_events=None,
+                 input_nodes=None, output_nodes=None):
         self.grid   = grid
         self.config = config or LutConfig()
         cells       = list(grid)
         self._cells = cells
         self.n      = n = len(cells)
         self._cidx  = {c: i for i, c in enumerate(cells)}
+        self.input_nodes = set(input_nodes or ())
+        self.output_nodes = set(output_nodes or ())
+        self._input_mask = np.fromiter(
+            (c in self.input_nodes for c in cells), dtype=bool, count=n)
+        self._output_mask = np.fromiter(
+            (c in self.output_nodes for c in cells), dtype=bool, count=n)
+        if (self._input_mask & self._output_mask).any():
+            raise ValueError('LUT terminal inputs and outputs must be distinct')
         self.max_events = None if max_events is None else max(1, int(max_events))
         # four LUT columns (same layout as LutSim; index n = padding sentinel)
         self._Ln = np.fromiter((grid[c][0] for c in cells), dtype=np.int64, count=n)
@@ -116,6 +125,7 @@ class AsyncLutSim:
         self._inj     = np.zeros(n, dtype=np.int64)   # wired-OR injection depth
         self._injor   = np.zeros(n, dtype=np.int64)   # 0xF where depth > 0
         self._wirepad = np.zeros(n + 1, dtype=np.int64)  # levels (+ absent = 0)
+        self._drivepad = np.zeros(n + 1, dtype=np.int64) # outward-visible levels
         self._pend_t  = np.full(n, _INF)              # inertial pending change
         self._pend_v  = np.zeros(n, dtype=np.int64)
         self._affbuf  = np.zeros(n + 1, dtype=bool)   # scratch reader mask
@@ -147,13 +157,21 @@ class AsyncLutSim:
     def _eval(self):
         """Every cell's lookup of the CURRENT wire levels (one numpy pass).
         Nibble layout and index bits exactly as LutSim._advance."""
-        pe = self._wirepad
+        pe = self._drivepad
+        pe[:self.n] = self._wirepad[:self.n]
+        pe[:self.n][self._output_mask] = 0
         idx = (((pe[self._nN] & 0x4) >> 2)         # from N -> bit0
                | ((pe[self._nS] & 0x8) >> 2)       # from S -> bit1
                | ((pe[self._nE] & 0x1) << 2)       # from E -> bit2
                | ((pe[self._nW] & 0x2) << 2))      # from W -> bit3
-        return ((((self._Ln >> idx) & 1) << 3) | (((self._Ls >> idx) & 1) << 2)
-                | (((self._Le >> idx) & 1) << 1) | ((self._Lw >> idx) & 1))
+        out = ((((self._Ln >> idx) & 1) << 3)
+               | (((self._Ls >> idx) & 1) << 2)
+               | (((self._Le >> idx) & 1) << 1)
+               | ((self._Lw >> idx) & 1))
+        # Source terminals expose only external injection; their LUT cannot
+        # consume neighbour state or generate a signal of its own.
+        out[self._input_mask] = 0
+        return out
 
     # ── event queue ──────────────────────────────────────────────────────────
 
@@ -167,7 +185,7 @@ class AsyncLutSim:
         else driving it), starting at any real time. Events are queued; call
         ``advance_to`` (or let ``step`` / ``run_bits`` advance) to process."""
         col = self._cidx.get(cell)
-        if col is None:
+        if col is None or self._output_mask[col]:
             return
         self._pristine = False
         w = TICK if width is None else float(width)
@@ -244,7 +262,12 @@ class AsyncLutSim:
         # wave (possible only when waves interleave within one delay, i.e.
         # off-lattice stimuli), whose pending must not be postponed; the
         # outstanding-pending check falls back to the exact mask then.
-        ch = np.nonzero(changed)[0]
+        # Sink changes are recorded and observable, but electrically invisible:
+        # they have no readers to re-evaluate.
+        drivers = changed & ~self._output_mask
+        if not drivers.any():
+            return
+        ch = np.nonzero(drivers)[0]
         affm = self._affbuf
         if 4 * ch.size >= n and not (self._pend_t < _INF).any():
             aff = True
@@ -383,7 +406,8 @@ class AsyncLutSim:
                     row = streams[t]
                     t0 = t * TICK
                     for i, c in enumerate(in_cols):
-                        if c is not None and i < len(row) and row[i]:
+                        if (c is not None and not self._output_mask[c]
+                                and i < len(row) and row[i]):
                             self._seq += 1
                             heapq.heappush(self._edges, (t0, self._seq, c, 1))
                             self._seq += 1
@@ -428,7 +452,8 @@ class AsyncLutSim:
             if t < ns:
                 row = streams[t]
                 cols = [c for i, c in enumerate(in_cols)
-                        if c is not None and i < len(row) and row[i]]
+                        if (c is not None and not self._output_mask[c]
+                            and i < len(row) and row[i])]
                 if cols:
                     injor[cols] = 0xF
                     last_inj = cols
@@ -505,19 +530,3 @@ class AsyncLutSim:
     def ever(self):
         e = self._ever
         return {self._cells[i]: (1 if e[i] else 0) for i in range(self.n)}
-
-
-def run_lut(grid, in_pos, streams, T, sample=True, config=None,
-            input_events=None, max_events=None):
-    """Run one trial on the asynchronous engine and return ``(B, sim)``:
-    the [T, ncells] mid-tick sample matrix (empty when ``sample`` is False)
-    and the simulator itself (for ``rise_times`` / ``overflow``). When the
-    trial carries a physical ``input_events`` schedule it is injected at its
-    real (possibly sub-tick) times; otherwise the integer ``streams`` drive
-    the nets exactly as the synchronous engine did."""
-    sim = AsyncLutSim(grid, config=config, max_events=max_events)
-    if input_events is not None:
-        B = sim.run_input_events(input_events, in_pos, T, sample=sample)
-    else:
-        B = sim.run_bits(streams, in_pos, T)
-    return B, sim

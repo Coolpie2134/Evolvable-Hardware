@@ -3,7 +3,7 @@ import random
 from dataclasses import dataclass, field
 from typing import List
 
-from evo_runtime.limits import MAX_CHROMOSOME_COUNT
+from runtime.limits import MAX_CHROMOSOME_COUNT
 
 MAX_ITER     = 12        # legacy per-gene time cap (kept only for pickle compat)
 GRID_SIZE    = 9         # field size — a generous OUTER bound; the telomere is
@@ -32,7 +32,7 @@ class Gene:
 
 @dataclass
 class Chromosome:
-    """`telomere` is a HAYFLICK division limit, mirroring nv_evo: seed cells start
+    """`telomere` is a HAYFLICK division limit, mirroring substrates/nervous: seed cells start
     with the germline length L, and each division hands the daughter one less. A
     cell at telomere 0 is senescent — still alive and functional, but it can no
     longer birth a neighbour, so growth self-limits at radius L from the seeds
@@ -43,7 +43,7 @@ class Chromosome:
     split: int = 0
     tag:   int = 0
     telomere: int = MAX_TELOMERE
-    # Non-developmental port-chromosome marker (see nv_evo/genome.py). Its genes
+    # Non-developmental port-chromosome marker (see substrates/nervous/genome.py). Its genes
     # hold either type/selector or x/y I/O mappings. Default False leaves every
     # existing genome unchanged.
     wiring:   bool = False
@@ -94,7 +94,7 @@ def random_genome(n_chroms=1, wiring_chromosome=False, n_ports=None,
         tag = random.randint(0, 9999),
     )
     if wiring_chromosome or spatial_chromosome or tag_rank:
-        from nv_evo.io_placement import seed_io_metadata
+        from substrates.nervous.io_placement import seed_io_metadata
         seed_io_metadata(genome, wiring_chromosome=wiring_chromosome,
                          n_ports=n_ports, tag_rank=tag_rank,
                          spatial_chromosome=spatial_chromosome)

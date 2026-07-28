@@ -5,7 +5,7 @@ population, whether or not it solved the target.
 The Evolution chart's spread series (population fitness sigma) is identically
 zero once every genome scores 1.0, so it goes blind exactly where the question
 gets interesting. This tab reads variety off STRUCTURE instead, via the
-four-level collapse funnel in nv_evo/diversity.py, and optionally samples the
+four-level collapse funnel in substrates/nervous/diversity.py, and optionally samples the
 mutational neighbourhood.
 
 Analysis grows every genome (and, for the behaviour level, runs it on an
@@ -23,7 +23,7 @@ from tkinter import filedialog, ttk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from nv_evo import diversity as dv
+from substrates.nervous import diversity as dv
 
 POLL_MS = 120
 DEFAULT_POPULATION = os.path.join('results', 'latest_population.json')
@@ -199,7 +199,7 @@ class DiversityTab:
     def _work(self, path, limit, samples, want_robustness):
         """Worker thread: load, cluster, optionally sample robustness."""
         try:
-            from evo_runtime.checkpoint import load_checkpoint
+            from runtime.checkpoint import load_checkpoint
             state = load_checkpoint(path)
             if 'genomes' not in state:
                 self._queue.put(('error', 'That file is a single-genome '
