@@ -21,7 +21,7 @@ from substrates.nervous.io_placement import (
 from substrates.nervous.scoring import (
     TemporalTraces, _obs_len, _score_output_candidate, needs_samples,
     score_contract, score_report_lines)
-from substrates.nervous.temporal import _output_candidates
+from substrates.nervous.temporal import _local_output_candidates
 
 from .growth import cell_io_tags, grow_snn
 from .lif_sim import _run as run_lif_events
@@ -163,7 +163,7 @@ def _fit_outputs(grid, in_pos, run, target):
     used = set()
     for terminal in target.outputs:
         best = best_key = None
-        for cell in _output_candidates(grid, in_set, terminal):
+        for cell in _local_output_candidates(grid, in_set, terminal):
             if cell in used:
                 continue
             sampled, events, intervals, expected = [], [], [], []

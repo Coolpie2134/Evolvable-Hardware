@@ -40,6 +40,12 @@ def clone_genome(g):
         tag=g.tag)
     if hasattr(g, '_io_binding_progress'):
         clone._io_binding_progress = g._io_binding_progress
+    if hasattr(g, '_mut_rate'):
+        # Self-adaptive mutation rate (runtime/escape.py) is a heritable trait
+        # of the LINEAGE, so it must survive cloning. It is deliberately absent
+        # from genome_signature: it changes no phenotype, and letting it into
+        # the key would give one circuit several fitness-cache entries.
+        clone._mut_rate = g._mut_rate
     return clone
 
 
@@ -48,12 +54,16 @@ def n_genes(g):
 
 
 def rank_key(genome, fitness):
-    """Selection key: wiring viability, honest fitness, then solved parsimony."""
+    """Selection key: wiring viability, honest fitness, the escape objectives,
+    then solved parsimony. The escape tiers are 0.0 unless their mechanism is
+    on (see substrates/nervous/ga.rank_key)."""
     from substrates.nervous.io_placement import binding_viability
     viability = binding_viability(genome)
+    robustness = getattr(genome, '_robustness', 0.0) or 0.0
+    juvenile = getattr(genome, '_juvenile_score', 0.0) or 0.0
     if fitness < PARSIMONY_START_FITNESS:
-        return (viability, fitness, 0, 0)
-    return (viability, fitness, -n_genes(genome),
+        return (viability, fitness, robustness, juvenile, 0, 0)
+    return (viability, fitness, robustness, juvenile, -n_genes(genome),
             -germline_telomere(genome))
 
 # ── evaluation ────────────────────────────────────────────────────
@@ -427,7 +437,7 @@ def next_population(population, fitnesses, chromosome_count=None,
                     recombination=True, evolve_io=False,
                     io_placement=None, mean_mutations=None, make_genome=None,
                     archive_parent=None, stagnation=0,
-                    rescue_candidates=None):
+                    rescue_candidates=None, escape=None, mutation_limit=8.0):
     """One generation of offspring only.
 
     Elites are a recombination parent pool, not verbatim survivors.  The
@@ -444,6 +454,9 @@ def next_population(population, fitnesses, chromosome_count=None,
         if any(len(genome.chromosomes) != chromosome_count
                for genome in population):
             raise ValueError('population violates configured chromosome count')
+    if escape is None:
+        from runtime.escape import OFF
+        escape = OFF
     pop     = len(population)
     n_elite = max(1, int(pop * ELITE_FRAC))
     n_imm = min(int(round(pop * IMMIGRANT_FRAC)), pop)
@@ -500,25 +513,48 @@ def next_population(population, fitnesses, chromosome_count=None,
                 archive_parent, chromosome_count=chromosome_count,
                 evolve_io=evolve_io, io_placement=io_placement,
                 mean_mutations=mean_mutations))
+    # mean_mutations is None on the direct-API path (mutate then uses its own
+    # default); self-adaptation needs a real number to perturb.
+    adaptive_base = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
+    if escape.self_adaptive_mutation:
+        # Immigrants have no lineage to inherit a rate from (see
+        # substrates.nervous.ga for the full argument).
+        from runtime.escape import seed_mutation_rate
+        for genome in new_pop:
+            if not hasattr(genome, '_mut_rate'):
+                seed_mutation_rate(genome, adaptive_base, mutation_limit)
+
+    def child_rate(child):
+        if not escape.self_adaptive_mutation:
+            return mean_mutations
+        from runtime.escape import mutation_rate_of
+        return mutation_rate_of(child, adaptive_base)
+
     while len(new_pop) < pop:
         pa, pb = parent_pair()
         ca, cb = (crossover(pa, pb) if recombination else
                   (clone_genome(pa), clone_genome(pb)))
+        if escape.self_adaptive_mutation:
+            from runtime.escape import inherit_mutation_rate
+            inherit_mutation_rate(ca, pa, pb, escape, adaptive_base,
+                                  mutation_limit)
+            inherit_mutation_rate(cb, pb, pa, escape, adaptive_base,
+                                  mutation_limit)
         new_pop.append(mutate(ca, chromosome_count=chromosome_count,
                               evolve_io=evolve_io,
                               io_placement=io_placement,
-                              mean_mutations=mean_mutations))
+                              mean_mutations=child_rate(ca)))
         if len(new_pop) < pop:
             new_pop.append(mutate(cb, chromosome_count=chromosome_count,
                                   evolve_io=evolve_io,
                                   io_placement=io_placement,
-                                  mean_mutations=mean_mutations))
+                                  mean_mutations=child_rate(cb)))
     return new_pop[:pop]
 
 # ── main loop ─────────────────────────────────────────────────────
 
 def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
-           arch=None, seed=None):
+           arch=None, seed=None, escape=None, ga_config=None):
     if seed is not None:
         random.seed(seed)
     if target is None:
@@ -552,6 +588,17 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
                 genome, grid, target, tags=tags)
         return genome
 
+    # Escape mechanisms, resolved exactly as the desktop controller resolves
+    # them so this headless driver and the app cannot drift apart.
+    import dataclasses as _dc
+    from runtime.config import GAConfig
+    from runtime.escape import build_escape_state, OFF
+    if ga_config is None:
+        ga_config = GAConfig(chromosome_count=n_chroms)
+    if escape is not None:
+        ga_config = _dc.replace(ga_config, escape=escape)
+    escape_cfg = ga_config.escape or OFF
+    setattr(target, '_escape', escape_cfg)
     population = [make_genome() for _ in range(popsize)]
     cache = LRUCache(FITNESS_CACHE_MAX)
     # Reuse ONE worker pool across generations (matches substrates/nervous/substrates/lut). Spawning
@@ -559,6 +606,9 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
     ex = ProcessPoolExecutor(max_workers=N_WORKERS)
     try:
         fitnesses  = _eval_batch(population, target, arch, ex, cache)
+        escape_state = build_escape_state(
+            'snn', ga_config, chromosome_count=n_chroms,
+            io_placement=strategy, evolve_io=evolve_io)
         best_idx   = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
         best_genome  = clone_genome(population[best_idx])
         best_fitness = fitnesses[best_idx]
@@ -582,23 +632,46 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
                 rescue = spatial_output_variants(
                     best_genome, target,
                     limit=min(48, max(1, popsize // 2)))
-            population = next_population(
-                population, fitnesses, chromosome_count=n_chroms,
+            parents, parent_fitnesses = population, fitnesses
+            offspring = next_population(
+                parents, parent_fitnesses, chromosome_count=n_chroms,
                 evolve_io=evolve_io, io_placement=strategy,
                 mean_mutations=actual_rate, make_genome=make_genome,
                 archive_parent=best_genome, stagnation=stagnation,
-                rescue_candidates=rescue)
-            fitnesses  = _eval_batch(population, target, arch, ex, cache)
+                rescue_candidates=rescue, escape=escape_cfg,
+                mutation_limit=ga_config.mutation_limit)
+            offspring_fitnesses = _eval_batch(offspring, target, arch, ex, cache)
+            # The SNN backend has no terminal (mu + lambda) consolidation, so
+            # this is either crowding or the original strict generational
+            # replacement — never a survivor phase it did not have before.
+            population, fitnesses, _ = escape_state.merge_generation(
+                parents, parent_fitnesses, None,
+                offspring, offspring_fitnesses, None)
             gi = max(range(popsize), key=lambda i: rank_key(population[i], fitnesses[i]))
             generation_rank = rank_key(population[gi], fitnesses[gi])
             if fitnesses[gi] > best_fitness + 1e-12:
                 stagnation = 0
             else:
                 stagnation += 1
-            if generation_rank > best_rank:
+            if escape_state.accepts(generation_rank, best_rank):
                 best_fitness = fitnesses[gi]
                 best_genome  = clone_genome(population[gi])
                 best_rank = generation_rank
+            escape_state.record_champion(gen, best_genome, best_fitness)
+            population, fitnesses, _cases, rebirth_info = \
+                escape_state.maybe_rebirth(
+                    gen, population, fitnesses, None, actual_rate, stagnation,
+                    best_fitness,
+                    lambda genomes: (
+                        _eval_batch(genomes, target, arch, ex, cache), None))
+            if rebirth_info is not None:
+                stagnation = 0
+                if verbose:
+                    print('Rebirth at generation %d: %d genomes from ancestors '
+                          '%s at rate %.2f'
+                          % (gen, rebirth_info['reborn'],
+                             rebirth_info['ancestors'], rebirth_info['rate']))
+            escape_state.tick()
             if verbose and (gen % 10 == 0 or fitnesses[gi] >= 1.0):
                 from substrates.nervous.io_placement import growth_seeds
                 mean_f = sum(fitnesses) / popsize

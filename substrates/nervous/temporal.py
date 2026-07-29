@@ -31,7 +31,8 @@ from __future__ import annotations
 
 from .nervous import (grow_nervous, interpret_nervous, node_delays)
 from .io_placement import (io_strategy, bind_io, input_groups, output_groups,
-                           flat_inputs, flat_outputs, merge_intervals,
+                           flat_inputs, flat_outputs, layout_pads,
+                           merge_intervals,
                            growth_seeds, binding_progress,
                            record_binding_progress, terminal_node_sets)
 from .hexgrid import hex_dirs
@@ -48,6 +49,7 @@ from .targets import (OutputTerminal, Trial, TemporalTarget,  # noqa: F401
 # substrates.nervous.temporal; new code should import from substrates.nervous.scoring directly.
 from .scoring import (                                          # noqa: F401
     PhysicalEvents, TemporalTraces,
+    best_distinct_assignment, behavior_representatives,
     contract_relations, has_relation, needs_samples,
     METRIC, _trace_metric, _obs_len,
     _expected_windows, _window_score, _role_trace_score,
@@ -229,24 +231,58 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                         terminal_outputs=terminal_outputs)
 
 
-# The output is read at a cell NEAR the target's terminal, not anywhere in the
-# organism. On the unbounded field a net can be hundreds of cells, and scoring
-# every one both costs O(cells) per genome and lets a lucky far-off cell inflate
-# the fitness without a real mechanism (the output location then jitters between
-# genomes, wrecking the gradient). Restricting to the OUT_RADIUS-nearest cells
-# to the terminal keeps placement cheap and the fitness signal about a fixed,
-# local output — the terminal is a designated read-out point, after all.
-OUT_RADIUS = 12
+# Outputs are NON-HERITABLE PROBES over the WHOLE organism.
+#
+# This used to examine only the twelve cells nearest the target's declared
+# output coordinate, on the reasoning that scoring every cell costs O(cells) and
+# lets a lucky far-off cell inflate fitness without a real mechanism.
+#
+# The declared coordinate is a label on the target, not a property of the
+# organism, so restricting to its neighbourhood asks "did you deliver the answer
+# HERE" when the honest question is "where does this organism actually produce
+# each answer" — a genome computing the right thing four cells too far away was
+# scored as though it had computed nothing.
+#
+# The inflation worry was the right thing to check, and it was checked rather
+# than argued away: raising scores is what CORRECT crediting and lucky-cell
+# inflation would BOTH look like, and held-out certification separates them.
+# Measured under analog_tri at equal budget, against the same experiment run
+# with the local probe:
+#
+#     Toggle    train 1.000 -> held-out 1.000,  3/3 CERTIFIED  (was 5/5)
+#     SR latch  train 0.924 -> held-out 0.906,  2/3 CERTIFIED  (was 3/5)
+#
+# No OVERFIT verdicts, and a train->held-out gap of 0.018 and 0.000. Circuits
+# selected this way generalise, so the extra candidates are finding real
+# mechanisms rather than lucky cells. (The other half of the original worry —
+# that the chosen cell JITTERS between genomes and roughens the gradient — has
+# not been measured.)
+#
+# So every mature non-input component is eligible for every role. The cost is
+# controlled by collapsing cells that respond IDENTICALLY (they are
+# interchangeable as probes) rather than by geography, and compactness survives
+# only as a deterministic tie-break inside best_distinct_assignment.
+def _output_candidates(grid, in_set):
+    """Every mature non-input component is eligible as an output probe."""
+    return tuple(sorted(cell for cell in grid if cell not in in_set))
 
 
-def _output_candidates(grid, in_set, term):
+# The retired local probe. The LUT and SNN comparison backends still read their
+# outputs this way; porting them would silently move their numbers, and they
+# exist to be compared against. Nervous no longer uses it.
+LEGACY_OUT_RADIUS = 12
+
+
+def _local_output_candidates(grid, in_set, term, radius=LEGACY_OUT_RADIUS):
     tx, ty = term.pos
     cands = [c for c in grid if c not in in_set]
     cands.sort(key=lambda c: (abs(c[0] - tx) + abs(c[1] - ty), c))
-    return cands[:OUT_RADIUS]
+    return cands[:radius]
 
 
-def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='single'):
+def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
+                           arch='single', source_nodes=None,
+                           sink_nodes=None):
     """Assign each output role the live non-input cell — among those nearest its
     terminal (see OUT_RADIUS) — whose activity trace best matches the expected
     trace across ALL trials (ties broken by distance to the terminal, then cell
@@ -276,23 +312,45 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
     else:
         cone = input_cone(grid, routing, in_pos)
         sub = grid if len(cone) == len(grid) else {c: grid[c] for c in cone}
+    # Probes must be FITTED under the same physics they will be SCORED under.
+    # Running placement without the terminal sets and then tracing with them
+    # selects a cell for behaviour the final run never reproduces.
     runs = [run_nervous_events(
                 sub, routing, in_pos, {}, tr.streams, obs, prune=False,
                 max_events=getattr(ttarget, 'max_events', 2048),
                 sample=need_samples, config=config,
-                input_events=getattr(tr, 'input_events', None), delays=delays, arch=arch)
+                input_events=getattr(tr, 'input_events', None), delays=delays,
+                arch=arch, terminal_inputs=source_nodes,
+                terminal_outputs=sink_nodes)
             for tr in ttarget.trials]
     trial_states = [run[0] for run in runs]
     trial_events = [run[2] for run in runs]
     trial_intervals = [getattr(run[2], 'intervals', {}) for run in runs]
     traces.overflow = any(run[3] for run in runs)
-    used = set()
+    def cell_response(c):
+        """This cell's complete observed response, across every trial."""
+        return (
+            tuple(
+                tuple(trial_states[ti][t].get(c, 0)
+                      if t < len(trial_states[ti]) else 0
+                      for t in range(obs))
+                if need_samples else ()
+                for ti in range(len(ttarget.trials))),
+            tuple(tuple(trial_events[ti].get(c, ()))
+                  for ti in range(len(ttarget.trials))),
+            tuple(tuple(tuple(pair) for pair in trial_intervals[ti].get(c, ()))
+                  for ti in range(len(ttarget.trials))))
+
+    # Cells that respond identically are interchangeable as probes, so only
+    # enough of each distinct response to still allow one cell per role are
+    # scored. This is what keeps whole-organism candidacy affordable.
+    candidates = behavior_representatives(
+        _output_candidates(grid, in_set), cell_response,
+        len(ttarget.outputs))
+
+    scores = {term.role: {} for term in ttarget.outputs}
     for term in ttarget.outputs:
-        best, best_key, best_aux = None, None, None
-        score_cache = {}
-        for c in _output_candidates(grid, in_set, term):
-            if c in used:
-                continue
+        for c in candidates:
             ctr, cevents, cintervals, cexp = [], [], [], []
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
@@ -309,28 +367,21 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
                 cintervals.append(list(trial_intervals[ti].get(c, ())))
                 cexp.append(exp)
             if not ctr:
-                s, aux = 0.0, None
-            else:
-                signature = (
-                    tuple(tuple(seq) for seq in ctr),
-                    tuple(tuple(seq) for seq in cevents),
-                    tuple(tuple(tuple(pair) for pair in seq)
-                          for seq in cintervals))
-                cached = score_cache.get(signature)
-                s, aux = cached if cached is not None else (None, None)
-            if ctr and s is None:
-                s, aux = _score_output_candidate(
-                    ctr, cevents, cexp, term.role, ttarget,
-                    traces.overflow, intervals=cintervals)
-            if ctr:
-                score_cache[signature] = (s, aux)
-            key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
-            if best_key is None or key < best_key:
-                best_key, best, best_aux = key, c, aux
-        if best is None:
-            break
-        used.add(best)
-        out_pos[term.role] = best
+                scores[term.role][c] = 0.0
+                continue
+            scores[term.role][c] = _score_output_candidate(
+                ctr, cevents, cexp, term.role, ttarget,
+                traces.overflow, intervals=cintervals)[0]
+
+    # Globally best injective assignment, not role-by-role greedy: a greedy
+    # first role can spend the only strong cell and strand a later one.
+    assignment = best_distinct_assignment(
+        tuple(out_pos), candidates, scores)
+    if assignment is None:
+        return out_pos, traces
+    out_pos.update(assignment)
+    for term in ttarget.outputs:
+        best = out_pos[term.role]
         traces[term.role] = [
             [trial_states[ti][t].get(best, 0) if t < len(trial_states[ti]) else 0
              for t in range(obs)]
@@ -344,7 +395,8 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None, arch='si
     return out_pos, traces
 
 
-def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, arch='single'):
+def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
+                        delays=None, arch='single', source_nodes=None):
     """Run target trials at already-selected nervous-net output cells.
 
     Unlike :func:`place_outputs_by_trace`, this function performs no search.
@@ -357,8 +409,15 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget, delays=None, ar
     obs = _obs_len(ttarget)
     need_samples = needs_samples(ttarget)
     config = getattr(ttarget, 'pulse_config', None)
-    terminal_inputs, terminal_outputs = terminal_node_sets(
-        ttarget, in_pos, out_pos)
+    if source_nodes is None:
+        terminal_inputs, terminal_outputs = terminal_node_sets(
+            ttarget, in_pos, out_pos)
+    else:
+        # A FROZEN set supplied by the caller. Held-out validation passes the
+        # pads it fitted with; re-resolving them here would let validation
+        # quietly choose a different input binding from training.
+        terminal_inputs = set(source_nodes)
+        terminal_outputs = set(flat_outputs(out_pos))
     if arch == 'tri3':
         sub = grid
     else:
@@ -408,7 +467,22 @@ def prepare_net(genome, ttarget):
     grid = grow_nervous(genome, seeds=growth_seeds(
                             ttarget, strategy, genome),
                         grid_size=ttarget.grid_size, iters=ttarget.iters)
-    if strategy in (
+    return prepare_net_grid(genome, ttarget, grid, strategy=strategy)
+
+
+def prepare_net_grid(genome, ttarget, grid, strategy=None,
+                     record_progress=True):
+    """``prepare_net`` for a body that has ALREADY been grown.
+
+    Split out so lifespan scoring (runtime/escape.py) can interpret several
+    developmental snapshots of one organism through exactly this code path
+    instead of a parallel copy of it. ``record_progress`` is false for juvenile
+    bodies: I/O binding progress describes the ADULT organism, and letting a
+    half-grown snapshot overwrite it would corrupt the selection-only wiring
+    viability that rank_key reads."""
+    if strategy is None:
+        strategy = io_strategy(ttarget)
+    if record_progress and strategy in (
             'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
         record_binding_progress(
             genome, binding_progress(genome, grid, ttarget))
@@ -416,7 +490,15 @@ def prepare_net(genome, ttarget):
         return None
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, _ = interpret_nervous(grid, ttarget, arch=arch)
-    if strategy == 'fixed' and any(p not in grid for p in in_pos):
+    # An evolved layout replaces the target's declared pads outright. Every pad
+    # must have survived development: a pad that failed to grow is a genuinely
+    # unbindable phenotype, not something to relocate to the nearest live cell.
+    pads = layout_pads(genome, ttarget)
+    if pads is not None:
+        if not pads or any(cell not in grid for cell in pads):
+            return None
+        in_pos = list(pads)
+    elif strategy == 'fixed' and any(p not in grid for p in in_pos):
         return None                     # a dead seed pad (fixed binding only)
     # Width-preserving transport: build the per-cell delays from the genome's
     # node-type delay vector (node_delays returns None for every other model,
@@ -426,7 +508,7 @@ def prepare_net(genome, ttarget):
     config = getattr(ttarget, 'pulse_config', None)
     delays = None if arch == 'tri3' else node_delays(genome, grid, config)
 
-    if strategy != 'fixed':
+    if pads is None and strategy != 'fixed':
         bound = bind_io(genome, grid, ttarget, strategy)
         if bound is None:
             return None
@@ -439,9 +521,14 @@ def prepare_net(genome, ttarget):
             return None
         return grid, routing, in_pos, out_pos, traces
 
+    # Explicit source membership, resolved ONCE and used for both fitting and
+    # tracing. Empty for a fixed-input genome, which keeps the legacy wired-OR
+    # input semantics untouched.
+    source_nodes = ({tuple(cell) for cell in pads} if pads else None)
     out_pos, traces = place_outputs_by_trace(grid, routing, in_pos, ttarget,
                                              delays=delays,
-                                             arch=arch)
+                                             arch=arch,
+                                             source_nodes=source_nodes)
     if any(out_pos[t.role] is None for t in ttarget.outputs):
         return None
     return grid, routing, in_pos, out_pos, traces

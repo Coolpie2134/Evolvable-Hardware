@@ -116,6 +116,83 @@ IO_STATE_INPUT  = 16
 IO_STATE_OUTPUT = 17
 
 
+# ── canonical alphabet ─────────────────────────────────────────────────────────
+# The 5-bit configuration register has 32 settings but only 22 distinct CIRCUITS.
+# A routing whose two excitatory inputs are the same cell relays that one line,
+# and AND(x, x) == OR(x, x) — so the OR twin of every buffer, and of "off", is
+# the identical circuit to its AND original:
+#
+#     dead <- 0, 16     buffer D <- 1, 17     buffer R <- 2, 18   buffer L <- 3, 19
+#     buffer R veto L <- 7, 23    buffer D veto L <-  8, 24   buffer L veto R <-  9, 25
+#     buffer D veto R <- 10, 26   buffer L veto D <- 11, 27   buffer R veto D <- 12, 28
+#
+# Only the six genuine coincidence routings (4, 5, 6, 13, 14, 15) differ from
+# their OR twins, giving 12 distinct coincidence circuits.
+#
+# Left unmanaged this is a 2:1 PRIOR against coincidence — the substrate's only
+# computational primitive. Drawing a configuration uniformly over the 32
+# encodings makes every buffer (and death) twice as likely as any coincidence
+# detector; measured over 60k random genes, buffers landed at ~6.2% each against
+# ~3.1% for each coincidence. It also let a genome accumulate alias states, so
+# two genes building the identical circuit displayed as different node types and
+# a gene emitting state 16 displayed as a node type that is really a dead cell.
+#
+# Genomes therefore carry CANONICAL states only: one encoding per circuit. The
+# register is still physically 5 bits and mutation is still a single bit flip
+# (the paper's model); the flip is simply normalised back onto the canonical
+# representative afterwards, so a bit that provably changes nothing cannot
+# silently consume a mutation event or split one circuit across two node types.
+_CANONICAL_ALIAS = {}
+for _state in range(len(ROUTING_HEX)):
+    _e1, _e2, _i1, _op = ROUTING_HEX[_state]
+    # An OR twin is redundant exactly when its two excitatory sources coincide.
+    if _state >= 16 and _e1 == _e2:
+        _CANONICAL_ALIAS[_state] = _state - 16
+del _state, _e1, _e2, _i1, _op
+
+#: Configurations a genome may hold under ordinary binding: one per circuit.
+CANONICAL_STATES = tuple(s for s in range(len(ROUTING_HEX))
+                         if s not in _CANONICAL_ALIAS)
+#: Under ``terminal_nodes`` binding, states 16 and 17 are not aliases at all —
+#: they are the dedicated input / output NODE TYPES described above, so they
+#: stay drawable and are never normalised away.
+CANONICAL_STATES_WITH_TERMINALS = tuple(sorted(
+    set(CANONICAL_STATES) | {IO_STATE_INPUT, IO_STATE_OUTPUT}))
+
+
+#: A redundant encoding is DEAD, not a second name for its AND original. The
+#: register really does have 32 settings and only 22 of them are circuits; the
+#: other 10 are configurations the hardware cannot usefully hold, so landing on
+#: one kills the cell rather than quietly meaning something else.
+#:
+#: This is deliberately NOT the same as folding an alias onto its twin. Folding
+#: made a bit flip onto the AND/OR select line of a buffer a guaranteed no-op —
+#: an inert mutation that consumed an event and changed nothing. Death makes the
+#: same flip meaningful: it prunes the cell, which is a real and reachable
+#: developmental outcome, and it gives mutation a way to remove a cell that does
+#: not require finding state 0 exactly.
+DEAD_STATE = 0
+
+
+def canonical_state(state, terminals=False):
+    """The stored form of one configuration: itself, or DEAD if it is redundant.
+
+    ``terminals`` keeps the two dedicated I/O node types (16 / 17) distinct,
+    which they genuinely are under the ``terminal_nodes`` binding strategy —
+    there they are real node types rather than redundant encodings, and killing
+    them would erase every terminal an organism grew.
+    """
+    state = int(state) & 0x1F
+    if terminals and state in (IO_STATE_INPUT, IO_STATE_OUTPUT):
+        return state
+    return DEAD_STATE if state in _CANONICAL_ALIAS else state
+
+
+def canonical_states(terminals=False):
+    return (CANONICAL_STATES_WITH_TERMINALS if terminals
+            else CANONICAL_STATES)
+
+
 def _entry_op(entry):
     return entry[3] if len(entry) > 3 else 'and'      # tolerate legacy 3-tuples
 

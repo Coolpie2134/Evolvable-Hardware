@@ -17,6 +17,7 @@ _FIELDS = {
                 'io_limit', 'io_selector', 'io_kind'),
     'lut': ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out', 'tag',
             'io_limit', 'io_selector', 'io_kind'),
+    'fnv': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'),
 }
 
 
@@ -27,6 +28,9 @@ def _genome_types(backend):
         from substrates.nervous.genome import HexGene as Gene, Chromosome, Genome
     elif backend == 'lut':
         from substrates.lut.genome import LutGene as Gene, Chromosome, Genome
+    elif backend == 'fnv':
+        from substrates.fnv.genome import (
+            FunctionalGene as Gene, Chromosome, Genome)
     else:
         raise ValueError('unknown backend: %s' % backend)
     return Gene, Chromosome, Genome
@@ -40,8 +44,25 @@ def genome_to_dict(genome, backend):
         return (0 if count < 2 else
                 max(1, min(int(chromosome.split), count - 1)))
     sd = getattr(genome, 'state_delays', None)     # nervous width-preserving model
+    if backend == 'fnv':
+        from substrates.fnv.catalogue import CATALOGUE_HASH
+        from substrates.fnv.genome import DEVELOPMENT_VERSION
+        catalogue_hash = CATALOGUE_HASH
+        development_version = DEVELOPMENT_VERSION
+    else:
+        catalogue_hash = None
+        development_version = None
     return {
         'tag': int(genome.tag), 'gene_fields': list(fields),
+        'catalogue_hash': catalogue_hash,
+        'development_version': development_version,
+        # FNV alone evolves relative physical source-pad positions. ``None``
+        # preserves legacy checkpoints whose pads remain target-declared.
+        'input_layout': (
+            [[int(cell[0]), int(cell[1])]
+             for cell in genome.input_layout]
+            if backend == 'fnv'
+            and getattr(genome, 'input_layout', None) is not None else None),
         'seed_state': (
             [int(value) for value in genome.seed_state]
             if backend == 'lut' and getattr(genome, 'seed_state', None)
@@ -53,6 +74,12 @@ def genome_to_dict(genome, backend):
             [[int(patch.x), int(patch.y), int(patch.state)]
              for patch in (getattr(genome, 'routing_patches', None) or ())]
             if backend == 'nervous' else []),
+        # Evolved input pads. Absent/null marks a FIXED-input genome, which
+        # keeps reading its pads from the target — that is the documented
+        # legacy load path, not a missing field to be repaired.
+        'input_layout': (
+            [[int(cell[0]), int(cell[1])] for cell in genome.input_layout]
+            if getattr(genome, 'input_layout', None) is not None else None),
         'chromosomes': [
             {'tag': int(c.tag), 'split': split_for(c),
              'telomere': int(getattr(c, 'telomere', 1)),
@@ -80,7 +107,8 @@ def genome_from_dict(data, backend):
             # Historical 0/all and multi-site limits are retired. Keeping the
             # field readable avoids breaking old files while guaranteeing that
             # every loaded port has single-cell semantics.
-            values['io_limit'] = 1
+            if 'io_limit' in fields:
+                values['io_limit'] = 1
             genes.append(Gene(**values))
         split = (0 if len(genes) < 2 else
                  max(1, min(int(item.get('split', 0)), len(genes) - 1)))
@@ -88,15 +116,34 @@ def genome_from_dict(data, backend):
             genes=genes, split=split,
             tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1)),
             # 'sex' is the flag's retired spelling — readable, never written
-            wiring=bool(item.get('wiring', item.get('sex', False)))))
+            **({'wiring': bool(item.get('wiring', item.get('sex', False)))}
+               if backend != 'fnv' else {})))
     seed_state = data.get('seed_state') if backend == 'lut' else None
+    backend_fields = {}
+    if backend == 'lut':
+        backend_fields.update({
+            'seed_state': (
+                tuple(int(value) & 0xFFFF for value in seed_state)
+                if seed_state is not None else None),
+            'provenance': str(data.get('provenance', '')),
+        })
+    elif backend == 'fnv':
+        layout = data.get('input_layout')
+        backend_fields['input_layout'] = (
+            tuple((int(cell[0]), int(cell[1])) for cell in layout)
+            if layout is not None else None)
     genome = Genome(
         chromosomes=chroms, tag=int(data.get('tag', 0)),
-        **({'seed_state': (
-            tuple(int(value) & 0xFFFF for value in seed_state)
-            if seed_state is not None else None),
-            'provenance': str(data.get('provenance', ''))}
-           if backend == 'lut' else {}))
+        **backend_fields)
+    if backend == 'fnv':
+        from substrates.fnv.catalogue import verify_catalogue_hash
+        from substrates.fnv.genome import DEVELOPMENT_VERSION
+        verify_catalogue_hash(data.get('catalogue_hash'))
+        if data.get('development_version') != DEVELOPMENT_VERSION:
+            raise ValueError(
+                "FNV checkpoint development version mismatch: expected %d, "
+                "found %r" % (
+                    DEVELOPMENT_VERSION, data.get('development_version')))
     # 'state_widths' appears in checkpoints written before width evolution was
     # retired. It is deliberately ignored: the vector no longer exists on the
     # genome and no engine reads it (RunConfig.from_dict moves such runs onto
@@ -110,6 +157,10 @@ def genome_from_dict(data, backend):
             RoutingPatch(int(row[0]), int(row[1]), int(row[2]))
             for row in data.get('routing_patches', ())
             if len(row) >= 3]
+        layout = data.get('input_layout')
+        if layout is not None:
+            genome.input_layout = tuple(
+                (int(cell[0]), int(cell[1])) for cell in layout)
         genome.arch = data.get('arch', 'single')
         # Tri channels were 4-bit AND-only before the OR twins were added. A
         # legacy checkpoint's packed bits would be re-cut at the new 5-bit field

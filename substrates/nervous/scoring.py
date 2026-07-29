@@ -1139,6 +1139,66 @@ def _state_observed_intervals(traces, role, trial_index):
             if trial_index < len(sampled) else [])
 
 
+# How irregular a real loop's lap time may be and still count as circulating.
+# Generous enough for node-delay spread, tight enough that two blips far apart
+# cannot masquerade as a slow ring.
+_CIRCULATION_SLACK = 1.6
+
+
+def _circulation_budget(intervals, windows, floor):
+    """This circuit's silent-gap budget for one trial.
+
+    ``floor`` is the smallest legal ring's lap time, ``2*(delay + width)``. A
+    LARGER loop is an equally legitimate memory — its lap is simply longer — so
+    a circuit that DEMONSTRATES a longer, regular circulation is judged against
+    its own lap rather than against the smallest ring that could exist. Without
+    this, every ring of more than about two cells was scored as though it kept
+    dying and restarting.
+
+    The demonstration is deliberately hard to fake, because a looser survival
+    test is exactly how a dead circuit sneaks a pass:
+
+    * the pulses must lie inside COMMANDED-ACTIVE epochs — a ring cannot claim
+      a lap out of the silence it was supposed to be keeping;
+    * there must be at least two of them, i.e. one completed lap. A single
+      pulse is an echo, not a circulation, and establishes no period at all;
+    * the laps must be REGULAR. A circulating pulse returns on a schedule;
+      irregular blips do not, and fall back to ``floor``;
+    * the budget is capped at HALF the LONGEST active epoch. This is what stops
+      one wide gap from declaring itself a slow ring: two pulses at the far ends
+      of an epoch claim a lap as long as the epoch, the cap refuses it, and the
+      circuit is judged against ``floor``. A lap that long cannot demonstrate
+      retention ACROSS any epoch the target actually commands.
+
+    The lap is measured once per TRIAL rather than per window, because it is a
+    property of the loop, not of the epoch being judged. A circuit that has
+    already shown a six-tick lap over a long hold does not stop having one when
+    the next hold is too short to re-demonstrate it, and making it re-prove
+    itself in every window punished exactly the longer loops this is meant to
+    admit.
+
+    A free-running oscillator that fires regardless of input could satisfy all
+    of that, but it then fires during the commanded-quiet windows too and loses
+    there — the quiet epochs remain the guard against non-storage.
+    """
+    laps, longest_window = [], 0.0
+    for start, end in windows:
+        longest_window = max(longest_window, end - start)
+        # Laps are measured WITHIN one epoch. The gap between the last pulse of
+        # one hold and the first of the next spans the commanded silence in
+        # between; counting it as a lap would make every multi-hold trial look
+        # like an irregular ring.
+        inside = sorted(s for s, _e in intervals if start <= s < end)
+        laps.extend(later - earlier
+                    for earlier, later in zip(inside, inside[1:]))
+    if not laps or longest_window <= 0.0:
+        return floor
+    shortest, longest = min(laps), max(laps)
+    if shortest <= 0.0 or longest > shortest * _CIRCULATION_SLACK:
+        return floor
+    return max(floor, min(longest, longest_window / 2.0))
+
+
 def _state_case_score(traces, target, trial, role, trial_index, shift):
     """Judge abstract active/quiet epochs without imposing pulse phase.
 
@@ -1154,19 +1214,64 @@ def _state_case_score(traces, target, trial, role, trial_index, shift):
     delay = pulse.DELAY if config is None else config.delay
     width = pulse.WIDTH if config is None else config.width
     allowed_gap = 2.0 * (delay + width)
-    values = []
-    commanded_active = judged_active = 0
+    windows = []
     for state, ticks in _expected_windows(trial.expected.get(role, ())):
         if not ticks:
             continue
         start = float(min(ticks) + shift)
         end = float(max(ticks) + 1 + shift)
-        if end <= start:
-            continue
+        if end > start:
+            windows.append((state, start, end))
+    # This circuit's own lap time, measured once from every commanded-active
+    # epoch of the trial. It sets both how long a silence inside a hold may be
+    # and how late the trailing pulse of a stopped ring may arrive.
+    lap = (allowed_gap if strict else _circulation_budget(
+        actual, [(s, e) for state, s, e in windows if state == 1],
+        allowed_gap))
+    values = []
+    commanded_active = judged_active = 0
+    quiet_windows = judged_quiet = 0
+    unjudgeable_quiet = []
+    previous_state = None
+    for state, start, end in windows:
+        if state == 0 and previous_state == 1 and not strict:
+            # STOPPING GRACE. A stored bit is a pulse going round a loop, and a
+            # loop cannot stop faster than one lap: when the reset arrives the
+            # pulse already in flight completes its circuit and lands just
+            # inside the newly-quiet window. That trailing pulse is correct
+            # behaviour, so the leading edge of a quiet epoch is excused for
+            # exactly one lap — of THIS circuit's ring, measured from the
+            # active epoch the pulse was launched in, not of the smallest ring
+            # that could theoretically exist. A six-tick loop's last pulse
+            # arrives six ticks late, and judging it against a four-tick budget
+            # punishes it for being a bigger loop.
+            #
+            # Without this, an ideal ring was penalised on EVERY reset it
+            # performed, at every period — measured 0.38-0.77 across all four
+            # memory targets (tools/probe_ring_penalty.py). The grace is only
+            # taken when a judgeable remainder survives it, so no quiet window
+            # ever becomes unjudgeable and a stuck-on output cannot buy a free
+            # pass with it.
+            if end - (start + lap) > 0:
+                start = start + lap
+            else:
+                # The whole quiet epoch is shorter than one lap, so it cannot
+                # separate "stopped on command" from "finishing the lap that
+                # was already under way". It therefore makes NO CLAIM, exactly
+                # as a too-short active epoch does above. Scoring it instead
+                # would punish the correct circuit hardest precisely where the
+                # evidence is weakest.
+                quiet_windows += 1
+                unjudgeable_quiet.append((start, end))
+                previous_state = state
+                continue
+        previous_state = state
         duration = end - start
         coverage, gap = _cov_gap(actual, start, end)
         fraction = coverage / duration
         if state == 0:
+            quiet_windows += 1
+            judged_quiet += 1
             value = (1.0 - fraction if strict else
                      max(0.0, 1.0 - fraction / STATE_QUIET_COVERAGE))
         elif strict:
@@ -1181,13 +1286,25 @@ def _state_case_score(traces, target, trial, role, trial_index, shift):
                 continue
             judged_active += 1
             value = (0.0 if coverage <= 0.0 else
-                     (1.0 if gap <= allowed_gap else allowed_gap / gap))
+                     (1.0 if gap <= lap else lap / gap))
         values.append(max(0.0, min(1.0, value)))
     # A case that commands activity but whose active epochs are EVERY one too
     # short to judge would otherwise be scored on its quiet epochs alone, and a
     # permanently silent output satisfies those perfectly. Refuse the free pass:
     # the state relation cannot express such a case, and scoring 0 says so
     # loudly instead of certifying a dead circuit at 1.0.
+    if quiet_windows and not judged_quiet and unjudgeable_quiet:
+        # Every quiet epoch was shorter than one lap. Letting them all vanish
+        # would hand a permanently-active output a free pass on the only
+        # constraint that can catch it, so the longest one is judged WITHOUT
+        # the stopping grace. A correct circuit loses a little here; a stuck-on
+        # one still fails, which is the trade that must not be got backwards.
+        start, end = max(unjudgeable_quiet, key=lambda w: w[1] - w[0])
+        coverage, _gap = _cov_gap(actual, start, end)
+        fraction = coverage / (end - start)
+        values.append(max(0.0, min(1.0, (
+            1.0 - fraction if strict else
+            max(0.0, 1.0 - fraction / STATE_QUIET_COVERAGE)))))
     timed_state = (
         hasattr(target, 'contract')
         and has_relation(target, 'transition_correspondence'))
@@ -1262,18 +1379,25 @@ def _expected_state_changes(expected, activation_only=False, allowed_gap=0.0):
     return changes
 
 
-def _expected_activation_changes(expected, allowed_gap):
+def _expected_activation_changes(expected, lap, width):
     """Required and optional 0->1 boundaries for a circulating output.
 
     A short active epoch may contain no pulse at the observed cell, and a
-    restart after a short quiet epoch may be indistinguishable from an ordinary
-    inter-pulse gap. Such boundaries are optional: absorb them when visible,
-    but do not count them as misses when ring phase hides them.
+    restart after a short quiet epoch may be indistinguishable from the prior
+    ring's trailing pulse followed by an ordinary inter-pulse gap. Such
+    boundaries are optional: absorb them when visible, but do not count them as
+    misses when ring phase hides them.
+
+    The ambiguity lasts for one lap of stopping grace plus one lap before the
+    restarted ring must next be visible. ``width`` matters because activity
+    epochs are merged by the silent gap between physical intervals, not by
+    their leading-edge separation.
     """
     required, optional = [], []
     previous = 0
     quiet_start = 0.0
     seen_activation = False
+    restart_ambiguity = 2.0 * lap + width
     for tick, value in enumerate(expected):
         if value is None:
             continue
@@ -1291,9 +1415,9 @@ def _expected_activation_changes(expected, allowed_gap):
                 float(tick) - quiet_start
                 if quiet_start is not None else float('inf'))
             observable = (
-                end - float(tick) > allowed_gap + 1e-9
+                end - float(tick) > lap + 1e-9
                 and (not seen_activation
-                     or quiet_duration > allowed_gap + 1e-9))
+                     or quiet_duration > restart_ambiguity + 1e-9))
             if observable:
                 required.append(float(tick))
             else:
@@ -1343,7 +1467,18 @@ def _logical_transition_pairs(traces, target):
                     (float(event), float(event) + width)
                     for event in _role_events(
                         traces, role, trial_index)]
-            epochs = _merge_activity_epochs(intervals, allowed_gap)
+            active_windows = [
+                (float(min(ticks)), float(max(ticks) + 1))
+                for state, ticks in _expected_windows(expected)
+                if state == 1 and ticks]
+            # A loop's lap is a property of this circuit, not of the smallest
+            # ring the substrate permits. Reuse the same guarded measurement
+            # as logical-state retention so a longer honest ring is not split
+            # into one apparent activation per circulating pulse.
+            lap = (
+                allowed_gap if strict else
+                _circulation_budget(intervals, active_windows, allowed_gap))
+            epochs = _merge_activity_epochs(intervals, lap)
             observation_horizon = (
                 float(len(samples[trial_index]))
                 if trial_index < len(samples) and samples[trial_index]
@@ -1364,10 +1499,10 @@ def _logical_transition_pairs(traces, target):
                 optional = ()
             else:
                 required, optional = _expected_activation_changes(
-                    expected, allowed_gap)
+                    expected, lap, width)
             pairs.append((
                 tuple(required), tuple(changes), float(target.T),
-                0.0 if strict else allowed_gap, tuple(optional)))
+                0.0 if strict else lap, tuple(optional)))
     return tuple(pairs)
 
 
@@ -2170,3 +2305,90 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
                   % (total, '   SOLVED' if total >= 0.999 else '', label,
                      exact_tick_accuracy(traces, ttarget))]
     return total, lines
+
+
+# ── fitted output probes: where does this organism produce each answer? ─────────
+# Outputs are NON-HERITABLE probes. The genome evolves the mechanism and the
+# input geometry; evaluation then asks where the grown organism actually
+# produces each answer, rather than demanding it deliver that answer to a
+# prescribed coordinate.
+#
+# Both asynchronous substrates use these two helpers, so the selection rule
+# cannot drift between them.
+
+
+def behavior_representatives(candidates, signature, multiplicity):
+    """Keep enough cells per identical response to preserve distinct matching.
+
+    Cells that respond identically are interchangeable as probes, so scoring
+    every one of them is wasted work on a large organism. Keeping
+    ``multiplicity`` (the number of output roles) of each behaviour is exactly
+    enough that a distinct-cell assignment can still be made when several roles
+    want the same response.
+    """
+    limit = max(1, int(multiplicity))
+    counts, representatives = {}, []
+    for cell in candidates:
+        key = signature(cell)
+        count = counts.get(key, 0)
+        if count >= limit:
+            continue
+        counts[key] = count + 1
+        representatives.append(cell)
+    return tuple(representatives)
+
+
+def best_distinct_assignment(roles, candidates, scores):
+    """Maximise total role score while assigning a DISTINCT cell to each role.
+
+    A role-by-role greedy choice can spend the only strong cell on an early
+    role and leave a later one with nothing — the greedy answer is not merely
+    suboptimal, it can be arbitrarily bad on exactly the multi-output targets
+    that matter. This small bitmask dynamic program finds the globally best
+    injective assignment instead.
+
+    Compactness is NOT an objective here: coordinate order enters only as a
+    deterministic tie-break between assignments of equal total score, so the
+    choice is reproducible without biasing the probe toward the target's
+    declared coordinate.
+    """
+    roles = tuple(roles)
+    candidates = tuple(candidates)
+    if not roles:
+        return {}
+    if len(candidates) < len(roles):
+        return None
+
+    def assignment_key(assignment):
+        sentinel = (float('inf'), float('inf'))
+        return tuple(sentinel if cell is None else tuple(cell)
+                     for cell in assignment)
+
+    def prefer(candidate, incumbent):
+        if incumbent is None:
+            return True
+        if candidate[0] != incumbent[0]:
+            return candidate[0] > incumbent[0]
+        return assignment_key(candidate[1]) < assignment_key(incumbent[1])
+
+    empty = (None,) * len(roles)
+    states = {0: (0.0, empty)}
+    for cell in candidates:
+        updated = dict(states)
+        for mask, (total, assignment) in states.items():
+            for role_index, role in enumerate(roles):
+                bit = 1 << role_index
+                if mask & bit:
+                    continue
+                trial = list(assignment)
+                trial[role_index] = cell
+                record = (total + float(scores[role].get(cell, 0.0)),
+                          tuple(trial))
+                next_mask = mask | bit
+                if prefer(record, updated.get(next_mask)):
+                    updated[next_mask] = record
+        states = updated
+    record = states.get((1 << len(roles)) - 1)
+    if record is None:
+        return None
+    return dict(zip(roles, record[1]))

@@ -186,6 +186,9 @@ def test_three_output_tile_composes_with_analog_node_physics():
 # ── GA path ──────────────────────────────────────────────────────────────────────
 
 def test_tri_growth_uses_fifteen_bit_states():
+    # Seeded: an unseeded random genome inherits whatever RNG state the previous
+    # test left behind, and some of those grow nothing beyond the seed tile.
+    random.seed(4242)
     g = random_hex_genome(2, arch='tri3')
     grid = grow_nervous(g, seeds=((0, 0),))
     assert len(grid) > 1

@@ -53,6 +53,8 @@ def test_nervous_routing_overlay_survives_checkpoint_and_signature():
         RoutingPatch(4, 1, 9),
     ]
     target = TEMPORAL_TARGETS['Veto gate']
+    # Single-arch genomes built inline: this exercises checkpoint/signature
+    # plumbing, not a run, so it keeps the retired engine's architecture.
     config = RunConfig(ga=GAConfig(
         chromosome_count=2, tile_arch='single',
         node_model='pulse_delay'),
@@ -634,8 +636,8 @@ def test_controller_uses_row_lexicase_for_combinational_nervous_targets():
     config = RunConfig(
         ga=GAConfig(
             chromosome_count=2, selection='tournament',
-            tile_arch='single', node_model='pulse_delay'),
-        pulse=PulseConfig(model='pulse_delay'))
+            tile_arch='tri3', node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
     messages = queue.Queue()
     stop = threading.Event()
 
@@ -672,8 +674,8 @@ def test_spatial_rescue_scans_each_unchanged_body_candidate_once():
     config = RunConfig(
         ga=GAConfig(
             chromosome_count=3, io_placement='spatial_chromosome',
-            tile_arch='single', node_model='pulse_delay'),
-        pulse=PulseConfig(model='pulse_delay'))
+            tile_arch='tri3', node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
     messages = queue.Queue()
     stop = threading.Event()
 
@@ -815,9 +817,9 @@ def test_controller_archives_the_champion_without_carrying_parents_forward():
     """
     target = TEMPORAL_TARGETS['Veto gate']
     config = RunConfig(
-        ga=GAConfig(chromosome_count=2, tile_arch='single',
-                    node_model='pulse_delay'),
-        pulse=PulseConfig(model='pulse_delay'))
+        ga=GAConfig(chromosome_count=2, tile_arch='tri3',
+                    node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
     messages = queue.Queue()
     stop = threading.Event()
     evaluations = iter((
@@ -856,9 +858,9 @@ def test_terminal_convergence_starts_only_after_a_perfect_offspring():
     """After the first 1.0, solved parents/children accumulate toward mean 1."""
     target = TEMPORAL_TARGETS['Veto gate']
     config = RunConfig(
-        ga=GAConfig(chromosome_count=2, tile_arch='single',
-                    node_model='pulse_delay'),
-        pulse=PulseConfig(model='pulse_delay'))
+        ga=GAConfig(chromosome_count=2, tile_arch='tri3',
+                    node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
     messages = queue.Queue()
     stop = threading.Event()
     evaluations = iter((
@@ -1072,8 +1074,8 @@ def test_stop_saves_the_latest_fully_evaluated_solver_generation():
     target = TEMPORAL_TARGETS['Veto gate']
     config = RunConfig(
         ga=GAConfig(chromosome_count=2, tile_arch='tri3',
-                    node_model='uniform'),
-        pulse=PulseConfig(model='uniform'))
+                    node_model='paper_analog'),
+        pulse=PulseConfig(model='paper_analog'))
     stop = threading.Event()
     messages = queue.Queue()
 

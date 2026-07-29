@@ -10,7 +10,9 @@ from concurrent.futures import ProcessPoolExecutor
 
 from .cache import LRUCache
 from .checkpoint import save_population
-from .config import RunConfig, MAX_CHROMOSOME_COUNT, validate_new_nv_profile
+from .config import (RunConfig, MAX_CHROMOSOME_COUNT, nv_run_config,
+                     validate_new_nv_profile)
+from .escape import build_escape_state, population_mutation_rate
 from .mutation import STRESS_PATIENCE
 from .mutation import adaptive_mutation_rate as snn_adaptive_mutation_rate
 from .parallel import EvolutionCancelled   # re-exported for back-compat
@@ -104,7 +106,11 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                             next_population as next_snn,
                             rank_key as snn_rank_key)
 
-    config = run_config or RunConfig()
+    # A caller that supplies no configuration gets the ONE live nervous
+    # profile rather than GAConfig's field defaults, which still describe the
+    # retired single-tile engine and would be rejected by the gate below.
+    config = run_config or (nv_run_config() if backend == 'nervous'
+                            else RunConfig())
     if backend == 'snn' and config.ga.io_placement == 'terminal_nodes':
         raise ValueError(
             "io_placement='terminal_nodes' is available for nervous and LUT "
@@ -112,6 +118,17 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             'physics')
     if backend == 'nervous':
         validate_new_nv_profile(config.ga)
+    if backend == 'fnv' and config.ga.io_placement != 'fixed':
+        raise ValueError(
+            "Functional NV Net currently uses fixed physical terminals; "
+            "set io_placement='fixed'")
+    if (backend == 'fnv' and (
+            config.ga.escape.lifespan_scoring
+            or config.ga.escape.robustness
+            or config.ga.escape.lexicase_downsample < 1.0)):
+        raise ValueError(
+            'FNV does not yet implement lifespan/physics-jitter objectives or '
+            'lexicase downsampling; leave those escape options off')
     chromosome_count = (config.ga.chromosome_count
                         if config.ga.chromosome_count is not None else n_chroms)
     if not 1 <= chromosome_count <= MAX_CHROMOSOME_COUNT:
@@ -131,6 +148,11 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             'chromosome-based I/O requires at least 3 chromosomes; '
             'chromosome 3 is reserved as the evolvable port map')
     setattr(target, 'pulse_config', config.pulse)
+    # The escape configuration rides on the TARGET so it reaches evaluation
+    # worker processes (same idiom as pulse_config / _lifetime_samples). It is
+    # what turns lifespan scoring and the robustness objective on inside the
+    # worker; the population-level mechanisms are driven from this loop.
+    setattr(target, '_escape', config.ga.escape)
     n_ports = target.n_inputs + len(target.outputs)
     pool = None
     diversify_fn = None
@@ -166,7 +188,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 spatial_chromosome=(io_strategy == 'spatial_chromosome'),
                 n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'),
                 terminal_nodes=(io_strategy == 'terminal_nodes'),
-                n_inputs=target.n_inputs, n_outputs=len(target.outputs))
+                n_inputs=target.n_inputs, n_outputs=len(target.outputs),
+                input_layout=True)
             if io_strategy == 'spatial_chromosome':
                 from substrates.nervous.io_placement import seed_spatial
                 seed_spatial(genome, None, target)
@@ -252,6 +275,53 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             chromosome_count=chromosome_count,
             evolve_delay=evolve_delay, evolve_io=evolve_io,
             io_placement=io_strategy,
+            on_progress=lambda r, total, found: messages.put(
+                ('phase', 'Diversifying solved circuits', r, total, found)))
+    elif backend == 'fnv':
+        from substrates.fnv.ga import (
+            N_WORKERS, adaptive_mutation_rate, consolidate_population,
+            diversify, eval_batch_cases, next_population, rank_key)
+        from substrates.fnv.genome import random_functional_genome
+        families = config.fnv.families
+        setattr(target, '_fnv_families', families)
+        setattr(target, 'io_placement', 'fixed')
+        evolve_io = False
+        cache = LRUCache(config.ga.cache_size)
+        pool = ProcessPoolExecutor(max_workers=N_WORKERS)
+
+        def make_genome():
+            # FNV search is forward-only: initialization and immigrants sample
+            # developmental rules directly, then the ordinary growth engine
+            # determines the body. No target-shaped phenotype is constructed
+            # and no body is translated back into a genome.
+            return random_functional_genome(
+                chromosome_count, max_telomere=config.ga.max_telomere,
+                families=families, n_inputs=target.n_inputs)
+
+        raw_eval = lambda genomes, should_stop=None, on_progress=None: \
+            eval_batch_cases(
+                genomes, target, cache, pool, should_stop, on_progress)
+        selection_mode = (
+            'lexicase' if config.ga.selection == 'lexicase' else 'tournament')
+        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: \
+            next_population(
+                p, f, make_genome, c, mm, selection=selection_mode,
+                ga_config=config.ga, chromosome_count=chromosome_count,
+                recombination=recombine, archive_parent=archive,
+                stagnation=stagnation, rescue_candidates=rescue,
+                families=families, growth_seeds=target.inputs,
+                focus_families=(
+                    ("LOGIC", "C_ELEMENT")
+                    if getattr(target, "combinational_cases", ())
+                    else ()))
+        rate_fn = adaptive_mutation_rate
+        rank_fn = rank_key
+        consolidate_fn = consolidate_population
+        diversify_fn = lambda seeds, valid: diversify(
+            seeds, target, pop, valid=valid, cache=cache, executor=pool,
+            should_stop=stop_event.is_set,
+            max_telomere=config.ga.max_telomere,
+            chromosome_count=chromosome_count, families=families,
             on_progress=lambda r, total, found: messages.put(
                 ('phase', 'Diversifying solved circuits', r, total, found)))
     elif backend == 'lut':
@@ -370,18 +440,34 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # still dropping mm/archive/stagnation/rescue on the floor, which left
         # the SNN backend running at a fixed mutation rate with no plateau
         # response at all.
+        # The SNN breeder takes no ga_config, so the escape configuration and
+        # the mutation cap are handed to it explicitly — otherwise self-adaptive
+        # mutation would silently do nothing on this backend.
         step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_snn(
             p, f, chromosome_count=chromosome_count,
             recombination=recombine, evolve_io=evolve_io,
             io_placement=io_strategy,
             mean_mutations=mm, make_genome=make_genome,
             archive_parent=archive, stagnation=stagnation,
-            rescue_candidates=rescue)
+            rescue_candidates=rescue, escape=config.ga.escape,
+            mutation_limit=config.ga.mutation_limit)
         rate_fn = snn_adaptive_mutation_rate
         if io_strategy == 'spatial_chromosome':
             from substrates.nervous.io_placement import spatial_output_variants
             plateau_rescue_fn = lambda champion, limit: \
                 spatial_output_variants(champion, target, limit=limit)
+
+    # One construction point for the escape machinery, shared with the headless
+    # driver (substrates.nervous.ga.evolve_nervous) so the two drive paths
+    # cannot breed, crowd or rebirth under different rules.
+    escape_state = build_escape_state(
+        backend, config.ga, chromosome_count=chromosome_count,
+        io_placement=getattr(config.ga, 'io_placement', 'fixed'),
+        evolve_io=evolve_io,
+        evolve_delay=(config.ga.timing_mutations()
+                      if backend == 'nervous' else None),
+        fnv_families=(config.fnv.families if backend == 'fnv' else None))
+    escape_active = config.ga.escape.any_enabled
 
     def recombination_enabled():
         if recombination_event is not None:
@@ -465,6 +551,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 population, 'Evaluating initial population', try_i, 0)
             latest_population, latest_fitnesses = population, fitnesses
             latest_try, latest_generation = try_i, 0
+            # Robustness scalars must exist before anything is ranked.
+            escape_state.apply_robustness_blend(population, max(fitnesses))
             bi = max(range(pop),
                      key=lambda index: rank_fn(population[index], fitnesses[index]))
             champion, run_fit = copy.deepcopy(population[bi]), fitnesses[bi]
@@ -490,46 +578,87 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                         and stagnation >= STRESS_PATIENCE):
                     rescue = plateau_rescue_fn(
                         champion, min(48, max(1, pop // 2)))
-                offspring = step(
-                    parents, parent_fitnesses, parent_cases, actual_rate,
-                    recombination_enabled(),
-                    champion if run_fit < 1.0 else None,
-                    stagnation, rescue)
+                # One pool, or separate demes at their own mutation rates when
+                # islands are on. Shared with the headless driver.
+                offspring = escape_state.breed(
+                    generation, parents, parent_fitnesses, parent_cases,
+                    actual_rate,
+                    lambda deme, deme_fitnesses, deme_cases, deme_rate: step(
+                        deme, deme_fitnesses, deme_cases, deme_rate,
+                        recombination_enabled(),
+                        champion if run_fit < 1.0 else None,
+                        stagnation, rescue))
                 offspring_fitnesses, offspring_cases = evaluate(
                     offspring, 'Evaluating population', try_i, generation)
                 offspring_best = max(offspring_fitnesses)
-                if (consolidate_fn is not None
-                        and max(run_fit, offspring_best) >= 1.0):
-                    # Terminal convergence begins only after the first perfect
-                    # circuit. Before that, elites are breeders only. After it,
-                    # the best evaluated parents and offspring accumulate so the
-                    # live population mean can rise toward one.
-                    population, fitnesses, cases = consolidate_fn(
-                        parents, parent_fitnesses, parent_cases,
-                        offspring, offspring_fitnesses, offspring_cases)
-                else:
-                    # Strict pre-solve generational replacement: no evaluated
-                    # parent is copied into the next live population.
-                    population, fitnesses, cases = (
-                        offspring, offspring_fitnesses, offspring_cases)
+                # Collapse each genome's robust case vector under the current
+                # anneal BEFORE anything is ranked; rank_fn reads the scalar.
+                escape_state.apply_robustness_blend(
+                    list(parents) + list(offspring), max(run_fit, offspring_best))
+                # Survivor selection: terminal consolidation once solved,
+                # otherwise crowding when it is on, otherwise strict
+                # generational replacement. Shared with the headless driver.
+                population, fitnesses, cases = escape_state.merge_generation(
+                    parents, parent_fitnesses, parent_cases,
+                    offspring, offspring_fitnesses, offspring_cases,
+                    consolidate=consolidate_fn,
+                    solved=(consolidate_fn is not None
+                            and max(run_fit, offspring_best) >= 1.0))
                 validate_population(population)
-                latest_population, latest_fitnesses = population, fitnesses
-                latest_try, latest_generation = try_i, generation
                 gi = max(
                     range(pop),
                     key=lambda index: rank_fn(
                         population[index], fitnesses[index]))
                 generation_rank = rank_fn(population[gi], fitnesses[gi])
                 stagnation = 0 if fitnesses[gi] > run_fit + 1e-12 else stagnation + 1
-                if generation_rank > run_rank:
+                if escape_state.accepts(generation_rank, run_rank):
                     run_fit, champion, run_rank = (
                         fitnesses[gi], copy.deepcopy(population[gi]), generation_rank)
-                    if best_rank is None or run_rank > best_rank:
+                    if escape_state.accepts(run_rank, best_rank):
                         best_fit, best_genome, best_rank = (
                             run_fit, copy.deepcopy(champion), run_rank)
+                escape_state.record_champion(generation, champion, run_fit)
+                population, fitnesses, cases, rebirth_info = \
+                    escape_state.maybe_rebirth(
+                        generation, population, fitnesses, cases, actual_rate,
+                        stagnation, run_fit,
+                        lambda genomes: evaluate(
+                            genomes, 'Re-evaluating reborn cohort', try_i,
+                            generation))
+                if rebirth_info is not None:
+                    # A rebirth IS progress against the stall it answered; not
+                    # clearing the counter would re-fire it every generation.
+                    stagnation = 0
+                    validate_population(population)
+                    # The reborn cohort was evaluated AFTER the champion was
+                    # chosen above, so re-check it here. Skipping this let a
+                    # reborn genome that beat the champion sit in the reported
+                    # population for a generation while the reported best still
+                    # showed the old value — the one way this loop could print a
+                    # best below its own mean.
+                    ri = max(range(pop),
+                             key=lambda index: rank_fn(
+                                 population[index], fitnesses[index]))
+                    reborn_rank = rank_fn(population[ri], fitnesses[ri])
+                    if escape_state.accepts(reborn_rank, run_rank):
+                        run_fit, champion, run_rank = (
+                            fitnesses[ri], copy.deepcopy(population[ri]),
+                            reborn_rank)
+                        if escape_state.accepts(run_rank, best_rank):
+                            best_fit, best_genome, best_rank = (
+                                run_fit, copy.deepcopy(champion), run_rank)
+                    messages.put(('rebirth', rebirth_info))
+                escape_state.tick()
+                latest_population, latest_fitnesses = population, fitnesses
+                latest_try, latest_generation = try_i, generation
                 messages.put(('gen', try_i, generation, best_fit,
                               sum(fitnesses) / len(fitnesses), offspring_best,
                               actual_rate, statistics.pstdev(fitnesses)))
+                if escape_active:
+                    stats = escape_state.stats()
+                    stats['mean_rate'] = population_mutation_rate(
+                        population, actual_rate)
+                    messages.put(('escape', stats))
             if best_fit >= 1.0:
                 break
 
@@ -538,7 +667,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # FRESH held-out schedules (readout/alignment frozen) and emit a verdict
         # so a memorised-timing / leaky solution is flagged rather than trusted.
         # Advisory only — a failure here must never sink the run.
-        if (backend in ('nervous', 'lut') and best_genome is not None
+        if (backend in ('nervous', 'lut', 'fnv') and best_genome is not None
                 and not stop_event.is_set()):
             try:
                 from substrates.nervous.certification import certify
@@ -548,11 +677,11 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             except Exception:
                 certification = None
 
-        if backend in ('nervous', 'lut'):
+        if backend in ('nervous', 'lut', 'fnv'):
             save_latest_evaluated_generation(
                 'stopped' if stop_event.is_set() else 'complete')
 
-        if stop_event.is_set() and backend in ('nervous', 'lut'):
+        if stop_event.is_set() and backend in ('nervous', 'lut', 'fnv'):
             save_latest_solver_generation('stopped')
         elif (diversify_fn is not None and best_genome is not None
                 and best_fit >= SOLVER_VALID):
@@ -574,12 +703,12 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 messages.put(('solver_saved', len(diverse), valid, 'stopped', path))
             else:
                 messages.put(('diverse', len(diverse), valid))
-        elif backend in ('nervous', 'lut'):
+        elif backend in ('nervous', 'lut', 'fnv'):
             # Replace an older solved run with an honest empty snapshot.  An
             # unsolved current run must never leave stale solvers looking current.
             save_latest_solver_generation('complete')
     except EvolutionCancelled:
-        if backend in ('nervous', 'lut'):
+        if backend in ('nervous', 'lut', 'fnv'):
             save_latest_evaluated_generation('stopped')
             save_latest_solver_generation('stopped')
     except Exception:

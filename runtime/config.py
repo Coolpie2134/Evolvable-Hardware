@@ -3,21 +3,46 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from substrates.nervous.pulse import PulseConfig
+from .escape import EscapeConfig
 from .limits import MAX_CHROMOSOME_COUNT
 from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
+FNV_FAMILIES = (
+    'LOGIC', 'DELAY', 'NORMALIZER', 'HOLD', 'C_ELEMENT', 'TOGGLE',
+    'GATED_OSCILLATOR',
+)
 
 # The only NV Net substrates exposed for NEW runs. Older node models remain in
 # the engine solely so existing checkpoints and controlled comparisons load.
 #: (tile_arch, node_model, evolve_delay) per profile.
 NV_NEW_RUN_PROFILES = {
-    'legacy': ('single', 'pulse_delay', None),
-    # digital_tri isolates the tile-topology variable: the paper's three-circuit
-    # tile under the frozen digital node abstraction. With analog_tri and legacy
-    # it completes the topology-vs-physics ablation pair.
-    'digital_tri': ('tri3', 'uniform', None),
+    # ONE profile. The paper's three-circuit tile on the paper's Fig. 1 analog
+    # node — the most physically faithful configuration, and also the best
+    # measured, which is the rare case where fidelity and results agree.
+    #
+    # The topology-vs-physics ablation that the retired 'digital_tri' profile
+    # existed to run has been settled (8 targets x 2 seeds, 40 gens, pop 30):
+    #
+    #     legacy       (single tile, digital)  mean 0.9097   solved 4/8
+    #     digital_tri  (paper tile,  digital)  mean 0.8823   solved 3/8
+    #     analog_tri   (paper tile,  analog)   mean 0.9554   solved 5/8
+    #
+    # The paper's tile ALONE does not help — digital_tri scored below the
+    # single-tile engine. The analog node physics is what does the work.
+    #
+    # Held-out certification decided it. On Toggle, legacy trained to 1.000 on
+    # 5/5 seeds but only 2/5 CERTIFIED — three memorised timing. analog_tri was
+    # 5/5 CERTIFIED. The digital engine's fixed pulse width and rectangular
+    # coincidence window are exploitable timing invariants; the analog node's
+    # window, output width and refractory all EMERGE from charge/leak/comparator
+    # constants, so there is no fixed rectangle to memorise and a circuit has to
+    # work by real dynamics.
+    #
+    # The retired engines remain in the codebase as reference implementations
+    # (tests/test_pulse_models.py, tests/test_node_contracts.py audit them);
+    # they are simply no longer offered for new runs.
     'analog_tri': ('tri3', 'paper_analog', None),
 }
 
@@ -31,14 +56,33 @@ def is_current_nv_profile(ga_config):
 def validate_new_nv_profile(ga_config):
     """Reject unsupported architecture/physics pairings for fresh NV runs.
 
-    GAConfig itself remains permissive because retired configurations must
-    still deserialize for checkpoint playback and controlled comparisons.
+    GAConfig itself remains permissive so the retired engines can still be
+    constructed directly by the audits that test them as reference
+    implementations. They are simply not offered for new runs.
     """
     if not is_current_nv_profile(ga_config):
         raise ValueError(
-            'new nervous-net runs require one of the current profiles: legacy '
-            '(single-tile width-preserving/evolved-delay), digital tri-circuit '
-            'or analog tri-circuit')
+            'new nervous-net runs use the analog tri-circuit profile '
+            "(tile_arch='tri3', node_model='paper_analog'); the single-tile "
+            'and digital tri-circuit engines are retired')
+
+
+def nv_run_config(**ga):
+    """A runnable configuration for a NEW nervous-net run.
+
+    The one live profile, assembled in a single place. GAConfig's own field
+    defaults still describe the retired single-tile engine because that class
+    doubles as the checkpoint deserialisation target and is constructed
+    partially throughout the tests; shifting those defaults made every
+    partially-built config an invalid tri3/pulse_delay pairing. So the live
+    profile is supplied here instead, and ``validate_new_nv_profile`` remains
+    the single gate that says which pairings a fresh run may use.
+    """
+    arch, model, evolve_delay = NV_NEW_RUN_PROFILES['analog_tri']
+    ga.setdefault('tile_arch', arch)
+    ga.setdefault('node_model', model)
+    ga.setdefault('evolve_delay', evolve_delay)
+    return RunConfig(ga=GAConfig(**ga), pulse=PulseConfig(model=model))
 
 
 def default_max_telomere(backend):
@@ -61,8 +105,9 @@ class GAConfig:
     # crossover is skipped without turning mutation or immigration off.
     recombination_enabled: bool = True
     # Nervous-net node-timing model (mirrors PulseConfig.model). The dataclass
-    # default remains 'uniform' for checkpoint/API compatibility; fresh GUI runs
-    # use one of NV_NEW_RUN_PROFILES instead.
+    # default stays 'uniform': this class is also the DESERIALISATION target
+    # and is built partially all over the tests, so the live profile is
+    # supplied by nv_run_config() rather than by shifting the field default.
     node_model: str = 'uniform'
     # Nervous-net TILE architecture (substrates/nervous/genome.py TILE_ARCHS):
     # 'single' — one Fig. 3 circuit per tile. 'tri3' — the paper's
@@ -111,6 +156,10 @@ class GAConfig:
     # chunked barriers, so this multiplier is no longer consumed. Kept as a
     # validated field so existing v2 checkpoints still round-trip.
     evaluation_chunk_multiplier: int = 2
+    # Local-minimum escape mechanisms (runtime/escape.py). Every one is off by
+    # default, so an unconfigured run — and any checkpoint written before the
+    # module existed — behaves exactly as it did before.
+    escape: EscapeConfig = EscapeConfig()
 
     def __post_init__(self):
         if self.mean_mutations < 0:
@@ -164,6 +213,8 @@ class GAConfig:
                              MAX_CHROMOSOME_COUNT)
         if self.evaluation_chunk_multiplier < 1:
             raise ValueError('evaluation_chunk_multiplier must be positive')
+        if not isinstance(self.escape, EscapeConfig):
+            raise ValueError('escape must be an EscapeConfig')
 
     def timing_mutations(self):
         """Resolved ``evolve_delay`` boolean for the GA.
@@ -183,6 +234,43 @@ class GAConfig:
         # migrate on load so those checkpoints keep working.
         if values.get('io_placement') == 'sex_chromosome':
             values['io_placement'] = 'wiring_chromosome'
+        # dataclasses.asdict flattens the nested escape config to a plain dict;
+        # rebuild it (tolerantly, so a checkpoint from a different revision of
+        # the mechanism set still loads with the rest of its run intact).
+        escape = values.get('escape')
+        if escape is not None and not isinstance(escape, EscapeConfig):
+            values['escape'] = EscapeConfig.from_dict(escape)
+        elif escape is None:
+            values.pop('escape', None)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class FNVConfig:
+    """Family-level component-bank selection for Functional NV Net runs."""
+
+    families: tuple[str, ...] = FNV_FAMILIES
+
+    def __post_init__(self):
+        families = tuple(str(family).upper() for family in self.families)
+        unknown = set(families).difference(FNV_FAMILIES)
+        if unknown:
+            raise ValueError(
+                'unknown FNV component families: %s' %
+                ', '.join(sorted(unknown)))
+        if not families:
+            raise ValueError('at least one FNV component family must be enabled')
+        if len(set(families)) != len(families):
+            raise ValueError('FNV component families may not be repeated')
+        object.__setattr__(
+            self, 'families',
+            tuple(family for family in FNV_FAMILIES if family in families))
+
+    @classmethod
+    def from_dict(cls, values):
+        values = dict(values or {})
+        if 'families' in values:
+            values['families'] = tuple(values['families'])
         return cls(**values)
 
 
@@ -190,6 +278,7 @@ class GAConfig:
 class RunConfig:
     ga: GAConfig = GAConfig()
     pulse: PulseConfig = PulseConfig()
+    fnv: FNVConfig = FNVConfig()
 
     def __post_init__(self):
         if self.ga.node_model != self.pulse.model:
@@ -218,4 +307,5 @@ class RunConfig:
             pulse_values['model'] = 'uniform'
         ga_values['node_model'] = model
         return cls(ga=GAConfig.from_dict(ga_values),
-                   pulse=PulseConfig(**pulse_values))
+                   pulse=PulseConfig(**pulse_values),
+                   fnv=FNVConfig.from_dict(values.get('fnv')))

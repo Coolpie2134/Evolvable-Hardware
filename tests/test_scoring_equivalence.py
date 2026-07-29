@@ -193,6 +193,54 @@ def test_state_contract_is_phase_invariant_for_the_same_ring():
     assert max(scores) - min(scores) < 1e-12
 
 
+def test_state_contract_does_not_penalize_an_honest_ring_on_reset():
+    """A pulse already in flight may land once after the state is cleared.
+
+    Sweep both smaller and larger loops. Transition correspondence and
+    retention must agree about the demonstrated lap; otherwise the former
+    mistakes ordinary circulation for repeated logical activations.
+    """
+    names = (
+        'One-shot (12 seconds)',
+        'Resettable toggle',
+        'SR latch',
+        'Toggle flip-flop',
+    )
+    for name in names:
+        target = TEMPORAL_TARGETS[name]
+        roles = [terminal.role for terminal in target.outputs]
+        for period in (2.0, 3.0, 4.0, 5.0, 6.0):
+            per_role = {}
+            for role in roles:
+                trials = []
+                for trial in target.trials:
+                    intervals = []
+                    for state, ticks in _expected_windows(
+                            trial.expected.get(role, ())):
+                        if state != 1 or not ticks:
+                            continue
+                        start = float(min(ticks))
+                        end = float(max(ticks) + 1)
+                        when = start
+                        while when < end:
+                            intervals.append((when, when + 1.0))
+                            when += period
+                        if when < float(target.T):
+                            intervals.append((
+                                when, min(when + 1.0, float(target.T))))
+                    trials.append(intervals)
+                per_role[role] = trials
+            traces = TemporalTraces(
+                {role: [[] for _ in target.trials] for role in roles},
+                events={
+                    role: [[start for start, _ in intervals]
+                           for intervals in per_role[role]]
+                    for role in roles},
+                intervals=per_role)
+            score, _, _ = score_contract(traces, target)
+            assert score == 1.0, (name, period, score)
+
+
 def test_state_contract_rejects_silence_and_permanent_activity():
     target = TEMPORAL_TARGETS['Toggle flip-flop']
     silent = TemporalTraces(
@@ -325,7 +373,12 @@ def test_every_registered_state_target_uses_one_fitted_latency():
             assert exact == 1.0, (name, strict, exact)
             assert exact_shift == 0.0, (name, strict, exact_shift)
             assert shifted == 1.0, (name, strict, shifted)
-            assert fitted_shift == 3.0, (name, strict, fitted_shift)
+            # A held LUT boundary identifies all three ticks as propagation
+            # delay. For a pulse ring, the same observation can be up to one
+            # demonstrated lap of phase after the logical boundary, so the
+            # fitter deliberately keeps the smallest equally-valid shift.
+            assert fitted_shift == (3.0 if strict else 0.0), (
+                name, strict, fitted_shift)
             assert 0.0 < jittered < 1.0, (name, strict, jittered)
 
 

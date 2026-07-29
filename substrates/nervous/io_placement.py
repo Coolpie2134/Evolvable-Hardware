@@ -51,7 +51,7 @@ import copy
 import random
 from typing import Dict, List, Tuple
 
-from .hexgrid import IO_STATE_INPUT, IO_STATE_OUTPUT
+from .hexgrid import IO_STATE_INPUT, IO_STATE_OUTPUT, canonical_state
 
 Pos = Tuple[int, int]
 
@@ -142,13 +142,33 @@ def spatial_input_sites(genome, target):
     return spatial_port_sites(genome, target)[:n_inputs]
 
 
+def layout_pads(genome, target):
+    """The genome's resolved input pads, or ``None`` for a fixed-input genome.
+
+    ``()`` is NOT None: it means the genome carries a layout and that layout is
+    invalid, which must make the phenotype unbindable rather than fall back to
+    the target's declared pads.
+    """
+    if genome is None or getattr(genome, 'input_layout', None) is None:
+        return None
+    from .genome import nervous_input_positions
+    return nervous_input_positions(genome, tuple(target.inputs))
+
+
 def growth_seeds(target, strategy=None, genome=None):
     """Return germline cells for the selected I/O architecture.
+
+    A genome carrying an evolved ``input_layout`` grows from EXACTLY those
+    coordinates — the pads are the germlines, so input geometry and body
+    geometry are one decision rather than two that have to agree.
 
     Fixed binding grows from declared pads. Developmental spatial binding grows
     from its heritable input anchors. Other evolvable strategies, plus
     zero-input spatial organisms, retain the neutral centre seed.
     """
+    pads = layout_pads(genome, target)
+    if pads:
+        return tuple(pads)
     strategy = strategy or io_strategy(target)
     if strategy == 'fixed':
         return tuple(target.inputs)
@@ -737,8 +757,14 @@ def spatial_routing_variants(genome, target, limit=48):
     for site in sites:
         old_state = int(grid[site])
         for bit in range(bits):
-            new_state = old_state ^ (1 << bit)
+            # Normalise the flip: the AND/OR select bit of a buffer produces
+            # that buffer's own alias, so without this a fifth of the rescue
+            # budget would be spent re-evaluating the champion's own circuit
+            # under a different bit pattern (hexgrid.CANONICAL_STATES).
+            new_state = canonical_state(old_state ^ (1 << bit))
             if not 0 < new_state < 32:
+                continue
+            if new_state == canonical_state(old_state):
                 continue
             candidate = copy.deepcopy(genome)
             patches = list(
@@ -1309,12 +1335,28 @@ def flat_outputs(out_pos):
     return _flat(output_groups(out_pos).values())
 
 
-def terminal_node_sets(target, in_pos, out_pos):
-    """Return ``(source_cells, sink_cells)`` for terminal-node placement.
+def terminal_node_sets(target, in_pos, out_pos, genome=None):
+    """Return ``(source_cells, sink_cells)`` — the EXPLICIT terminal membership.
 
-    Other strategies return two empty sets, keeping every legacy simulation
-    byte-for-byte on its original path.
+    Source-only physics is decided by membership in the resolved input-pad set,
+    never by a cell's state id. That distinction matters: an ordinary evolved
+    body cell can express the same state as a dedicated terminal, and if the
+    engine keyed off the state alone that cell would silently become an
+    externally-driven terminal in the middle of the organism.
+
+    A genome carrying an evolved ``input_layout`` therefore makes exactly its
+    pads sources. Other strategies return two empty sets, keeping every legacy
+    simulation byte-for-byte on its original path — a fixed-input genome keeps
+    the old wired-OR input semantics, so existing solutions do not silently
+    change physics.
     """
+    pads = layout_pads(genome, target)
+    if pads:
+        sources = {tuple(cell) for cell in pads}
+        sinks = set(flat_outputs(out_pos))
+        if sources & sinks:
+            raise ValueError('input pads and output probes must be distinct')
+        return sources, sinks
     if io_strategy(target) != 'terminal_nodes':
         return set(), set()
     sources = set(flat_inputs(in_pos))

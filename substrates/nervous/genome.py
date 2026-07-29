@@ -23,9 +23,11 @@ The genetic operators (mutation, crossover, selection) live in substrates/nervou
 from __future__ import annotations
 import random
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import List
 
 from runtime.limits import MAX_CHROMOSOME_COUNT
+from .hexgrid import hex_frontier_cells
 
 MAX_STATE    = 32       # 5-bit cell state: 0-15 = paper AND routing, 16-31 = OR
 MAX_GENES    = 24
@@ -103,6 +105,75 @@ class Chromosome:
     wiring:   bool = False
 
 
+@lru_cache(maxsize=None)
+def input_layout_domain(radius: int) -> tuple:
+    """Honeycomb sites within ``radius`` graph steps of the canonical origin."""
+    reached = {(0, 0)}
+    frontier = {(0, 0)}
+    for _ in range(max(0, int(radius))):
+        frontier = {neighbour
+                    for cell in frontier
+                    for neighbour in hex_frontier_cells(*cell)
+                    if neighbour not in reached}
+        reached.update(frontier)
+    return tuple(sorted(reached))
+
+
+@lru_cache(maxsize=None)
+def input_layout_radius(max_telomere: int, n_inputs: int) -> int:
+    """Placement radius with enough distinct sites for every pad."""
+    radius = max(1, min(8, int(max_telomere)))
+    while len(input_layout_domain(radius)) < max(1, int(n_inputs)):
+        radius += 1
+    return radius
+
+
+def random_input_layout(n_inputs: int, max_telomere: int = MAX_TELOMERE):
+    """Compact, distinct, collision-free starting pads.
+
+    Input 0 is the origin gauge; the rest are drawn from a small neighbourhood
+    so organisms start with their pads close enough to interact. Mutation
+    spreads them out later, one honeycomb edge at a time.
+    """
+    count = max(0, int(n_inputs))
+    if not count:
+        return ()
+    mutation_radius = input_layout_radius(max_telomere, count)
+    initial_radius = min(2, mutation_radius)
+    while len(input_layout_domain(initial_radius)) < count:
+        initial_radius += 1
+    domain = list(input_layout_domain(initial_radius))
+    domain.remove((0, 0))
+    return ((0, 0),) + tuple(random.sample(domain, count - 1))
+
+
+def nervous_input_positions(genome, fallback) -> tuple:
+    """The pads to grow from and inject into: evolved, or the target's own.
+
+    ``input_layout=None`` is a fixed-input genome and keeps the target's
+    declared pads. An evolved layout that is malformed, the wrong length,
+    self-colliding, or not anchored at the origin returns NO pads, which makes
+    the phenotype unbindable. That is deliberate: repairing an invalid layout
+    during evaluation — clamping, relocating, deduplicating — would score a
+    genome for a body it does not encode, and would hide the very mutations
+    that produced the invalid layout from selection.
+    """
+    fallback = tuple(tuple(cell) for cell in fallback)
+    layout = getattr(genome, 'input_layout', None)
+    if layout is None:
+        return fallback
+    try:
+        if any(len(cell) != 2 for cell in layout):
+            return ()
+        sites = tuple((int(cell[0]), int(cell[1])) for cell in layout)
+    except (TypeError, ValueError, IndexError):
+        return ()
+    if (len(sites) != len(fallback) or len(set(sites)) != len(sites)
+            or (sites and sites[0] != (0, 0))):
+        return ()
+    return sites
+
+
 def germline_telomere(genome) -> int:
     """The organism's germline telomere length L: the longest division program
     across its chromosomes. Seed cells start here; growth reaches radius L. A
@@ -146,6 +217,23 @@ class Genome:
     # genome and evaluation path; populated patches are heritable, mutate and
     # recombine like ordinary alleles, but act only after development settles.
     routing_patches: List[RoutingPatch] = field(default_factory=list)
+    # EVOLVED INPUT GEOMETRY: one honeycomb coordinate per logical input, in
+    # input order. ``None`` marks a fixed-input genome that reads its pads from
+    # the target instead.
+    #
+    # Position in this tuple IS the logical identity of the input — pad 0 is
+    # input 0 — so no per-pad numeric parameter is needed or wanted. Input 0 is
+    # pinned to the origin purely as a coordinate gauge: translating a whole
+    # organism changes nothing behaviourally, so letting it drift would add a
+    # dimension of pure neutral wandering. Every genuine RELATIVE placement is
+    # still reachable by moving the other pads.
+    #
+    # This replaces the grown input-terminal strategies. A grown terminal has a
+    # cliff: a genome that fails to express one required terminal gets no
+    # meaningful evaluation at all. Discrete pads always preserve the required
+    # pad count, so the placement neighbourhood is smooth and local — one pad,
+    # one honeycomb edge.
+    input_layout: tuple = None
 
 
 DELAY_MULT_MIN = 0.25    # evolvable propagation-delay bounds (of PulseConfig.delay)
@@ -158,7 +246,26 @@ def default_state_delays():
     return [1.0] * MAX_STATE
 
 
-def random_hex_gene(arch='single', tag_range=0) -> HexGene:
+def _canonical_draw(terminals=False):
+    """A uniformly-drawn CIRCUIT, not a uniformly-drawn bit pattern.
+
+    Drawing over the raw 5-bit register would make every buffer twice as likely
+    as every coincidence detector, because the buffers each have two encodings
+    (hexgrid.CANONICAL_STATES). Coincidence is the substrate's only
+    computational primitive, so that prior worked directly against it.
+    """
+    from .hexgrid import canonical_states
+    return random.choice(canonical_states(terminals))
+
+
+def _canonical_tri_draw():
+    """One tri-tile state: three independently drawn canonical channels."""
+    from .tritile import pack_channels
+    return pack_channels(_canonical_draw(), _canonical_draw(),
+                         _canonical_draw())
+
+
+def random_hex_gene(arch='single', tag_range=0, terminals=False) -> HexGene:
     # self_in == 0 makes a GROWTH rule: it matches empty cells and is the only
     # kind that can bring an empty cell to life under the sim6 empty-cell guard
     # (division is further gated by the parent's Hayflick telomere). Random
@@ -169,30 +276,37 @@ def random_hex_gene(arch='single', tag_range=0) -> HexGene:
     if arch not in TILE_ARCHS:
         raise ValueError('unknown tile architecture: %r' % (arch,))
     if arch == 'tri3':
-        m = TRI_STATE_MAX
+        out = _canonical_tri_draw()
+        while out == 0 and random.random() >= _TRI_DEATH_P:
+            out = _canonical_tri_draw()
         return HexGene(
-            ctx_l    = random.randrange(m),
-            ctx_r    = random.randrange(m),
-            ctx_d    = random.randrange(m),
-            self_in  = 0 if random.random() < 0.25 else random.randrange(m),
-            self_out = (0 if random.random() < _TRI_DEATH_P
-                        else random.randrange(1, m)),
+            ctx_l    = _canonical_tri_draw(),
+            ctx_r    = _canonical_tri_draw(),
+            ctx_d    = _canonical_tri_draw(),
+            self_in  = 0 if random.random() < 0.25 else _canonical_tri_draw(),
+            self_out = out,
         )
+    # Context fields are canonical too: they are Hamming-match ANCHORS against
+    # real cell states, and a cell can now only ever hold a canonical state, so
+    # an alias anchor could never sit at distance 0 from the circuit it is
+    # trying to name — a silent handicap on half the drawn contexts.
     return HexGene(
-        ctx_l    = random.randrange(MAX_STATE),
-        ctx_r    = random.randrange(MAX_STATE),
-        ctx_d    = random.randrange(MAX_STATE),
-        self_in  = 0 if random.random() < 0.25 else random.randrange(MAX_STATE),
-        self_out = random.randrange(MAX_STATE),      # 0..31, 0 = death
+        ctx_l    = _canonical_draw(terminals),
+        ctx_r    = _canonical_draw(terminals),
+        ctx_d    = _canonical_draw(terminals),
+        self_in  = 0 if random.random() < 0.25 else _canonical_draw(terminals),
+        self_out = _canonical_draw(terminals),       # 0 = death
     )
 
 
 def random_hex_chromosome(n_genes=None, max_telomere=MAX_TELOMERE,
-                          arch='single', wiring=False) -> Chromosome:
+                          arch='single', wiring=False,
+                          terminals=False) -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
-        genes = [random_hex_gene(arch) for _ in range(n_genes)],
+        genes = [random_hex_gene(arch, terminals=terminals)
+                 for _ in range(n_genes)],
         split = random.randint(1, max(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         telomere = random.randint(2, min(5, max_telomere)),
@@ -204,7 +318,7 @@ def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
                       arch='single', wiring_chromosome=False, n_ports=None,
                       tag_rank=False, spatial_chromosome=False,
                       terminal_nodes=False, n_inputs=0,
-                      n_outputs=0) -> Genome:
+                      n_outputs=0, input_layout=False) -> Genome:
     """Random genome with optional evolvable I/O metadata.
 
     Fixed runs take the original byte-identical path. Method A seeds body-gene
@@ -213,7 +327,10 @@ def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
     """
     if arch not in TILE_ARCHS:
         raise ValueError('unknown tile architecture: %r' % (arch,))
-    chroms = [random_hex_chromosome(max_telomere=max_telomere, arch=arch)
+    # Under terminal_nodes binding the two dedicated I/O node types are real
+    # distinct circuits, so they stay in the drawable alphabet there.
+    chroms = [random_hex_chromosome(max_telomere=max_telomere, arch=arch,
+                                    terminals=terminal_nodes)
               for _ in range(n_chroms)]
     genome = Genome(
         chromosomes = chroms,
@@ -228,4 +345,6 @@ def random_hex_genome(n_chroms=2, max_telomere=MAX_TELOMERE,
     if terminal_nodes:
         from .io_placement import seed_terminal_states
         seed_terminal_states(genome, n_inputs, n_outputs)
+    if input_layout:
+        genome.input_layout = random_input_layout(n_inputs, max_telomere)
     return genome

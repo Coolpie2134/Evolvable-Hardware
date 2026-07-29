@@ -54,21 +54,47 @@ def _grown(genome, target):
 
 # ── default-path invariance ─────────────────────────────────────────────────────
 
-def test_default_random_gene_is_byte_identical():
+def test_default_random_gene_draws_only_its_own_fields():
     """A random gene must NOT consume extra RNG for I/O metadata — otherwise
     every seeded run and golden reproduction would diverge. Bodies carry no I/O
-    numbers at all now; the tag field defaults to 0 without a draw."""
+    numbers at all now; the tag field defaults to 0 without a draw.
+
+    The five state fields are drawn over the CANONICAL alphabet, one circuit per
+    encoding (hexgrid.CANONICAL_STATES): drawing over the raw 5-bit register
+    would make every buffer twice as likely as every coincidence detector."""
+    from substrates.nervous.hexgrid import canonical_states
     random.seed(12345)
     gene = random_hex_gene()
     assert gene.tag == 0
     assert gene.io_kind == iop.IO_KIND_BODY
     random.seed(12345)
-    ctx_l = random.randrange(32); ctx_r = random.randrange(32)
-    ctx_d = random.randrange(32)
-    self_in = 0 if random.random() < 0.25 else random.randrange(32)
-    self_out = random.randrange(32)
+    pool = canonical_states()
+    ctx_l = random.choice(pool); ctx_r = random.choice(pool)
+    ctx_d = random.choice(pool)
+    self_in = 0 if random.random() < 0.25 else random.choice(pool)
+    self_out = random.choice(pool)
     assert (gene.ctx_l, gene.ctx_r, gene.ctx_d, gene.self_in, gene.self_out) == (
         ctx_l, ctx_r, ctx_d, self_in, self_out)
+
+
+def test_random_genes_only_ever_hold_canonical_states():
+    """No alias encoding may reach a genome: an alias is the same circuit under
+    a different bit pattern, which both biases the draw and makes one circuit
+    display as two different node types."""
+    from substrates.nervous.hexgrid import canonical_states
+    allowed, allowed_terminals = set(canonical_states()), set(
+        canonical_states(terminals=True))
+    random.seed(7)
+    for _ in range(400):
+        gene = random_hex_gene()
+        for field in ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'):
+            assert getattr(gene, field) in allowed
+    # terminal_nodes binding keeps 16/17 — there they are real, distinct I/O
+    # node types rather than aliases of dead / buffer-D.
+    for _ in range(400):
+        gene = random_hex_gene(terminals=True)
+        assert gene.self_out in allowed_terminals
+    assert {16, 17} <= allowed_terminals and not {16, 17} & allowed
 
 
 def test_default_genome_has_no_tags_or_wiring():
@@ -238,7 +264,10 @@ def test_terminal_bindings_are_not_fixed_across_genome_seeds():
     target.io_placement = 'terminal_nodes'
 
     nv_bindings = []
-    for seed in (0, 2):
+    # Seeds are chosen for GROWING a bindable body, not for any property of the
+    # binding itself — a random genome is under no obligation to grow enough
+    # terminals, and roughly half do not.
+    for seed in (1, 2):
         random.seed(seed)
         genome = random_hex_genome(
             2, terminal_nodes=True,
@@ -678,7 +707,9 @@ def test_mature_routing_patch_changes_one_live_cell_only():
 
 def test_spatial_routing_rescue_is_one_cell_local_and_heritable():
     tgt = with_io_placement(coincidence_detector(), 'spatial_chromosome')
-    random.seed(1901)
+    # A seed that grows a real BODY: with only the input pads alive there are no
+    # non-input sites to patch and the rescue legitimately has nothing to offer.
+    random.seed(2024)
     genome = _spatial_genome()
     iop.seed_spatial_from_geometry(genome, None, tgt)
     baseline = _grown(genome, tgt)
@@ -706,8 +737,18 @@ def test_spatial_routing_rescue_is_one_cell_local_and_heritable():
         patch = candidate.routing_patches[0]
         site = (patch.x, patch.y)
         assert site in baseline
-        delta = int(patch.state) ^ int(baseline[site])
-        assert delta and delta & (delta - 1) == 0
+        # ONE physical SRAM bit of that cell's register, stored under the
+        # resulting circuit's canonical encoding. The stored delta is not always
+        # itself one bit: flipping a bit of config 20 gives config 16, which is
+        # a dead cell and is therefore recorded as state 0. Killing a cell is a
+        # legitimate local proposal, so the rule is "one bit flip", not "one bit
+        # of difference in the stored value".
+        from substrates.nervous.hexgrid import canonical_state
+        old = int(baseline[site])
+        neighbours = {canonical_state(old ^ (1 << bit)) for bit in range(5)}
+        assert int(patch.state) in neighbours
+        assert canonical_state(int(patch.state)) != canonical_state(old)
+        assert int(patch.state) == canonical_state(int(patch.state))
 
 
 def test_spatial_seed_is_viable_and_mutation_changes_one_coordinate():

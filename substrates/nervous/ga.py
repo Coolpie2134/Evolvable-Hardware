@@ -63,7 +63,9 @@ from .genome import (MAX_STATE, TRI_STATE_MAX, MAX_GENES, MAX_CHROMS, MAX_TELOME
                      DELAY_LOG_STEP,
                      default_state_delays,
                      Genome, Chromosome, RoutingPatch, germline_telomere,
-                     random_hex_gene, random_hex_chromosome, random_hex_genome)
+                     random_hex_gene, random_hex_chromosome, random_hex_genome,
+                     random_input_layout)
+from .hexgrid import hex_frontier_cells
 from .nervous import score_nervous
 
 
@@ -86,12 +88,22 @@ def clone_genome(genome):
         routing_patches=[
             RoutingPatch(patch.x, patch.y, patch.state)
             for patch in (getattr(genome, 'routing_patches', None) or ())])
+    layout = getattr(genome, 'input_layout', None)
+    if layout is not None:
+        clone.input_layout = tuple(tuple(cell) for cell in layout)
     if hasattr(genome, '_io_binding_progress'):
         clone._io_binding_progress = genome._io_binding_progress
+    if hasattr(genome, '_mut_rate'):
+        # Self-adaptive mutation rate (runtime/escape.py) is a heritable trait
+        # of the LINEAGE, so it must survive cloning. It is deliberately absent
+        # from genome_signature: it changes no phenotype, and letting it into
+        # the key would give one circuit several fitness-cache entries.
+        clone._mut_rate = genome._mut_rate
     return clone
 from .temporal import (prepare_net, score_contract, loop_profile,
                        cycle_nodes, _reachable)
 from .scoring import contract_case_count
+from .objectives import total_case_count
 from .tritile import interpret_tri
 
 POPSIZE        = 120
@@ -171,10 +183,17 @@ def evaluate_nv_full(genome, target):
     """(scalar fitness, per-case score vector). Cases are the individual
     (trial, role) traces — the units ε-lexicase selection streams over. For
     combinational targets there is no trial structure: cases is None and
-    selection falls back to tournament."""
+    selection falls back to tournament.
+
+    Under LIFESPAN SCORING (runtime/escape.py) the case vector is extended by
+    one entry per developmental checkpoint. The scalar fitness is unaffected:
+    it remains the ADULT organism's score, so a solved run still reads 1.0 for
+    the circuit that actually gets grown."""
     if not getattr(target, 'temporal', False):
         return score_nervous(genome, target), None
-    n_cases = contract_case_count(target)
+    escape = getattr(target, '_escape', None)
+    lifespan = escape is not None and escape.lifespan_scoring
+    n_cases = total_case_count(target)
     # Optional fine timing: locally hill-climb inherited delays while holding the
     # grown topology and output readout fixed. Off by default (0), so the ordinary
     # path below is unchanged.
@@ -200,8 +219,26 @@ def evaluate_nv_full(genome, target):
                              else _loop_bonus(
                                  grid, routing, in_pos, out_pos))
                     s = s + (1.0 - s) * LOOP_WEIGHT * bonus
+            # Lifetime timing plasticity re-tunes delays inside its own session,
+            # so it owns the whole evaluation. Lifespan checkpoints would have to
+            # re-run that session per stage; instead the juvenile slots inherit
+            # the adult score, leaving the case vector the right LENGTH (which is
+            # all ε-lexicase requires) without inventing a juvenile measurement.
+            if lifespan:
+                cases = tuple(cases or ()) + (
+                    (float(s),) * escape.lifespan_checkpoints)
             return s, cases
-    prep = prepare_net(genome, target)
+    snapshots, strategy = None, None
+    if lifespan:
+        # Grow ONCE and reuse the trajectory: the final snapshot is bit-identical
+        # to grow_nervous's result, so the adult evaluation below is unchanged.
+        from .io_placement import io_strategy
+        from .objectives import grown_snapshots, prepare_grid
+        strategy = io_strategy(target)
+        snapshots = grown_snapshots(genome, target, 'nervous', strategy)
+        prep = prepare_grid(genome, target, 'nervous', snapshots[-1], strategy)
+    else:
+        prep = prepare_net(genome, target)
     if prep is None:
         return 0.0, (0.0,) * n_cases
     grid, routing, in_pos, out_pos, traces = prep
@@ -216,6 +253,11 @@ def evaluate_nv_full(genome, target):
                  if getattr(genome, 'arch', 'single') == 'tri3'
                  else _loop_bonus(grid, routing, in_pos, out_pos))
         s = s + (1.0 - s) * LOOP_WEIGHT * bonus
+    if lifespan:
+        from .objectives import juvenile_scores
+        cases = tuple(cases or ()) + juvenile_scores(
+            genome, target, 'nervous', snapshots, strategy,
+            escape.lifespan_checkpoints, s)
     return s, cases
 
 
@@ -225,19 +267,23 @@ def evaluate_nv(genome, target):
 
 
 def _evaluate_nv_selection_record(genome, target):
-    """Fitness record plus selection-only I/O viability.
+    """Fitness record plus selection-only I/O viability and escape objectives.
 
     Behavioral fitness remains untouched. The extra progress tuple only
-    distinguishes otherwise-equal zero-fitness wiring genomes.
+    distinguishes otherwise-equal zero-fitness wiring genomes; the juvenile and
+    robustness entries are the escape objectives, which rank_key applies
+    strictly BELOW fitness (see runtime/escape.py).
     """
     fitness, cases = evaluate_nv_full(genome, target)
     from .io_placement import io_strategy
+    from .objectives import escape_objectives
     total = target.n_inputs + len(target.outputs)
+    juvenile, robust = escape_objectives(genome, target, 'nervous', cases)
     if io_strategy(target) not in (
             'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
-        return fitness, cases, (total, total)
+        return fitness, cases, (total, total), juvenile, robust
     progress = getattr(genome, '_io_binding_progress', (total, total))
-    return fitness, cases, progress
+    return fitness, cases, progress, juvenile, robust
 
 
 def genome_signature(genome):
@@ -312,7 +358,24 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
         progress = record[2] if len(record) > 2 else (
             target.n_inputs + len(target.outputs),) * 2
         record_binding_progress(genome, progress)
+        record_escape_objectives(genome, record)
     return [r[0] for r in out], [r[1] for r in out]
+
+
+def record_escape_objectives(genome, record):
+    """Copy an evaluation record's escape objectives onto the genome.
+
+    Evaluation happens in worker processes, so the objectives travel back in
+    the record and are attached here, in the parent, exactly where the existing
+    I/O binding progress is attached. rank_key reads them from the genome; the
+    robustness SCALAR is derived later by EscapeState.apply_robustness_blend,
+    because its mean-to-worst-case aggregation depends on the run's current
+    best fitness, which a worker cannot know.
+    """
+    genome._juvenile_score = float(record[3]) if len(record) > 3 else 0.0
+    genome._robust_cases = record[4] if len(record) > 4 else None
+    if getattr(genome, '_robust_cases', None) is None:
+        genome._robustness = 0.0
 
 
 def eval_batch_nv(genomes, target, cache=None):
@@ -341,9 +404,47 @@ def _arch_bits(genome):
     return _TRI_STATE_BITS if getattr(genome, 'arch', 'single') == 'tri3' else _STATE_BITS
 
 
-def _arch_random_gene(genome):
+def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
+    """Move exactly ONE non-anchor input pad by ONE valid honeycomb edge.
+
+    This is the whole input-placement neighbourhood, and it is deliberately
+    tiny. A grown input terminal has a cliff — a genome that fails to express
+    one required terminal receives no meaningful evaluation at all — whereas a
+    discrete pad list always carries exactly the required number of pads, so
+    every mutation lands on a valid, evaluable layout one step away from its
+    parent.
+
+    Input 0 stays at the origin as a coordinate gauge: translating the whole
+    organism is behaviourally meaningless, so letting the anchor drift would
+    only add neutral wandering. Every real RELATIVE arrangement is still
+    reachable by moving the others. Occupied sites are excluded rather than
+    repaired, so a move never manufactures a collision.
+    """
+    from .genome import input_layout_domain, input_layout_radius
+    layout = getattr(genome, 'input_layout', None)
+    if layout is None or len(layout) < 2:
+        return False
+    sites = [tuple(map(int, cell)) for cell in layout]
+    domain = set(input_layout_domain(
+        input_layout_radius(max_telomere, len(sites))))
+    occupied = set(sites)
+    indices = list(range(1, len(sites)))
+    random.shuffle(indices)
+    for index in indices:
+        options = [neighbour
+                   for neighbour in hex_frontier_cells(*sites[index])
+                   if neighbour in domain and neighbour not in occupied]
+        if not options:
+            continue
+        sites[index] = random.choice(options)
+        genome.input_layout = tuple(sites)
+        return True
+    return False
+
+
+def _arch_random_gene(genome, terminals=False):
     return random_hex_gene('tri3' if getattr(genome, 'arch', 'single') == 'tri3'
-                           else 'single')
+                           else 'single', terminals=terminals)
 
 
 def _normalize_split(chromosome):
@@ -402,31 +503,68 @@ def _recombination_signature(genome):
     )
 
 
-def _other_state(value, bits=_STATE_BITS):
+def _canonicalise(value, bits=_STATE_BITS, terminals=False):
+    """Normalise a configuration onto its canonical encoding.
+
+    The register is physically 5 bits and mutation really is a single bit flip,
+    but only 22 of the 32 settings are distinct circuits (see
+    hexgrid.CANONICAL_STATES). Normalising after the flip keeps the hardware
+    model while stopping a genome from drifting into alias encodings — where a
+    provably-inert bit would consume mutation events and split one circuit
+    across two apparent node types.
+    """
+    from .hexgrid import canonical_state
+    value = int(value)
+    if bits == _STATE_BITS:
+        return canonical_state(value, terminals)
+    from .tritile import channel_configs, pack_channels
+    # Tri tiles canonicalise per CHANNEL: the three 5-bit fields are three
+    # independent Fig. 3 circuits and each carries the same redundancy.
+    return pack_channels(*(canonical_state(channel)
+                           for channel in channel_configs(value)))
+
+
+def _other_state(value, bits=_STATE_BITS, terminals=False):
     """Flip one physical SRAM bit in a core-circuit configuration (single tile:
-    5 bits; tri tile: 12 bits, one flip landing within a single channel)."""
-    return int(value) ^ (1 << random.randrange(bits))
+    5 bits; tri tile: 15 bits, one flip landing within a single channel), and
+    land on a DIFFERENT circuit.
+
+    Canonicalising a raw flip is not enough: flipping the AND/OR select bit of a
+    buffer produces that buffer's own alias, which normalises straight back to
+    where it started. That silently turned a fifth of all state mutations into
+    no-ops — and a no-op mutation lets a multi-event transaction cancel back to
+    an exact copy of its parent, which reproduction relies on never happening.
+    So the flip is drawn from the one-bit neighbours that are a different
+    circuit, which is the same rule ``_state_excluding`` already applies.
+    """
+    return _state_excluding(value, bits=bits, terminals=terminals)
 
 
-def _state_excluding(*values, bits=_STATE_BITS):
-    """Choose a one-bit neighbour excluding the supplied values when possible."""
+def _state_excluding(*values, bits=_STATE_BITS, terminals=False):
+    """Choose a one-bit neighbour excluding the supplied values when possible.
+
+    Exclusion is judged on the CANONICAL encoding: a neighbour that merely
+    aliases an excluded state is the same circuit and would not have excluded
+    anything."""
     state_max = 1 << bits
-    excluded = sorted({int(value) for value in values
-                       if value is not None and 0 <= int(value) < state_max})
+    excluded = {_canonicalise(value, bits, terminals) for value in values
+                if value is not None and 0 <= int(value) < state_max}
     base = int(values[0]) if values and values[0] is not None else 0
-    nearby = [base ^ (1 << bit) for bit in range(bits)
-              if (base ^ (1 << bit)) not in excluded]
+    nearby = [candidate for candidate in
+              (_canonicalise(base ^ (1 << bit), bits, terminals)
+               for bit in range(bits))
+              if candidate not in excluded]
     if nearby:
         return random.choice(nearby)
     # Defensive fallback when exclusions cover every one-bit neighbour.
-    pick = random.randrange(state_max - len(excluded))
-    for value in excluded:
-        if pick >= value:
-            pick += 1
-    return pick
+    for _attempt in range(32):
+        pick = _canonicalise(random.randrange(state_max), bits, terminals)
+        if pick not in excluded:
+            return pick
+    return _canonicalise(random.randrange(state_max), bits, terminals)
 
 
-def _force_nonparent_tweak(genome, parent):
+def _force_nonparent_tweak(genome, parent, terminals=False):
     """Finish a multi-event mutation transaction with protected novelty.
 
     Earlier edits may cancel one another.  This last allele is chosen different
@@ -442,7 +580,7 @@ def _force_nonparent_tweak(genome, parent):
             genome.chromosomes.append(_arch_random_chromosome(genome))
         else:
             random.choice(genome.chromosomes).genes.append(
-                _arch_random_gene(genome))
+                _arch_random_gene(genome, terminals))
         with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
                       if chromosome.genes]
     ci = random.choice(with_genes)
@@ -454,7 +592,8 @@ def _force_nonparent_tweak(genome, parent):
             and gi < len(parent.chromosomes[ci].genes)):
         parent_value = getattr(parent.chromosomes[ci].genes[gi], field)
     setattr(gene, field,
-            _state_excluding(getattr(gene, field), parent_value, bits=bits))
+            _state_excluding(getattr(gene, field), parent_value,
+                             bits=bits, terminals=terminals))
     genome.chromosomes[ci].genes[gi] = gene
 
 
@@ -464,13 +603,15 @@ def _arch_random_chromosome(genome, max_telomere=MAX_TELOMERE):
         arch='tri3' if getattr(genome, 'arch', 'single') == 'tri3' else 'single')
 
 
-def _tweak_gene(gene, bits=_STATE_BITS):
+def _tweak_gene(gene, bits=_STATE_BITS, terminals=False):
     g   = copy.copy(gene)
     fld = random.choice(_GENE_FIELDS)
     if fld == 'self_in' and g.self_in != 0 and random.random() < 0.2:
         g.self_in = 0                     # keep growth rules reachable
     else:
-        setattr(g, fld, _other_state(getattr(g, fld), bits=bits))
+        setattr(g, fld,
+                _other_state(getattr(g, fld), bits=bits,
+                             terminals=terminals))
     return g
 
 
@@ -509,10 +650,12 @@ def _mutate_routing_patch(genome):
     choice = random.random()
     if choice < 0.65:
         maximum = ARCH_STATE_MAX[getattr(genome, 'arch', 'single')]
-        candidate = int(patch.state) ^ (
-            1 << random.randrange((maximum - 1).bit_length()))
+        bits = (maximum - 1).bit_length()
+        candidate = _canonicalise(
+            int(patch.state) ^ (1 << random.randrange(bits)), bits)
         if not 0 < candidate < maximum:
-            candidate = 1 + (int(patch.state) % (maximum - 1))
+            candidate = _canonicalise(
+                1 + (int(patch.state) % (maximum - 1)), bits)
         patch.state = candidate
         patches[index] = patch
     elif choice < 0.90:
@@ -547,7 +690,8 @@ IO_MUTATION_PROB = 0.20
 
 
 def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
-                    chromosome_count=None, evolve_delay=False, evolve_io=False):
+                    chromosome_count=None, evolve_delay=False,
+                    evolve_io=False, terminals=False):
     """Apply one feasible, state-changing mutation to a nervous-net genome.
 
     ``evolve_delay`` (the width-preserving 'pulse_delay' model) adds a mutation
@@ -601,15 +745,17 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
     elif op == 'tweak':
         chrom = random.choice(with_genes)
         idx = random.randrange(len(chrom.genes))
-        chrom.genes[idx] = _tweak_gene(chrom.genes[idx], bits=bits)
+        chrom.genes[idx] = _tweak_gene(chrom.genes[idx], bits=bits,
+                                       terminals=terminals)
     elif op == 'duplicate':
         chrom = random.choice([c for c in body
                                if c.genes and len(c.genes) < MAX_GENES])
         chrom.genes.insert(random.randrange(len(chrom.genes) + 1),
-                           _tweak_gene(random.choice(chrom.genes), bits=bits))
+                           _tweak_gene(random.choice(chrom.genes),
+                                       bits=bits, terminals=terminals))
     elif op == 'add_gene':
         random.choice([c for c in body if len(c.genes) < MAX_GENES]).genes.append(
-            _arch_random_gene(genome))
+            _arch_random_gene(genome, terminals))
     elif op == 'del_gene':
         chrom = random.choice([c for c in body if len(c.genes) > 1])
         chrom.genes.pop(random.randrange(len(chrom.genes)))
@@ -647,6 +793,11 @@ def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
         raise ValueError('expected %d chromosomes, got %d' %
                          (chromosome_count, len(genome.chromosomes)))
     g = clone_genome(genome)
+    # Under terminal_nodes binding, states 16/17 are the dedicated input and
+    # output NODE TYPES rather than aliases of dead/buffer-D, so canonical
+    # normalisation must leave them alone or mutation would erase every
+    # terminal the organism has grown.
+    terminals = (io_placement == 'terminal_nodes')
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
     if local_only and _mutate_routing_patch(g):
@@ -656,11 +807,13 @@ def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
     for _ in range(events - 1):
         _mutate_once_nv(g, max_telomere=max_telomere,
                         chromosome_count=chromosome_count,
-                        evolve_delay=evolve_delay, evolve_io=evolve_io)
+                        evolve_delay=evolve_delay, evolve_io=evolve_io,
+                        terminals=terminals)
     if events == 1:
         _mutate_once_nv(g, max_telomere=max_telomere,
                         chromosome_count=chromosome_count,
-                        evolve_delay=evolve_delay, evolve_io=evolve_io)
+                        evolve_delay=evolve_delay, evolve_io=evolve_io,
+                        terminals=terminals)
     else:
         # A single mandatory routing tweak guarantees non-clone novelty. When
         # timing is evolving on top of settled routing, also give the transaction
@@ -668,7 +821,13 @@ def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
         if evolve_delay and random.random() < 0.5:
             _mutate_state_delay(g)
         else:
-            _force_nonparent_tweak(g, genome)
+            _force_nonparent_tweak(g, genome, terminals)
+    # Evolved input geometry: one pad, one edge. Gated on the genome actually
+    # carrying a layout, so fixed-input genomes are untouched.
+    if (getattr(g, 'input_layout', None) is not None
+            and len(g.input_layout) > 1
+            and random.random() < IO_MUTATION_PROB):
+        mutate_input_layout(g, max_telomere)
     if evolve_io and random.random() < IO_MUTATION_PROB:
         if coordinated_io:
             from .io_placement import mutate_io_bundle
@@ -757,6 +916,20 @@ def crossover_nv(pa, pb, io_placement=None):
         _normalize_split(chromosome)
     patches_a = list(getattr(pa, 'routing_patches', None) or ())
     patches_b = list(getattr(pb, 'routing_patches', None) or ())
+    # Input geometry is a single co-adapted physical module. Recombining
+    # individual pad coordinates would manufacture collisions and tear apart
+    # relative arrangements that only work together, so a child takes one
+    # parent's LAYOUT ENTIRE or the other's — never a mixture.
+    layout_b = getattr(pb, 'input_layout', None)
+    layout_a = getattr(pa, 'input_layout', None)
+    for child, mine, theirs in ((ca, layout_a, layout_b),
+                                (cb, layout_b, layout_a)):
+        chosen = mine
+        if (theirs is not None and mine is not None
+                and len(theirs) == len(mine) and random.random() < 0.5):
+            chosen = theirs
+        if chosen is not None:
+            child.input_layout = tuple(tuple(cell) for cell in chosen)
     if patches_a or patches_b:
         cut_a = random.randrange(len(patches_a) + 1)
         cut_b = random.randrange(len(patches_b) + 1)
@@ -795,12 +968,27 @@ def rank_key(genome, fitness):
     chromosome COUNT — it collapsed multi-chromosome genomes to 1 even when each
     chromosome was small — whereas the germline reflects actual organism size and
     leaves chromosome count to gene-parsimony alone. These selection tiers never
-    alter the reported behavioral fitness."""
+    alter the reported behavioral fitness.
+
+    Between fitness and parsimony sit the two ESCAPE objectives, in this order
+    and no other:
+
+        viability > fitness > robustness > juvenile > parsimony
+
+    Both are LEXICOGRAPHICALLY BELOW fitness, which is the whole safety
+    argument for them. Robustness can only ever separate two circuits that are
+    already equally correct, so a robust-but-wrong circuit can never outrank a
+    correct one; juvenile (lifespan) credit likewise only breaks ties, most
+    usefully across the flat zero-fitness region where nothing else does. Both
+    are 0.0 for every genome when their mechanism is off, so the ordering
+    collapses to exactly the pre-escape one."""
     from .io_placement import binding_viability
     viability = binding_viability(genome)
+    robustness = getattr(genome, '_robustness', 0.0) or 0.0
+    juvenile = getattr(genome, '_juvenile_score', 0.0) or 0.0
     if fitness < PARSIMONY_START_FITNESS:
-        return (viability, fitness, 0, 0)
-    return (viability, fitness, -n_genes(genome),
+        return (viability, fitness, robustness, juvenile, 0, 0)
+    return (viability, fitness, robustness, juvenile, -n_genes(genome),
             -germline_telomere(genome))
 
 
@@ -813,20 +1001,33 @@ def tournament_nv(population, fitnesses):
     return population[max(idx, key=lambda i: rank_key(population[i], fitnesses[i]))]
 
 
-def _lexicase_parent(population, case_vecs):
+def _lexicase_parent(population, case_vecs, case_subset=None):
     """ε-lexicase selection (La Cava et al.): stream the cases in random order;
     at each case keep only candidates within ε (median absolute deviation) of
     that case's best. Averages hide a single failing trial (~1/12 of a mean);
     lexicase makes every case a hard filter some of the time, so specialists on
     the currently-failing cases are selected and recombined — the mechanism that
-    drives populations to ALL-cases-perfect rather than high-average."""
+    drives populations to ALL-cases-perfect rather than high-average.
+
+    The ε is what makes this usable on CONTINUOUS scores. Plain lexicase filters
+    on exact ties, which essentially never occur between floats, so the first
+    case drawn would decide every selection on its own and the rest would be
+    dead weight — indistinguishable from single-case selection while still
+    looking like it maintains diversity.
+
+    ``case_subset`` restricts the stream to a sample of case indices for this
+    generation (downsampled lexicase). Same selection quality for a fraction of
+    the cases touched, and because the sample is redrawn every generation it is
+    also what "rotate the stimulus set" amounts to here."""
     from .io_placement import binding_viability
     n_cases = len(case_vecs[0])
     viability = [binding_viability(genome) for genome in population]
     best_viability = max(viability)
     cand = [index for index, value in enumerate(viability)
             if value >= best_viability - 1e-12]
-    for c in random.sample(range(n_cases), n_cases):
+    pool = (list(case_subset) if case_subset
+            else list(range(n_cases)))
+    for c in random.sample(pool, len(pool)):
         vals = [case_vecs[i][c] for i in cand]
         best = max(vals)
         srt  = sorted(vals)
@@ -847,10 +1048,18 @@ def _lexicase_parent(population, case_vecs):
 SELECTION = 'tournament'          # 'tournament' | 'lexicase'
 
 
-def select_parent(population, fitnesses, case_vecs=None):
+def _escape_off():
+    """The all-mechanisms-off escape config (imported lazily: runtime.config
+    imports the substrate's PulseConfig, so a module-level import here would
+    close an import cycle)."""
+    from runtime.escape import OFF
+    return OFF
+
+
+def select_parent(population, fitnesses, case_vecs=None, case_subset=None):
     if (SELECTION == 'lexicase' and case_vecs is not None
             and case_vecs[0] is not None):
-        return _lexicase_parent(population, case_vecs)
+        return _lexicase_parent(population, case_vecs, case_subset)
     return tournament_nv(population, fitnesses)
 
 
@@ -899,7 +1108,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     chromosome_count=None, recombination=True,
                     evolve_delay=None, evolve_io=False, io_placement=None,
                     archive_parent=None, stagnation=0,
-                    rescue_candidates=None):
+                    rescue_candidates=None, escape=None, mutation_limit=None):
     """Breed one exploratory offspring generation.
 
     Elites are normally a breeding pool only. A stalled spatial run preserves
@@ -912,6 +1121,15 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                           else ga_config.immigrant_fraction)
     tournament_size = (TOURNAMENT_K if ga_config is None
                        else ga_config.tournament_size)
+    # Local-minimum escape mechanisms. An explicit argument wins; otherwise the
+    # run configuration supplies them, so the desktop controller and the
+    # headless driver cannot end up breeding under different rules.
+    if escape is None:
+        escape = (getattr(ga_config, 'escape', None) if ga_config is not None
+                  else None) or _escape_off()
+    if mutation_limit is None:
+        mutation_limit = (getattr(ga_config, 'mutation_limit', 8.0)
+                          if ga_config is not None else 8.0)
     population_archs = {getattr(genome, 'arch', 'single')
                         for genome in population}
     if len(population_archs) > 1:
@@ -971,6 +1189,22 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                                                     strategy == 'terminal_nodes'),
                                                 n_inputs=inferred_inputs,
                                                 n_outputs=inferred_outputs)
+        # An immigrant must carry a layout of the SAME length as the population
+        # it joins, or it is born unbindable and wastes an evaluation slot.
+        # Read the shape from the population rather than guessing it.
+        reference_layout = (getattr(population[0], 'input_layout', None)
+                            if population else None)
+        if reference_layout is not None:
+            pad_count = len(reference_layout)
+            plain_genome = make_genome
+
+            def make_genome():
+                genome = plain_genome()
+                genome.input_layout = random_input_layout(
+                    pad_count,
+                    MAX_TELOMERE if ga_config is None
+                    else ga_config.max_telomere)
+                return genome
     # Enable the timing mutation belonging to the selected node model. An
     # explicit argument wins; otherwise read the run configuration — its
     # evolve_delay toggle overrides the model pairing (None = paired).
@@ -1027,6 +1261,13 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                  if selection is None else selection)
     use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
+    # One case sample per GENERATION, shared by every selection event in it —
+    # resampling per parent would average the downsampling away and lose the
+    # selection pressure it is supposed to concentrate.
+    case_subset = None
+    if use_lexicase:
+        from runtime.escape import lexicase_case_subset
+        case_subset = lexicase_case_subset(len(case_vecs[0]), escape)
     if n_elite > 0 and not use_lexicase:
         elite = order[:n_elite]
         k = min(tournament_size, len(elite))
@@ -1034,10 +1275,11 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             random.sample(elite, k),
             key=lambda i: rank_key(population[i], fitnesses[i]))]
     else:
-        elite_parent = lambda: (_lexicase_parent(population, case_vecs)
-                                 if use_lexicase else population[max(
-                                     random.sample(range(pop), min(tournament_size, pop)),
-                                     key=lambda i: rank_key(population[i], fitnesses[i]))])
+        elite_parent = lambda: (
+            _lexicase_parent(population, case_vecs, case_subset)
+            if use_lexicase else population[max(
+                random.sample(range(pop), min(tournament_size, pop)),
+                key=lambda i: rank_key(population[i], fitnesses[i]))])
     residual = order[n_elite:] if n_elite < pop else order
     recombination_signatures = [
         _recombination_signature(genome) for genome in population]
@@ -1055,7 +1297,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         if use_lexicase:
             local_pop = [population[i] for i in candidates]
             local_cases = [case_vecs[i] for i in candidates]
-            chosen = _lexicase_parent(local_pop, local_cases)
+            chosen = _lexicase_parent(local_pop, local_cases, case_subset)
             return candidates[next(i for i, genome in enumerate(local_pop)
                                    if genome is chosen)]
         k = min(tournament_size, len(candidates))
@@ -1096,6 +1338,21 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                 second = pick_index(distinct)
         return population[first], population[second]
 
+    # ``mean_mutations`` is None on the direct-API path, where mutate_nv falls
+    # back to its own default. Self-adaptation needs a real number to perturb,
+    # so resolve it here rather than propagating the None.
+    adaptive_base = MEAN_MUTATIONS if mean_mutations is None else mean_mutations
+
+    def child_rate(child):
+        # Under self-adaptive mutation each individual carries its own rate, so
+        # a stuck lineage can heat up while a lineage that is still improving
+        # stays cool — the per-lineage counterpart to the population-wide SOS
+        # reheat in runtime/mutation.py.
+        if not escape.self_adaptive_mutation:
+            return mean_mutations
+        from runtime.escape import mutation_rate_of
+        return mutation_rate_of(child, adaptive_base)
+
     def mutate_child(child):
         # Plateau pressure is a portfolio, not eight destructive edits on every
         # descendant: most patched lineages receive one or two cell-local
@@ -1107,7 +1364,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             and random.random() < 0.60)
         if not local:
             return mutate_nv(
-                child, mean_mutations,
+                child, child_rate(child),
                 max_telomere=(MAX_TELOMERE if ga_config is None
                               else ga_config.max_telomere),
                 chromosome_count=chromosome_count,
@@ -1131,11 +1388,25 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                 io_placement=strategy, local_only=True)
         return result
 
+    if escape.self_adaptive_mutation:
+        # Immigrants have no lineage to inherit a rate from, so they start on a
+        # randomised spread around the run rate; selection sorts out which end
+        # of that spread this landscape rewards.
+        from runtime.escape import seed_mutation_rate
+        for genome in new_pop:
+            if not hasattr(genome, '_mut_rate'):
+                seed_mutation_rate(genome, adaptive_base, mutation_limit)
     while len(new_pop) < pop:
         pa, pb = parent_pair()
         ca, cb = (crossover_nv(pa, pb, io_placement=strategy)
                   if recombination else
                   (clone_genome(pa), clone_genome(pb)))
+        if escape.self_adaptive_mutation:
+            from runtime.escape import inherit_mutation_rate
+            inherit_mutation_rate(ca, pa, pb, escape, adaptive_base,
+                                  mutation_limit)
+            inherit_mutation_rate(cb, pb, pa, escape, adaptive_base,
+                                  mutation_limit)
         new_pop.append(mutate_child(ca))
         if len(new_pop) < pop:
             new_pop.append(mutate_child(cb))
@@ -1185,7 +1456,8 @@ def _assimilate_timing_parents(population, fitnesses, target, count,
 
 def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                    seed=None, seed_genomes=None, selection=None,
-                   return_population=False, tile_arch='single'):
+                   return_population=False, tile_arch='tri3',
+                   escape=None, ga_config=None):
     # Reproducibility: fitness evaluation is deterministic (grow + score, no RNG),
     # so seeding the main-process RNG that drives the genetic operators pins the
     # whole evolutionary trajectory. Pass a seed for any result meant to be re-run.
@@ -1198,7 +1470,9 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
     # This is also a fresh-run entry point, so apply the same two-profile
     # contract as the desktop controller. With no explicit target physics,
     # choose the current profile belonging to the requested architecture.
+    import dataclasses as _dc
     from runtime.config import GAConfig, validate_new_nv_profile
+    from runtime.escape import build_escape_state, OFF
     from .pulse import PulseConfig
     pulse_config = getattr(target, 'pulse_config', None)
     if pulse_config is None:
@@ -1207,6 +1481,19 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         setattr(target, 'pulse_config', pulse_config)
     validate_new_nv_profile(GAConfig(
         tile_arch=tile_arch, node_model=pulse_config.model))
+    # Escape mechanisms. ``ga_config`` carries a whole run configuration;
+    # ``escape`` overrides just the mechanism set. Neither is required, and with
+    # both absent this driver behaves exactly as it did before the module
+    # existed. The resolved config is attached to the target so it also reaches
+    # the evaluation workers, exactly as the desktop controller does it.
+    if ga_config is None:
+        ga_config = GAConfig(tile_arch=tile_arch,
+                             node_model=pulse_config.model,
+                             chromosome_count=n_chroms)
+    if escape is not None:
+        ga_config = _dc.replace(ga_config, escape=escape)
+    escape_cfg = ga_config.escape or OFF
+    setattr(target, '_escape', escape_cfg)
     from .io_placement import (
         growth_seeds, io_strategy, seed_spatial, seed_wiring_from_phenotype,
         uses_port_chromosome)
@@ -1226,7 +1513,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             spatial_chromosome=(strategy == 'spatial_chromosome'),
             n_ports=n_ports, tag_rank=(strategy == 'tag_rank'),
             terminal_nodes=(strategy == 'terminal_nodes'),
-            n_inputs=target.n_inputs, n_outputs=len(target.outputs))
+            n_inputs=target.n_inputs, n_outputs=len(target.outputs),
+            input_layout=True)
         if strategy == 'spatial_chromosome':
             seed_spatial(genome, None, target)
         elif uses_port_chromosome(strategy):
@@ -1250,6 +1538,12 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         population  = [clone_genome(g) for g in seeds]
         population += [make_genome() for _ in range(pop - len(population))]
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)
+        escape_state = build_escape_state(
+            'nervous', ga_config, chromosome_count=n_chroms,
+            io_placement=strategy, evolve_io=evolve_io,
+            evolve_delay=ga_config.timing_mutations())
+        # Robustness scalars must exist before anything is ranked.
+        escape_state.apply_robustness_blend(population, max(fitnesses))
         bi           = max(range(pop),
                            key=lambda i: rank_key(population[i], fitnesses[i]))
         best_genome  = clone_genome(population[bi])
@@ -1341,23 +1635,35 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                         best_rank = parent_rank
                         best_fitness = parent_fitnesses[pi]
                         best_genome = clone_genome(parents[pi])
-            offspring = next_population(
-                parents, parent_fitnesses, make_genome, parent_cases, mm,
-                selection=selection, chromosome_count=n_chroms,
-                evolve_delay=evolve_delay, evolve_io=evolve_io,
-                io_placement=strategy, archive_parent=best_genome,
-                stagnation=stagnation, rescue_candidates=rescue)
+            # One pool, or separate demes at their own mutation rates when
+            # islands are on. Shared with the desktop controller.
+            offspring = escape_state.breed(
+                gen, parents, parent_fitnesses, parent_cases, mm,
+                lambda deme, deme_fitnesses, deme_cases, deme_rate:
+                    next_population(
+                        deme, deme_fitnesses, make_genome, deme_cases,
+                        deme_rate,
+                        selection=selection, chromosome_count=n_chroms,
+                        evolve_delay=evolve_delay, evolve_io=evolve_io,
+                        io_placement=strategy, archive_parent=best_genome,
+                        stagnation=stagnation, rescue_candidates=rescue,
+                        escape=escape_cfg,
+                        mutation_limit=ga_config.mutation_limit))
             offspring_fitnesses, offspring_cases = eval_batch_cases(
                 offspring, target, cache, ex)
-            if max(best_fitness, max(offspring_fitnesses)) >= 1.0:
-                # Terminal convergence is the sole survivor-selection phase.
-                population, fitnesses, cases = consolidate_population(
-                    parents, parent_fitnesses, parent_cases,
-                    offspring, offspring_fitnesses, offspring_cases)
-            else:
-                # Before the first solve, elites breed but never survive.
-                population, fitnesses, cases = (
-                    offspring, offspring_fitnesses, offspring_cases)
+            # Collapse robust case vectors under the current anneal before
+            # anything is ranked (see runtime/escape.py).
+            escape_state.apply_robustness_blend(
+                list(parents) + list(offspring),
+                max(best_fitness, max(offspring_fitnesses)))
+            # Survivor selection, shared with the desktop controller: terminal
+            # consolidation once solved, otherwise crowding when it is on,
+            # otherwise strict generational replacement.
+            population, fitnesses, cases = escape_state.merge_generation(
+                parents, parent_fitnesses, parent_cases,
+                offspring, offspring_fitnesses, offspring_cases,
+                consolidate=consolidate_population,
+                solved=max(best_fitness, max(offspring_fitnesses)) >= 1.0)
             gi = max(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]))
             gen_rank = rank_key(population[gi], fitnesses[gi])
@@ -1368,10 +1674,27 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                 stagnation = 0
             else:
                 stagnation += 1
-            if gen_rank > best_rank:
+            if escape_state.accepts(gen_rank, best_rank):
                 best_rank    = gen_rank
                 best_fitness = fitnesses[gi]
                 best_genome  = clone_genome(population[gi])
+            escape_state.record_champion(gen, best_genome, best_fitness)
+            population, fitnesses, cases, rebirth_info = \
+                escape_state.maybe_rebirth(
+                    gen, population, fitnesses, cases, mm, stagnation,
+                    best_fitness,
+                    lambda genomes: eval_batch_cases(
+                        genomes, target, cache, ex))
+            if rebirth_info is not None:
+                # A rebirth answers the stall that triggered it; leaving the
+                # counter set would re-fire it on the very next generation.
+                stagnation = 0
+                if verbose:
+                    print('Rebirth at generation %d: %d genomes from ancestors '
+                          '%s at rate %.2f'
+                          % (gen, rebirth_info['reborn'],
+                             rebirth_info['ancestors'], rebirth_info['rate']))
+            escape_state.tick()
             if solved_at is None and best_fitness >= 1.0:
                 solved_at = gen
                 if verbose:

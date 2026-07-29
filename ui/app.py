@@ -53,15 +53,21 @@ from substrates.nervous import TEMPORAL_TARGETS
 from substrates.nervous.contracts import behavior_contract_lines
 from substrates.nervous.viz import draw_hex_net
 from substrates.lut.viz import draw_lut_net, draw_lut_table
+from substrates.fnv import (
+    functional_case_outputs, functional_input_positions, functional_report,
+    grow_functional_snapshots, prepare_functional,
+)
+from substrates.fnv.viz import draw_functional_net
 # Absolute package imports work both for the documented ``python -m ui.app``
 # launch and when this file is invoked directly by an IDE/file association.
 # ROOT is inserted above, so direct execution still resolves the package.
 from ui.interactive import InteractiveTab
-from ui.designer import DesignerTab
+from ui.designer import DesignerTab, _Tip
 from ui.diversity_ui import DiversityTab
 from ui.target_ui import TargetPicker
 from ui import ui_compat
-from runtime.config import (GAConfig, RunConfig, NV_NEW_RUN_PROFILES,
+from runtime.config import (FNVConfig, FNV_FAMILIES, GAConfig, RunConfig,
+                                NV_NEW_RUN_PROFILES,
                                 MAX_CHROMOSOME_COUNT as MAX_CHROMS,
                                 default_max_telomere)
 from runtime.checkpoint import load_checkpoint, save_checkpoint
@@ -537,12 +543,12 @@ class App:
         self._backend_var = tk.StringVar(value='SNN')
         self._telomere_values = {
             backend: str(default_max_telomere(backend))
-            for backend in ('snn', 'nervous', 'lut')
+            for backend in ('snn', 'nervous', 'lut', 'fnv')
         }
         self._telomere_backend = 'snn'
         self._backend_cb  = ttk.Combobox(ctrl, textvariable=self._backend_var,
-                                         values=['SNN', 'Nervous', 'LUT'],
-                                         width=8, state='readonly')
+                                         values=['SNN', 'Nervous', 'FNV', 'LUT'],
+                                         width=9, state='readonly')
         self._backend_cb.pack(side='left')
         self._backend_cb.bind('<<ComboboxSelected>>', self._on_backend_change)
 
@@ -716,22 +722,20 @@ class App:
             self._pulse_frame, 'Coinc:', _C, width=4,
             store=self._pulse_entries, label_store=self._pulse_labels)
         # New NV runs expose only the current coherent substrate profiles.
-        # Experimental engines remain internal solely so older checkpoints can
-        # still load. Digital tri isolates tile topology (paper tile, frozen
-        # digital node) so analog_tri wins can be attributed to topology vs
-        # physics.
+        # ONE profile: the paper's three-circuit tile on the paper's Fig. 1
+        # analog node. The single-tile and digital tri-circuit engines are
+        # retired from new runs — measured worse on score, on solve rate, and
+        # decisively on held-out certification (see runtime/config.py). They
+        # remain in the codebase only as reference implementations for the
+        # timing-model audits.
         ttk.Label(self._pulse_frame, text='NV profile:').pack(
             side='left', padx=(6, 2))
         self._NV_PROFILE_LABELS = {
-            'Legacy: width-preserving + evolved delay':
-                NV_NEW_RUN_PROFILES['legacy'],
-            'Digital tri-circuit (3-output)':
-                NV_NEW_RUN_PROFILES['digital_tri'],
-            'Analog tri-circuit (3-output)':
+            'Analog tri-circuit (3-output, paper Fig. 1 node)':
                 NV_NEW_RUN_PROFILES['analog_tri'],
         }
         self._nv_profile_var = tk.StringVar(
-            value='Legacy: width-preserving + evolved delay')
+            value='Analog tri-circuit (3-output, paper Fig. 1 node)')
         self._nv_profile_cb = ttk.Combobox(
             self._pulse_frame, textvariable=self._nv_profile_var, width=39,
             state='readonly', values=list(self._NV_PROFILE_LABELS))
@@ -798,6 +802,190 @@ class App:
                        '(1-Vth)/2 < Step < 1-Vth; Vth+Hysteresis < 1)').pack(
             side='left', padx=(8, 0))
 
+        # FNV exposes component BANKS only.  Selecting a family enables every
+        # permanent route/output-count/timing type in that family.
+        self._fnv_row = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        ttk.Label(self._fnv_row, text='FNV component families:').pack(
+            side='left', padx=(2, 6))
+        self._fnv_family_vars = {}
+        self._fnv_family_checks = []
+        family_labels = {
+            'LOGIC': 'Logic',
+            'DELAY': 'Delay',
+            'NORMALIZER': 'Normalizer',
+            'HOLD': 'Hold',
+            'C_ELEMENT': 'C-element',
+            'TOGGLE': 'Toggle',
+            'GATED_OSCILLATOR': 'Gated oscillator',
+        }
+        for family in FNV_FAMILIES:
+            variable = tk.BooleanVar(value=True)
+            check = ttk.Checkbutton(
+                self._fnv_row, text=family_labels[family], variable=variable)
+            check.pack(side='left', padx=(0, 7))
+            self._fnv_family_vars[family] = variable
+            self._fnv_family_checks.append(check)
+
+        # ── fourth row: local-minimum escape mechanisms (runtime/escape.py) ──
+        # Every one is OFF by default, so an untouched row runs exactly the
+        # evolution this application ran before they existed. They apply to all
+        # four backends and to both GA drive paths.
+        from runtime.escape import EscapeConfig as _EC
+        _ED = _EC()
+        self._escape_defaults = dict(
+            lifespan=False, stages=_ED.lifespan_checkpoints,
+            crowding=False, window=_ED.crowding_window,
+            reserve=_ED.crowding_fraction,
+            drift=False, adaptive=False,
+            rebirth=False, patience=_ED.rebirth_patience,
+            fraction=_ED.rebirth_fraction,
+            robust=False, jitter=_ED.robustness_jitter,
+            islands=False, island_count=_ED.island_count,
+            island_interval=_ED.island_migration_interval,
+            downsample=_ED.lexicase_downsample)
+        # Two sub-rows: all of these on one line overflows the window at its
+        # natural width, and a control the user cannot see is a control that
+        # silently does not exist.
+        self._escape_row = ttk.Frame(self.root, padding=(6, 0, 6, 0))
+        self._escape_row.pack(fill='x', side='top')
+        esc1 = ttk.Frame(self._escape_row); esc1.pack(fill='x', side='top')
+        esc2 = ttk.Frame(self._escape_row); esc2.pack(fill='x', side='top',
+                                                      pady=(2, 4))
+        ctrl4 = esc1
+        ttk.Label(esc1, text='Escape:').pack(side='left', padx=(2, 0))
+        ttk.Label(esc2, text='          ').pack(side='left', padx=(2, 0))
+        self._escape_entries = []
+        # Lifespan scoring and the robustness objective are measured through the
+        # temporal scoring contract, and ε-lexicase needs per-case vectors —
+        # none of which the SNN backend has. Those widgets are collected here so
+        # _reconfigure_for_backend can disable exactly them rather than making
+        # the whole row look inapplicable.
+        self._escape_async_only = []
+
+        def echeck(text, tip, store=None):
+            var = tk.BooleanVar(value=False)
+            widget = ttk.Checkbutton(ctrl4, text=text, variable=var)
+            widget.pack(side='left', padx=(6, 0))
+            self._escape_entries.append(widget)
+            if store is not None:
+                store.append(widget)
+            _Tip(widget, tip)
+            return var
+
+        # Score the organism at several points along its DEVELOPMENT, not only
+        # as a finished adult. Manufactures a gradient on flat plateaus; the
+        # reported fitness is still the adult score.
+        self._lifespan_var = echeck(
+            'Lifespan',
+            'Score the circuit at several developmental stages, not only as a '
+            'grown adult.\nJuvenile scores become extra lexicase cases and a '
+            'selection tie-break, so a genome whose\nhalf-grown body partly '
+            'works has somewhere to climb from. Reported fitness is still\nthe '
+            'ADULT score. Costs roughly one extra evaluation per stage.',
+            store=self._escape_async_only)
+        self._lifespan_stages_var = aentry(
+            ctrl4, 'stages:', _ED.lifespan_checkpoints, width=3,
+            store=self._escape_entries)
+        self._escape_async_only.append(self._escape_entries[-1])
+        # Restricted tournament replacement.
+        self._crowding_var = echeck(
+            'Crowding',
+            'Restricted tournament replacement: each offspring competes '
+            'against the most\ngenetically SIMILAR member of a random window, '
+            'not a random one. Niches survive,\nbecause a specialist is only '
+            'displaced by a better version of itself.\n\nRTR is MONOTONE: '
+            'nothing in the crowded reserve is ever replaced by something '
+            'worse,\nso that share of the population can only rise. "reserve" '
+            'is how much of the population\nis crowded; the rest keeps ordinary '
+            'generational replacement, which is where the\nexploratory churn '
+            'lives. At 1.00 the mean rises smoothly and never dips — niche\n'
+            'preservation, but a population that cannot move downhill cannot '
+            'cross a valley.')
+        self._crowding_window_var = aentry(
+            ctrl4, 'window:', _ED.crowding_window, width=3,
+            store=self._escape_entries)
+        self._crowding_fraction_var = aentry(
+            ctrl4, 'reserve:', _ED.crowding_fraction, width=4,
+            store=self._escape_entries)
+        self._drift_var = echeck(
+            'Neutral drift',
+            'Accept equal-ranked challengers instead of demanding strict '
+            'improvement.\nDrifting across a plateau’s neutral network is how '
+            'this substrate finds new\nphenotypes; strict > freezes the '
+            'archived champion in place.')
+        self._adaptive_mut_var = echeck(
+            'Self-adaptive mutation',
+            'Each individual carries its own mutation rate, inherited with a '
+            'log-normal nudge.\nA stuck lineage heats up on its own while an '
+            'improving lineage stays cool —\nper-lineage, unlike the '
+            'population-wide plateau reheat (β).')
+        # Second sub-row from here on (echeck/aentry both resolve ctrl4 at call
+        # time, so rebinding it moves the remaining widgets).
+        ctrl4 = esc2
+        self._rebirth_var = echeck(
+            'Rebirth',
+            'On a stall, rebuild part of the population from a DIVERSE SET of '
+            'archived ancestors\nat an elevated mutation rate — deliberately '
+            'backtracking to an earlier branch point\nto leave it in a '
+            'different direction. Current elites are kept.')
+        self._rebirth_patience_var = aentry(
+            ctrl4, 'stall:', _ED.rebirth_patience, width=4,
+            store=self._escape_entries)
+        self._rebirth_fraction_var = aentry(
+            ctrl4, 'frac:', _ED.rebirth_fraction, width=4,
+            store=self._escape_entries)
+        self._robust_var = echeck(
+            'Robustness',
+            'Second objective: re-score under jittered physics, aggregated by '
+            'WORST case and\nranked strictly BELOW correctness, so it can never '
+            'trade against a correct answer.\nAmong equally correct circuits it '
+            'prefers the broader basin. Costs one extra\nevaluation per jitter '
+            'sample.',
+            store=self._escape_async_only)
+        self._robust_jitter_var = aentry(
+            ctrl4, 'jitter:', _ED.robustness_jitter, width=4,
+            store=self._escape_entries)
+        self._escape_async_only.append(self._escape_entries[-1])
+        self._islands_var = echeck(
+            'Islands',
+            'Split the population into demes that breed SEPARATELY, each at '
+            'its own mutation rate —\ncold demes exploit while hot demes '
+            'explore, at the same time, instead of one\npopulation annealing '
+            'between the two. Rare ring migration carries a discovery\n'
+            'gradually rather than letting it sweep every deme at once.\n\n'
+            'The demes share ONE objective and differ only in search dynamics. '
+            'Islands that\ndiffer by OBJECTIVE — one per test case — were tried '
+            'in this project and failed:\nthey specialise into incompatible '
+            'optima and every migrant is a hybrid that\nfails on both sides.')
+        self._island_count_var = aentry(
+            ctrl4, 'demes:', _ED.island_count, width=3,
+            store=self._escape_entries)
+        self._island_interval_var = aentry(
+            ctrl4, 'migrate:', _ED.island_migration_interval, width=4,
+            store=self._escape_entries)
+        self._downsample_var = aentry(
+            ctrl4, 'Lexicase sample:', _ED.lexicase_downsample, width=4,
+            store=self._escape_entries)
+        self._escape_async_only.append(self._escape_entries[-1])
+        _Tip(self._escape_entries[-1],
+             'Fraction of cases ε-lexicase streams each generation (1 = all).\n'
+             'Downsampling buys several times more generations at the same '
+             'selection quality,\nand because the sample is redrawn every '
+             'generation it is also what "rotate the\nstimulus set" amounts to '
+             'here. Only acts when ε-lexicase is selected.')
+        self._escape_reset_btn = ttk.Button(
+            ctrl4, text='Reset escape', width=13,
+            command=self._reset_escape)
+        self._escape_reset_btn.pack(side='left', padx=(10, 2))
+        # Live telemetry: rebirth count, crowding replacements, mean adaptive
+        # rate. Populated from the worker's 'escape' messages.
+        self._escape_status = tk.StringVar(value='off')
+        self._escape_status_label = ttk.Label(
+            esc2, textvariable=self._escape_status, foreground='#777777',
+            anchor='w')
+        self._escape_status_label.pack(side='left', padx=(8, 0),
+                                       fill='x', expand=True)
+
         # Fix a natural size on the notebook and stop it from resizing to fit
         # whichever tab is shown. On X11 a matplotlib canvas in a freshly-mapped
         # tab requests its figsize*dpi in pixels, and without this the whole
@@ -809,8 +997,9 @@ class App:
         self._build_growth_tab(nb)
         self._build_voltage_tab(nb)
         self._build_genome_tab(nb)
-        self._interactive = InteractiveTab(self._add_tab(nb, 'Interactive'),
-                                           self.current_circuit)
+        self._interactive_frame = self._add_tab(nb, 'Interactive')
+        self._interactive = InteractiveTab(
+            self._interactive_frame, self.current_circuit)
         self._designer_frame = self._add_tab(nb, 'Designer')
         self._designer = DesignerTab(self._designer_frame,
                                      get_circuit=self.current_circuit)
@@ -854,13 +1043,21 @@ class App:
         """Show only the controls / tab labels relevant to the selected model."""
         backend = self._backend()
         if hasattr(self, '_io_placement_cb'):
-            labels = [
-                label for label, strategy in self._IO_PLACEMENT_LABELS.items()
-                if backend != 'snn' or strategy != 'terminal_nodes']
-            if (backend == 'snn'
-                    and self._selected_io_placement() == 'terminal_nodes'):
+            labels = (
+                ['Evolved inputs / fitted outputs'] if backend == 'fnv' else [
+                    label for label, strategy in self._IO_PLACEMENT_LABELS.items()
+                    if backend != 'snn' or strategy != 'terminal_nodes'])
+            if (backend == 'fnv' or (
+                    backend == 'snn'
+                    and self._selected_io_placement() == 'terminal_nodes')):
+                self._io_placement_var.set(
+                    'Evolved inputs / fitted outputs'
+                    if backend == 'fnv' else 'Fixed (original)')
+            elif self._io_placement_var.get() not in labels:
                 self._io_placement_var.set('Fixed (original)')
             self._io_placement_cb.configure(values=labels)
+            self._io_placement_cb.configure(
+                state=('disabled' if backend == 'fnv' else 'readonly'))
         self._sync_telomere_backend(backend)
         if backend != 'snn':
             self._arch_frame.pack_forget()
@@ -895,6 +1092,13 @@ class App:
                         '(paper Architecture 2 / sim6). Recurrent & dynamical — TEMPORAL '
                         'targets only (it cannot settle to combinational logic). '
                         'Substrate/Graded do not apply.')
+            if backend == 'fnv':
+                note = (
+                    'Functional NV Net (FNV) - directed honeycomb hardware. '
+                    'Each node is one fixed logic, timing, memory, or gated-'
+                    'oscillator component; two independent antiparallel wires '
+                    'share every edge. Component families are enabled only as '
+                    'whole physical banks, with no evolvable node parameters.')
             self._model_note.config(text=note)
             self._set_tab_label(self._volt_tab, 'Activity')
         else:
@@ -906,8 +1110,8 @@ class App:
         # pulse-physics knobs apply only to the nervous net's pulse engine.
         # Re-pack relative to the always-present I/O-binding frame (the
         # separator is itself hidden for other models, so it can't be a pack
-        # anchor). The I/O binding dropdown itself stays for EVERY backend —
-        # all three GAs honour the strategy.
+        # anchor). Nervous/LUT/SNN keep the I/O binding dropdown; FNV currently
+        # fixes physical terminal cells.
         if hasattr(self, '_pulse_frame'):
             if backend == 'nervous':
                 self._pulse_frame.pack(side='left', before=self._io_frame)
@@ -918,8 +1122,14 @@ class App:
                 self._pulse_frame.pack_forget()
                 if hasattr(self, '_analog_row'):
                     self._analog_row.pack_forget()
+        if hasattr(self, '_fnv_row'):
+            if backend == 'fnv':
+                self._fnv_row.pack(
+                    fill='x', side='top', before=self._escape_row)
+            else:
+                self._fnv_row.pack_forget()
         # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
-        # feeds the nervous & LUT GAs only; the SNN GA uses its own fixed constants
+        # feeds the nervous, FNV and LUT GAs; SNN uses its own fixed constants
         # and ignores them — so disable the whole row for SNN rather than let it look
         # as if it applies.
         if hasattr(self, '_ga_entries'):
@@ -929,12 +1139,28 @@ class App:
                     w.configure(state=st)
                 except tk.TclError:
                     pass
+        # The population-level escape mechanisms (crowding / neutral drift /
+        # self-adaptive mutation / rebirth) work on all four backends. Lifespan
+        # scoring, the robustness objective and lexicase downsampling all read
+        # the temporal scoring contract's per-case vectors, which SNN has none
+        # of — disable exactly those and leave the rest live.
+        if hasattr(self, '_escape_async_only'):
+            st = 'disabled' if backend in ('snn', 'fnv') else 'normal'
+            if backend == 'fnv':
+                self._lifespan_var.set(False)
+                self._robust_var.set(False)
+                self._downsample_var.set('1.0')
+            for w in self._escape_async_only:
+                try:
+                    w.configure(state=st)
+                except tk.TclError:
+                    pass
         # the Designer edits grown hardware, which only the two asynchronous
         # substrates have — hide its tab for SNN runs, and keep its
         # architecture in lockstep with the Model selector otherwise
         if hasattr(self, '_designer'):
             try:
-                if backend == 'snn':
+                if backend in ('snn', 'fnv'):
                     self._nb.hide(self._designer_frame)
                 else:
                     self._nb.add(self._designer_frame)   # restore if hidden
@@ -944,10 +1170,18 @@ class App:
         # Diversity grows and probes circuits, so it too is nervous/LUT only.
         if hasattr(self, '_diversity_frame'):
             try:
-                if backend == 'snn':
+                if backend in ('snn', 'fnv'):
                     self._nb.hide(self._diversity_frame)
                 else:
                     self._nb.add(self._diversity_frame)
+            except tk.TclError:
+                pass
+        if hasattr(self, '_interactive_frame'):
+            try:
+                if backend == 'fnv':
+                    self._nb.hide(self._interactive_frame)
+                else:
+                    self._nb.add(self._interactive_frame)
             except tk.TclError:
                 pass
         # dropdown offers only backend-valid targets (LUT hides combinational)
@@ -1082,7 +1316,7 @@ class App:
 
     def _targets_for_backend(self, backend):
         """Return static SNN targets or periodic asynchronous targets."""
-        if backend in ('nervous', 'lut'):
+        if backend in ('nervous', 'lut', 'fnv'):
             d = {
                 name: (target if getattr(target, 'temporal', False)
                        else self._periodic_target(target))
@@ -1100,7 +1334,10 @@ class App:
         return {
             name: target for name, target in d.items()
             if (not getattr(target, 'supported_backends', ())
-                or backend in target.supported_backends)
+                or backend in target.supported_backends
+                or (backend == 'fnv'
+                    and any(candidate in target.supported_backends
+                            for candidate in ('nervous', 'lut'))))
             if (node_model is None
                 or not getattr(target, 'supported_models', ())
                 or node_model in target.supported_models)
@@ -1124,7 +1361,9 @@ class App:
             self._reconfigure_for_backend()
             # show what this target IS right away in the Evolution tab's panel
             try:
-                if self._backend() == 'lut':
+                if self._backend() == 'fnv':
+                    preview = functional_report(self.target)
+                elif self._backend() == 'lut':
                     from substrates.lut import lut_report
                     preview = lut_report(self.target)
                 elif self._backend() == 'snn':
@@ -1137,6 +1376,7 @@ class App:
             model = {
                 'lut': 'continuous-time LUT array',
                 'nervous': 'continuous-time nervous net',
+                'fnv': 'continuous-time Functional NV Net',
                 'snn': 'continuous-time recurrent SNN',
             }[self._backend()]
             self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test seconds. '
@@ -1183,13 +1423,74 @@ class App:
             self._ahyst_var.set(str(a['hyst']))
         if hasattr(self, '_nv_profile_var'):
             self._nv_profile_var.set(
-                'Legacy: width-preserving + evolved delay')
+                'Analog tri-circuit (3-output, paper Fig. 1 node)')
             self._sync_nv_profile_controls()
         if hasattr(self, '_lexicase_var'):
             self._lexicase_var.set(False)    # tournament is the tuned default
+        for variable in getattr(self, '_fnv_family_vars', {}).values():
+            variable.set(True)
+        if hasattr(self, '_lifespan_var'):
+            self._reset_escape()
         if hasattr(self, '_target_picker'):
             self._reconfigure_for_backend()
             self._refresh_target_list()
+
+    def _reset_escape(self):
+        """Return every escape mechanism to off — the pre-escape behaviour."""
+        d = self._escape_defaults
+        self._lifespan_var.set(d['lifespan'])
+        self._lifespan_stages_var.set(str(d['stages']))
+        self._crowding_var.set(d['crowding'])
+        self._crowding_window_var.set(str(d['window']))
+        self._crowding_fraction_var.set(str(d['reserve']))
+        self._drift_var.set(d['drift'])
+        self._adaptive_mut_var.set(d['adaptive'])
+        self._rebirth_var.set(d['rebirth'])
+        self._rebirth_patience_var.set(str(d['patience']))
+        self._rebirth_fraction_var.set(str(d['fraction']))
+        self._robust_var.set(d['robust'])
+        self._robust_jitter_var.set(str(d['jitter']))
+        self._islands_var.set(d['islands'])
+        self._island_count_var.set(str(d['island_count']))
+        self._island_interval_var.set(str(d['island_interval']))
+        self._downsample_var.set(str(d['downsample']))
+        self._escape_status.set('off')
+
+    def _read_escape_config(self):
+        """Parse the escape row, or None when a field is invalid.
+
+        EscapeConfig validates its own ranges, so a nonsensical entry surfaces
+        as "invalid tuning" on Run rather than as a crashed worker thread.
+        """
+        from runtime.escape import EscapeConfig
+        try:
+            return EscapeConfig(
+                lifespan_scoring=bool(self._lifespan_var.get()),
+                lifespan_checkpoints=int(self._lifespan_stages_var.get()),
+                crowding=bool(self._crowding_var.get()),
+                crowding_window=int(self._crowding_window_var.get()),
+                crowding_fraction=float(self._crowding_fraction_var.get()),
+                neutral_drift=bool(self._drift_var.get()),
+                self_adaptive_mutation=bool(self._adaptive_mut_var.get()),
+                rebirth=bool(self._rebirth_var.get()),
+                rebirth_patience=int(self._rebirth_patience_var.get()),
+                rebirth_fraction=float(self._rebirth_fraction_var.get()),
+                robustness=bool(self._robust_var.get()),
+                robustness_jitter=float(self._robust_jitter_var.get()),
+                islands=bool(self._islands_var.get()),
+                island_count=int(self._island_count_var.get()),
+                island_migration_interval=int(
+                    self._island_interval_var.get()),
+                lexicase_downsample=float(self._downsample_var.get()))
+        except (TypeError, ValueError):
+            return None
+
+    def _selected_fnv_families(self):
+        if not hasattr(self, '_fnv_family_vars'):
+            return FNV_FAMILIES
+        return tuple(
+            family for family in FNV_FAMILIES
+            if self._fnv_family_vars[family].get())
 
     def _read_run_config(self, chromosome_count=None):
         """Parse controls into an immutable, process-safe run configuration."""
@@ -1223,6 +1524,9 @@ class App:
                 raise ValueError
         except ValueError:
             return None
+        escape = self._read_escape_config()
+        if escape is None:
+            return None
         from substrates.nervous.pulse import PulseConfig
         try:
             pulse_config = PulseConfig(delay=delay, width=width,
@@ -1231,6 +1535,10 @@ class App:
         except ValueError:
             # PulseConfig enforces the analog coupling constraints (e.g. step
             # inside ((1-Vth)/2, 1-Vth)); report as invalid tuning, not a crash.
+            return None
+        try:
+            fnv_config = FNVConfig(self._selected_fnv_families())
+        except ValueError:
             return None
         return RunConfig(
             ga=GAConfig(
@@ -1249,11 +1557,15 @@ class App:
                 evolve_delay=evolve_delay,
                 tile_arch=tile_arch,
                 io_placement=self._selected_io_placement(),
-                chromosome_count=chromosome_count),
-            pulse=pulse_config)
+                chromosome_count=chromosome_count,
+                escape=escape),
+            pulse=pulse_config,
+            fnv=fnv_config)
 
     def _backend(self):
         v = self._backend_var.get().lower()
+        if v.startswith('fnv') or v.startswith('functional'):
+            return 'fnv'
         if v.startswith('nerv'):
             return 'nervous'
         if v.startswith('lut'):
@@ -1293,7 +1605,7 @@ class App:
                     'non-developmental I/O map.')
 
     def _selected_nv_profile(self):
-        default = ('single', 'pulse_delay', None)
+        default = ('tri3', 'paper_analog', None)
         if not hasattr(self, '_nv_profile_var'):
             return default
         return self._NV_PROFILE_LABELS.get(
@@ -1336,7 +1648,10 @@ class App:
         self._sync_nv_profile_controls()
         if hasattr(self, '_io_placement_cb'):
             self._io_placement_cb.configure(
-                state='disabled' if locked else 'readonly')
+                state=('disabled' if locked or self._backend() == 'fnv'
+                       else 'readonly'))
+        for widget in getattr(self, '_fnv_family_checks', ()):
+            widget.configure(state='disabled' if locked else 'normal')
 
     def _sync_telomere_backend(self, backend=None):
         """Swap in the remembered growth ceiling for the selected backend.
@@ -1365,6 +1680,10 @@ class App:
         if backend == 'nervous':
             self._status.set('Model: Nervous net — coincidence + inhibition + loops; '
                              'best with small grids and close I/O.')
+        elif backend == 'fnv':
+            self._status.set(
+                'Model: Functional NV Net - fixed physical functions on '
+                'directed honeycomb wires; select whole component families.')
         elif backend == 'lut':
             self._status.set('Model: LUT array — square grid, 4 neighbours, four 16-bit '
                              'lookup tables per cell, asynchronous level logic (sim6 / Arch 2).')
@@ -1475,6 +1794,7 @@ class App:
                              'Tournament>=1, Elites>=0, 0<α<=1, 0<=β<=10, '
                              'Mutation cap>=1, '
                              'Max telomere>=2, '
+                             'at least one FNV family enabled, '
                              'Delay/Width>0, Coinc>=0; analog: 0<Vth<1, '
                              '(1-Vth)/2<Step<1-Vth, Tau>0, Hyst>=0, '
                              'Vth+Hyst<1.')
@@ -1483,6 +1803,8 @@ class App:
         backend = self._backend()
         eff_target = self._effective_target(high, self._graded_var.get())
         setattr(eff_target, 'pulse_config', run_config.pulse)
+        if backend == 'fnv':
+            setattr(eff_target, '_fnv_families', run_config.fnv.families)
         # Mirror the evolvable I/O binding onto the display/scoring target so the
         # main-thread report and playback (which call prepare_net/prepare_lut/
         # interpret paths) bind ports the same way the run does. All backends
@@ -1504,6 +1826,8 @@ class App:
         self._n_unique_solvers = 0
         self._certification = None
         self._ga_error = None
+        self._last_rebirth = None
+        self._escape_status.set(run_config.ga.escape.summary())
         self._solver_save_error = None
         self._population_save_error = None
         self._stop_requested = False
@@ -1668,6 +1992,9 @@ class App:
             self._active_seed = saved_seed
         saved_backend = loaded_backend
         self._active_run_config = normalized_config
+        if saved_backend == 'fnv':
+            setattr(saved_target, '_fnv_families',
+                    normalized_config.fnv.families)
         self._beta_var.set(str(normalized_config.ga.stagnation_beta))
         self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
         self._recombination_var.set(normalized_config.ga.recombination_enabled)
@@ -1694,10 +2021,14 @@ class App:
              if profile == saved_profile), None)
         profile_warn = ''
         if profile_label is None:
-            profile_label = 'Legacy: width-preserving + evolved delay'
+            # A checkpoint saved under a retired engine. The dropdown can
+            # only show the one live profile, so say plainly that the run
+            # being displayed is not the one a fresh Run would use.
+            profile_label = 'Analog tri-circuit (3-output, paper Fig. 1 node)'
             if loaded_backend == 'nervous':
-                profile_warn = ('   — loaded retired NV physics for playback; '
-                                'new runs use one of the current profiles')
+                profile_warn = ('   — this checkpoint was saved under a '
+                                'RETIRED NV engine; the shown profile is '
+                                'the current one, not the saved one')
         self._nv_profile_var.set(profile_label)
         # Restore the I/O binding dropdown from the loaded run (old checkpoints
         # default to 'fixed').
@@ -1706,13 +2037,18 @@ class App:
             (label for label, strat in self._IO_PLACEMENT_LABELS.items()
              if strat == saved_io), 'Fixed (original)')
         self._io_placement_var.set(io_label)
+        for family, variable in getattr(
+                self, '_fnv_family_vars', {}).items():
+            variable.set(family in normalized_config.fnv.families)
         self._sync_nv_profile_controls()
         self._sync_recombination()
         self._chroms_var.set(str(actual_chroms))
         self._active_chroms = actual_chroms
         self._disp_backend   = saved_backend
         self._active_backend = saved_backend
-        self._backend_var.set({'nervous': 'Nervous', 'lut': 'LUT'}.get(saved_backend, 'SNN'))
+        self._backend_var.set({
+            'nervous': 'Nervous', 'fnv': 'FNV', 'lut': 'LUT'
+        }.get(saved_backend, 'SNN'))
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
         self._reconfigure_for_backend()      # filters the dropdown for the backend
@@ -1849,6 +2185,38 @@ class App:
                     lines = tb.strip().splitlines()
                     self._solver_save_error = (
                         lines[-1] if lines else 'unknown save error')
+                elif kind == 'escape':
+                    # Live escape telemetry, one message per generation while
+                    # any mechanism is on. Rendered next to the controls that
+                    # produced it so a run's behaviour is attributable.
+                    stats = msg[1]
+                    parts = [stats['summary']]
+                    if stats['rebirths']:
+                        last = getattr(self, '_last_rebirth', None)
+                        detail = ('' if last is None else
+                                  ' from gens %s' % ','.join(
+                                      str(g) for g in last['ancestors']))
+                        parts.append('rebirths %d (last gen %s%s)'
+                                     % (stats['rebirths'],
+                                        stats['last_rebirth_gen'], detail))
+                    if stats['archive']:
+                        parts.append('ancestors %d' % stats['archive'])
+                    if stats['crowding_replacements']:
+                        parts.append('crowd-replaced %d'
+                                     % stats['crowding_replacements'])
+                    if stats.get('migrations'):
+                        parts.append('migrations %d' % stats['migrations'])
+                    if stats.get('robust_blend'):
+                        parts.append('worst-case %.0f%%'
+                                     % (stats['robust_blend'] * 100))
+                    if self._adaptive_mut_var.get():
+                        parts.append('mean rate %.2f' % stats['mean_rate'])
+                    self._escape_status.set('  |  '.join(parts))
+                elif kind == 'rebirth':
+                    # Stashed rather than written to the status bar: the status
+                    # bar is rewritten with the generation line every poll, so
+                    # a one-shot event posted there would never be readable.
+                    self._last_rebirth = msg[1]
                 elif kind == 'certified':
                     # Held-out verdict for the winning genome (CERTIFIED /
                     # OVERFIT / BELOW / SOLVED / PLATEAU / UNCERTIFIED).
@@ -2002,7 +2370,9 @@ class App:
     def _update_truth_table(self, genome):
         temporal = getattr(self._disp_target, 'temporal', False)
         try:
-            if temporal:
+            if self._disp_backend == 'fnv':
+                text = functional_report(self._disp_target, genome)
+            elif temporal:
                 if self._disp_backend == 'lut':
                     from substrates.lut import lut_report
                     text = lut_report(self._disp_target, genome)
@@ -2024,6 +2394,9 @@ class App:
 
     def _draw_growth(self, genome, fitness):
         target = self._disp_target
+        if self._disp_backend == 'fnv':
+            self._draw_growth_fnv(genome, target, fitness)
+            return
         if self._disp_backend == 'nervous':
             self._draw_growth_hex(genome, target, fitness)
             return
@@ -2107,6 +2480,39 @@ class App:
         ]
         leg_ax.legend(handles=patches, loc='center', fontsize=7.5,
                       frameon=False, title='Node type', title_fontsize=8)
+        self._growth_canvas.draw_idle()
+
+    def _draw_growth_fnv(self, genome, target, fitness):
+        try:
+            inputs = functional_input_positions(genome, target.inputs)
+            snapshots = grow_functional_snapshots(
+                genome, seeds=inputs,
+                grid_size=target.grid_size, iters=target.iters)
+            prepared = prepare_functional(genome, target)
+            outputs = prepared[2] if prepared is not None else {}
+        except Exception:
+            return
+        fig = self._growth_fig
+        fig.clf()
+        fig.suptitle(
+            '%s - Functional NV Net growth   (fitness=%.4f)%s' %
+            (target.name, fitness, self._seed_tag()),
+            fontsize=10, fontweight='bold', y=0.995)
+        count = len(snapshots)
+        columns = min(5, max(3, math.ceil(math.sqrt(count))))
+        rows = math.ceil(count / columns)
+        axes = fig.subplots(rows, columns, squeeze=False)
+        flat = [axis for row in axes for axis in row]
+        for index, snapshot in enumerate(snapshots):
+            draw_functional_net(
+                flat[index], snapshot, input_positions=inputs,
+                output_positions=(outputs if index == count - 1 else {}),
+                show_edges=(index == count - 1),
+                title=('Seed (%d)' % len(snapshot) if index == 0 else
+                       'Iter %d (%d)' % (index, len(snapshot))))
+        for index in range(count, len(flat)):
+            flat[index].set_visible(False)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
         self._growth_canvas.draw_idle()
 
     def _draw_growth_hex(self, genome, target, fitness):
@@ -2376,6 +2782,9 @@ class App:
         self._volt_canvas.draw_idle()
 
     def _draw_voltages(self, genome):
+        if self._disp_backend == 'fnv':
+            self._draw_activity_fnv(genome)
+            return
         if self._disp_backend == 'nervous':
             self._draw_activity(genome)
             return
@@ -2478,6 +2887,55 @@ class App:
                         color='green' if act == exp else 'red', fontweight='bold')
                 if row == n_rows - 1:
                     ax.set_xlabel('Time (ms)', fontsize=8)
+        self._volt_canvas.draw_idle()
+
+    def _draw_activity_fnv(self, genome):
+        target = self._disp_target
+        if getattr(target, 'temporal', False):
+            self._draw_placeholder(
+                self._volt_fig, self._volt_canvas,
+                'Temporal FNV target - the fitted physical event/state traces '
+                'are listed in Contract Score.')
+            return
+        try:
+            grid, inputs, outputs, cases = functional_case_outputs(
+                genome, target)
+        except Exception:
+            self._draw_placeholder(
+                self._volt_fig, self._volt_canvas,
+                '(FNV: cannot evaluate this circuit)')
+            return
+        if not cases:
+            self._draw_placeholder(
+                self._volt_fig, self._volt_canvas,
+                '(FNV: circuit incomplete - inputs/outputs missing)')
+            return
+        cases = cases[:MAX_VOLT_CASES]
+        self._volt_fig.clf()
+        self._volt_fig.suptitle(
+            '%s - Functional NV Net activity per case%s' %
+            (target.name, self._seed_tag()),
+            fontsize=10, fontweight='bold', y=0.99)
+        axes = self._volt_fig.subplots(1, len(cases), squeeze=False)[0]
+        for index, case in enumerate(cases):
+            correct = all(
+                case['acts'][terminal.role] == case['out_bits'][out_index]
+                for out_index, terminal in enumerate(target.outputs))
+            result = '  '.join(
+                '%s %d/%d' % (
+                    terminal.role, case['out_bits'][out_index],
+                    case['acts'][terminal.role])
+                for out_index, terminal in enumerate(target.outputs))
+            draw_functional_net(
+                axes[index], grid, input_positions=inputs,
+                output_positions=outputs, activity=case['node_outputs'],
+                show_edges=True,
+                title='in=%s\n%s  %s' % (
+                    ''.join(map(str, case['in_bits'])), result,
+                    'OK' if correct else 'FAIL'))
+            axes[index].set_title(
+                axes[index].get_title(),
+                color='green' if correct else 'red', fontsize=7)
         self._volt_canvas.draw_idle()
 
     def _draw_activity(self, genome):

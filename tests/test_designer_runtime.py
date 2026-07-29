@@ -46,30 +46,26 @@ class _Parent:
 
 
 def test_app_exposes_only_the_current_nv_profiles():
+    # ONE profile. The single-tile and digital tri-circuit engines are retired:
+    # measured worse on score, solve rate and — decisively — on held-out
+    # certification, where legacy's Toggle "solve" was 3/5 OVERFIT.
     assert NV_NEW_RUN_PROFILES == {
-        'legacy': ('single', 'pulse_delay', None),
-        'digital_tri': ('tri3', 'uniform', None),
         'analog_tri': ('tri3', 'paper_analog', None),
     }
     assert is_current_nv_profile(GAConfig(
-        tile_arch='single', node_model='pulse_delay'))
-    assert is_current_nv_profile(GAConfig(
-        tile_arch='tri3', node_model='uniform'))
-    assert is_current_nv_profile(GAConfig(
         tile_arch='tri3', node_model='paper_analog'))
-    assert not is_current_nv_profile(GAConfig(
-        tile_arch='single', node_model='uniform'))
+    for retired in (
+            GAConfig(tile_arch='single', node_model='pulse_delay'),
+            GAConfig(tile_arch='tri3', node_model='uniform'),
+            GAConfig(tile_arch='single', node_model='uniform')):
+        assert not is_current_nv_profile(retired)
 
     app = App.__new__(App)
     app._NV_PROFILE_LABELS = {
-        'Legacy': NV_NEW_RUN_PROFILES['legacy'],
         'Analog': NV_NEW_RUN_PROFILES['analog_tri'],
     }
     app._nv_profile_var = type(
         'Var', (), {'get': lambda self: self.value})()
-    app._nv_profile_var.value = 'Legacy'
-    assert App._selected_tile_arch(app) == 'single'
-    assert App._selected_node_model(app) == ('pulse_delay', None)
     app._nv_profile_var.value = 'Analog'
     assert App._selected_tile_arch(app) == 'tri3'
     assert App._selected_node_model(app) == ('paper_analog', None)
@@ -121,12 +117,10 @@ def test_wiring_io_selection_automatically_provides_chromosome_three():
 
 def test_new_nv_run_validation_rejects_every_retired_pairing():
     validate_new_nv_profile(GAConfig(
-        tile_arch='single', node_model='pulse_delay'))
-    validate_new_nv_profile(GAConfig(
-        tile_arch='tri3', node_model='uniform'))
-    validate_new_nv_profile(GAConfig(
         tile_arch='tri3', node_model='paper_analog'))
     for config in (
+            GAConfig(tile_arch='single', node_model='pulse_delay'),
+            GAConfig(tile_arch='tri3', node_model='uniform'),
             GAConfig(tile_arch='single', node_model='uniform'),
             GAConfig(tile_arch='single', node_model='paper_analog'),
             GAConfig(tile_arch='single', node_model='pulse_delay',

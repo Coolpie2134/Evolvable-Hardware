@@ -65,7 +65,7 @@ def oracle_spec_for(target):
 # non-default node-timing model (pulse_delay / paper_analog) would be certified
 # under the default uniform physics — every such run would read as OVERFIT. Copy
 # it onto each spec target so fit + holdout run under the SAME physics as training.
-_PHYSICS_ATTRS = ('pulse_config', 'lut_config')
+_PHYSICS_ATTRS = ('pulse_config', 'lut_config', '_fnv_families')
 
 
 def carry_physics(src_target, dst_target):

@@ -69,6 +69,24 @@ def fit_readout(genome, target, backend='nervous'):
             return None
         out_pos, traces = prep[1], prep[2]
         in_pos = _freeze_inputs(prep[3]) if len(prep) > 3 else ()
+    elif backend == 'fnv':
+        from substrates.fnv.evaluation import prepare_functional
+        from .scoring import score_contract
+        prep = prepare_functional(genome, target)
+        if prep is None:
+            return None
+        _, inputs, out_pos, observations = prep
+        if getattr(target, 'temporal', False):
+            traces = observations
+        else:
+            traces = [
+                [float(case['acts'][terminal.role])
+                 for terminal in target.outputs]
+                for case in observations
+            ]
+        # FNV input_layout is a flat tuple of physical source pads, not the
+        # grouped fan-out representation used by Nervous/LUT I/O strategies.
+        in_pos = tuple(tuple(cell) for cell in inputs)
     else:
         raise ValueError("unknown temporal backend: %s" % backend)
     if getattr(traces, 'overflow', False):
@@ -84,7 +102,22 @@ def fit_readout(genome, target, backend='nervous'):
     # Only carry the input binding for genuinely evolvable strategies; leave it
     # empty for 'fixed' so input_positions() falls back to the seed pads and
     # nothing about the legacy path changes.
-    fitted_inputs = in_pos if getattr(target, 'io_placement', 'fixed') != 'fixed' else ()
+    # A genome carrying an evolved input_layout freezes its EXACT flat pad
+    # tuple. Validation must reuse these coordinates verbatim: re-resolving the
+    # layout there would let held-out silently pick a different input binding
+    # from the one training was scored on.
+    evolved_layout = getattr(genome, 'input_layout', None) is not None
+    if evolved_layout:
+        # The EXACT FLAT pad tuple, one coordinate per logical input. A layout
+        # pad is a single cell — there is no fan-out to represent — so the
+        # grouped form would only add a level of nesting for validation to
+        # unwrap, and flat is already the shape the fixed path hands on.
+        from .io_placement import flat_inputs as _flat_inputs
+        fitted_inputs = tuple(tuple(cell) for cell in _flat_inputs(in_pos))
+    else:
+        fitted_inputs = (
+            in_pos
+            if getattr(target, 'io_placement', 'fixed') != 'fixed' else ())
     return FittedReadout(backend, outputs, alignment, score, inputs=fitted_inputs)
 
 
@@ -122,8 +155,15 @@ def score_frozen(genome, target, fitted):
         # (node_delays returns None off that model).
         config = getattr(target, 'pulse_config', None)
         delays = None if arch == 'tri3' else node_delays(genome, grid, config)
+        # Source membership comes from the FROZEN pads, not from re-resolving
+        # the genome's layout, so validation runs the same terminal physics on
+        # the same coordinates that training was scored under.
+        source_nodes = (
+            {tuple(cell) for cell in flat_inputs(in_pos)}
+            if getattr(genome, 'input_layout', None) is not None else None)
         traces = trace_fixed_outputs(
-            grid, routing, in_pos, out_pos, target, delays=delays, arch=arch)
+            grid, routing, in_pos, out_pos, target, delays=delays, arch=arch,
+            source_nodes=source_nodes)
     elif fitted.backend == 'lut':
         from substrates.lut.lut import grow_lut
         from substrates.lut.ga import trace_fixed_outputs
@@ -141,6 +181,24 @@ def score_frozen(genome, target, fitted):
             return 0.0
         traces = trace_fixed_outputs(
             grid, list(in_pos), out_pos, target)
+    elif fitted.backend == 'fnv':
+        from substrates.fnv.growth import grow_functional
+        from substrates.fnv.evaluation import (
+            score_fixed_logic_outputs, trace_fixed_outputs,
+        )
+        from .scoring import score_contract
+        in_pos = fitted.input_positions(target)
+        grid = grow_functional(
+            genome, in_pos, grid_size=target.grid_size, iters=target.iters)
+        if (len(grid) <= target.n_inputs
+                or any(pos not in grid for pos in in_pos)):
+            return 0.0
+        if getattr(target, 'temporal', False):
+            traces = trace_fixed_outputs(
+                grid, list(in_pos), out_pos, target)
+        else:
+            traces = score_fixed_logic_outputs(
+                genome, grid, list(in_pos), out_pos, target)
     else:
         raise ValueError("unknown fitted backend: %s" % fitted.backend)
 
