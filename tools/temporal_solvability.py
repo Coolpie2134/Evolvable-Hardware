@@ -285,17 +285,15 @@ def render(document, supplements=(), fixed_document=None):
         "prove a complete mechanism is reachable by the current local mutation "
         "operators.",
         "",
-        "Spatial input I/O is developmental in this run: every heritable input "
-        "anchor is an exclusive germline, and moving it changes the grown body. "
-        "Outputs remain target-blind heritable spatial attachments. Fixed I/O "
-        "still has the search advantage of trace-fitting an output after "
-        "observing target behavior.",
+        "When this historical matrix selects `spatial_chromosome`, every "
+        "heritable input anchor is a developmental germline and outputs remain "
+        "target-blind spatial attachments. Current Nervous application runs "
+        "instead use evolved coordinate pads plus globally fitted probes.",
         "",
-        "The next decisive step is mechanism seeding/inverse development: seed "
-        "small ordinary-genome loop, latch, counter, and rendezvous motifs, "
-        "verify each with the unchanged contract, and let evolution elaborate "
-        "them. Larger blind budgets alone cannot distinguish a missing motif "
-        "from a merely rare one.",
+        "Current forward search keeps target-shaped inverse development out of "
+        "Nervous and FNV. Connectivity/feedback topology supplies a target-blind "
+        "stepping-stone signal; separately hand-designed witnesses remain useful "
+        "only to distinguish substrate impossibility from a search miss.",
         "",
         *_comparison_table(
             _matching_rows(documents, fixed_document), fixed_document),

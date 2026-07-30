@@ -24,13 +24,29 @@ from .genome import (
     random_functional_genome,
 )
 
-N_WORKERS = max(1, min(os.cpu_count() or 1, 8))
+N_WORKERS = max(1, min((os.cpu_count() or 2) - 2, 16))
 FITNESS_CACHE_MAX = 200_000
 GENE_FIELDS = ("ctx_l", "ctx_r", "ctx_d", "self_in", "self_out")
 
 
 def clone_genome(genome):
-    return copy.deepcopy(genome)
+    """Copy mutable FNV structure without recursively walking scalar fields.
+
+    FNV mutations edit gene objects in place, so unlike NV/LUT their genes
+    cannot be shared between offspring.  They contain only scalar alleles,
+    however, making one shallow copy per gene equivalent to ``deepcopy`` while
+    avoiding its memo/dispatch overhead throughout reproduction.
+    """
+    clone = copy.copy(genome)
+    clone.chromosomes = []
+    for chromosome in genome.chromosomes:
+        copied = copy.copy(chromosome)
+        copied.genes = [copy.copy(gene) for gene in chromosome.genes]
+        clone.chromosomes.append(copied)
+    layout = getattr(genome, "input_layout", None)
+    if layout is not None:
+        clone.input_layout = tuple(tuple(cell) for cell in layout)
+    return clone
 
 
 def genome_signature(genome):
@@ -232,7 +248,7 @@ def _mutate_structure(genome, families, max_telomere, chromosome_count,
         del chromosome.genes[random.randrange(len(chromosome.genes))]
     elif action == "duplicate_gene" and len(chromosome.genes) < MAX_GENES:
         index = random.randrange(len(chromosome.genes))
-        chromosome.genes.insert(index + 1, copy.deepcopy(
+        chromosome.genes.insert(index + 1, copy.copy(
             chromosome.genes[index]))
     elif action == "split":
         if len(chromosome.genes) > 1:
@@ -321,8 +337,8 @@ def crossover_functional(parent_a, parent_b):
             cut_a = max(1, min(a.split, len(a.genes) - 1))
             cut_b = max(1, min(b.split, len(b.genes) - 1))
             genes = (
-                [copy.deepcopy(gene) for gene in a.genes[:cut_a]]
-                + [copy.deepcopy(gene) for gene in b.genes[cut_b:]]
+                [copy.copy(gene) for gene in a.genes[:cut_a]]
+                + [copy.copy(gene) for gene in b.genes[cut_b:]]
             )[:MAX_GENES]
             if genes:
                 a.genes = genes

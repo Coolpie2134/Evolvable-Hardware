@@ -113,14 +113,29 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                             else RunConfig())
     if backend == 'snn' and config.ga.io_placement == 'terminal_nodes':
         raise ValueError(
-            "io_placement='terminal_nodes' is available for nervous and LUT "
-            'substrates; the SNN substrate has no directional terminal-cell '
-            'physics')
+            "io_placement='terminal_nodes' is retained for programmatic LUT "
+            'runs; SNN has no directional terminal-cell physics, and Nervous '
+            'uses evolved source pads plus fitted output probes')
     if backend == 'nervous':
         validate_new_nv_profile(config.ga)
+        if config.ga.io_placement != 'fixed':
+            raise ValueError(
+                'retired Nervous I/O placement: %r. The nervous substrate now '
+                'uses one native mechanism — an evolved input layout of source '
+                'pads plus whole-organism fitted output probes. The tag_rank, '
+                'wiring_chromosome, spatial_chromosome and terminal_nodes '
+                'compatibility strategies remain only where supported by SNN '
+                'or programmatic LUT runs.' % (config.ga.io_placement,))
     if backend == 'fnv' and config.ga.io_placement != 'fixed':
         raise ValueError(
-            "Functional NV Net currently uses fixed physical terminals; "
+            "Functional NV Net uses native evolved source pads plus fitted "
+            "output probes; set the compatibility field io_placement='fixed'")
+    if (backend == 'lut'
+            and getattr(config.ga, 'lut_io_mode',
+                        'source_pads') == 'exterior_edges'
+            and config.ga.io_placement != 'fixed'):
+        raise ValueError(
+            "LUT exterior-edge I/O replaces cell-binding strategies; "
             "set io_placement='fixed'")
     if (backend == 'fnv' and (
             config.ga.escape.lifespan_scoring
@@ -148,6 +163,10 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             'chromosome-based I/O requires at least 3 chromosomes; '
             'chromosome 3 is reserved as the evolvable port map')
     setattr(target, 'pulse_config', config.pulse)
+    if backend == 'lut':
+        setattr(
+            target, 'lut_io_mode',
+            getattr(config.ga, 'lut_io_mode', 'source_pads'))
     # The escape configuration rides on the TARGET so it reaches evaluation
     # worker processes (same idiom as pulse_config / _lifetime_samples). It is
     # what turns lifespan scoring and the robustness objective on inside the
@@ -167,42 +186,22 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         from substrates.nervous.ga import (eval_batch_cases, next_population, diversify,
                                consolidate_population,
                                adaptive_mutation_rate, rank_key, N_WORKERS)
-        # Evolvable I/O binding: the strategy lives on the target. Method A
-        # evolves body-gene expression priorities. Chromosome strategies evolve
-        # either type/selector mappings or normalised x/y anchors.
-        io_strategy = getattr(config.ga, 'io_placement', 'fixed')
+        # Nervous I/O is ONE native mechanism: an evolved input layout of
+        # discrete source pads, plus whole-organism fitted output probes. The
+        # tag / wiring / spatial / terminal-node placement strategies are
+        # retired here (they remain available to LUT and SNN).
+        io_strategy = 'fixed'
         setattr(target, 'io_placement', io_strategy)
-        evolve_io = io_strategy in (
-            'terminal_nodes', 'tag_rank', 'wiring_chromosome',
-            'spatial_chromosome')
-        port_chromosome = io_strategy in (
-            'wiring_chromosome', 'spatial_chromosome')
+        evolve_io = False
         cache = LRUCache(config.ga.cache_size)
         workers = N_WORKERS
         pool = ProcessPoolExecutor(max_workers=workers)
         def make_genome():
-            genome = random_hex_genome(
+            return random_hex_genome(
                 chromosome_count, max_telomere=config.ga.max_telomere,
                 arch=getattr(config.ga, 'tile_arch', 'single'),
-                wiring_chromosome=(io_strategy == 'wiring_chromosome'),
-                spatial_chromosome=(io_strategy == 'spatial_chromosome'),
-                n_ports=n_ports, tag_rank=(io_strategy == 'tag_rank'),
-                terminal_nodes=(io_strategy == 'terminal_nodes'),
                 n_inputs=target.n_inputs, n_outputs=len(target.outputs),
                 input_layout=True)
-            if io_strategy == 'spatial_chromosome':
-                from substrates.nervous.io_placement import seed_spatial
-                seed_spatial(genome, None, target)
-            elif port_chromosome:
-                from substrates.nervous.io_placement import (
-                    growth_seeds, seed_wiring_from_phenotype)
-                from substrates.nervous.nervous import grow_nervous
-                grid = grow_nervous(
-                    genome, seeds=growth_seeds(
-                        target, io_strategy, genome),
-                    grid_size=target.grid_size, iters=target.iters)
-                seed_wiring_from_phenotype(genome, grid, target)
-            return genome
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         selection_mode = (
@@ -219,52 +218,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
-        if io_strategy == 'spatial_chromosome':
-            from substrates.nervous.io_placement import (
-                growth_seeds, spatial_input_sites,
-                spatial_output_variants, spatial_routing_variants)
-            from substrates.nervous.nervous import grow_nervous
-            rescue_queues = {}
-
-            def nervous_spatial_rescue(champion, limit):
-                grid = grow_nervous(
-                    champion,
-                    seeds=growth_seeds(
-                        target, 'spatial_chromosome', champion),
-                    grid_size=target.grid_size, iters=target.iters)
-                body_key = (
-                    tuple(sorted(grid.items())),
-                    tuple(spatial_input_sites(champion, target)))
-                queues = rescue_queues.get(body_key)
-                if queues is None:
-                    # At most ports*field-size proposals (small on the GUI
-                    # domains). Serve the deterministic readout scan in chunks;
-                    # once exhausted, this body spends no more generations
-                    # repeating the same output placements or routing flips.
-                    # Only the current champion body matters; discard scans for
-                    # obsolete bodies instead of retaining a run-long history.
-                    rescue_queues.clear()
-                    queues = {
-                        'outputs': spatial_output_variants(
-                            champion, target, limit=10_000),
-                        'routing': spatial_routing_variants(
-                            champion, target, limit=10_000),
-                    }
-                    rescue_queues[body_key] = queues
-                output_queue = queues['outputs']
-                output_count = min(
-                    len(output_queue), max(1, limit // 3))
-                output_candidates = output_queue[:output_count]
-                del output_queue[:output_count]
-                routing_queue = queues['routing']
-                routing_count = min(
-                    len(routing_queue),
-                    max(0, limit - len(output_candidates)))
-                local_candidates = routing_queue[:routing_count]
-                del routing_queue[:routing_count]
-                return output_candidates + local_candidates
-
-            plateau_rescue_fn = nervous_spatial_rescue
         # Resolve the delay-mutation toggle once so diversification mutates
         # under exactly the same operator set as the main GA loop.
         evolve_delay = config.ga.timing_mutations()
@@ -330,6 +283,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             consolidate_population, make_seed_genome,
             adaptive_mutation_rate, rank_key, N_WORKERS,
             plateau_rescue_candidates)
+        from substrates.lut.genome import random_input_layout
         from substrates.nervous.io_placement import seed_io_metadata
         # Evolvable I/O binding (see the nervous branch): body priorities or a
         # dedicated chromosome of type/selector or spatial anchor alleles.
@@ -348,6 +302,11 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             for chromosome in genome.chromosomes:
                 chromosome.telomere = min(
                     chromosome.telomere, config.ga.max_telomere)
+            if io_strategy == 'fixed':
+                if getattr(config.ga, 'lut_io_mode',
+                           'source_pads') != 'exterior_edges':
+                    genome.input_layout = random_input_layout(
+                        target.n_inputs, config.ga.max_telomere)
             if evolve_io:
                 seed_io_metadata(
                     genome,

@@ -12,8 +12,10 @@ The two substrates keep their distinct characters —
 
 — but both are now simulated as physical hardware: every cell has one fixed
 propagation delay, all action is precipitated by a wire LEVEL CHANGE, and
-inputs are wired-OR injections onto the input cells' nets at arbitrary
-(possibly sub-tick) real times.
+inputs arrive at arbitrary (possibly sub-tick) real times. Internal source-pad
+mode wired-ORs them onto source-only cells; exterior-edge mode assigns every
+exposed outer face to a logical-input bus in cyclic A/B/... order. Each outside
+tap drives exactly one facing N/S/E/W input of a perimeter cell.
 
 Delay model: INERTIAL, the standard asynchronous-logic model. When any of a
 cell's input wires changes at time t, the cell re-evaluates its lookup on the
@@ -72,6 +74,7 @@ class LutConfig:
 
 
 _INF = float('inf')
+_EXTERNAL_INPUT_BITS = {'N': 0x1, 'S': 0x2, 'E': 0x4, 'W': 0x8}
 
 
 class AsyncLutSim:
@@ -79,15 +82,16 @@ class AsyncLutSim:
 
     Drop-in for the synchronous ``LutSim`` API (``step``, ``run_bits``,
     ``out``, ``ever``, ``reset``) and additionally speaks the PulseSim
-    dialect: ``inject_pulse(cell, t, width)`` places a wired-OR level
-    injection at any real time, ``advance_to(when)`` processes events through
+    dialect: ``inject_pulse(source, t, width)`` drives either an internal
+    source-only cell or a declared exterior source at any real time,
+    ``advance_to(when)`` processes events through
     an absolute time, ``rise_times`` holds every wire's continuous 0->high
     leading-edge timestamps, and ``overflow`` marks a run that exceeded its
     event/wave budget (scorers turn overflow into zero).
     """
 
     def __init__(self, grid, config=None, max_events=None,
-                 input_nodes=None, output_nodes=None):
+                 input_nodes=None, output_nodes=None, external_inputs=None):
         self.grid   = grid
         self.config = config or LutConfig()
         cells       = list(grid)
@@ -102,6 +106,28 @@ class AsyncLutSim:
             (c in self.output_nodes for c in cells), dtype=bool, count=n)
         if (self._input_mask & self._output_mask).any():
             raise ValueError('LUT terminal inputs and outputs must be distinct')
+        # Exterior sources are not cells. Each source drives exactly one
+        # directional input of one perimeter cell and therefore cannot consume
+        # feedback, become an output candidate, or have its own LUT state.
+        external_inputs = dict(external_inputs or {})
+        self.external_inputs = external_inputs
+        self._ext_ids = list(external_inputs)
+        self._ext_index = {
+            source: index for index, source in enumerate(self._ext_ids)}
+        ext_inside, ext_masks = [], []
+        for source in self._ext_ids:
+            inside, direction = external_inputs[source]
+            if inside not in self._cidx:
+                raise ValueError('LUT exterior input must face a live cell')
+            try:
+                mask = _EXTERNAL_INPUT_BITS[str(direction).upper()]
+            except KeyError as exc:
+                raise ValueError(
+                    'LUT exterior input direction must be N, S, E or W') from exc
+            ext_inside.append(self._cidx[inside])
+            ext_masks.append(mask)
+        self._ext_inside = np.array(ext_inside, dtype=np.intp)
+        self._ext_masks = np.array(ext_masks, dtype=np.int64)
         self.max_events = None if max_events is None else max(1, int(max_events))
         # four LUT columns (same layout as LutSim; index n = padding sentinel)
         self._Ln = np.fromiter((grid[c][0] for c in cells), dtype=np.int64, count=n)
@@ -124,12 +150,14 @@ class AsyncLutSim:
         self._logic   = np.zeros(n, dtype=np.int64)   # each cell's computed nibble
         self._inj     = np.zeros(n, dtype=np.int64)   # wired-OR injection depth
         self._injor   = np.zeros(n, dtype=np.int64)   # 0xF where depth > 0
+        self._ext_depth = np.zeros(len(self._ext_ids), dtype=np.int64)
+        self._ext_bits = np.zeros(n, dtype=np.int64)
         self._wirepad = np.zeros(n + 1, dtype=np.int64)  # levels (+ absent = 0)
         self._drivepad = np.zeros(n + 1, dtype=np.int64) # outward-visible levels
         self._pend_t  = np.full(n, _INF)              # inertial pending change
         self._pend_v  = np.zeros(n, dtype=np.int64)
         self._affbuf  = np.zeros(n + 1, dtype=bool)   # scratch reader mask
-        self._edges   = []                            # heap: (t, seq, col, ±1)
+        self._edges   = []       # heap: (t, seq, 0=cell/1=exterior, index, +/-1)
         self._waves   = []                            # heap of pending-wave times
         self._wave_set = set()
         self._seq     = 0
@@ -163,7 +191,8 @@ class AsyncLutSim:
         idx = (((pe[self._nN] & 0x4) >> 2)         # from N -> bit0
                | ((pe[self._nS] & 0x8) >> 2)       # from S -> bit1
                | ((pe[self._nE] & 0x1) << 2)       # from E -> bit2
-               | ((pe[self._nW] & 0x2) << 2))      # from W -> bit3
+               | ((pe[self._nW] & 0x2) << 2)       # from W -> bit3
+               | self._ext_bits)
         out = ((((self._Ln >> idx) & 1) << 3)
                | (((self._Ls >> idx) & 1) << 2)
                | (((self._Le >> idx) & 1) << 1)
@@ -185,15 +214,22 @@ class AsyncLutSim:
         else driving it), starting at any real time. Events are queued; call
         ``advance_to`` (or let ``step`` / ``run_bits`` advance) to process."""
         col = self._cidx.get(cell)
-        if col is None or self._output_mask[col]:
+        if col is not None and self._output_mask[col]:
             return
+        if col is None:
+            external = self._ext_index.get(cell)
+            if external is None:
+                return
+            kind, index = 1, external
+        else:
+            kind, index = 0, col
         self._pristine = False
         w = TICK if width is None else float(width)
         t = float(t)
         self._seq += 1
-        heapq.heappush(self._edges, (t, self._seq, col, 1))
+        heapq.heappush(self._edges, (t, self._seq, kind, index, 1))
         self._seq += 1
-        heapq.heappush(self._edges, (t + w, self._seq, col, -1))
+        heapq.heappush(self._edges, (t + w, self._seq, kind, index, -1))
 
     def _next_time(self):
         t = self._edges[0][0] if self._edges else _INF
@@ -221,13 +257,22 @@ class AsyncLutSim:
             if due.any():
                 self._logic[due] = self._pend_v[due]
                 self._pend_t[due] = _INF
+        old_ext_bits = self._ext_bits.copy()
         while self._edges and self._edges[0][0] == t:
-            _, _, col, delta = heapq.heappop(self._edges)
-            self._inj[col] += delta
-            self._injor[col] = 0xF if self._inj[col] > 0 else 0
+            _, _, kind, index, delta = heapq.heappop(self._edges)
+            if kind:
+                self._ext_depth[index] += delta
+            else:
+                self._inj[index] += delta
+                self._injor[index] = 0xF if self._inj[index] > 0 else 0
+        if self._ext_ids:
+            self._ext_bits[:] = 0
+            for port in np.nonzero(self._ext_depth > 0)[0]:
+                self._ext_bits[self._ext_inside[port]] |= self._ext_masks[port]
+        external_changed = self._ext_bits != old_ext_bits
         new_wire = self._logic | self._injor
         changed = new_wire != wire
-        if not changed.any():
+        if not changed.any() and not external_changed.any():
             return
         rising = changed & (wire == 0)
         if rising.any():
@@ -247,8 +292,9 @@ class AsyncLutSim:
             # nibble-to-nibble changes that stay high are neither edge
             self._fall_log.append((t, np.nonzero(falling)[0]))
             self._interval_dict = None
-        wire[...] = new_wire
-        self._out_dict = None
+        if changed.any():
+            wire[...] = new_wire
+            self._out_dict = None
         self.wave_count += 1
         if self.wave_count > self.config.wave_cap:
             self._overflow_now()
@@ -265,18 +311,20 @@ class AsyncLutSim:
         # Sink changes are recorded and observable, but electrically invisible:
         # they have no readers to re-evaluate.
         drivers = changed & ~self._output_mask
-        if not drivers.any():
-            return
         ch = np.nonzero(drivers)[0]
         affm = self._affbuf
-        if 4 * ch.size >= n and not (self._pend_t < _INF).any():
+        if (ch.size and 4 * ch.size >= n
+                and not external_changed.any()
+                and not (self._pend_t < _INF).any()):
             aff = True
         else:
             affm[:] = False
-            affm[self._nN[ch]] = True
-            affm[self._nS[ch]] = True
-            affm[self._nE[ch]] = True
-            affm[self._nW[ch]] = True
+            if ch.size:
+                affm[self._nN[ch]] = True
+                affm[self._nS[ch]] = True
+                affm[self._nE[ch]] = True
+                affm[self._nW[ch]] = True
+            affm[:n] |= external_changed
             affm[n] = False                        # drop the off-grid sentinel
             aff = affm[:n]
             if not aff.any():
@@ -397,7 +445,11 @@ class AsyncLutSim:
             B = self._run_bits_lattice(streams, in_pos, T)
         else:
             self._pristine = False
-            in_cols = [self._cidx.get(p) for p in in_pos]
+            in_refs = [
+                ((0, self._cidx[p]) if p in self._cidx
+                 else ((1, self._ext_index[p])
+                       if p in self._ext_index else None))
+                for p in in_pos]
             ns = len(streams)
             B = np.zeros((T, self.n), dtype=np.uint8)
             wire = self._wirepad[:self.n]
@@ -405,14 +457,19 @@ class AsyncLutSim:
                 if t < ns:
                     row = streams[t]
                     t0 = t * TICK
-                    for i, c in enumerate(in_cols):
-                        if (c is not None and not self._output_mask[c]
-                                and i < len(row) and row[i]):
+                    for i, ref in enumerate(in_refs):
+                        if (ref is not None and i < len(row) and row[i]
+                                and not (ref[0] == 0
+                                         and self._output_mask[ref[1]])):
+                            kind, index = ref
                             self._seq += 1
-                            heapq.heappush(self._edges, (t0, self._seq, c, 1))
+                            heapq.heappush(
+                                self._edges,
+                                (t0, self._seq, kind, index, 1))
                             self._seq += 1
                             heapq.heappush(self._edges,
-                                           (t0 + TICK, self._seq, c, -1))
+                                           (t0 + TICK, self._seq,
+                                            kind, index, -1))
                 self._run_until((t + 0.5) * TICK)
                 B[t] = wire != 0
                 if self.overflow:
@@ -438,25 +495,40 @@ class AsyncLutSim:
         self._waves = []
         self._wave_set.clear()
         self._pend_t[:] = _INF
-        in_cols = [self._cidx.get(p) for p in in_pos]
+        in_refs = [
+            ((0, self._cidx[p]) if p in self._cidx
+             else ((1, self._ext_index[p])
+                   if p in self._ext_index else None))
+            for p in in_pos]
         ns = len(streams)
         B = np.zeros((T, n), dtype=np.uint8)
         wire = self._wirepad[:n]
         logic, injor, ever = self._logic, self._injor, self._ever
         last_inj = ()
+        last_ext = ()
         for t in range(T):
             v = self._eval()                   # logic_t = LUT(wire_{t-1})
             logic[...] = v
             injor[:] = 0
+            self._ext_bits[:] = 0
             last_inj = ()
+            last_ext = ()
             if t < ns:
                 row = streams[t]
-                cols = [c for i, c in enumerate(in_cols)
-                        if (c is not None and not self._output_mask[c]
-                            and i < len(row) and row[i])]
+                refs = [ref for i, ref in enumerate(in_refs)
+                        if (ref is not None and i < len(row) and row[i]
+                            and not (ref[0] == 0
+                                     and self._output_mask[ref[1]]))]
+                cols = [index for kind, index in refs if kind == 0]
                 if cols:
                     injor[cols] = 0xF
                     last_inj = cols
+                ports = [index for kind, index in refs if kind == 1]
+                if ports:
+                    for port in ports:
+                        self._ext_bits[self._ext_inside[port]] |= \
+                            self._ext_masks[port]
+                    last_ext = ports
             new_wire = logic | injor
             rising = (wire == 0) & (new_wire != 0)
             falling = (wire != 0) & (new_wire == 0)
@@ -492,8 +564,92 @@ class AsyncLutSim:
                 self._inj[c] = 1
                 injor[c] = 0xF
                 self._seq += 1
-                heapq.heappush(self._edges, (T * TICK, self._seq, c, -1))
+                heapq.heappush(
+                    self._edges, (T * TICK, self._seq, 0, c, -1))
+            for port in last_ext:
+                self._ext_depth[port] = 1
+                self._seq += 1
+                heapq.heappush(
+                    self._edges, (T * TICK, self._seq, 1, port, -1))
         return B
+
+    def run_bits_batch_lattice(self, streams, in_pos):
+        """Evaluate independent tick-lattice trials in one NumPy batch.
+
+        ``streams`` is ``[trial, tick, input]`` and the result is
+        ``[trial, tick, cell]``.  This is the read-only, scoring-only twin of
+        :meth:`_run_bits_lattice`: every trial starts from power-on zero, uses
+        the same one-delay LUT recurrence, source-only internal pads and
+        directional exterior inputs, but event logs and resumable frontier
+        state are intentionally not built.  Combinational fitness consumes
+        only the returned level windows, so batching changes no observation.
+        """
+        values = np.asarray(streams, dtype=np.uint8)
+        if values.ndim != 3:
+            raise ValueError(
+                'batched LUT streams must be [trial, tick, input]')
+        if self.config.delay != TICK:
+            raise ValueError('batched LUT scoring requires tick-lattice delay')
+        batch, ticks, lanes = values.shape
+        if lanes != len(in_pos):
+            raise ValueError('batched LUT stream/input width mismatch')
+
+        in_refs = [
+            ((0, self._cidx[p]) if p in self._cidx
+             else ((1, self._ext_index[p])
+                   if p in self._ext_index else None))
+            for p in in_pos]
+        n = self.n
+        wire = np.zeros((batch, n), dtype=np.int64)
+        ext_bits = np.zeros((batch, n), dtype=np.int64)
+        levels = np.zeros((batch, ticks, n), dtype=np.uint8)
+        input_mask = self._input_mask
+        output_mask = self._output_mask
+        Ln, Ls, Le, Lw = (
+            self._Ln[None, :], self._Ls[None, :],
+            self._Le[None, :], self._Lw[None, :])
+
+        for tick in range(ticks):
+            drive = wire
+            if output_mask.any():
+                drive = wire.copy()
+                drive[:, output_mask] = 0
+            # The ordinary simulator uses one padding column for absent
+            # neighbours.  Batched indexing instead appends that zero column.
+            padded = np.pad(drive, ((0, 0), (0, 1)))
+            index = (
+                ((padded[:, self._nN] & 0x4) >> 2)
+                | ((padded[:, self._nS] & 0x8) >> 2)
+                | ((padded[:, self._nE] & 0x1) << 2)
+                | ((padded[:, self._nW] & 0x2) << 2)
+                | ext_bits)
+            logic = (
+                (((Ln >> index) & 1) << 3)
+                | (((Ls >> index) & 1) << 2)
+                | (((Le >> index) & 1) << 1)
+                | ((Lw >> index) & 1))
+            if input_mask.any():
+                logic[:, input_mask] = 0
+
+            injection = np.zeros((batch, n), dtype=np.int64)
+            next_ext = np.zeros((batch, n), dtype=np.int64)
+            for lane, ref in enumerate(in_refs):
+                if ref is None:
+                    continue
+                active = values[:, tick, lane] != 0
+                if not active.any():
+                    continue
+                kind, index_value = ref
+                if kind == 0:
+                    if not output_mask[index_value]:
+                        injection[active, index_value] = 0xF
+                else:
+                    inside = self._ext_inside[index_value]
+                    next_ext[active, inside] |= self._ext_masks[index_value]
+            wire = logic | injection
+            levels[:, tick] = wire != 0
+            ext_bits = next_ext
+        return levels
 
     def run_input_events(self, input_events, in_pos, T, sample=True):
         """Drive an explicit floating-time stimulus schedule (one list of

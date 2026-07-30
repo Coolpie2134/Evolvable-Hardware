@@ -12,7 +12,9 @@ from substrates.nervous.scoring import (
 
 from .genome import functional_input_positions, germline_telomere
 from .growth import grow_functional
-from .simulation import FunctionalSim, TICK, effective_wiring_edges
+from .simulation import (
+    FunctionalSim, TICK, compile_functional_grid, effective_wiring_edges,
+)
 
 
 @dataclass(frozen=True)
@@ -106,10 +108,11 @@ def _strong_components(nodes, adjacency):
     return components
 
 
-def functional_topology(grid, inputs):
+def functional_topology(grid, inputs, *, _compiled=None):
     """Measure connected and cyclic FNV hardware without inspecting behavior."""
     input_set = set(map(tuple, inputs))
-    edges = effective_wiring_edges(grid, input_set)
+    edges = effective_wiring_edges(
+        grid, input_set, compiled=_compiled)
     adjacency = {cell: set() for cell in grid}
     for source, destination in edges:
         adjacency.setdefault(source, set()).add(destination)
@@ -249,12 +252,12 @@ def _inject_events(sim, input_positions, input_events):
 
 def run_functional_events(grid, input_positions, output_positions, streams,
                           horizon, *, max_events=2048, sample=True,
-                          input_events=None):
+                          input_events=None, _compiled=None):
     """Run one trial and return snapshots, role traces, physical events, flag."""
     inputs = [tuple(cell) for cell in input_positions]
     sim = FunctionalSim(
         grid, input_nodes=inputs, output_nodes=set(output_positions.values()),
-        max_events=max_events)
+        max_events=max_events, compiled=_compiled)
     if input_events is None:
         _inject_streams(sim, inputs, streams, horizon)
     else:
@@ -291,27 +294,32 @@ def run_functional_events(grid, input_positions, output_positions, streams,
     return states, traces, events, sim.overflow
 
 
-def _temporal_runs(grid, inputs, target):
+def _temporal_runs(grid, inputs, target, *, _compiled=None):
     horizon = _obs_len(target)
     sample = needs_samples(target)
+    circuit = (
+        compile_functional_grid(grid, inputs)
+        if _compiled is None else _compiled)
     return [
         run_functional_events(
             grid, inputs, {}, trial.streams, horizon,
             max_events=getattr(target, "max_events", 2048),
             sample=sample,
             input_events=getattr(trial, "input_events", None),
+            _compiled=circuit,
         )
         for trial in target.trials
     ], horizon, sample
 
 
-def place_temporal_outputs(grid, inputs, target):
+def place_temporal_outputs(grid, inputs, target, *, _compiled=None):
     out_positions = {terminal.role: None for terminal in target.outputs}
     traces = TemporalTraces()
     input_set = set(inputs)
     if len(grid) <= len(input_set):
         return out_positions, traces
-    runs, horizon, sample = _temporal_runs(grid, inputs, target)
+    runs, horizon, sample = _temporal_runs(
+        grid, inputs, target, _compiled=_compiled)
     states = [run[0] for run in runs]
     events = [run[2] for run in runs]
     intervals = [getattr(run[2], "intervals", {}) for run in runs]
@@ -381,9 +389,11 @@ def place_temporal_outputs(grid, inputs, target):
     return out_positions, traces
 
 
-def trace_fixed_outputs(grid, inputs, output_positions, target):
+def trace_fixed_outputs(grid, inputs, output_positions, target,
+                        *, _compiled=None):
     """Trace an already-fitted FNV readout on fresh temporal trials."""
-    runs, horizon, sample = _temporal_runs(grid, inputs, target)
+    runs, horizon, sample = _temporal_runs(
+        grid, inputs, target, _compiled=_compiled)
     traces = TemporalTraces(overflow=any(run[3] for run in runs))
     for role, cell in output_positions.items():
         traces[role] = [
@@ -417,7 +427,8 @@ def _develop_functional(genome, target):
     return grid, inputs
 
 
-def prepare_functional(genome, target, *, _developed=_UNSET):
+def prepare_functional(genome, target, *, _developed=_UNSET,
+                       _compiled=None):
     developed = (
         _develop_functional(genome, target)
         if _developed is _UNSET else _developed)
@@ -426,27 +437,41 @@ def prepare_functional(genome, target, *, _developed=_UNSET):
     grid, inputs = developed
     if len(grid) <= len(inputs) or any(cell not in grid for cell in inputs):
         return None
+    circuit = (
+        compile_functional_grid(grid, inputs)
+        if _compiled is None else _compiled)
     if getattr(target, "temporal", False):
-        output_positions, traces = place_temporal_outputs(grid, inputs, target)
+        output_positions, traces = place_temporal_outputs(
+            grid, inputs, target, _compiled=circuit)
         if any(output_positions[terminal.role] is None
                for terminal in target.outputs):
             return None
         return grid, inputs, output_positions, traces
     output_positions, cases = place_logic_outputs(
-        genome, grid, inputs, target)
+        genome, grid, inputs, target, _compiled=circuit)
     if any(output_positions[terminal.role] is None
            for terminal in target.outputs):
         return None
     return grid, inputs, output_positions, cases
 
 
-def _run_logic_case(genome, grid, inputs, bits, target):
+def functional_logic_horizon(genome):
+    """Continuous-time settling window used by FNV logic fitness.
+
+    It is genotype-derived because FNV growth is bounded by the germline
+    telomere rather than by the target's display grid.
+    """
+    return 2 * germline_telomere(genome) + 4
+
+
+def _run_logic_case(genome, grid, inputs, bits, target, *, _compiled=None):
     # FNV growth is unbounded and target.grid_size is ignored. A signal crosses
     # at most the germline telomere in two-tick components, so this is the
     # genotype-derived settling bound rather than a display-grid-derived one.
-    horizon = 2 * germline_telomere(genome) + 4
+    horizon = functional_logic_horizon(genome)
     sim = FunctionalSim(grid, input_nodes=inputs,
-                        max_events=getattr(target, "max_events", 2048))
+                        max_events=getattr(target, "max_events", 2048),
+                        compiled=_compiled)
     for index, cell in enumerate(inputs):
         if index < len(bits) and bits[index]:
             sim.inject_pulse(cell, 0.0, float(horizon))
@@ -454,12 +479,21 @@ def _run_logic_case(genome, grid, inputs, bits, target):
     return dict(sim.ever), dict(sim.levels), sim.overflow
 
 
-def place_logic_outputs(genome, grid, inputs, target):
+def place_logic_outputs(genome, grid, inputs, target, *, _compiled=None):
     input_set = set(inputs)
-    runs = [
-        _run_logic_case(genome, grid, inputs, bits, target)
-        for bits, _ in target.cases
-    ]
+    if _compiled is None:
+        # Keep the public helper's historical call seam: diagnostics/tests may
+        # replace _run_logic_case with a five-argument physical oracle.
+        runs = [
+            _run_logic_case(genome, grid, inputs, bits, target)
+            for bits, _ in target.cases
+        ]
+    else:
+        runs = [
+            _run_logic_case(
+                genome, grid, inputs, bits, target, _compiled=_compiled)
+            for bits, _ in target.cases
+        ]
     positions = {terminal.role: None for terminal in target.outputs}
     candidates = _output_candidates(grid, input_set)
     candidates = behavior_representatives(
@@ -500,10 +534,11 @@ def place_logic_outputs(genome, grid, inputs, target):
 
 def score_fixed_logic_outputs(genome, grid, inputs, output_positions, target):
     """Return static case rows for an already-fitted FNV readout."""
+    circuit = compile_functional_grid(grid, inputs)
     rows = []
     for bits, _ in target.cases:
         ever, _, overflow = _run_logic_case(
-            genome, grid, inputs, bits, target)
+            genome, grid, inputs, bits, target, _compiled=circuit)
         if overflow:
             return None
         rows.append([
@@ -515,11 +550,15 @@ def score_fixed_logic_outputs(genome, grid, inputs, output_positions, target):
 
 def evaluate_functional_full(genome, target, *, include_topology=False):
     developed = _develop_functional(genome, target)
+    circuit = (
+        compile_functional_grid(*developed)
+        if developed is not None else None)
     topology = (
-        functional_topology(*developed)
-        if developed is not None else FunctionalTopology())
+        functional_topology(*developed, _compiled=circuit)
+        if include_topology and developed is not None
+        else FunctionalTopology())
     prepared = prepare_functional(
-        genome, target, _developed=developed)
+        genome, target, _developed=developed, _compiled=circuit)
     if prepared is None:
         result = 0.0, (0.0,) * contract_case_count(target)
     else:

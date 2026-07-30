@@ -5,18 +5,21 @@ Ontogenies*, EH'02, Architecture 1).
 Fully independent of substrates/snn: its own hex genome + growth, its own targets and
 its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
 
-  * each grown cell is a nervous-net node whose state routes its neighbours to
-    two excitatory inputs (E1, E2) and one inhibitory input (I1);
+  * each grown tile carries either one legacy circuit or three independent
+    L/R/D output circuits. Each 5-bit channel routes neighbours to two
+    excitatory inputs (E1, E2) and one inhibitory input (I1);
   * a node fires when  (E1 op E2) AND NOT I1  — coincidence detection with an
     optional inhibitory veto. States 0-15 are the paper's Fig. 3 table (op = AND;
     each a buffer or an AND, the paper has no disjunction); states 16-31 are OR
     twins (op = OR, fire on either excitatory input) — a non-paper extension;
-  * dynamics are asynchronous edge-triggered pulses (pulse.py): the paper model
-    emits fixed-width pulses after fixed delay, while optional node models evolve
-    width or preserve the incoming waveform with an evolved delay; inputs inject
-    onto the perimeter nets (wired-OR). Nothing happens without an input, and
-    memory / oscillation are a pulse circulating around a loop of buffers
-    "until stopped by application of an inhibitory input" (delay-line memory);
+  * fresh runs use the analog three-circuit tile. Retired digital engines remain
+    for checkpoints/ablations: ``uniform`` regenerates one fixed-width pulse,
+    while ``pulse_delay`` preserves the waveform with an evolved delay. Width
+    evolution itself has been removed;
+  * inputs inject onto evolved source-pad nets (wired-OR) and those pads ignore
+    internal feedback. Nothing happens without external input, and memory /
+    oscillation can be a pulse circulating around a loop of buffers "until
+    stopped by application of an inhibitory input" (delay-line memory);
   * temporal scoring retains raw continuous edge timestamps for point-event
     relations, uses cadence invariants for autonomous rhythms, and keeps sampled
     active/quiet windows only where they express persistence. The GA's fitness

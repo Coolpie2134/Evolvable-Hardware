@@ -13,8 +13,12 @@ _FIELDS = {
     # for old-checkpoint compatibility; every save/load pins it to one.
     'snn': ('state_n', 'state_s', 'state_e', 'state_w', 'self_in', 'self_out',
             'limit', 'tag', 'io_limit', 'io_selector'),
-    'nervous': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out', 'tag',
-                'io_limit', 'io_selector', 'io_kind'),
+    # Nervous no longer writes the retired per-gene I/O alleles (tag, io_limit,
+    # io_selector, io_kind): its I/O is an evolved input LAYOUT on the genome
+    # plus fitted output probes, so those fields encode nothing. Old documents
+    # carry their own 'gene_fields' list and still load — the fields are read
+    # only to identify and cleanly reject an incompatible retired-placement run.
+    'nervous': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'),
     'lut': ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out', 'tag',
             'io_limit', 'io_selector', 'io_kind'),
     'fnv': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'),
@@ -56,13 +60,6 @@ def genome_to_dict(genome, backend):
         'tag': int(genome.tag), 'gene_fields': list(fields),
         'catalogue_hash': catalogue_hash,
         'development_version': development_version,
-        # FNV alone evolves relative physical source-pad positions. ``None``
-        # preserves legacy checkpoints whose pads remain target-declared.
-        'input_layout': (
-            [[int(cell[0]), int(cell[1])]
-             for cell in genome.input_layout]
-            if backend == 'fnv'
-            and getattr(genome, 'input_layout', None) is not None else None),
         'seed_state': (
             [int(value) for value in genome.seed_state]
             if backend == 'lut' and getattr(genome, 'seed_state', None)
@@ -80,6 +77,11 @@ def genome_to_dict(genome, backend):
         'input_layout': (
             [[int(cell[0]), int(cell[1])] for cell in genome.input_layout]
             if getattr(genome, 'input_layout', None) is not None else None),
+        'edge_input_layout': (
+            [int(value) for value in genome.edge_input_layout]
+            if backend == 'lut'
+            and getattr(genome, 'edge_input_layout', None) is not None
+            else None),
         'chromosomes': [
             {'tag': int(c.tag), 'split': split_for(c),
              'telomere': int(getattr(c, 'telomere', 1)),
@@ -121,11 +123,18 @@ def genome_from_dict(data, backend):
     seed_state = data.get('seed_state') if backend == 'lut' else None
     backend_fields = {}
     if backend == 'lut':
+        layout = data.get('input_layout')
         backend_fields.update({
             'seed_state': (
                 tuple(int(value) & 0xFFFF for value in seed_state)
                 if seed_state is not None else None),
             'provenance': str(data.get('provenance', '')),
+            'input_layout': (
+                tuple((int(cell[0]), int(cell[1])) for cell in layout)
+                if layout is not None else None),
+            'edge_input_layout': (
+                tuple(int(value) for value in data['edge_input_layout'])
+                if data.get('edge_input_layout') is not None else None),
         })
     elif backend == 'fnv':
         layout = data.get('input_layout')
@@ -331,6 +340,34 @@ def save_population(path, genomes, target, backend, valid, run_config=None,
     })
 
 
+RETIRED_NERVOUS_PLACEMENTS = (
+    'terminal_nodes', 'tag_rank', 'wiring_chromosome', 'spatial_chromosome')
+
+
+def _reject_retired_nervous_placement(backend, run_config):
+    """Fail loudly on a checkpoint saved under a retired Nervous I/O strategy.
+
+    Those bindings live in per-gene tags, a reserved wiring chromosome or
+    normalised x/y anchors. None of them carry the information the coordinate
+    layout needs, so any automatic conversion would be an invention rather than
+    a migration — the run would silently become a DIFFERENT organism wearing the
+    old fitness. Refusing is the honest outcome.
+    """
+    if backend != 'nervous' or run_config is None:
+        return
+    placement = getattr(getattr(run_config, 'ga', None), 'io_placement',
+                        'fixed')
+    if placement in RETIRED_NERVOUS_PLACEMENTS:
+        raise ValueError(
+            'retired Nervous I/O placement %r in this checkpoint. The nervous '
+            'substrate now uses an evolved input layout plus fitted output '
+            'probes; tag / wiring / spatial / terminal-node bindings cannot be '
+            'converted into pad coordinates without inventing them, so this '
+            'run cannot be loaded. (Fixed-input nervous checkpoints still load '
+            'normally and keep their original wired-OR input physics.)'
+            % (placement,))
+
+
 def load_checkpoint(path):
     try:
         with open(path, 'r', encoding='utf-8') as handle:
@@ -345,8 +382,11 @@ def load_checkpoint(path):
     if 'genomes' in doc:
         from .config import RunConfig
         run_config = RunConfig.from_dict(doc.get('run_config'))
+        _reject_retired_nervous_placement(backend, run_config)
         target = _target_from_dict(doc['target'])
         setattr(target, 'pulse_config', run_config.pulse)
+        if backend == 'lut':
+            setattr(target, 'lut_io_mode', run_config.ga.lut_io_mode)
         return {'genomes': [genome_from_dict(g, backend) for g in doc['genomes']],
                 'target': target, 'backend': backend,
                 'valid': doc.get('valid', 0.999), 'run_config': run_config,
@@ -362,7 +402,10 @@ def load_checkpoint(path):
     target = _target_from_dict(doc['target'])
     from .config import RunConfig
     run_config = RunConfig.from_dict(doc.get('run_config'))
+    _reject_retired_nervous_placement(backend, run_config)
     setattr(target, 'pulse_config', run_config.pulse)
+    if backend == 'lut':
+        setattr(target, 'lut_io_mode', run_config.ga.lut_io_mode)
     return {'best_genome': genome_from_dict(doc['genome'], backend),
             'best_fitness': float(doc['fitness']), 'target': target,
             'target_name': target.name, 'arch': arch, 'seed': doc.get('seed'),

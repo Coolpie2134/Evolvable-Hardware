@@ -7,6 +7,7 @@ renumbered and new entries may only be appended.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 import hashlib
 import json
 from typing import Iterable
@@ -142,7 +143,17 @@ for _high in (1, 2):
 COMPONENTS = tuple(_components)
 BY_ID = {component.id: component for component in COMPONENTS}
 BY_NAME = {component.name: component for component in COMPONENTS}
+# Compact public dictionary for decoding the permanent number printed inside
+# every FNV node.  Keep this derived from COMPONENTS so it cannot drift from the
+# executable component catalogue.
+NODE_TYPE_DICTIONARY = {
+    component.id: component.name for component in COMPONENTS
+}
 MAX_COMPONENT_ID = len(COMPONENTS) - 1
+_IDS_BY_FAMILY = {
+    family: tuple(entry.id for entry in COMPONENTS if entry.family == family)
+    for family in FAMILIES
+}
 
 if len(COMPONENTS) != 118:  # catalogue edits must be conscious and append-only
     raise RuntimeError("the initial FNV catalogue must contain exactly 118 types")
@@ -165,11 +176,21 @@ def normalise_families(families: Iterable[str] | None) -> frozenset[str]:
     return frozenset(enabled)
 
 
+@lru_cache(maxsize=None)
+def _enabled_component_ids(enabled: frozenset[str],
+                           include_empty: bool) -> tuple[int, ...]:
+    ids = tuple(
+        component_id
+        for family in FAMILIES if family in enabled
+        for component_id in _IDS_BY_FAMILY[family]
+    )
+    return ((0,) + ids) if include_empty else ids
+
+
 def enabled_component_ids(families: Iterable[str] | None = None,
                           *, include_empty: bool = False) -> tuple[int, ...]:
-    enabled = normalise_families(families)
-    ids = tuple(c.id for c in COMPONENTS if c.family in enabled)
-    return ((0,) + ids) if include_empty else ids
+    return _enabled_component_ids(
+        normalise_families(families), bool(include_empty))
 
 
 def _catalogue_payload() -> list[dict]:
@@ -188,6 +209,7 @@ def verify_catalogue_hash(value: str) -> None:
             "component-to-type-ID mapping")
 
 
+@lru_cache(maxsize=None)
 def state_distance(left: int, right: int) -> int:
     """Categorical/physical distance used by associative development.
 
@@ -213,21 +235,44 @@ def state_distance(left: int, right: int) -> int:
     return max(1, distance)
 
 
-def local_component_ids(component_id: int,
-                        families: Iterable[str] | None = None) -> tuple[int, ...]:
+# The catalogue is permanent and small (118 entries), while development asks
+# this same distance question millions of times. Materialize the complete
+# immutable table once so the growth hot loop performs four indexed reads
+# instead of four cached Python function calls per gene comparison.
+STATE_DISTANCES = tuple(
+    tuple(state_distance(left, right) for right in range(len(COMPONENTS)))
+    for left in range(len(COMPONENTS))
+)
+# The matrix supersedes those temporary cache entries on every hot path. Drop
+# their key tuples so each persistent worker keeps one compact table, not both
+# representations.
+state_distance.cache_clear()
+
+
+@lru_cache(maxsize=None)
+def _local_component_ids(component_id: int,
+                         enabled: frozenset[str]) -> tuple[int, ...]:
     """Closest enabled alternatives for the high-probability local mutation."""
-    enabled = normalise_families(families)
     current = component(component_id)
     candidates = [
-        candidate.id for candidate in COMPONENTS
-        if candidate.id != current.id and candidate.family in enabled
-        and (current.id == 0 or candidate.family == current.family)
+        candidate
+        for family in FAMILIES if family in enabled
+        for candidate in _IDS_BY_FAMILY[family]
+        if candidate != current.id
+        and (current.id == 0 or family == current.family)
     ]
     if not candidates:
         return enabled_component_ids(enabled)
-    best = min(state_distance(current.id, candidate) for candidate in candidates)
+    distances = STATE_DISTANCES[current.id]
+    best = min(distances[candidate] for candidate in candidates)
     return tuple(candidate for candidate in candidates
-                 if state_distance(current.id, candidate) == best)
+                 if distances[candidate] == best)
+
+
+def local_component_ids(component_id: int,
+                        families: Iterable[str] | None = None) -> tuple[int, ...]:
+    return _local_component_ids(
+        int(component_id), normalise_families(families))
 
 
 def quiescent_component(component_type: ComponentType) -> bool:
@@ -244,4 +289,3 @@ def quiescent_component(component_type: ComponentType) -> bool:
 
 
 assert all(quiescent_component(entry) for entry in COMPONENTS)
-

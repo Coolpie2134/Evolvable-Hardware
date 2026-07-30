@@ -18,8 +18,8 @@ transistor- or charge-level reproduction of Fig. 1:
   * a triggered node emits a pulse of width WIDTH after a fixed delay DELAY,
     and is refractory until its own pulse ends (the comparator hysteresis —
     no chattering);
-  * external inputs are INJECTED onto the input cell's net (wired-OR, like
-    driving the physical perimeter wire). A held-high input is one long pulse
+  * external inputs are INJECTED onto a source pad's net (wired-OR, like
+    driving an exposed physical wire). A held-high input is one long pulse
     — one edge — not a train of edges.
 
 DELAY, WIDTH, and COINC are independent behavioural parameters in this

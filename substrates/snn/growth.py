@@ -6,7 +6,6 @@ SEED_A     = (0, 3)
 SEED_B     = (0, 5)
 SEED_STATE = 1
 
-_PC4 = [bin(i).count("1") for i in range(16)]
 
 # ── associative next-state lookup (min Hamming over the 4 sides + self) ──────────
 # The per-gene time `limit` is gone: growth is now bounded by the Hayflick
@@ -14,21 +13,48 @@ _PC4 = [bin(i).count("1") for i in range(16)]
 # the lookup depends on CONTEXT ALONE and its result is cacheable for the whole
 # grow (mirrors substrates.nervous._next_state / sim6 table_lookup_cached).
 
-def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int, si: int) -> int:
+_STATE_BITS = 4
+_STATE_MASK = (1 << _STATE_BITS) - 1
+
+
+def _pack_context(sn, ss, se, sw, si):
+    return ((sn & _STATE_MASK)
+            | ((ss & _STATE_MASK) << _STATE_BITS)
+            | ((se & _STATE_MASK) << (2 * _STATE_BITS))
+            | ((sw & _STATE_MASK) << (3 * _STATE_BITS))
+            | ((si & _STATE_MASK) << (4 * _STATE_BITS)))
+
+
+def _compile_lookup(genome):
+    """Pack immutable gene contexts once for one developmental run."""
+    return tuple(
+        (_pack_context(
+            gene.state_n, gene.state_s, gene.state_e, gene.state_w,
+            gene.self_in), gene.self_out)
+        for chromosome in genome.chromosomes
+        if not getattr(chromosome, 'wiring', False)
+        for gene in chromosome.genes
+    )
+
+
+def _lookup_compiled(program, sn, ss, se, sw, si, packed=None):
     if sn == 0 and ss == 0 and se == 0 and sw == 0 and si == 0:
         return 0
-    pc = _PC4
     best_out, best_dist = 0, 1 << 30
-    for chrom in genome.chromosomes:
-        if getattr(chrom, 'wiring', False):
-            continue
-        for gene in chrom.genes:
-            d = (pc[(gene.state_n ^ sn) & 0xF] + pc[(gene.state_s ^ ss) & 0xF] +
-                 pc[(gene.state_e ^ se) & 0xF] + pc[(gene.state_w ^ sw) & 0xF] +
-                 pc[(gene.self_in ^ si) & 0xF])
-            if d < best_dist:
-                best_dist, best_out = d, gene.self_out
+    context = (
+        _pack_context(sn, ss, se, sw, si)
+        if packed is None else packed)
+    for gene_context, output in program:
+        distance = (gene_context ^ context).bit_count()
+        if distance < best_dist:
+            best_dist, best_out = distance, output
     return best_out if best_out else 1
+
+
+def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int, si: int) -> int:
+    """Back-compatible one-shot lookup; growth compiles the genome once."""
+    return _lookup_compiled(
+        _compile_lookup(genome), sn, ss, se, sw, si)
 
 
 def cell_io_tags(genome: Genome, grid) -> Dict[Tuple[int, int], int]:
@@ -40,11 +66,12 @@ def cell_io_tags(genome: Genome, grid) -> Dict[Tuple[int, int], int]:
     return {pos: int(state) for pos, state in grid.items()}
 
 
-def _next_state(genome, sn, ss, se, sw, si, cache):
-    key = (sn, ss, se, sw, si)
+def _next_state(program, sn, ss, se, sw, si, cache):
+    key = _pack_context(sn, ss, se, sw, si)
     v = cache.get(key)
     if v is None:
-        v = _lookup(genome, sn, ss, se, sw, si)
+        v = _lookup_compiled(
+            program, sn, ss, se, sw, si, packed=key)
         cache[key] = v
     return v
 
@@ -52,7 +79,7 @@ def _next_state(genome, sn, ss, se, sw, si, cache):
 _FRONT = ((0, 1), (0, -1), (1, 0), (-1, 0))
 
 
-def _grow_step(genome, grid, tel, seeds, L, grid_size, cache):
+def _grow_step(program, grid, tel, seeds, L, grid_size, cache):
     """One development step on a telomere-bounded field. `grid` = {pos: state},
     `tel` = {pos: remaining telomere}. Returns (next_grid, next_tel).
 
@@ -71,7 +98,7 @@ def _grow_step(genome, grid, tel, seeds, L, grid_size, cache):
     for (x, y), state in grid.items():
         sn = grid.get((x, y + 1), 0); ss = grid.get((x, y - 1), 0)
         se = grid.get((x + 1, y), 0); sw = grid.get((x - 1, y), 0)
-        ns = _next_state(genome, sn, ss, se, sw, state, cache)
+        ns = _next_state(program, sn, ss, se, sw, state, cache)
         if ns:
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = tel.get((x, y), 0)
@@ -88,7 +115,7 @@ def _grow_step(genome, grid, tel, seeds, L, grid_size, cache):
             continue                                      # -> no division (Hayflick)
         sn = grid.get((x, y + 1), 0); ss = grid.get((x, y - 1), 0)
         se = grid.get((x + 1, y), 0); sw = grid.get((x - 1, y), 0)
-        ns = _next_state(genome, sn, ss, se, sw, 0, cache)
+        ns = _next_state(program, sn, ss, se, sw, 0, cache)
         if ns:
             nxt[(x, y)] = ns
             nxt_tel[(x, y)] = parent - 1
@@ -116,12 +143,14 @@ def _run(genome, seeds, grid_size, collect):
     net — there's no point running extra settling steps; the STRUCTURE is the
     organism, read at the moment it stops growing."""
     L = germline_telomere(genome)
+    program = _compile_lookup(genome)
     grid = {pos: SEED_STATE for pos in seeds}
     tel  = {pos: L for pos in seeds}
     snaps = [dict(grid)] if collect else None
     cache = {}
     for _ in range(_grow_budget(L)):
-        nxt, nxt_tel = _grow_step(genome, grid, tel, seeds, L, grid_size, cache)
+        nxt, nxt_tel = _grow_step(
+            program, grid, tel, seeds, L, grid_size, cache)
         if collect:
             snaps.append(dict(nxt))
         if nxt.keys() == grid.keys():          # no new cell -> body mature

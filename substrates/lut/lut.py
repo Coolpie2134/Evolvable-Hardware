@@ -16,11 +16,13 @@ d, plus this cell's own LUT for d; the minimum-Hamming-distance gene supplies
 the new LUT. A cell whose four LUTs are all zero is dead. Growth runs to a
 stable attractor ("maturity"), capped by `iters`.
 
-Dynamics (sim6 step_network): latched and synchronous. Each cell emits one bit
-per direction; the four bits it receives (one from each neighbour, the bit that
-neighbour aims back at this cell) form a 4-bit index into each of the cell's
-four LUTs, giving its next four output bits. Inputs are OR-injected onto the
-input cells' outputs (the perimeter sensory lines).
+Production dynamics live in ``pulse.AsyncLutSim``: continuous-time,
+event-driven, inertial level logic. Each cell emits one bit per direction; the
+four bits it receives form the index into each directional LUT. Native
+``source_pads`` inject onto source-only cells, while ``exterior_edges`` fans
+alternating logical-input buses around every exposed outer face; each tap drives
+one facing input of a perimeter cell from outside the body. The synchronous
+``LutSim`` below is retained as the audited lattice-time reference.
 """
 from __future__ import annotations
 

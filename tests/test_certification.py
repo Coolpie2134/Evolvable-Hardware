@@ -67,6 +67,17 @@ def test_certify_non_oracle_target_is_uncertified_without_scoring():
     assert res['verdict'].startswith('UNCERTIFIED')
     assert res['holdouts'] is None and res['holdout'] is None
 
+    # Exterior LUT training/playback is implemented, but its frozen adapter
+    # cannot yet replay outside-to-facing-edge links. Never substitute the
+    # source-pad path and publish that unrelated score as a verdict.
+    exterior = dataclasses.replace(
+        TEMPORAL_TARGETS['C-element (2-in join)'])
+    exterior.lut_io_mode = 'exterior_edges'
+    res = certify(object(), exterior, train=1.0, backend='lut')
+    assert res['verdict'].startswith('UNCERTIFIED')
+    assert 'exterior-edge' in res['verdict']
+    assert res['holdouts'] is None and res['holdout'] is None
+
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

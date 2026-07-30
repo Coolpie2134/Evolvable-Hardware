@@ -246,17 +246,22 @@ def test_lut_growth_expresses_unambiguous_terminal_kind():
     assert set(genome._terminal_kinds.values()) == {iop.IO_KIND_OUTPUT}
 
 
-def test_terminal_kind_checkpoint_round_trip_for_nv_and_lut():
-    nv = Genome(chromosomes=[Chromosome(
-        genes=[HexGene(self_out=1, io_kind=iop.IO_KIND_INPUT)],
-        split=0)])
+def test_terminal_kind_checkpoint_round_trip_for_lut():
+    """Terminal kinds are a LUT/SNN concept now.
+
+    Nervous retired the grown-terminal strategies: its I/O is an evolved input
+    layout plus fitted output probes, so a nervous gene carries no io_kind and
+    none is written.
+    """
     lut = LutGenome(chromosomes=[LutChromosome(
         genes=[LutGene(self_out=1, io_kind=iop.IO_KIND_OUTPUT)],
         split=0)])
-    nv_loaded = genome_from_dict(genome_to_dict(nv, 'nervous'), 'nervous')
     lut_loaded = genome_from_dict(genome_to_dict(lut, 'lut'), 'lut')
-    assert nv_loaded.chromosomes[0].genes[0].io_kind == iop.IO_KIND_INPUT
     assert lut_loaded.chromosomes[0].genes[0].io_kind == iop.IO_KIND_OUTPUT
+
+    nv = Genome(chromosomes=[Chromosome(
+        genes=[HexGene(self_out=1, io_kind=iop.IO_KIND_INPUT)], split=0)])
+    assert 'io_kind' not in genome_to_dict(nv, 'nervous')['gene_fields']
 
 
 def test_terminal_bindings_are_not_fixed_across_genome_seeds():
@@ -874,25 +879,24 @@ def test_fixed_fit_readout_leaves_inputs_empty():
 
 # ── evolvability ─────────────────────────────────────────────────────────────────
 
-def test_evolve_io_mutates_mapping_alleles_but_not_designation():
+def test_nervous_evolve_io_no_longer_mutates_mapping_alleles():
+    """Retired for nervous: the port-map alleles are inert there now.
+
+    LUT still evolves them (see the LUT coverage below), so this asserts the
+    deletion is scoped rather than global.
+    """
     g = _tagged_genome(7, wiring=True)
     random.seed(0)
     original = [
         (gene.tag, gene.io_limit, gene.io_selector)
         for gene in iop.wiring_chromosome(g).genes
     ]
-    changed = False
     for _ in range(300):
         m = mutate_nv(g, evolve_io=True)
-        assert [c.wiring for c in m.chromosomes] == [False, False, True]
-        alleles = [
+        assert [
             (gene.tag, gene.io_limit, gene.io_selector)
             for gene in iop.wiring_chromosome(m).genes
-        ]
-        if alleles != original:
-            changed = True
-            break
-    assert changed, "evolve_io never mutated type or selector"
+        ] == original
 
 
 def test_wiring_crossover_inherits_each_port_map_as_a_whole():
@@ -1222,12 +1226,11 @@ def test_nervous_combinational_honors_strategy():
 
 def test_checkpoint_roundtrips_tags_and_wiring_all_backends():
     from runtime.checkpoint import genome_to_dict, genome_from_dict
-    import substrates.nervous.ga as nga
     import substrates.lut.ga as lga
     import substrates.snn.ga as sga
+    # Nervous is absent by design: it retired the tag / wiring / spatial
+    # placement strategies, so it writes no per-gene I/O alleles at all.
     cases = [
-        ('nervous', _tagged_genome(9, wiring=True), nga.genome_signature),
-        ('nervous', _spatial_genome(), nga.genome_signature),
         ('lut', _lut_genome(9, wiring=True), lga.genome_signature),
         ('snn', _snn_genome(9, wiring=True), sga.genome_signature),
     ]
@@ -1241,17 +1244,17 @@ def test_checkpoint_roundtrips_tags_and_wiring_all_backends():
 
 def test_checkpoint_migrates_retired_multisite_limits_to_one():
     from runtime.checkpoint import genome_to_dict, genome_from_dict
-    genome = _tagged_genome(9, wiring=True)
-    document = genome_to_dict(genome, 'nervous')
+    genome = _lut_genome(9, wiring=True)
+    document = genome_to_dict(genome, 'lut')
     limit_index = document['gene_fields'].index('io_limit')
     # Simulate files written while zero meant "all" and larger values meant
     # multi-site fan-out.
     document['chromosomes'][2]['genes'][0][limit_index] = 0
     document['chromosomes'][2]['genes'][1][limit_index] = 8
-    restored = genome_from_dict(document, 'nervous')
+    restored = genome_from_dict(document, 'lut')
     assert all(gene.io_limit == 1
                for gene in iop.wiring_chromosome(restored).genes)
-    saved_again = genome_to_dict(restored, 'nervous')
+    saved_again = genome_to_dict(restored, 'lut')
     assert all(row[limit_index] == 1
                for row in saved_again['chromosomes'][2]['genes'])
 

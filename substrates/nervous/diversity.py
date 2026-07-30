@@ -13,13 +13,15 @@ The four levels, from most to least generous:
 
   exact       — the full inherited genome identity (``genome_signature``):
                 rule alleles, gene order, chromosome tags, split points,
-                telomeres, timing vectors, architecture. Tags and splits do not
+                telomeres, timing vectors, architecture, native input layout,
+                and any compatibility routing patches. Tags and splits do not
                 touch THIS organism's development, but they steer future
                 crossover, so they are real heritable variation.
   functional  — variation that can affect a phenotype: architecture, ordered
                 rule alleles, germline telomere (it sets growth radius L AND
-                the settle budget), active timing vectors, and—under an
-                evolvable I/O strategy—the I/O alleles it actually reads.
+                the settle budget), active timing vectors, native input/seed
+                geometry, and—under a compatibility I/O strategy—the mapping
+                alleles it actually reads.
   phenotype   — the realised circuit: architecture, the grown state grid,
                 evolved I/O attachments, and timing values referenced by states
                 PRESENT in that grid.
@@ -296,7 +298,8 @@ def _active_timing(genome, config):
 
 def functional_signature(genome, backend, config=None):
     """Variation that could change a phenotype: architecture, ordered rule
-    alleles, germline telomere, and the timing vectors the model reads.
+    alleles, germline telomere, native seed/input geometry, and the timing
+    vectors the model reads.
 
     Chromosome tags and split points are deliberately excluded. Body-gene tags
     are included only in tag-rank mode; mapping alleles are included only in
@@ -331,8 +334,11 @@ def functional_signature(genome, backend, config=None):
                   for gene in chromosome.genes)
             for chromosome in developmental)
         delays = _active_timing(genome, config)
+        layout = (
+            None if getattr(genome, 'input_layout', None) is None
+            else tuple(tuple(cell) for cell in genome.input_layout))
         return (getattr(genome, 'arch', 'single'), alleles,
-                germline_telomere(genome), delays, mapping)
+                germline_telomere(genome), delays, layout, mapping)
     fields = ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out')
     if strategy == 'tag_rank':
         fields += ('tag',)
@@ -343,7 +349,11 @@ def functional_signature(genome, backend, config=None):
               for gene in chromosome.genes)
         for chromosome in developmental)
     telomeres = tuple(getattr(c, 'telomere', 0) for c in developmental)
-    return ('lut', alleles, telomeres, mapping)
+    layout = (
+        None if getattr(genome, 'input_layout', None) is None
+        else tuple(tuple(cell) for cell in genome.input_layout))
+    return ('lut', getattr(genome, 'seed_state', None), alleles, telomeres,
+            layout, mapping)
 
 
 def _evolved_binding_signature(genome, backend, target, grid):
@@ -351,6 +361,26 @@ def _evolved_binding_signature(genome, backend, target, grid):
     from .io_placement import (bind_io, input_groups, io_strategy,
                                output_groups)
     if io_strategy(target) == 'fixed':
+        if backend == 'nervous' and getattr(
+                genome, 'input_layout', None) is not None:
+            from .genome import nervous_input_positions
+            inputs = nervous_input_positions(genome, target.inputs)
+            return (('native_pads', tuple(inputs)) if inputs else False)
+        if backend == 'lut':
+            from substrates.lut.genome import (
+                lut_exterior_inputs, lut_input_positions, lut_io_mode,
+            )
+            if lut_io_mode(target) == 'exterior_edges':
+                inputs, links = lut_exterior_inputs(
+                    genome, grid, target.n_inputs)
+                if len(inputs) != target.n_inputs:
+                    return False
+                return ('exterior_edges', tuple(
+                    tuple((source, links[source]) for source in group)
+                    for group in input_groups(inputs)))
+            if getattr(genome, 'input_layout', None) is not None:
+                inputs = lut_input_positions(genome, target.inputs)
+                return (('native_pads', tuple(inputs)) if inputs else False)
         return None
     node_types = None
     if backend == 'lut':

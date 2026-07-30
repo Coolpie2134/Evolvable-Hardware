@@ -398,7 +398,7 @@ class DesignerTab:
             cb.configure(state='disabled')
             _Tip(cb, 'Follows the Model selector at the top of the main '
                      'window (the designer supports the nervous net and the '
-                     'LUT array; it is hidden for SNN runs).')
+                     'LUT array; it is hidden for SNN and FNV runs).')
         else:
             _Tip(cb, "The paper's two substrates: Architecture 1 = honeycomb nervous "
                      "net (coincidence + inhibition, pulse dynamics); Architecture 2 = "
@@ -1691,9 +1691,13 @@ class DesignerTab:
     def _build_player(self):
         target = self._current_target()          # may be None (free playback)
         from substrates.nervous.io_placement import terminal_node_sets
-        terminal_inputs, terminal_outputs = (
-            terminal_node_sets(target, self.in_pos, self.out_pos)
-            if target is not None else (set(), set()))
+        if (target is not None and self.genome is not None
+                and getattr(self.genome, 'input_layout', None) is not None):
+            terminal_inputs, terminal_outputs = set(self.in_pos), set()
+        else:
+            terminal_inputs, terminal_outputs = (
+                terminal_node_sets(target, self.in_pos, self.out_pos)
+                if target is not None else (set(), set()))
         if self.backend == 'nervous':
             arch = self._nv_arch()
             routing = self._nv_routing()
@@ -2078,7 +2082,18 @@ class DesignerTab:
             self.out_pos = dict(out_pos or {})
             self._grid_edited = bool(grid_edited)
         else:
-            self.in_pos = list(target.inputs) if target is not None else []
+            if (genome is not None and target is not None
+                    and getattr(genome, 'input_layout', None) is not None):
+                if backend == 'lut':
+                    from substrates.lut.genome import lut_input_positions
+                    self.in_pos = list(lut_input_positions(
+                        genome, target.inputs))
+                else:
+                    from substrates.nervous.genome import nervous_input_positions
+                    self.in_pos = list(nervous_input_positions(
+                        genome, target.inputs))
+            else:
+                self.in_pos = list(target.inputs) if target is not None else []
             self.out_pos = {}
             if genome is not None and self.in_pos:
                 if backend == 'nervous':

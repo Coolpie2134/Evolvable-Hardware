@@ -12,7 +12,7 @@ one broadcast output net. These tests defend the directional tile topology:
   * CAPABILITY — a single tri tile routes two independent signals to two
     different outputs WITHOUT merging them, which one broadcast state cannot do;
   * determinism, and that the whole GA path (grow → interpret → mutate →
-    reproduce) stays homogeneously tri3 and explores the full 12-bit alphabet;
+    reproduce) stays homogeneously tri3 and explores the full 15-bit alphabet;
   * isolation — the 'single' tile path is completely unaffected (arch defaults
     to 'single' everywhere).
 

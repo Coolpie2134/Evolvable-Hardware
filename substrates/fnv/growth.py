@@ -3,43 +3,40 @@ from __future__ import annotations
 
 from substrates.nervous.hexgrid import hex_dirs, hex_frontier_cells
 
-from .catalogue import state_distance
+from .catalogue import STATE_DISTANCES
 from .genome import germline_telomere, input_seed_grid
 
 
 def _compile_lookup(genome):
     return tuple(
-        gene
+        (gene.ctx_l, gene.ctx_r, gene.ctx_d, gene.self_in, gene.self_out)
         for chromosome in genome.chromosomes
         for gene in chromosome.genes
-    )
-
-
-def _context_distance(gene, s_l, s_r, s_d, self_state):
-    return (
-        state_distance(gene.ctx_l, s_l)
-        + state_distance(gene.ctx_r, s_r)
-        + state_distance(gene.ctx_d, s_d)
-        + state_distance(gene.self_in, self_state)
     )
 
 
 def _lookup_compiled(program, s_l, s_r, s_d, self_state):
     if s_l == s_r == s_d == self_state == 0:
         return 0
-    best_gene, best_distance = None, 1 << 30
-    for gene in program:
-        distance = _context_distance(
-            gene, s_l, s_r, s_d, self_state)
+    best_entry, best_distance = None, 1 << 30
+    distances = STATE_DISTANCES
+    for entry in program:
+        ctx_l, ctx_r, ctx_d, self_in, _ = entry
+        distance = (
+            distances[ctx_l][s_l]
+            + distances[ctx_r][s_r]
+            + distances[ctx_d][s_d]
+            + distances[self_in][self_state]
+        )
         if distance < best_distance:
-            best_gene, best_distance = gene, distance
-    if best_gene is None:
+            best_entry, best_distance = entry, distance
+    if best_entry is None:
         return 0
     # Empty cells only express explicit growth rules.  This prevents a
     # maintenance rule from filling the infinite field.
-    if self_state == 0 and best_gene.self_in != 0:
+    if self_state == 0 and best_entry[3] != 0:
         return 0
-    return int(best_gene.self_out)
+    return int(best_entry[4])
 
 
 def lookup(genome, s_l, s_r, s_d, self_state):
@@ -156,7 +153,11 @@ def active_gene_loci(genome, seeds):
     """
     grid = grow_functional(genome, seeds)
     program = [
-        (chromosome_index, gene_index, gene)
+        (
+            chromosome_index, gene_index,
+            gene.ctx_l, gene.ctx_r, gene.ctx_d,
+            gene.self_in, gene.self_out,
+        )
         for chromosome_index, chromosome in enumerate(genome.chromosomes)
         for gene_index, gene in enumerate(chromosome.genes)
     ]
@@ -184,12 +185,20 @@ def active_gene_loci(genome, seeds):
         ))
 
     active = set()
+    distances = STATE_DISTANCES
     for context in contexts:
         best, best_distance = None, 1 << 30
-        for chromosome_index, gene_index, gene in program:
-            if context[3] == 0 and gene.self_in != 0:
+        s_l, s_r, s_d, self_state = context
+        for (chromosome_index, gene_index, ctx_l, ctx_r, ctx_d,
+             self_in, _self_out) in program:
+            if self_state == 0 and self_in != 0:
                 continue
-            distance = _context_distance(gene, *context)
+            distance = (
+                distances[ctx_l][s_l]
+                + distances[ctx_r][s_r]
+                + distances[ctx_d][s_d]
+                + distances[self_in][self_state]
+            )
             if distance < best_distance:
                 best = (chromosome_index, gene_index)
                 best_distance = distance

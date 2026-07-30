@@ -12,6 +12,7 @@ from runtime.checkpoint import genome_from_dict, genome_to_dict
 from runtime.config import FNVConfig, RunConfig
 from substrates.fnv.catalogue import (
     BY_ID, BY_NAME, CATALOGUE_HASH, COMPONENTS, FAMILIES,
+    NODE_TYPE_DICTIONARY,
     enabled_component_ids,
 )
 from substrates.fnv.ga import mutate_functional, mutate_input_layout, rank_key
@@ -54,6 +55,10 @@ def test_catalogue_is_permanent_complete_and_family_first_selectable():
     assert len(COMPONENTS) == 118
     assert COMPONENTS[0].name == "EMPTY"
     assert COMPONENTS[-1].id == 117
+    assert NODE_TYPE_DICTIONARY == {
+        entry.id: entry.name for entry in COMPONENTS}
+    assert NODE_TYPE_DICTIONARY[0] == "EMPTY"
+    assert NODE_TYPE_DICTIONARY[117] == COMPONENTS[-1].name
     assert CATALOGUE_HASH == (
         "8487a4ddca738efb0e843cc186fb4c56cb166179cac6ca4afbe586f2eb44dd28")
     assert len([entry for entry in COMPONENTS
@@ -517,6 +522,86 @@ def test_fitted_readout_is_reused_without_refitting():
     assert fitted.backend == "fnv"
     assert fitted.inputs == ((0, 0),)
     assert score_frozen(genome, target, fitted) == fitted.training_score
+
+
+def test_fnv_interactive_temporal_playback_matches_scored_waveforms():
+    from substrates.fnv.evaluation import prepare_functional
+    from substrates.fnv.playback import (
+        FunctionalPlayer, prepare_functional_playback)
+    from substrates.nervous.playback import pulses_from_trial
+    from substrates.nervous.targets import echo
+
+    child_state = BY_NAME["DELAY1_R_TO_L"].id
+    genome = Genome([Chromosome([
+        FunctionalGene(
+            ctx_l=0, ctx_r=SOURCE_STATE, ctx_d=0,
+            self_in=0, self_out=child_state),
+        FunctionalGene(
+            ctx_l=0, ctx_r=SOURCE_STATE, ctx_d=0,
+            self_in=child_state, self_out=child_state),
+    ], telomere=2)], input_layout=((0, 0),))
+    target = echo(delay=2)
+    scored = prepare_functional(genome, target)
+    playback = prepare_functional_playback(genome, target)
+    assert playback is not None
+    grid, inputs, outputs, horizon = playback
+    assert (grid, inputs, outputs) == scored[:3]
+
+    for trial_index in range(len(target.trials)):
+        player = FunctionalPlayer(
+            grid, inputs, outputs.values(), horizon=horizon,
+            max_events=target.max_events)
+        lanes = pulses_from_trial(target, len(inputs), trial_index)
+        player.set_schedule({
+            cell: list(lanes[index])
+            for index, cell in enumerate(inputs)
+        })
+        player.sim.advance_to(horizon)
+        for role, cell in outputs.items():
+            observed = [
+                tuple(interval)
+                for interval in player.sim.pulse_intervals[cell]
+            ]
+            assert observed == scored[3].intervals[role][trial_index]
+
+
+def test_fnv_interactive_logic_cases_use_the_exact_fitness_hold_window():
+    from substrates.fnv.evaluation import prepare_functional
+    from substrates.fnv.playback import (
+        FunctionalPlayer, functional_case_pulses,
+        prepare_functional_playback)
+    from substrates.snn.targets import gate_target
+
+    target = gate_target("AND", grid_size=5)
+    random.seed(73)
+    for _ in range(40):
+        genome = random_functional_genome(
+            2, max_telomere=3, n_inputs=target.n_inputs,
+            families=("LOGIC", "DELAY"))
+        scored = prepare_functional(genome, target)
+        if scored is None:
+            continue
+        grid, inputs, outputs, horizon = prepare_functional_playback(
+            genome, target)
+        assert (grid, inputs, outputs) == scored[:3]
+        for case_index, (bits, _expected) in enumerate(target.cases):
+            lanes = functional_case_pulses(
+                target, len(inputs), horizon, case_index)
+            for bit, lane in zip(bits, lanes):
+                assert lane == ([(0.0, horizon)] if bit else [])
+            player = FunctionalPlayer(
+                grid, inputs, outputs.values(), horizon=horizon,
+                max_events=getattr(target, "max_events", 2048))
+            player.set_schedule({
+                cell: list(lanes[index])
+                for index, cell in enumerate(inputs)
+            })
+            player.sim.advance_to(horizon)
+            for terminal in target.outputs:
+                assert int(player.sim.ever[outputs[terminal.role]]) == int(
+                    scored[3][case_index]["acts"][terminal.role])
+        return
+    raise AssertionError("no random FNV genome produced a playable circuit")
 
 
 def test_parallel_population_evaluation_returns_case_vectors():

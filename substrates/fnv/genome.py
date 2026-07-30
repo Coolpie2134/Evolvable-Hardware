@@ -9,8 +9,8 @@ from runtime.limits import MAX_CHROMOSOME_COUNT
 from substrates.nervous.hexgrid import hex_frontier_cells
 
 from .catalogue import (
-    BY_NAME, COMPONENTS, DEFAULT_FAMILIES, FAMILIES, enabled_component_ids,
-    normalise_families,
+    BY_NAME, DEFAULT_FAMILIES, FAMILIES, _IDS_BY_FAMILY,
+    enabled_component_ids, normalise_families,
 )
 
 # Fixed-function phenotypes need more distinct developmental contexts than the
@@ -145,9 +145,9 @@ def random_component_id(families=None, *, empty_probability=0.0) -> int:
     enabled = normalise_families(families)
     if random.random() < empty_probability:
         return 0
-    family = random.choice(tuple(f for f in FAMILIES if f in enabled))
-    members = [entry.id for entry in COMPONENTS if entry.family == family]
-    return random.choice(members)
+    family = random.choice(tuple(family for family in FAMILIES
+                                 if family in enabled))
+    return random.choice(_IDS_BY_FAMILY[family])
 
 
 def random_functional_gene(families=None, *,

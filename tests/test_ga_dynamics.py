@@ -381,19 +381,30 @@ def test_nv_reproduction_preserves_configured_count_for_children_and_immigrants(
     assert {len(genome.chromosomes) for genome in children} == {3}
 
 
-def test_nv_baseline_io_mutation_remains_a_single_edit():
-    genome = random_hex_genome(
-        3, wiring_chromosome=True, n_ports=3)
+def test_nervous_mutation_has_no_io_tag_path_left():
+    """The nervous evolve_io mutation branch is deleted, not merely unused.
+
+    LUT and SNN keep their own copies — this retirement is scoped to nervous.
+    """
+    import substrates.lut.ga as lut_ga_module
+    import substrates.snn.ga as snn_ga_module
+    assert not hasattr(nv_ga, '_mutate_io_tag')
+    assert hasattr(lut_ga_module, '_mutate_io_tag')
+    assert hasattr(snn_ga_module, '_mutate_io_tag')
+
+    # A nervous genome mutated with the old flag still on keeps its port-map
+    # alleles: there is no path left to change them. (Body genes still mutate
+    # structurally, so only the wiring chromosome is compared.)
+    from substrates.nervous.io_placement import wiring_chromosome
+    genome = random_hex_genome(3, wiring_chromosome=True, n_ports=3)
+    before = [(gene.tag, gene.io_limit, gene.io_selector)
+              for gene in wiring_chromosome(genome).genes]
     random.seed(7009)
-    real_edit = nv_ga._mutate_io_tag
-    with mock.patch.object(
-            nv_ga, '_mutate_io_tag', wraps=real_edit) as edit:
-        for _ in range(100):
-            edit.reset_mock()
-            mutate_nv(
-                genome, mean_mutations=8.0, chromosome_count=3,
-                evolve_delay=True, evolve_io=True)
-            assert edit.call_count <= 1
+    for _ in range(50):
+        mutated = mutate_nv(genome, mean_mutations=8.0, chromosome_count=3,
+                            evolve_delay=True, evolve_io=True)
+        assert [(gene.tag, gene.io_limit, gene.io_selector)
+                for gene in wiring_chromosome(mutated).genes] == before
 
 
 def test_coordinated_spatial_io_mutation_relocates_distinct_ports():
@@ -669,56 +680,37 @@ def test_controller_uses_row_lexicase_for_combinational_nervous_targets():
     assert step.call_args.kwargs['selection'] == 'lexicase'
 
 
-def test_spatial_rescue_scans_each_unchanged_body_candidate_once():
+def test_nervous_rejects_every_retired_io_placement():
+    """The retired strategies are gone from nervous, not merely unused.
+
+    They remain available to LUT and SNN, so the rejection has to be scoped to
+    the nervous backend rather than to the config field.
+    """
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
-    config = RunConfig(
-        ga=GAConfig(
-            chromosome_count=3, io_placement='spatial_chromosome',
-            tile_arch='tri3', node_model='paper_analog'),
-        pulse=PulseConfig(model='paper_analog'))
-    messages = queue.Queue()
-    stop = threading.Event()
+    messages, stop = queue.Queue(), threading.Event()
 
     class FakePool:
         def shutdown(self, **_kwargs):
             pass
 
-    def evaluate(genomes, *_args, **_kwargs):
-        return [0.5] * len(genomes), None
-
-    def reproduce(population, *_args, **_kwargs):
-        return [nv_ga.clone_genome(genome) for genome in population]
-
-    one_output = lambda champion, _target, limit: [
-        nv_ga.clone_genome(champion)]
-    one_routing = lambda champion, _target, limit: [
-        nv_ga.clone_genome(champion)]
-
-    with tempfile.TemporaryDirectory() as directory, \
-            mock.patch('runtime.controller.ProcessPoolExecutor',
-                       return_value=FakePool()), \
-            mock.patch.object(nv_ga, 'eval_batch_cases',
-                              side_effect=evaluate), \
-            mock.patch.object(nv_ga, 'next_population',
-                              side_effect=reproduce), \
-            mock.patch(
-                'substrates.nervous.io_placement.spatial_output_variants',
-                side_effect=one_output) as output_scan, \
-            mock.patch(
-                'substrates.nervous.io_placement.spatial_routing_variants',
-                side_effect=one_routing) as routing_scan, \
-            mock.patch('substrates.nervous.certification.certify', return_value=None):
-        run_evolution(
-            gens=nv_ga.STRESS_PATIENCE + 3, pop=2, n_chroms=3,
-            tries=1, target=target, arch=None, messages=messages,
-            stop_event=stop, base_seed=70126, backend='nervous',
-            run_config=config, results_dir=directory)
-
-    assert output_scan.call_count == 1
-    assert routing_scan.call_count == 1
-    assert output_scan.call_args.kwargs['limit'] == 10_000
-    assert routing_scan.call_args.kwargs['limit'] == 10_000
-
+    for retired in ('terminal_nodes', 'tag_rank', 'wiring_chromosome',
+                    'spatial_chromosome'):
+        config = RunConfig(
+            ga=GAConfig(chromosome_count=3, io_placement=retired,
+                        tile_arch='tri3', node_model='paper_analog'),
+            pulse=PulseConfig(model='paper_analog'))
+        with tempfile.TemporaryDirectory() as directory,                 mock.patch('runtime.controller.ProcessPoolExecutor',
+                           return_value=FakePool()):
+            try:
+                run_evolution(
+                    gens=1, pop=2, n_chroms=3, tries=1, target=target,
+                    arch=None, messages=messages, stop_event=stop,
+                    base_seed=1, backend='nervous', run_config=config,
+                    results_dir=directory)
+            except ValueError as error:
+                assert 'retired Nervous I/O placement' in str(error), retired
+            else:
+                raise AssertionError('nervous accepted %r' % retired)
 
 def test_controller_gives_the_snn_backend_the_same_plateau_machinery():
     """The SNN step must forward the plateau arguments, not drop them.

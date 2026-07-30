@@ -65,9 +65,10 @@ class TemporalTarget:
     grid_size:       int = 7
     iters:           int = 30      # safety CAP — growth stops at its attractor
     output_strategy: str = "terminals"
-    # How input/output ports bind to physical cells (substrates/nervous/io_placement.py):
-    #   'fixed'          — inputs are the seed pads in declared order; outputs are
-    #                      trace-fitted near their terminals (the default, legacy).
+    # Compatibility I/O strategy consumed by SNN/programmatic LUT experiments.
+    # Current Nervous/FNV runs require 'fixed' here while resolving their native
+    # genome layouts and fitted probes elsewhere.
+    #   'fixed'          — use the backend's native/default binding.
     #   'tag_rank'       — ports bind to the highest-tagged cells, in order
     #                      (Method A). Placement becomes an evolvable genome trait.
     #   'wiring_chromosome' — chromosome 3 maps each port to a desired node type,

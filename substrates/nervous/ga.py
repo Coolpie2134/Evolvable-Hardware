@@ -7,17 +7,14 @@ feedback loop *and* its input/output wiring all appear together, so a plain GA
 stalls on flat plateaus and converges on loop-free delay chains. This GA
 differs from substrates/snn's in seven ways:
 
-  1. Trace-matched outputs + spike-event scoring (temporal targets):
-     each output role is read at the live cell whose trace best matches the
-     expected trace across ALL trials (terminal distance only breaks ties), so
-     evolution only has to build the mechanism, not also route its answer to
-     one prescribed cell. The trace is scored by SPIKE-EVENT precision/recall
-     (F1, see substrates/nervous/temporal.METRIC): reward each correctly-timed output
-     spike, penalise expected spikes that never occur, penalise extra spikes
-     that weren't expected. A do-nothing output recalls nothing and so scores
-     0 — silence is not rewarded (measured: under plain per-tick accuracy the
-     GA converged onto the constant-0 baseline on every preset). 1.0 iff every
-     expected spike is produced and nothing fires where it shouldn't.
+  1. Contract-matched outputs (temporal and periodic-combinational targets):
+     every live non-input cell is a candidate read-only probe. Output roles are
+     assigned globally to distinct cells using their complete Behavior Contract
+     scores across all trials, so evolution need not route every answer to a
+     prescribed coordinate and an early role cannot greedily consume the only
+     strong probe for a later one. Point-event contracts use precision/recall;
+     state, cadence, interval, and logic contracts use their own declared
+     semantics through the shared ``score_contract`` evaluator.
 
   2. Loop-aware shaping: a small bonus, scaled by (1 - score) so a perfect
      score is still exactly 1.0, rewards nets whose signal graph contains
@@ -37,11 +34,10 @@ differs from substrates/snn's in seven ways:
      converged populations re-submit the same genomes; a signature cache skips
      re-evaluating elites and duplicates.
 
-  6. Senescence / metabolic cost (rank_key): among equally-fit genomes the one
-     that grows a cheaper, smaller body wins — fewer genes, then a shorter
-     telomere (a smaller organism, since telomeres are now a Hayflick growth
-     bound). This never distorts the fitness value, so a solved run still reads
-     exactly 1.0 while both genome and body shrink when the task allows.
+  6. Target-blind topology (rank_key): after viability, fitness, robustness,
+     and juvenile score, ties prefer more source-reachable wiring,
+     multi-input integration, and feedback. Disconnected bulk earns nothing,
+     and gene count/telomere never enter this rank.
 
   7. Stress-induced mutagenesis (adaptive_mutation_rate): the bacterial SOS response —
      hold the mutation rate at baseline until the run stalls, then ramp it up the
@@ -125,9 +121,6 @@ MUT_DECAY      = 0.997       # slow cooldown: hard recurrent tasks need late
                              # long runs use α close to 1 (e.g. 0.9999); α = 1.0
                              # disables annealing.
 LOOP_WEIGHT    = 0.05          # max shaping bonus, as a fraction of (1 - score)
-# A counter-like mechanism needs extra structure.  Do not prune that structure
-# merely because it ties a smaller shortcut before the behavioral task is solved.
-PARSIMONY_START_FITNESS = 0.999
 # Population evaluation is embarrassingly parallel; the old min(cpu, 8) left
 # most cores idle on many-core machines (a 20-core box used 8). Scale with the
 # machine, leave 2 cores for the GUI/OS, and cap at 16 where returns flatten
@@ -179,7 +172,7 @@ def _loop_bonus_tri(grid, in_pos, out_pos):
     return 0.3 + 0.7 * min(1.0, n_relevant / 4.0)
 
 
-def evaluate_nv_full(genome, target):
+def evaluate_nv_full(genome, target, *, _developed=None):
     """(scalar fitness, per-case score vector). Cases are the individual
     (trial, role) traces — the units ε-lexicase selection streams over. For
     combinational targets there is no trial structure: cases is None and
@@ -190,7 +183,8 @@ def evaluate_nv_full(genome, target):
     it remains the ADULT organism's score, so a solved run still reads 1.0 for
     the circuit that actually gets grown."""
     if not getattr(target, 'temporal', False):
-        return score_nervous(genome, target), None
+        return score_nervous(
+            genome, target, _developed=_developed), None
     escape = getattr(target, '_escape', None)
     lifespan = escape is not None and escape.lifespan_scoring
     n_cases = total_case_count(target)
@@ -238,7 +232,13 @@ def evaluate_nv_full(genome, target):
         snapshots = grown_snapshots(genome, target, 'nervous', strategy)
         prep = prepare_grid(genome, target, 'nervous', snapshots[-1], strategy)
     else:
-        prep = prepare_net(genome, target)
+        if _developed is None:
+            prep = prepare_net(genome, target)
+        else:
+            from .temporal import prepare_net_grid
+            grid, strategy = _developed
+            prep = prepare_net_grid(
+                genome, target, grid, strategy=strategy)
     if prep is None:
         return 0.0, (0.0,) * n_cases
     grid, routing, in_pos, out_pos, traces = prep
@@ -274,22 +274,41 @@ def _evaluate_nv_selection_record(genome, target):
     robustness entries are the escape objectives, which rank_key applies
     strictly BELOW fitness (see runtime/escape.py).
     """
-    fitness, cases = evaluate_nv_full(genome, target)
-    from .io_placement import io_strategy
-    from .objectives import escape_objectives
+    from .io_placement import growth_seeds, io_strategy
+    from .objectives import escape_objectives, structural_topology
+    escape = getattr(target, '_escape', None)
+    lifespan = escape is not None and escape.lifespan_scoring
+    lifetime_samples = int(
+        getattr(target, '_lifetime_samples', 0) or 0)
+    developed = None
+    if not lifespan and lifetime_samples <= 0:
+        # Behavioral evaluation and the final topology tie-break inspect the
+        # same mature phenotype. Grow once and pass that body to both.
+        from .nervous import grow_nervous
+        strategy = io_strategy(target)
+        grid = grow_nervous(
+            genome, seeds=growth_seeds(target, strategy, genome),
+            grid_size=target.grid_size, iters=target.iters)
+        developed = (grid, strategy)
+    fitness, cases = evaluate_nv_full(
+        genome, target, _developed=developed)
     total = target.n_inputs + len(target.outputs)
     juvenile, robust = escape_objectives(genome, target, 'nervous', cases)
+    topology = structural_topology(
+        genome, target, _developed=developed)
     if io_strategy(target) not in (
             'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
-        return fitness, cases, (total, total), juvenile, robust
+        return (fitness, cases, (total, total), juvenile, robust,
+                topology, topology.score)
     progress = getattr(genome, '_io_binding_progress', (total, total))
-    return fitness, cases, progress, juvenile, robust
+    return (fitness, cases, progress, juvenile, robust,
+            topology, topology.score)
 
 
 def genome_signature(genome):
     """Hashable identity of a genome's evolvable content (for the fitness cache).
-    Includes both optional timing vectors so physically different genomes are
-    never cache-aliased."""
+    Includes native input geometry, timing, architecture, and routing patches
+    so physically different genomes are never cache-aliased."""
     chroms = tuple(
         (c.tag, c.split, getattr(c, 'telomere', 0), getattr(c, 'wiring', False),
          tuple((g.ctx_l, g.ctx_r, g.ctx_d, g.self_in, g.self_out,
@@ -303,7 +322,10 @@ def genome_signature(genome):
     patches = tuple(
         (int(patch.x), int(patch.y), int(patch.state))
         for patch in (getattr(genome, 'routing_patches', None) or ()))
-    return (chroms, tuple(sd) if sd else None,
+    layout = (
+        None if getattr(genome, 'input_layout', None) is None
+        else tuple(tuple(cell) for cell in genome.input_layout))
+    return (layout, chroms, tuple(sd) if sd else None,
             getattr(genome, 'arch', 'single'), patches)
 
 
@@ -376,6 +398,12 @@ def record_escape_objectives(genome, record):
     genome._robust_cases = record[4] if len(record) > 4 else None
     if getattr(genome, '_robust_cases', None) is None:
         genome._robustness = 0.0
+    # Topology travels in the record like every other worker-computed value, so
+    # a CACHE HIT restores it exactly as a fresh evaluation would. Without this
+    # a cached genome would rank with topology 0 and lose ties it should win.
+    genome._topology = record[5] if len(record) > 5 else None
+    genome._topology_score = (
+        float(record[6]) if len(record) > 6 else 0.0)
 
 
 def eval_batch_nv(genomes, target, cache=None):
@@ -394,9 +422,9 @@ def _poisson(lam):
 
 _GENE_FIELDS = ["ctx_l", "ctx_r", "ctx_d", "self_in", "self_out"]
 _STATE_BITS = (MAX_STATE - 1).bit_length()
-# Tri-tile states are 12-bit (three packed 4-bit channels). Single-bit flips on
-# 12 bits act on ONE channel at a time (disjoint fields), giving the paper's
-# per-channel mutability for free.
+# Tri-tile states are 15-bit (three packed 5-bit channels). Single-bit flips on
+# those disjoint fields act on ONE channel at a time, giving per-channel
+# mutability for free.
 _TRI_STATE_BITS = (TRI_STATE_MAX - 1).bit_length()
 
 
@@ -488,8 +516,12 @@ def _recombine_gene_fields(gene_a, gene_b, fields=None):
 
 def _recombination_signature(genome):
     """Alleles crossover can actually exchange (not slot/object identity)."""
+    layout = (
+        None if getattr(genome, 'input_layout', None) is None
+        else tuple(tuple(cell) for cell in genome.input_layout))
     return (
         getattr(genome, 'arch', 'single'),
+        layout,
         tuple(
             (getattr(chromosome, 'wiring', False),
              tuple((*(getattr(gene, field) for field in _GENE_FIELDS),
@@ -624,20 +656,6 @@ def _mutate_state_delay(genome):
     delays[s] = min(DELAY_MULT_MAX,
                     max(DELAY_MULT_MIN, delays[s] * factor))
     genome.state_delays = delays
-
-
-def _mutate_io_tag(genome, io_placement=None):
-    """Mutate one body priority, type/selector pair, or spatial anchor."""
-    if io_placement == 'terminal_nodes':
-        # Nervous terminal identity is the grown I/O node-type state (16/17), so
-        # its mutation edits self_out — not the io_kind tag LUT/SNN still use.
-        from .io_placement import mutate_terminal_state
-        mutate_terminal_state(genome)
-        return
-    from .io_placement import mutate_io_allele
-    mutate_io_allele(
-        genome, ARCH_STATE_MAX[getattr(genome, 'arch', 'single')],
-        strategy=io_placement)
 
 
 def _mutate_routing_patch(genome):
@@ -828,16 +846,6 @@ def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
             and len(g.input_layout) > 1
             and random.random() < IO_MUTATION_PROB):
         mutate_input_layout(g, max_telomere)
-    if evolve_io and random.random() < IO_MUTATION_PROB:
-        if coordinated_io:
-            from .io_placement import mutate_io_bundle
-            mutate_io_bundle(
-                g, ARCH_STATE_MAX[getattr(g, 'arch', 'single')],
-                strategy=io_placement,
-                count=max(2, int(io_mutations)))
-        else:
-            for _ in range(max(1, int(io_mutations))):
-                _mutate_io_tag(g, io_placement=io_placement)
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
     return g
@@ -960,20 +968,16 @@ def rank_key(genome, fitness):
     """Selection / ranking key (maximise).
 
     Fully wired organisms rank above incomplete wiring maps; within the same
-    viability tier honest behavioral fitness dominates. Solved ties then break
-    toward a cheaper organism — SENESCENCE / METABOLIC COST: fewer genes
-    first (the paper's parsimony pressure), then a shorter GERMLINE telomere (the
-    organism's growth RADIUS = its real body-size cost). Using the germline (max)
-    telomere, not the SUM over chromosomes, is deliberate: the sum penalises
-    chromosome COUNT — it collapsed multi-chromosome genomes to 1 even when each
-    chromosome was small — whereas the germline reflects actual organism size and
-    leaves chromosome count to gene-parsimony alone. These selection tiers never
-    alter the reported behavioral fitness.
+    viability tier honest behavioral fitness dominates. The final tier is
+    target-blind source-reachable topology: connected wiring, multi-input
+    integration, and feedback receive diminishing-return credit, while
+    disconnected bulk earns nothing. Gene count and telomere are deliberately
+    absent. These selection tiers never alter the reported behavioral fitness.
 
-    Between fitness and parsimony sit the two ESCAPE objectives, in this order
+    Between fitness and topology sit the two ESCAPE objectives, in this order
     and no other:
 
-        viability > fitness > robustness > juvenile > parsimony
+        viability > fitness > robustness > juvenile > topology
 
     Both are LEXICOGRAPHICALLY BELOW fitness, which is the whole safety
     argument for them. Robustness can only ever separate two circuits that are
@@ -986,17 +990,15 @@ def rank_key(genome, fitness):
     viability = binding_viability(genome)
     robustness = getattr(genome, '_robustness', 0.0) or 0.0
     juvenile = getattr(genome, '_juvenile_score', 0.0) or 0.0
-    if fitness < PARSIMONY_START_FITNESS:
-        return (viability, fitness, robustness, juvenile, 0, 0)
-    return (viability, fitness, robustness, juvenile, -n_genes(genome),
-            -germline_telomere(genome))
+    topology = getattr(genome, '_topology_score', 0.0) or 0.0
+    return (viability, fitness, robustness, juvenile, topology)
 
 
 def tournament_nv(population, fitnesses):
-    """Tournament selection with a metabolic-cost tie-break: at EQUAL fitness the
-    cheaper organism wins (fewer genes, then a shorter telomere — see rank_key),
-    applied without distorting the fitness value itself, so a solved run still
-    reads exactly 1.0 while complexity keeps shrinking when it isn't needed."""
+    """Tournament selection using :func:`rank_key`.
+
+    Behavior dominates; source-reachable topology breaks final ties without
+    changing the reported score or preferring smaller genomes."""
     idx = random.sample(range(len(population)), min(TOURNAMENT_K, len(population)))
     return population[max(idx, key=lambda i: rank_key(population[i], fitnesses[i]))]
 
@@ -1667,9 +1669,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             gi = max(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]))
             gen_rank = rank_key(population[gi], fitnesses[gi])
-            # SOS tracks FITNESS plateaus only: a parsimony-only win (same fitness,
-            # leaner body) still updates the champion but must NOT reset the stress
-            # counter, or the ever-shrinking tie-break would keep it pinned at 1.0.
+            # SOS tracks FITNESS plateaus only: a topology-only win can update
+            # the champion but must NOT reset the stress counter.
             if fitnesses[gi] > best_fitness + 1e-12:
                 stagnation = 0
             else:

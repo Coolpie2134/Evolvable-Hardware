@@ -78,12 +78,12 @@ from .contracts import behavior_contract_lines
 
 def input_cone(grid, routing, in_pos):
     """The cells whose value can be influenced by an input — everything forward-
-    reachable from the input seeds in the signal graph. On the nervous net there
-    is no spontaneous activity, so every cell OUTSIDE this cone is silent for all
-    time; simulating only the cone is exact and, on the unbounded field where
-    growth may leave a large off-cone blob, far cheaper. ``in_pos`` may carry
-    per-input attachment GROUPS (evolvable binding); the cone starts from every
-    attachment cell."""
+    reachable from the resolved source pads or compatibility attachments in the
+    signal graph. On the nervous net there is no spontaneous activity, so every
+    cell OUTSIDE this cone is silent for all time; simulating only the cone is
+    exact and, on the unbounded field where growth may leave a large off-cone
+    blob, far cheaper. ``in_pos`` may carry per-input attachment GROUPS; the cone
+    starts from every attachment cell."""
     edges = signal_graph(grid, routing)          # u -> cells that read u
     seen  = set(p for p in flat_inputs(in_pos) if p in grid)
     stack = list(seen)
@@ -254,9 +254,10 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
 #
 # No OVERFIT verdicts, and a train->held-out gap of 0.018 and 0.000. Circuits
 # selected this way generalise, so the extra candidates are finding real
-# mechanisms rather than lucky cells. (The other half of the original worry —
+# mechanisms rather than lucky cells. The other half of the original worry —
 # that the chosen cell JITTERS between genomes and roughens the gradient — has
-# not been measured.)
+# a non-mutating diagnostic in tools/probe_gradient_jitter.py; no full-bank
+# result is claimed here yet.
 #
 # So every mature non-input component is eligible for every role. The cost is
 # controlled by collapsing cells that respond IDENTICALLY (they are
@@ -267,9 +268,9 @@ def _output_candidates(grid, in_set):
     return tuple(sorted(cell for cell in grid if cell not in in_set))
 
 
-# The retired local probe. The LUT and SNN comparison backends still read their
-# outputs this way; porting them would silently move their numbers, and they
-# exist to be compared against. Nervous no longer uses it.
+# The retired local probe. SNN still owns a backend-specific local readout;
+# Nervous, FNV, and LUT now use whole-organism global fitting. This helper
+# remains for legacy callers and controlled comparisons.
 LEGACY_OUT_RADIUS = 12
 
 
@@ -283,10 +284,11 @@ def _local_output_candidates(grid, in_set, term, radius=LEGACY_OUT_RADIUS):
 def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
                            arch='single', source_nodes=None,
                            sink_nodes=None):
-    """Assign each output role the live non-input cell — among those nearest its
-    terminal (see OUT_RADIUS) — whose activity trace best matches the expected
-    trace across ALL trials (ties broken by distance to the terminal, then cell
-    order). Evolution builds the computation and lands it near the read-out.
+    """Assign every role jointly over all mature non-input cells.
+
+    Candidate scores use the expected behavior across ALL trials. The global
+    injective assignment maximizes total score while keeping roles on distinct
+    cells; compact cell order is only a deterministic tie-break.
 
     ``delays`` ({cell: delay}) drives width-preserving transport; None leaves
     the engine at its configured fixed delay. Returns (out_pos
@@ -417,7 +419,10 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
         # pads it fitted with; re-resolving them here would let validation
         # quietly choose a different input binding from training.
         terminal_inputs = set(source_nodes)
-        terminal_outputs = set(flat_outputs(out_pos))
+        # The selected outputs are observation probes, not physical sink
+        # terminals. They must retain their ordinary outgoing connections,
+        # exactly as they did while place_outputs_by_trace fitted them.
+        terminal_outputs = set()
     if arch == 'tri3':
         sub = grid
     else:
@@ -456,14 +461,13 @@ def prepare_net(genome, ttarget):
     traces[role][i] is the chosen cell's trace in trial i — or None if the net
     is unusable (too small, no candidate output cells, or an input seed dead).
 
-    When the target opts into an evolvable io_placement strategy (see
-    substrates/nervous/io_placement.py), the input and output CELLS are chosen by the
-    genome's heritable tags instead of by geometry/trace-match, and the traces
-    are read at those fixed cells."""
+    Current genomes grow from ``input_layout`` and fit global probes. Legacy
+    fixed-input genomes use target pads; direct compatibility strategies may
+    instead bind cells through ``substrates.nervous.io_placement``."""
     strategy = io_strategy(ttarget)
-    # Fixed binding grows from declared pads. Spatial binding grows from the
-    # genome's heritable input anchors; the other evolvable strategies retain
-    # one neutral centre because they do not encode developmental coordinates.
+    # Native layouts take precedence inside growth_seeds. Without one, fixed
+    # binding uses target pads, spatial compatibility uses inherited anchors,
+    # and the other compatibility strategies retain one neutral centre.
     grid = grow_nervous(genome, seeds=growth_seeds(
                             ttarget, strategy, genome),
                         grid_size=ttarget.grid_size, iters=ttarget.iters)
@@ -739,3 +743,39 @@ def loop_profile(grid, routing, in_pos, out_pos):
             rev[v].add(u)
     to_out = _reachable(rev, flat_outputs(out_pos))
     return {'n_cycle': len(cyc), 'n_relevant': len(cyc & from_in & to_out)}
+
+
+# ── structural topology (selection tie-break, target-agnostic) ─────────────────
+
+def nervous_topology(grid, routing, in_pos, arch='single'):
+    """Measure this organism's EFFECTIVE routing as a directed graph.
+
+    The graph is the physical wiring the engine will actually run, not the
+    genome and not the target:
+
+    * single tile — one output net per cell, so an edge ``u -> v`` exists iff
+      v's routing reads neighbour u (excitatory or inhibitory);
+    * tri3 — the CHANNEL/sub-node graph from ``interpret_tri``. Measuring tri
+      at tile level would fuse three electrically separate circuits into one
+      node and invent paths and loops that no signal can take.
+
+    Input pads have outgoing edges but no incoming effective edge (they are
+    source-only), so a pad can never be counted inside a cycle.
+    """
+    from substrates.topology import EMPTY, measure
+    if not grid:
+        return EMPTY
+    sources = [tuple(cell) for cell in flat_inputs(in_pos)]
+    if arch == 'tri3':
+        from .tritile import interpret_tri
+        info = interpret_tri(grid, sources)
+        # sources[v] = the sub-nodes feeding v; invert into (u -> v) wires.
+        edges = [(feeder, node)
+                 for node, feeders in info['sources'].items()
+                 for feeder in feeders
+                 if feeder is not None]
+        pads = [node for tile, node in info['in_nodes'].items()]
+        return measure(edges, pads, nodes=info['nodes'])
+    readers = signal_graph(grid, routing)
+    edges = [(u, v) for u, listeners in readers.items() for v in listeners]
+    return measure(edges, sources, nodes=grid)

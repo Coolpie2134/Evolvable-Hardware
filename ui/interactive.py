@@ -2,7 +2,7 @@
 interactive.py — an "Interactive / Test" tab for the Evolvable-Hardware GUI.
 
 After a circuit is evolved (or loaded), this lets you drive its inputs and watch
-the response. All three backends share Step / Run / Reset controls, while each
+the response. All four backends share Step / Run / Reset controls, while each
 uses the input and time representation appropriate to its physics:
 
   * SNN      — LIF playback: static truth tables use Boolean source toggles and
@@ -15,6 +15,10 @@ uses the input and time representation appropriate to its physics:
                time and watch pulses propagate with their actual delays, loops
                latch, and oscillators run. It uses the paper-faithful PulseSim,
                the same asynchronous event engine used by Nervous evolution.
+  * FNV      — continuous-time playback over FunctionalSim: evolved source pads,
+               fixed physical component types, directed honeycomb wires, and
+               globally fitted non-invasive output probes. Temporal trials and
+               static logic settling windows are identical to fitness.
   * LUT      — the SAME timeline and continuous-time playback, driving the
                asynchronous level-logic engine (AsyncLutSim, the same one LUT
                evolution scores with): watch the cells' four directional
@@ -33,22 +37,97 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from substrates.snn import (grow_snn, interpret_grid, simulate_trace, draw_snn_net,
                      prepare_snn_temporal, N_STEPS, DT)
-from substrates.nervous import grow_nervous, interpret_nervous, place_outputs_by_trace
+from substrates.nervous import prepare_net
 from substrates.nervous.viz import draw_hex_net
 from substrates.nervous.contracts import behavior_contract_badge
 from substrates.nervous.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
                              pulses_from_case, charge_levels)
-from substrates.lut import grow_lut
+from substrates.lut import (
+    prepare_lut, lut_case_outputs, lut_input_positions,
+    lut_exterior_inputs, lut_io_mode)
 from substrates.lut.playback import LutPlayer
+from substrates.fnv.playback import (
+    FunctionalPlayer, functional_case_pulses, prepare_functional_playback)
+from substrates.fnv.viz import draw_functional_net
 
 
-from substrates.lut import place_outputs_by_trace as lut_place_by_trace
-from substrates.lut.ga import _place_outputs_combinational as lut_place_combinational
 from substrates.lut.viz import draw_lut_net
 
 # LIF playback advances this many 0.1 ms *display samples* per frame; the
 # underlying LIF response is event-driven rather than stepped.
 SNN_STRIDE = 5
+
+
+def prepare_nervous_playback(genome, target):
+    """Build the exact Nervous circuit that fitness prepared.
+
+    Evolved input layouts are developmental germlines as well as source-only
+    simulator nodes, and output probes are fitted under that physics. Keeping
+    this adapter on top of ``prepare_net`` prevents Interactive from separately
+    restoring retired fixed pads or re-fitting probes under different physics.
+    """
+    prepared = prepare_net(genome, target)
+    if prepared is None:
+        return None
+    grid, routing, in_pos, out_pos, _traces = prepared
+    arch = getattr(genome, 'arch', 'single')
+    from substrates.nervous.nervous import node_delays
+    from substrates.nervous.io_placement import terminal_node_sets
+    config = getattr(target, 'pulse_config', None)
+    delays = None if arch == 'tri3' else node_delays(genome, grid, config)
+    source_nodes, sink_nodes = terminal_node_sets(
+        target, in_pos, out_pos, genome=genome)
+    return (grid, routing, in_pos, out_pos, arch, delays,
+            source_nodes, sink_nodes)
+
+
+def prepare_lut_playback(genome, target):
+    """Build the same LUT body, source pads, and fitted probes as fitness."""
+    if getattr(target, 'temporal', False):
+        prepared = prepare_lut(genome, target)
+        if prepared is None:
+            return None
+        grid, out_pos, _traces, in_pos = prepared
+    else:
+        grid, out_pos, _cases = lut_case_outputs(genome, target)
+        if not grid or any(out_pos.get(term.role) is None
+                           for term in target.outputs):
+            return None
+        if lut_io_mode(target) == 'exterior_edges':
+            in_pos, _ = lut_exterior_inputs(
+                genome, grid, target.n_inputs)
+            in_pos = list(in_pos)
+        elif getattr(genome, 'input_layout', None) is not None:
+            in_pos = list(lut_input_positions(genome, target.inputs))
+        else:
+            from substrates.nervous.io_placement import io_strategy, bind_io
+            if io_strategy(target) == 'fixed':
+                in_pos = list(target.inputs)
+            else:
+                from substrates.lut.lut import cell_io_tags
+                bound = bind_io(
+                    genome, grid, target,
+                    tags=cell_io_tags(genome, grid))
+                if bound is None:
+                    return None
+                in_pos = bound[0]
+    external_inputs = {}
+    if lut_io_mode(target) == 'exterior_edges':
+        resolved, external_inputs = lut_exterior_inputs(
+            genome, grid, target.n_inputs)
+        if len(resolved) != target.n_inputs:
+            return None
+        in_pos = list(resolved)
+        source_nodes, sink_nodes = set(), set()
+    elif any(cell not in grid for cell in in_pos):
+        return None
+    elif getattr(genome, 'input_layout', None) is not None:
+        source_nodes, sink_nodes = set(in_pos), set()
+    else:
+        from substrates.nervous.io_placement import terminal_node_sets
+        source_nodes, sink_nodes = terminal_node_sets(
+            target, in_pos, out_pos)
+    return grid, in_pos, out_pos, source_nodes, sink_nodes
 
 
 class InteractiveTab:
@@ -129,7 +208,7 @@ class InteractiveTab:
         self._case_kind = ('trials' if getattr(target, 'trials', None)
                            else 'cases' if getattr(target, 'cases', None)
                            else None)
-        if backend in ('nervous', 'lut') or self._temporal_snn:
+        if backend in ('nervous', 'fnv', 'lut') or self._temporal_snn:
             # every stored test case is loadable, not just trial 0: pick one
             # from the dropdown to see exactly what fitness scored, then edit
             # the timeline freely (the box flips to '(custom schedule)').
@@ -161,55 +240,50 @@ class InteractiveTab:
             w.destroy()
         from substrates.nervous.io_placement import io_strategy, bind_io, growth_seeds
         if backend == 'nervous':
-            self._nv_arch = getattr(c['genome'], 'arch', 'single')
-            self._grid = grow_nervous(
-                c['genome'], seeds=growth_seeds(
-                    target, io_strategy(target), c['genome']),
-                                      grid_size=target.grid_size, iters=target.iters)
-            self._routing, self._in_pos, self._out_pos = interpret_nervous(
-                self._grid, target, arch=self._nv_arch)
-            # Per-node delays feed BOTH the trace-matched placement (so the
-            # highlighted output cell is the one fitness actually read) and the
-            # playback engine below. node_delays returns None off the
-            # width-preserving model, so this is uniform-safe.
-            from substrates.nervous.nervous import node_delays
-            pulse_config = getattr(target, 'pulse_config', None)
-            self._nv_delays = (None if self._nv_arch == 'tri3' else
-                               node_delays(c['genome'], self._grid, pulse_config))
-            # Evolvable I/O binding: drive and read the SAME cells fitness
-            # used — each _in_pos entry becomes that input's attachment GROUP
-            # (an input may fan out to several sites).
-            bound = (bind_io(c['genome'], self._grid, target)
-                     if io_strategy(target) != 'fixed' else None)
-            if bound is not None:
-                self._in_pos, self._out_pos = bound
-            elif getattr(target, 'temporal', False):
-                # show the same output cell the fitness reads (trace-matched)
-                self._out_pos, _ = place_outputs_by_trace(
-                    self._grid, self._routing, self._in_pos, target,
-                    delays=self._nv_delays,
-                    arch=self._nv_arch)
+            playback = prepare_nervous_playback(c['genome'], target)
+            if playback is None:
+                self._placeholder(
+                    'The Nervous net did not grow a complete I/O circuit.')
+                self._status.set(
+                    'Nervous circuit incomplete - no playback is available.')
+                return
+            (self._grid, self._routing, self._in_pos, self._out_pos,
+             self._nv_arch, self._nv_delays, self._nv_source_nodes,
+             self._nv_sink_nodes) = playback
             self._setup_async(target)
             self._playback_controls(
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
+        elif backend == 'fnv':
+            playback = prepare_functional_playback(c['genome'], target)
+            if playback is None:
+                self._placeholder(
+                    'The Functional NV Net did not grow a complete I/O circuit.')
+                self._status.set(
+                    'FNV circuit incomplete - no playback is available.')
+                return
+            (self._grid, self._in_pos, self._out_pos,
+             self._fnv_horizon) = playback
+            self._setup_async(target)
+            self._playback_controls(
+                '   (click the timeline to place input pulses; '
+                'Step/Run uses FNV component time)')
+            self._reset()
         elif backend == 'lut':                             # LUT array (async levels)
-            self._grid = grow_lut(
-                c['genome'], seeds=growth_seeds(
-                    target, io_strategy(target), c['genome']),
-                                  grid_size=target.grid_size, iters=target.iters)
-            self._in_pos = list(target.inputs)
-            bound = None
-            if io_strategy(target) != 'fixed':
-                from substrates.lut.lut import cell_io_tags
-                bound = bind_io(c['genome'], self._grid, target,
-                                tags=cell_io_tags(c['genome'], self._grid))
-            if bound is not None:
-                self._in_pos, self._out_pos = bound
-            elif getattr(target, 'temporal', False):
-                self._out_pos, _ = lut_place_by_trace(self._grid, self._in_pos, target)
+            playback = prepare_lut_playback(c['genome'], target)
+            if playback is None:
+                self._placeholder(
+                    'The LUT array did not grow a complete I/O circuit.')
+                self._status.set(
+                    'LUT circuit incomplete - no playback is available.')
+                return
+            (self._grid, self._in_pos, self._out_pos,
+             self._lut_source_nodes, self._lut_sink_nodes) = playback
+            if lut_io_mode(target) == 'exterior_edges':
+                _, self._lut_external_inputs = lut_exterior_inputs(
+                    c['genome'], self._grid, target.n_inputs)
             else:
-                self._out_pos = lut_place_combinational(self._grid, target)
+                self._lut_external_inputs = {}
             self._setup_async(target)
             self._playback_controls(
                 '   (click the timeline to place input pulses; Step/Run in real time)')
@@ -276,7 +350,21 @@ class InteractiveTab:
                 self._reset()
         strategy = io_strategy(target)
         note = ''
-        if strategy != 'fixed':
+        if backend == 'fnv':
+            note = ('   [I/O binding: evolved source pads; '
+                    '%d input%s; globally fitted output probe%s]'
+                    % (len(self._in_pos),
+                       '' if len(self._in_pos) == 1 else 's',
+                       '' if len(self._out_pos) == 1 else 's'))
+        elif backend == 'lut':
+            architecture = (
+                'alternating exterior perimeter buses'
+                if lut_io_mode(target) == 'exterior_edges'
+                else 'evolved internal source pads')
+            note = ('   [I/O binding: %s; globally fitted output probe%s]'
+                    % (architecture,
+                       '' if len(self._out_pos) == 1 else 's'))
+        elif strategy != 'fixed':
             from substrates.nervous.io_placement import input_groups
             groups = input_groups(getattr(self, '_in_pos', []) or [])
             sites = sum(len(g) for g in groups)
@@ -318,12 +406,19 @@ class InteractiveTab:
             on_change=self._snn_schedule_changed, default_width=1.0)
         self._editor.set_pulses(self._case_pulses(target, 0))
 
-    # ── nervous + LUT: asynchronous continuous-time playback ──────────────────────
+    # ── nervous + FNV + LUT: continuous-time playback ─────────────────────────────
 
     def _setup_async(self, target):
         labels = [chr(65 + i) if i < 26 else 'i%d' % i
                   for i in range(len(self._in_pos))]
         horizon = float(max(24, getattr(target, 'T', 24) or 24))
+        if self._backend == 'nervous':
+            # Use the scorer's actual observation window so delayed output
+            # activity beyond the stimulus window is visible here too.
+            from substrates.nervous.scoring import _obs_len
+            horizon = max(horizon, float(_obs_len(target)))
+        elif self._backend == 'fnv':
+            horizon = float(self._fnv_horizon)
         # Combinational LUT pulses arrive after a delay and are held for wide
         # widths (see _combinational_schedule); stretch the timeline so the whole
         # held window fitness reads is visible.
@@ -333,7 +428,9 @@ class InteractiveTab:
             horizon = max(horizon,
                           max(d + max(ws) for d, ws in schedule) + 4.0)
         pulse_config = getattr(target, 'pulse_config', None)
-        default_width = getattr(pulse_config, 'width', None)
+        default_width = (
+            1.0 if self._backend == 'fnv'
+            else getattr(pulse_config, 'width', None))
         self.fig.clf()
         gs = self.fig.add_gridspec(3, 2, height_ratios=[0.55, 0.5, 0.5],
                                    width_ratios=[1.1, 1.0], hspace=0.85,
@@ -349,12 +446,10 @@ class InteractiveTab:
         self._editor.set_pulses(self._case_pulses(target, 0))
         if self._backend == 'nervous':
             config = pulse_config
-            # sync() and shared with the trace-matched placement, so playback and
-            # the highlighted output cell agree on the physics.
-            from substrates.nervous.io_placement import (
-                flat_inputs, terminal_node_sets)
-            terminal_inputs, terminal_outputs = terminal_node_sets(
-                target, self._in_pos, self._out_pos)
+            # Resolved once with the scorer-prepared input pads and probes.
+            from substrates.nervous.io_placement import flat_inputs
+            terminal_inputs = self._nv_source_nodes
+            terminal_outputs = self._nv_sink_nodes
             self._player = NervousPlayer(
                 self._grid, self._routing, horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048),
@@ -363,14 +458,18 @@ class InteractiveTab:
                 inputs=flat_inputs(self._in_pos),
                 outputs=terminal_outputs,
                 terminal_inputs=terminal_inputs)
+        elif self._backend == 'fnv':
+            self._player = FunctionalPlayer(
+                self._grid, self._in_pos, self._out_pos.values(),
+                horizon=horizon,
+                max_events=getattr(target, 'max_events', 2048))
         else:                                  # LUT — same player, level engine
-            from substrates.nervous.io_placement import terminal_node_sets
-            terminal_inputs, terminal_outputs = terminal_node_sets(
-                target, self._in_pos, self._out_pos)
             self._player = LutPlayer(
                 self._grid, horizon=horizon,
                 config=getattr(target, 'lut_config', None),
-                inputs=terminal_inputs, outputs=terminal_outputs)
+                inputs=self._in_pos, outputs=self._lut_sink_nodes,
+                input_nodes=self._lut_source_nodes,
+                external_inputs=self._lut_external_inputs)
         self._player.set_schedule(self._editor.schedule(self._in_pos))
 
     def _case_kind_for(self, target):
@@ -388,6 +487,9 @@ class InteractiveTab:
         scores for this backend (temporal trial vs combinational truth table)."""
         n_inputs = len(self._in_pos)
         if self._case_kind_for(target) == 'cases':
+            if getattr(self, '_backend', None) == 'fnv':
+                return functional_case_pulses(
+                    target, n_inputs, self._fnv_horizon, index)
             return pulses_from_case(target, n_inputs, index,
                                     getattr(self, '_backend', 'lut'))
         return pulses_from_trial(target, n_inputs, index)
@@ -485,11 +587,19 @@ class InteractiveTab:
                          show_edges=(getattr(self, '_nv_arch', 'single') == 'single'),
                          arch=getattr(self, '_nv_arch', 'single'),
                          title=title)
+        elif self._backend == 'fnv':
+            draw_functional_net(
+                self._axg, self._grid,
+                input_positions=self._in_pos,
+                output_positions=self._out_pos,
+                activity=self._player.activity(),
+                show_edges=True, title=title)
         else:
-            in_pos = [p for p in flat_inputs(self._in_pos) if p in self._grid]
             draw_lut_net(self._axg, self._grid, activity=self._player.nibbles(),
-                         in_pos=in_pos, out_pos=self._out_pos, show_edges=True,
-                         title=title)
+                         in_pos=self._in_pos, out_pos=self._out_pos,
+                         show_edges=True,
+                         title=title,
+                         external_inputs=self._lut_external_inputs)
         self._draw_event_strip(self._axt)
         self._draw_width_strip(self._axw)
         self.canvas.draw_idle()

@@ -18,19 +18,15 @@ class FittedReadout:
     """The complete fitted evaluation state carried into fresh schedules."""
 
     backend: str
-    # Fixed binding stores one Pos per role. Evolvable binding stores a tuple of
-    # Pos values: the immutable wired-OR output group.
+    # Native fitted probes store one Pos per role. Compatibility bindings may
+    # store a tuple of Pos values: an immutable wired-OR output group.
     outputs: Tuple
     alignment: Optional[float]
     training_score: float
-    # Input CELLS chosen at fit time. Empty means "use the target's seed pads"
-    # (the fixed/legacy binding). Under an evolvable io_placement strategy the
-    # genome's tags pick the injection cells, so they too are a fitted parameter
-    # that validation must reuse unchanged — otherwise validation would silently
-    # re-bind inputs to fresh cells. Defaulted so legacy 4-arg construction (e.g.
-    # substrates/nervous/persistence.py) still works.
-    # Under an evolvable strategy each entry is itself a tuple of attachment
-    # cells (an input may fan out to several sites); fixed binding stores ().
+    # Input sites frozen at fit time. Native layouts use a flat tuple; legacy
+    # tag/wiring strategies may use attachment groups. Empty means use the
+    # target's declared pads for an old fixed-input document. Defaulted so
+    # legacy 4-arg construction still works.
     inputs: Tuple = ()
 
     @property
@@ -38,16 +34,12 @@ class FittedReadout:
         return dict(self.outputs)
 
     def input_positions(self, target):
-        """The input binding to drive: the fitted one (one attachment-cell
-        group per input under an evolvable strategy), or the target's seed pads
-        when nothing was fitted (fixed binding / legacy checkpoints)."""
+        """The frozen input sites, or target pads for a legacy fixed document."""
         return list(self.inputs) if self.inputs else list(target.inputs)
 
 
 def fit_readout(genome, target, backend='nervous'):
-    """Fit output cells and one shared alignment on training schedules. Under an
-    evolvable io_placement strategy the input cells are fitted here too, so
-    validation reuses the genome's chosen binding rather than re-deriving it."""
+    """Fit probes/alignment and freeze any genome-selected input binding."""
     def _freeze_inputs(entries):
         """Nested-tuple form of an in_pos (groups stay groups, cells stay cells)."""
         from .io_placement import input_groups
@@ -84,8 +76,7 @@ def fit_readout(genome, target, backend='nervous'):
                  for terminal in target.outputs]
                 for case in observations
             ]
-        # FNV input_layout is a flat tuple of physical source pads, not the
-        # grouped fan-out representation used by Nervous/LUT I/O strategies.
+        # FNV input_layout is a flat tuple of physical source pads.
         in_pos = tuple(tuple(cell) for cell in inputs)
     else:
         raise ValueError("unknown temporal backend: %s" % backend)
@@ -169,18 +160,24 @@ def score_frozen(genome, target, fitted):
         from substrates.lut.ga import trace_fixed_outputs
         from .scoring import score_contract
         from .io_placement import growth_seeds
-        grid = grow_lut(genome, seeds=growth_seeds(
-                            target, strategy, genome),
-                        grid_size=target.grid_size, iters=target.iters)
         # Drive the FITTED input cells (the genome's evolved binding under an
         # io_placement strategy); the seed pads for fixed binding.
         from .io_placement import flat_inputs
         in_pos = fitted.input_positions(target)
+        evolved_layout = getattr(genome, 'input_layout', None) is not None
+        seeds = (tuple(flat_inputs(in_pos)) if evolved_layout
+                 else growth_seeds(target, strategy, genome))
+        grid = grow_lut(
+            genome, seeds=seeds,
+            grid_size=target.grid_size, iters=target.iters)
         if len(grid) <= target.n_inputs or any(
                 pos not in grid for pos in flat_inputs(in_pos)):
             return 0.0
         traces = trace_fixed_outputs(
-            grid, list(in_pos), out_pos, target)
+            grid, list(in_pos), out_pos, target,
+            source_nodes=(
+                {tuple(cell) for cell in flat_inputs(in_pos)}
+                if evolved_layout else None))
     elif fitted.backend == 'fnv':
         from substrates.fnv.growth import grow_functional
         from substrates.fnv.evaluation import (

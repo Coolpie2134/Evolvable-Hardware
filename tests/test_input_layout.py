@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from runtime.checkpoint import genome_from_dict, genome_to_dict     # noqa: E402
 from substrates.nervous.ga import (clone_genome, crossover_nv,      # noqa: E402
+                                   genome_signature,
                                    mutate_input_layout, mutate_nv)
 from substrates.nervous.genome import (input_layout_domain,         # noqa: E402
                                        input_layout_radius,
@@ -65,11 +66,17 @@ def test_zero_inputs_is_an_empty_layout_not_a_crash():
 
 def test_position_is_the_only_input_identity():
     """No per-pad numeric parameter: the tuple index IS the logical input."""
-    layout = random_input_layout(3)
+    genome = _layout_genome(3, seed=5)
+    layout = genome.input_layout
     assert all(isinstance(cell, tuple) and len(cell) == 2 for cell in layout)
     # Two pads swapped is a DIFFERENT assignment, not the same layout relabelled.
     swapped = (layout[0], layout[2], layout[1])
     assert swapped != layout
+    other = clone_genome(genome)
+    other.input_layout = swapped
+    # Layout is executable inherited state, so it must also split evaluation
+    # cache entries even when every developmental rule is identical.
+    assert genome_signature(other) != genome_signature(genome)
 
 
 # ── mutation: one pad, one edge ───────────────────────────────────────────────

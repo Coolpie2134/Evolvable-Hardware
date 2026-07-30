@@ -16,6 +16,9 @@ readout and alignment frozen (no re-fit on validation), and classifies the gap:
                                                 no oracle reference available)
 
 One verdict rule, shared by reproduce.py, the evolution controller, and tests.
+LUT exterior-edge I/O is not certified yet: its frozen readout adapter cannot
+currently replay outside-to-facing-edge links, so certification returns an
+explicit UNCERTIFIED verdict instead of presenting an unaudited score.
 """
 from __future__ import annotations
 
@@ -65,7 +68,8 @@ def oracle_spec_for(target):
 # non-default node-timing model (pulse_delay / paper_analog) would be certified
 # under the default uniform physics — every such run would read as OVERFIT. Copy
 # it onto each spec target so fit + holdout run under the SAME physics as training.
-_PHYSICS_ATTRS = ('pulse_config', 'lut_config', '_fnv_families')
+_PHYSICS_ATTRS = (
+    'pulse_config', 'lut_config', '_fnv_families', 'lut_io_mode')
 
 
 def carry_physics(src_target, dst_target):
@@ -101,6 +105,13 @@ def certify(genome, target, train=None, backend='nervous',
     name = getattr(target, 'name', '?')
     result = {'target': name, 'train': train, 'holdouts': None,
               'holdout': None, 'verdict': None}
+    if (backend == 'lut'
+            and getattr(target, 'lut_io_mode', 'source_pads')
+            == 'exterior_edges'):
+        result['verdict'] = (
+            'UNCERTIFIED (LUT exterior-edge frozen validation is not '
+            'implemented)')
+        return result
     spec = oracle_spec_for(target)
     if spec is None:
         result['verdict'] = classify(train or 0.0, None, threshold, kind=kind)

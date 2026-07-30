@@ -8,6 +8,7 @@ off-grid inputs read zero.
 from __future__ import annotations
 
 import heapq
+from dataclasses import dataclass
 from math import inf
 
 from substrates.nervous.hexgrid import hex_dirs
@@ -42,10 +43,13 @@ def _wiring_maps(grid, input_nodes):
             if source not in grid:
                 sources.append(None)
                 continue
-            facing = facing_direction(source, cell)
             source_entry = BY_ID[grid[source]]
+            # Local honeycomb directions are self-reciprocal: if ``source`` is
+            # cell's L/R/D neighbour, cell is source's same-named L/R/D
+            # neighbour.  Avoid resolving the same physical edge with another
+            # hex_dirs allocation and three-coordinate scan.
             driven = (
-                source in input_nodes or facing in source_entry.outputs)
+                source in input_nodes or direction in source_entry.outputs)
             if driven:
                 sources.append(source)
                 watchers[source].add(cell)
@@ -55,22 +59,43 @@ def _wiring_maps(grid, input_nodes):
     return sources_by_cell, watchers
 
 
-def effective_wiring_edges(grid, input_nodes=()):
-    """The directed connections capable of influencing non-source components.
+@dataclass(frozen=True)
+class CompiledFunctionalGrid:
+    """Immutable-by-convention wiring shared by simulations of one phenotype."""
 
-    Incoming physical wires to an input pad are deliberately omitted because
-    FNV pads are source-only: ``FunctionalSim._evaluate`` ignores them.
-    """
+    grid: dict
+    input_nodes: frozenset
+    inputs: dict
+    watch: dict
+
+
+def compile_functional_grid(grid, input_nodes=()):
+    """Validate and wire a grown phenotype once for all of its trials/cases."""
     normalized = {
         tuple(position): int(state)
         for position, state in grid.items()
         if int(state) != 0
     }
-    inputs = {tuple(cell) for cell in (input_nodes or ())}
-    _, watchers = _wiring_maps(normalized, inputs)
+    for state in normalized.values():
+        component(state)
+    inputs = frozenset(tuple(cell) for cell in (input_nodes or ()))
+    sources, watch = _wiring_maps(normalized, inputs)
+    return CompiledFunctionalGrid(normalized, inputs, sources, watch)
+
+
+def effective_wiring_edges(grid, input_nodes=(), *, compiled=None):
+    """The directed connections capable of influencing non-source components.
+
+    Incoming physical wires to an input pad are deliberately omitted because
+    FNV pads are source-only: ``FunctionalSim._evaluate`` ignores them.
+    """
+    circuit = (
+        compile_functional_grid(grid, input_nodes)
+        if compiled is None else compiled)
+    inputs = circuit.input_nodes
     return tuple(sorted(
         (source, destination)
-        for source, destinations in watchers.items()
+        for source, destinations in circuit.watch.items()
         for destination in destinations
         if destination not in inputs
     ))
@@ -80,15 +105,20 @@ class FunctionalSim:
     """Event-driven simulation of one grown ``{position: component_id}`` grid."""
 
     def __init__(self, grid, *, input_nodes=None, output_nodes=None,
-                 max_events=2048):
-        self.grid = {tuple(pos): int(state) for pos, state in grid.items()
-                     if int(state) != 0}
-        for state in self.grid.values():
-            component(state)
-        self.input_nodes = set(input_nodes or ())
+                 max_events=2048, compiled=None):
+        requested_inputs = frozenset(
+            tuple(cell) for cell in (input_nodes or ()))
+        circuit = (
+            compile_functional_grid(grid, requested_inputs)
+            if compiled is None else compiled)
+        if requested_inputs != circuit.input_nodes:
+            raise ValueError(
+                "compiled FNV wiring does not match the requested inputs")
+        self.grid = circuit.grid
+        self.input_nodes = set(circuit.input_nodes)
         self.output_nodes = set(output_nodes or ())
         self.max_events = None if max_events is None else max(1, int(max_events))
-        self._build_wiring()
+        self._inputs, self._watch = circuit.inputs, circuit.watch
         self.reset()
 
     def _build_wiring(self):

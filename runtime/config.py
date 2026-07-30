@@ -115,12 +115,16 @@ class GAConfig:
     # Tri3 supports the fixed digital abstraction and paper_analog physics; the
     # per-node-type width/delay vectors are single-tile features.
     tile_arch: str = 'single'
-    # I/O binding strategy (substrates/nervous/io_placement.py IO_STRATEGIES).
-    # Nervous and LUT support every strategy. SNN does not implement
-    # directional terminal nodes.
-    #   'fixed'          — inputs are the seed pads in declared order; outputs are
-    #                      trace-/duty-fitted near their terminals (the legacy
-    #                      default).
+    # Compatibility I/O binding strategy
+    # (substrates/nervous/io_placement.py IO_STRATEGIES).
+    # Fresh Nervous/FNV runs require 'fixed' because their native genomes carry
+    # evolved source layouts and use fitted probes. SNN supports every legacy
+    # strategy except directional terminal nodes; LUT keeps the legacy
+    # strategies programmatically in addition to its two native lut_io_mode
+    # choices.
+    #   'fixed'          — compatibility selector. SNN uses declared pads;
+    #                      Nervous/FNV genomes resolve native layouts; LUT uses
+    #                      its selected native lut_io_mode.
     #   'terminal_nodes' - body genes evolve ordinary/input/output identity;
     #                      matching mature cells become one-way terminals.
     #   'tag_rank'       — body-gene expression tags rank mature cells; ports
@@ -131,10 +135,15 @@ class GAConfig:
     #   'spatial_chromosome' — chromosome 3 evolves one normalised (x,y)
     #                      anchor per port. Input anchors are developmental
     #                      germlines; outputs attach to nearest free live cells.
-    # Kept 'fixed' by default so every existing run and checkpoint is
-    # byte-identical; the literal is duplicated from IO_STRATEGIES to keep
+    # Kept 'fixed' by default so native-pad backends and old fixed checkpoints
+    # are unambiguous; the literal is duplicated from IO_STRATEGIES to keep
     # runtime backend-neutral (no substrates.nervous import at module level).
     io_placement: str = 'fixed'
+    # LUT-only physical input architecture. Source pads are ordinary developed
+    # cells made source-only at runtime; exterior edges are fixed alternating
+    # logical-input buses whose taps face inward through one directional input
+    # of every perimeter LUT face.
+    lut_io_mode: str = 'source_pads'
     # Delay-mutation toggle, decoupled from the model name for ablations.
     # ``None`` keeps the model's pairing (pulse_delay <-> delay mutation). An
     # explicit False disables it — node_model='pulse_delay' with
@@ -187,6 +196,9 @@ class GAConfig:
             raise ValueError(
                 "io_placement must be 'fixed', 'terminal_nodes', 'tag_rank', "
                 "'wiring_chromosome' or 'spatial_chromosome'")
+        if self.lut_io_mode not in ('source_pads', 'exterior_edges'):
+            raise ValueError(
+                "lut_io_mode must be 'source_pads' or 'exterior_edges'")
         # tri3 evolves routing only, so it pairs with the routing-only engines:
         # 'uniform' (digital) or 'paper_analog' (analog). The width/delay vectors
         # are single-tile node-type features and have no tri3 meaning.

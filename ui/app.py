@@ -54,6 +54,7 @@ from substrates.nervous.contracts import behavior_contract_lines
 from substrates.nervous.viz import draw_hex_net
 from substrates.lut.viz import draw_lut_net, draw_lut_table
 from substrates.fnv import (
+    COMPONENTS as FNV_COMPONENTS,
     functional_case_outputs, functional_input_positions, functional_report,
     grow_functional_snapshots, prepare_functional,
 )
@@ -63,6 +64,13 @@ from substrates.fnv.viz import draw_functional_net
 # ROOT is inserted above, so direct execution still resolves the package.
 from ui.interactive import InteractiveTab
 from ui.designer import DesignerTab, _Tip
+
+#: Shown, disabled, for the substrates with one native I/O mechanism.
+NATIVE_IO_LABEL = 'Evolved inputs / fitted outputs'
+#: Shown when a legacy fixed-input nervous checkpoint is loaded.
+LEGACY_IO_LABEL = 'Legacy fixed inputs / fitted outputs'
+LUT_PAD_IO_LABEL = 'Evolved internal source pads'
+LUT_EDGE_IO_LABEL = 'Alternating exterior perimeter buses'
 from ui.diversity_ui import DiversityTab
 from ui.target_ui import TargetPicker
 from ui import ui_compat
@@ -89,7 +97,7 @@ MAX_VOLT_CASES  = 8     # voltage tab caps rows for readability on big targets
 # ── target-aware analysis helpers ─────────────────────────────────────────────
 
 def _growth_seeds(target, genome=None):
-    """Return the strategy's developmental origin for every GUI backend.
+    """Return the strategy's developmental origin for the SNN analysis path.
 
     Fixed mode uses declared pads, developmental spatial mode uses the
     genome's input anchors, and the other evolvable modes use a neutral centre.
@@ -677,8 +685,8 @@ class App:
 
         ga_frame = ttk.Frame(ctrl3); ga_frame.pack(side='left')
         ttk.Label(ga_frame, text='GA:').pack(side='left', padx=(2, 0))
-        # the nervous/LUT GAs read these; the SNN GA has its own fixed constants and
-        # ignores them, so the whole row is disabled when SNN is selected (see
+        # Nervous/FNV/LUT read these; SNN has its own fixed constants and ignores
+        # them, so the whole row is disabled when SNN is selected (see
         # _reconfigure_for_backend). Widgets are collected so they can be toggled.
         self._ga_entries = []
         self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4, store=self._ga_entries)
@@ -696,9 +704,9 @@ class App:
                                 width=4, store=self._ga_entries)
         self._mutation_limit_var = aentry(
             ga_frame, 'Mutation cap:', _ML, width=4, store=self._ga_entries)
-        # ε-lexicase selection (nervous/LUT temporal targets only): streams over the
-        # whole population instead of tournament, bypassing the elite pool so it can
-        # actually act. Off = tournament (the tuned default).
+        # ε-lexicase selection (Nervous/FNV/LUT contract cases): streams over the
+        # whole population instead of tournament, bypassing the elite pool so it
+        # can actually act. Off = tournament (the tuned default).
         self._lexicase_var = tk.BooleanVar(value=False)
         self._lexicase_chk = ttk.Checkbutton(ga_frame, text='ε-lexicase',
                                               variable=self._lexicase_var)
@@ -742,21 +750,25 @@ class App:
         self._nv_profile_cb.pack(side='left')
         self._nv_profile_cb.bind('<<ComboboxSelected>>',
                                  self._on_nv_profile_change)
-        # Evolvable I/O binding (substrates/nervous/io_placement.py). 'fixed' is the original
-        # geometric/fitted placement; the others make port placement an
-        # evolvable genome trait. All THREE backends honour
-        # it, so it lives in its own always-visible frame — the pulse frame is
-        # hidden for non-nervous backends.
+        # I/O description/selection. Nervous and FNV show their one native
+        # evolved-pad/fitted-probe architecture, LUT chooses between internal
+        # pads and exterior-edge drivers, and SNN exposes the compatible legacy
+        # placement strategies. The frame remains visible for every backend.
         self._io_frame = ttk.Frame(ctrl3)
         self._io_frame.pack(side='left')
         ttk.Label(self._io_frame, text='I/O binding:').pack(
             side='left', padx=(6, 2))
+        # Native-pad substrates use this widget as a description, not a choice.
         self._IO_PLACEMENT_LABELS = {
             'Fixed (original)':            'fixed',
             'Dedicated input/output nodes': 'terminal_nodes',
             'Evolvable: node-type rank':   'tag_rank',
             'Evolvable: wiring chromosome':   'wiring_chromosome',
             'Evolvable: spatial chromosome':  'spatial_chromosome',
+        }
+        self._LUT_IO_LABELS = {
+            LUT_PAD_IO_LABEL: 'source_pads',
+            LUT_EDGE_IO_LABEL: 'exterior_edges',
         }
         self._io_placement_var = tk.StringVar(value='Fixed (original)')
         self._io_placement_cb = ttk.Combobox(
@@ -825,6 +837,12 @@ class App:
             check.pack(side='left', padx=(0, 7))
             self._fnv_family_vars[family] = variable
             self._fnv_family_checks.append(check)
+        ttk.Separator(self._fnv_row, orient='vertical').pack(
+            side='left', fill='y', padx=(2, 8))
+        self._fnv_dictionary_btn = ttk.Button(
+            self._fnv_row, text='Node number dictionary',
+            command=self._show_fnv_node_dictionary)
+        self._fnv_dictionary_btn.pack(side='left')
 
         # ── fourth row: local-minimum escape mechanisms (runtime/escape.py) ──
         # Every one is OFF by default, so an untouched row runs exactly the
@@ -1043,21 +1061,32 @@ class App:
         """Show only the controls / tab labels relevant to the selected model."""
         backend = self._backend()
         if hasattr(self, '_io_placement_cb'):
-            labels = (
-                ['Evolved inputs / fitted outputs'] if backend == 'fnv' else [
-                    label for label, strategy in self._IO_PLACEMENT_LABELS.items()
-                    if backend != 'snn' or strategy != 'terminal_nodes'])
-            if (backend == 'fnv' or (
-                    backend == 'snn'
-                    and self._selected_io_placement() == 'terminal_nodes')):
-                self._io_placement_var.set(
-                    'Evolved inputs / fitted outputs'
-                    if backend == 'fnv' else 'Fixed (original)')
-            elif self._io_placement_var.get() not in labels:
+            # LUT exposes its two physical source architectures. Nervous and
+            # FNV retain one native source-pad architecture; SNN keeps the
+            # legacy binding strategy choices.
+            native_io = backend in ('fnv', 'nervous')
+            if backend == 'lut':
+                labels = list(self._LUT_IO_LABELS)
+                if self._io_placement_var.get() not in labels:
+                    self._io_placement_var.set(LUT_PAD_IO_LABEL)
+            elif native_io:
+                labels = [NATIVE_IO_LABEL]
+                self._io_placement_var.set(NATIVE_IO_LABEL)
+            else:
+                labels = [
+                    label for label, strategy
+                    in self._IO_PLACEMENT_LABELS.items()
+                    if backend != 'snn' or strategy != 'terminal_nodes']
+            if (not native_io and backend != 'lut'
+                    and backend == 'snn'
+                    and self._selected_io_placement() == 'terminal_nodes'):
+                self._io_placement_var.set('Fixed (original)')
+            elif (not native_io and backend != 'lut'
+                  and self._io_placement_var.get() not in labels):
                 self._io_placement_var.set('Fixed (original)')
             self._io_placement_cb.configure(values=labels)
             self._io_placement_cb.configure(
-                state=('disabled' if backend == 'fnv' else 'readonly'))
+                state=('disabled' if native_io else 'readonly'))
         self._sync_telomere_backend(backend)
         if backend != 'snn':
             self._arch_frame.pack_forget()
@@ -1110,8 +1139,8 @@ class App:
         # pulse-physics knobs apply only to the nervous net's pulse engine.
         # Re-pack relative to the always-present I/O-binding frame (the
         # separator is itself hidden for other models, so it can't be a pack
-        # anchor). Nervous/LUT/SNN keep the I/O binding dropdown; FNV currently
-        # fixes physical terminal cells.
+        # anchor). Nervous, LUT, and FNV show their native evolved-pad/fitted-
+        # probe policy as a disabled description; SNN keeps the strategy choice.
         if hasattr(self, '_pulse_frame'):
             if backend == 'nervous':
                 self._pulse_frame.pack(side='left', before=self._io_frame)
@@ -1176,14 +1205,7 @@ class App:
                     self._nb.add(self._diversity_frame)
             except tk.TclError:
                 pass
-        if hasattr(self, '_interactive_frame'):
-            try:
-                if backend == 'fnv':
-                    self._nb.hide(self._interactive_frame)
-                else:
-                    self._nb.add(self._interactive_frame)
-            except tk.TclError:
-                pass
+        self._show_interactive_tab()
         # dropdown offers only backend-valid targets (LUT hides combinational)
         if hasattr(self, '_target_cb'):
             self._refresh_target_list()
@@ -1192,6 +1214,100 @@ class App:
         try:
             self._nb.tab(frame, text=text)
         except Exception:
+            pass
+
+    def _show_fnv_node_dictionary(self):
+        """Open the permanent FNV component-ID catalogue."""
+        existing = getattr(self, '_fnv_dictionary_window', None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_set()
+                    return
+            except tk.TclError:
+                pass
+
+        window = tk.Toplevel(self.root)
+        self._fnv_dictionary_window = window
+        window.title('FNV node number dictionary')
+        window.geometry('970x620')
+        window.minsize(720, 360)
+        window.transient(self.root)
+
+        ttk.Label(
+            window,
+            text=('The number printed inside an FNV node is its permanent '
+                  'physical component type. IDs are append-only.'),
+            padding=(10, 9, 10, 5), anchor='w').pack(fill='x')
+
+        frame = ttk.Frame(window, padding=(10, 0, 10, 10))
+        frame.pack(fill='both', expand=True)
+        columns = ('id', 'name', 'family', 'function', 'inputs', 'outputs',
+                   'timing')
+        table = ttk.Treeview(
+            frame, columns=columns, show='headings', selectmode='browse')
+        headings = {
+            'id': 'ID',
+            'name': 'Permanent component name',
+            'family': 'Family',
+            'function': 'Function',
+            'inputs': 'Inputs',
+            'outputs': 'Outputs',
+            'timing': 'Fixed timing',
+        }
+        widths = {
+            'id': 45, 'name': 260, 'family': 125, 'function': 115,
+            'inputs': 65, 'outputs': 70, 'timing': 145,
+        }
+        for column in columns:
+            table.heading(column, text=headings[column])
+            table.column(
+                column, width=widths[column],
+                anchor=('center' if column in {
+                    'id', 'inputs', 'outputs'} else 'w'),
+                stretch=(column == 'name'))
+        for entry in FNV_COMPONENTS:
+            if entry.behavior == 'GATED_OSCILLATOR':
+                timing = 'high %d / low %d ticks' % (
+                    entry.high_time, entry.low_time)
+            elif entry.duration:
+                timing = '%d tick%s' % (
+                    entry.duration, '' if entry.duration == 1 else 's')
+            elif entry.id:
+                timing = 'delay %d tick%s' % (
+                    entry.delay, '' if entry.delay == 1 else 's')
+            else:
+                timing = '-'
+            table.insert('', 'end', values=(
+                entry.id, entry.name, entry.family, entry.behavior,
+                ','.join(entry.inputs) or '-', ','.join(entry.outputs) or '-',
+                timing))
+
+        scroll = ttk.Scrollbar(
+            frame, orient='vertical', command=table.yview)
+        table.configure(yscrollcommand=scroll.set)
+        table.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+
+        def close_dictionary():
+            self._fnv_dictionary_window = None
+            window.destroy()
+
+        window.protocol('WM_DELETE_WINDOW', close_dictionary)
+
+    def _show_interactive_tab(self):
+        """Keep playback reachable for every backend, including FNV.
+
+        ``Notebook.add`` restores a tab previously hidden during an older
+        backend selection without constructing a second InteractiveTab.
+        """
+        if not hasattr(self, '_interactive_frame'):
+            return
+        try:
+            self._nb.add(self._interactive_frame)
+        except tk.TclError:
             pass
 
     def _build_evolve_tab(self, nb):
@@ -1557,6 +1673,7 @@ class App:
                 evolve_delay=evolve_delay,
                 tile_arch=tile_arch,
                 io_placement=self._selected_io_placement(),
+                lut_io_mode=self._selected_lut_io_mode(),
                 chromosome_count=chromosome_count,
                 escape=escape),
             pulse=pulse_config,
@@ -1581,12 +1698,27 @@ class App:
         return self._selected_nv_profile()[0]
 
     def _selected_io_placement(self):
-        """The I/O binding strategy for NV runs ('fixed' when the control is
-        absent or unset — e.g. non-nervous backends)."""
+        """The I/O binding strategy ('fixed' when the control is absent).
+
+        The descriptive labels shown for the substrates with one native I/O
+        mechanism are not strategies, so they resolve to 'fixed' — those runs
+        carry an evolved input layout on the genome instead.
+        """
         if not hasattr(self, '_io_placement_var'):
             return 'fixed'
         return self._IO_PLACEMENT_LABELS.get(
             self._io_placement_var.get(), 'fixed')
+
+    def _selected_lut_io_mode(self):
+        """The LUT physical source architecture; other backends ignore it."""
+        if not hasattr(self, '_io_placement_var'):
+            return 'source_pads'
+        labels = getattr(self, '_LUT_IO_LABELS', {
+            LUT_PAD_IO_LABEL: 'source_pads',
+            LUT_EDGE_IO_LABEL: 'exterior_edges',
+        })
+        return labels.get(
+            self._io_placement_var.get(), 'source_pads')
 
     def _on_io_placement_change(self, _evt=None):
         """Keep the genome controls runnable for the selected I/O strategy."""
@@ -1810,6 +1942,8 @@ class App:
         # interpret paths) bind ports the same way the run does. All backends
         # honour the strategy.
         setattr(eff_target, 'io_placement', run_config.ga.io_placement)
+        if backend == 'lut':
+            setattr(eff_target, 'lut_io_mode', run_config.ga.lut_io_mode)
         self._active_target  = eff_target
         self._active_arch    = arch
         self._active_chroms  = n_chroms
@@ -1995,6 +2129,11 @@ class App:
         if saved_backend == 'fnv':
             setattr(saved_target, '_fnv_families',
                     normalized_config.fnv.families)
+        elif saved_backend == 'lut':
+            setattr(
+                saved_target, 'lut_io_mode',
+                getattr(normalized_config.ga,
+                        'lut_io_mode', 'source_pads'))
         self._beta_var.set(str(normalized_config.ga.stagnation_beta))
         self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
         self._recombination_var.set(normalized_config.ga.recombination_enabled)
@@ -2052,6 +2191,27 @@ class App:
         if saved_target.name not in self._all_targets():
             self._custom[saved_target.name] = saved_target
         self._reconfigure_for_backend()      # filters the dropdown for the backend
+        if saved_backend == 'lut':
+            lut_label = next(
+                (label for label, mode in self._LUT_IO_LABELS.items()
+                 if mode == normalized_config.ga.lut_io_mode),
+                LUT_PAD_IO_LABEL)
+            self._io_placement_var.set(lut_label)
+        # Exterior LUT buses are a fixed architecture over every exposed face;
+        # unlike native source pads they require no per-genome layout field.
+        native_layout = (
+            ()
+            if (saved_backend == 'lut'
+                and normalized_config.ga.lut_io_mode == 'exterior_edges')
+            else getattr(loaded_genome, 'input_layout', None))
+        if (saved_backend in ('nervous', 'fnv', 'lut')
+                and native_layout is None):
+            legacy_label = (
+                LEGACY_IO_LABEL if saved_io == 'fixed'
+                else 'Legacy: %s' % io_label)
+            self._io_placement_var.set(legacy_label)
+            self._io_placement_cb.configure(
+                values=[legacy_label], state='disabled')
         # A loaded checkpoint reflects its saved run, not the fresh-run default.
         saved_telomere = str(normalized_config.ga.max_telomere)
         self._maxtel_var.set(saved_telomere)
@@ -2567,30 +2727,60 @@ class App:
         with the first-class renderer (per-side capability nibs + I/O markers),
         the final panel showing the mature organism, plus a legend."""
         try:
-            from substrates.lut import grow_lut_snapshots, place_outputs_by_trace
+            from substrates.lut import (
+                grow_lut_snapshots, place_outputs_by_trace,
+                lut_growth_seeds)
             from substrates.lut.ga import _place_outputs_combinational
             snaps = grow_lut_snapshots(
-                genome, seeds=_growth_seeds(target, genome),
+                genome, seeds=lut_growth_seeds(
+                    genome, target,
+                    getattr(target, 'io_placement', 'fixed')),
                                        grid_size=target.grid_size, iters=target.iters)
         except Exception:
             return
         final  = snaps[-1] if snaps else {}
-        in_pos = [p for p in target.inputs if p in final]
+        from substrates.lut import (
+            lut_input_positions, lut_exterior_inputs, lut_io_mode)
+        exterior = lut_io_mode(target) == 'exterior_edges'
+        evolved_layout = getattr(genome, 'input_layout', None) is not None
+        if exterior:
+            resolved_inputs, external_inputs = lut_exterior_inputs(
+                genome, final, target.n_inputs)
+        else:
+            external_inputs = {}
+            resolved_inputs = (
+                lut_input_positions(genome, target.inputs)
+                if evolved_layout else tuple(target.inputs))
+        in_pos = (
+            list(resolved_inputs) if exterior
+            else [p for p in resolved_inputs if p in final])
         try:
             # Under an evolvable io_placement strategy the genome's tags choose
             # the ports — mark the SAME cells the scorer drives/reads.
             from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
             bound = None
-            if io_strategy(target) != 'fixed' and final:
+            if (not exterior and not evolved_layout
+                    and io_strategy(target) != 'fixed'
+                    and final):
                 from substrates.lut.lut import cell_io_tags
                 bound = bind_io(genome, final, target,
                                 tags=cell_io_tags(genome, final))
             if bound is not None:
                 in_pos, out_pos = flat_inputs(bound[0]), bound[1]
             elif getattr(target, 'temporal', False):
-                out_pos, _ = place_outputs_by_trace(final, list(target.inputs), target)
+                out_pos, _ = place_outputs_by_trace(
+                    final, list(resolved_inputs), target,
+                    source_nodes=(
+                        set() if exterior else
+                        set(resolved_inputs) if evolved_layout else None),
+                    external_inputs=external_inputs)
             else:
-                out_pos = _place_outputs_combinational(final, target)
+                out_pos = _place_outputs_combinational(
+                    final, target, in_pos=list(resolved_inputs),
+                    source_nodes=(
+                        set() if exterior else
+                        set(resolved_inputs) if evolved_layout else None),
+                    external_inputs=external_inputs)
         except Exception:
             out_pos = {}
         fig = self._growth_fig
@@ -2622,8 +2812,11 @@ class App:
         for idx, snap in enumerate(snaps):
             last = (idx == n - 1)
             ax = fig.add_subplot(gs_snap[idx // snap_cols, idx % snap_cols])
-            draw_lut_net(ax, snap, in_pos=in_pos,
+            draw_lut_net(ax, snap,
+                         in_pos=(in_pos if (last or not exterior) else []),
                          out_pos=(out_pos if last else {}), show_edges=True,
+                         external_inputs=(
+                             external_inputs if last else None),
                          title=('Iter %d (%d)' % (idx, len(snap))) if idx
                                else 'Seed (%d)' % len(snap))
         leg = fig.add_subplot(gs_snap[n // snap_cols, n % snap_cols])
@@ -2661,24 +2854,12 @@ class App:
         dynamics that ARE the LUT's computation are visible over time."""
         target = self._disp_target
         try:
-            from substrates.lut import grow_lut, AsyncLutSim, place_outputs_by_trace
-            grid = grow_lut(genome, seeds=_growth_seeds(target, genome),
-                            grid_size=target.grid_size, iters=target.iters)
-            if len(grid) <= target.n_inputs:
+            from substrates.lut import (
+                AsyncLutSim, prepare_lut, lut_exterior_inputs, lut_io_mode)
+            prepared = prepare_lut(genome, target)
+            if prepared is None:
                 raise ValueError
-            # Honour an evolvable io_placement strategy: drive/read the same
-            # tag-bound cells the scorer uses.
-            from substrates.nervous.io_placement import io_strategy, bind_io
-            bound = None
-            if io_strategy(target) != 'fixed':
-                from substrates.lut.lut import cell_io_tags
-                bound = bind_io(genome, grid, target,
-                                tags=cell_io_tags(genome, grid))
-            if bound is not None:
-                bound_in, out_pos = list(bound[0]), bound[1]
-            else:
-                bound_in = None
-                out_pos, _ = place_outputs_by_trace(grid, list(target.inputs), target)
+            grid, out_pos, _traces, bound_in = prepared
         except Exception:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
                                    '(LUT: circuit incomplete — grew too little)')
@@ -2689,14 +2870,22 @@ class App:
         # Drive the SAME cells the scorer drives: the bound attachment groups
         # under an evolvable strategy (an input may fan out to several sites; a
         # shared site wired-ORs), the seed pads otherwise.
-        groups  = input_groups(bound_in if bound_in is not None
-                               else [p for p in target.inputs if p in grid])
-        in_pos  = flat_inputs(groups)                  # display markers
-        terminal_inputs, terminal_outputs = terminal_node_sets(
-            target, groups, out_pos)
+        groups = input_groups(bound_in)
+        in_pos  = flat_inputs(groups)                  # terminal membership
+        exterior_inputs = {}
+        if lut_io_mode(target) == 'exterior_edges':
+            _, exterior_inputs = lut_exterior_inputs(
+                genome, grid, target.n_inputs)
+            terminal_inputs, terminal_outputs = set(), set()
+        elif getattr(genome, 'input_layout', None) is not None:
+            terminal_inputs, terminal_outputs = set(in_pos), set()
+        else:
+            terminal_inputs, terminal_outputs = terminal_node_sets(
+                target, groups, out_pos)
         sim = AsyncLutSim(
             grid, input_nodes=terminal_inputs,
-            output_nodes=terminal_outputs)
+            output_nodes=terminal_outputs,
+            external_inputs=exterior_inputs)
         frames  = []                                   # (tick, nibble-map)
         physical = getattr(trial, 'input_events', None)
         if physical is not None:
@@ -2732,8 +2921,10 @@ class App:
         flat  = [a for row in axes for a in row]
         for j, fi in enumerate(idxs):
             tick, nib = frames[fi]
-            draw_lut_net(flat[j], grid, activity=nib, in_pos=in_pos,
-                         out_pos=out_pos, show_edges=True, title='second %d' % tick)
+            draw_lut_net(flat[j], grid, activity=nib, in_pos=groups,
+                         out_pos=out_pos, show_edges=True,
+                         external_inputs=exterior_inputs,
+                         title='second %d' % tick)
         for j in range(k, len(flat)):
             flat[j].set_visible(False)
         self._volt_canvas.draw_idle()
@@ -2757,7 +2948,19 @@ class App:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
                                    '(LUT: circuit incomplete — inputs/outputs missing)')
             return
-        in_pos = [p for p in target.inputs if p in grid]
+        from substrates.lut import (
+            lut_exterior_inputs, lut_io_mode)
+        exterior_inputs = {}
+        if lut_io_mode(target) == 'exterior_edges':
+            in_pos, exterior_inputs = lut_exterior_inputs(
+                genome, grid, target.n_inputs)
+            in_pos = list(in_pos)
+        elif getattr(genome, 'input_layout', None) is not None:
+            from substrates.lut import lut_input_positions
+            in_pos = [p for p in lut_input_positions(
+                genome, target.inputs) if p in grid]
+        else:
+            in_pos = [p for p in target.inputs if p in grid]
         cases  = cases[:MAX_VOLT_CASES]
         self._volt_fig.clf()
         extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
@@ -2775,6 +2978,7 @@ class App:
             settled = '' if case.get('stable', True) else '  (unsettled)'
             draw_lut_net(axes[ci], grid, activity=case['node_nibbles'],
                          in_pos=in_pos, out_pos=out_pos, show_edges=True,
+                         external_inputs=exterior_inputs,
                          title='in=%s\n%s  %s%s' % (''.join(map(str, case['in_bits'])),
                                                   res, 'OK' if all_ok else 'FAIL', settled))
             axes[ci].set_title(axes[ci].get_title(),

@@ -122,15 +122,65 @@ def test_terminal_sets_come_from_the_pad_set_and_are_empty_for_fixed_inputs():
     target = dataclasses.replace(TEMPORAL_TARGETS['Coincidence (2-in)'])
     random.seed(3)
     evolved = random_hex_genome(2, n_inputs=target.n_inputs, input_layout=True)
-    sources, _sinks = terminal_node_sets(
-        target, list(evolved.input_layout), {}, genome=evolved)
+    probes = {'Q': (2, 2)}
+    sources, sinks = terminal_node_sets(
+        target, list(evolved.input_layout), probes, genome=evolved)
     assert sources == {tuple(cell) for cell in evolved.input_layout}
+    assert sinks == set(), 'fitted outputs are probes, not sink terminals'
 
     legacy = random_hex_genome(2)
     assert terminal_node_sets(
         target, list(target.inputs), {}, genome=legacy) == (set(), set())
     # and with no genome at all — the historical call shape
     assert terminal_node_sets(target, list(target.inputs), {}) == (set(), set())
+
+
+def test_interactive_reuses_the_scorer_prepared_layout_probes_and_physics():
+    """The GUI must not independently restore target.inputs and re-fit probes."""
+    from substrates.nervous.io_placement import (
+        input_groups, merge_intervals, output_groups)
+    from substrates.nervous.playback import NervousPlayer, pulses_from_trial
+    from ui.interactive import prepare_nervous_playback
+
+    target = _analog_target()
+    random.seed(31)
+    for _ in range(40):
+        genome = random_hex_genome(
+            2, arch='tri3', n_inputs=target.n_inputs, input_layout=True)
+        genome.arch = 'tri3'
+        scored = prepare_net(genome, target)
+        if scored is None:
+            continue
+        playback = prepare_nervous_playback(genome, target)
+        assert playback is not None
+        (grid, routing, in_pos, out_pos, arch, delays,
+         source_nodes, sink_nodes) = playback
+        assert (grid, routing, in_pos, out_pos) == scored[:4]
+        assert tuple(in_pos) == genome.input_layout
+        assert source_nodes == set(genome.input_layout)
+        assert sink_nodes == set()
+
+        player = NervousPlayer(
+            grid, routing, horizon=2 * target.T,
+            max_events=target.max_events,
+            config=target.pulse_config, delays=delays, arch=arch,
+            inputs=[cell for group in input_groups(in_pos) for cell in group],
+            outputs=sink_nodes, terminal_inputs=source_nodes)
+        lanes = pulses_from_trial(target, len(in_pos), trial_index=0)
+        schedule = {}
+        for lane, cells in zip(lanes, input_groups(in_pos)):
+            for cell in cells:
+                schedule[cell] = list(lane)
+        player.set_schedule(schedule)
+        player.sim.advance_to(2 * target.T)
+
+        fitted = scored[4]
+        for role, cells in output_groups(out_pos).items():
+            observed = merge_intervals([
+                player.sim.pulse_intervals.get(cell, ()) for cell in cells])
+            assert observed == fitted.intervals[role][0]
+        return
+    raise AssertionError('no layout genome produced a playable circuit')
 
 
 # ── tri3: channel level ───────────────────────────────────────────────────────

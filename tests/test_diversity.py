@@ -87,6 +87,16 @@ def test_functional_signature_counts_only_active_io_alleles():
     assert (dv.functional_signature(genome, 'nervous', ranked)
             != dv.functional_signature(other, 'nervous', ranked))
 
+    native = random_hex_genome(2, n_inputs=3, input_layout=True)
+    moved = clone_genome(native)
+    moved.input_layout = (
+        native.input_layout[0],
+        native.input_layout[2],
+        native.input_layout[1],
+    )
+    assert (dv.functional_signature(native, 'nervous', fixed)
+            != dv.functional_signature(moved, 'nervous', fixed))
+
     wiring_cfg = RunConfig(ga=GAConfig(
         chromosome_count=3, io_placement='wiring_chromosome'))
     wired = random_hex_genome(

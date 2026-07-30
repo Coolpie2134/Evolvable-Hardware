@@ -1,16 +1,13 @@
 """
-tools/make_scoring_golden.py — regenerate tests/fixtures/scoring_golden.json.
+tools/make_scoring_golden.py — regenerate the retired numerical score snapshot.
 
-The golden file freezes the scoring contract: a synthetic bundle battery
-(every registered target x {perfect, shift2, half, silence, always} x hold_tol
-variants) plus float-time retention/coverage scenarios, scored through
-substrates/nervous/scoring.py. tests/test_scoring_equivalence.py replays the stored
-bundles and demands identical scores/cases/alignments, so ANY change to
-scoring semantics fails the suite until this script is deliberately re-run.
+``tests/fixtures/scoring_golden.json`` is a numerical snapshot of a synthetic
+bundle battery. It is retained for manual comparison and migration analysis
+only; the current test suite does not treat those numbers as a compatibility
+contract. Contract-v1 behavior is guarded semantically by
+``tests/test_scoring_equivalence.py`` instead.
 
-Only regenerate after an INTENTIONAL scoring change, and say why in the
-commit message — the whole point of the gate is that scores never drift
-silently.
+Running this tool deliberately replaces the historical snapshot:
 
     py tools/make_scoring_golden.py
 """

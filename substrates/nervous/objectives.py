@@ -74,13 +74,15 @@ def grown_snapshots(genome, target, backend, strategy):
     would have returned, so a lifespan run's adult body — and therefore its
     reported fitness — is exactly the body an ordinary run would have grown.
     """
-    from .io_placement import growth_seeds
-    seeds = growth_seeds(target, strategy, genome)
     if backend == 'lut':
+        from substrates.lut.genome import lut_growth_seeds
         from substrates.lut.lut import grow_lut_snapshots
+        seeds = lut_growth_seeds(genome, target, strategy)
         return grow_lut_snapshots(genome, seeds=seeds,
                                   grid_size=target.grid_size,
                                   iters=target.iters)
+    from .io_placement import growth_seeds
+    seeds = growth_seeds(target, strategy, genome)
     from .nervous import grow_nervous_snapshots
     return grow_nervous_snapshots(genome, seeds=seeds,
                                   grid_size=target.grid_size,
@@ -210,3 +212,37 @@ def robust_case_vector(genome, target, backend, escape):
         worst = cases if worst is None else tuple(
             min(a, b) for a, b in zip(worst, cases))
     return worst
+
+
+def structural_topology(genome, target, *, _developed=None):
+    """This organism's reachable computational structure.
+
+    Deliberately target-AGNOSTIC: it grows and interprets the body, then
+    measures wiring. No truth table, expected trace, target name, fitted output,
+    gene count or telomere reaches it — the target is used only to find the
+    growth seeds and the tile architecture.
+    """
+    from substrates.topology import EMPTY
+    from .io_placement import io_strategy, growth_seeds, layout_pads
+    from .nervous import grow_nervous, interpret_nervous
+    from .temporal import nervous_topology
+    try:
+        if _developed is None:
+            strategy = io_strategy(target)
+            grid = grow_nervous(
+                genome, seeds=growth_seeds(target, strategy, genome),
+                grid_size=target.grid_size, iters=target.iters)
+        else:
+            grid, strategy = _developed
+        if not grid:
+            return EMPTY
+        arch = getattr(genome, 'arch', 'single')
+        routing, in_pos, _ = interpret_nervous(grid, target, arch=arch)
+        pads = layout_pads(genome, target)
+        if pads is not None:
+            if not pads or any(cell not in grid for cell in pads):
+                return EMPTY
+            in_pos = list(pads)
+        return nervous_topology(grid, routing, in_pos, arch=arch)
+    except Exception:
+        return EMPTY

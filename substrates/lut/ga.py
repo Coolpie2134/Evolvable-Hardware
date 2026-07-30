@@ -16,13 +16,18 @@ from runtime.cache import LRUCache
 from runtime.mutation import adaptive_mutation_rate, STRESS_PATIENCE
 from runtime.parallel import map_ordered
 
-from substrates.nervous.temporal import (_obs_len, _local_output_candidates, TemporalTraces,
+from substrates.nervous.temporal import (_obs_len, TemporalTraces,
                              _score_output_candidate)
 from substrates.nervous.scoring import (contract_relations, needs_samples, score_contract,
-                            score_report_lines, LUT_REPORT_NOTES)
+                            score_report_lines, LUT_REPORT_NOTES,
+                            behavior_representatives, best_distinct_assignment)
 from substrates.nervous.contracts import behavior_contract_lines
 from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      Genome, Chromosome,
+                     input_layout_domain, input_layout_radius,
+                     random_input_layout,
+                     lut_input_positions, lut_exterior_inputs,
+                     lut_growth_seeds, lut_io_mode,
                      random_lut_gene, random_lut_chromosome)
 from .lut import grow_lut, grow_lut_tracked
 from .pulse import AsyncLutSim
@@ -39,7 +44,13 @@ def clone_genome(genome):
                      for c in genome.chromosomes],
         tag=genome.tag,
         seed_state=getattr(genome, 'seed_state', None),
-        provenance=getattr(genome, 'provenance', ''))
+        provenance=getattr(genome, 'provenance', ''),
+        input_layout=(
+            None if getattr(genome, 'input_layout', None) is None
+            else tuple(tuple(cell) for cell in genome.input_layout)),
+        edge_input_layout=(
+            None if getattr(genome, 'edge_input_layout', None) is None
+            else tuple(int(value) for value in genome.edge_input_layout)))
     if hasattr(genome, '_io_binding_progress'):
         clone._io_binding_progress = genome._io_binding_progress
     if hasattr(genome, '_mut_rate'):
@@ -61,10 +72,9 @@ FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 # LUT temporal search has the same flat recurrent landscapes as the nervous
 # net; reheat after a plateau instead of cooling indefinitely.
 # ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
-# Output candidates are the LEGACY_OUT_RADIUS cells nearest each terminal, via
-# substrates.nervous.temporal._local_output_candidates. The nervous substrate has
-# moved to whole-organism fitted probes; LUT keeps the local probe because it is
-# a COMPARISON backend and changing its readout would move its numbers.
+# Native LUT I/O follows the NV/FNV probe rule: every mature non-source cell is
+# eligible, behaviorally identical candidates are compressed, and all output
+# roles are assigned together to distinct non-invasive probes.
 
 
 def _expand_input_lanes(in_pos):
@@ -84,7 +94,9 @@ def _expand_input_lanes(in_pos):
     return flat, lanes
 
 
-def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
+def _run_lut_trials(grid, in_pos, ttarget, watch_cells,
+                    source_nodes=None, sink_nodes=None,
+                    external_inputs=None):
     """Run every trial once on the asynchronous engine (substrates.lut.pulse).
 
     Returns (trial_B, trial_events, overflow): the [obs, ncells] mid-tick
@@ -102,12 +114,17 @@ def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
     need_samples = needs_samples(ttarget)
     flat_pos, lanes = _expand_input_lanes(in_pos)
     expand = lanes != list(range(len(flat_pos)))
-    from substrates.nervous.io_placement import terminal_node_sets
-    terminal_inputs, terminal_outputs = terminal_node_sets(
-        ttarget, in_pos, {'watch': list(watch_cells)})
+    if source_nodes is None and sink_nodes is None:
+        from substrates.nervous.io_placement import terminal_node_sets
+        terminal_inputs, terminal_outputs = terminal_node_sets(
+            ttarget, in_pos, {'watch': list(watch_cells)})
+    else:
+        terminal_inputs = set(source_nodes or ())
+        terminal_outputs = set(sink_nodes or ())
     sim = AsyncLutSim(
         grid, config=getattr(ttarget, 'lut_config', None),
-        input_nodes=terminal_inputs, output_nodes=terminal_outputs)
+        input_nodes=terminal_inputs, output_nodes=terminal_outputs,
+        external_inputs=external_inputs)
     trial_B, trial_events, trial_intervals, overflow = [], [], [], False
     first = True
     for tr in ttarget.trials:
@@ -135,17 +152,20 @@ def _run_lut_trials(grid, in_pos, ttarget, watch_cells):
     return sim, trial_B, trial_events, trial_intervals, overflow
 
 
-def place_outputs_by_trace(grid, in_pos, ttarget):
-    """{role: cell}, traces — each role read at the live non-input cell nearest
-    its terminal whose trace best matches the expectation across all trials
-    (terminal-distance tie-break), exactly like the nervous backend.
+def place_outputs_by_trace(grid, in_pos, ttarget, source_nodes=None,
+                           external_inputs=None):
+    """Globally assign roles to distinct mature non-input cells.
+
+    Every candidate is scored across all trials and a joint injective assignment
+    maximizes total role score, matching the current Nervous/FNV probe rule.
 
     The dynamics are the asynchronous engine (substrates.lut.pulse.AsyncLutSim):
     trace/persistence modes score the mid-tick sample matrix (a column slice
     per candidate cell — no per-tick dicts), while event/cadence modes read
     the wires' raw continuous leading-edge timestamps, exactly as the nervous
     backend does."""
-    in_set = set(in_pos)
+    from substrates.nervous.io_placement import flat_inputs
+    in_set = set(flat_inputs(in_pos))
     out_pos = {t.role: None for t in ttarget.outputs}
     traces  = TemporalTraces()
     # LUT holds a level (a latch), it does not ring like the nervous net — so a
@@ -153,69 +173,77 @@ def place_outputs_by_trace(grid, in_pos, ttarget):
     # sparse 2-3 tick burst under the nervous net's ±1 ring tolerance. Mark these
     # traces strict (hold_tol=0) so scoring + placement demand the full hold.
     traces.hold_tol = 0
-    if len(grid) <= len(in_set):
+    if len(grid) <= len(in_set.intersection(grid)):
         return out_pos, traces
-    relations = set(contract_relations(ttarget))
-    cands_by_role = {term.role: _local_output_candidates(grid, in_set, term)
-                     for term in ttarget.outputs}
-    watch = sorted(set().union(*cands_by_role.values()))
-    sim, trial_B, trial_events, trial_intervals, overflow = _run_lut_trials(
-        grid, in_pos, ttarget, watch)
+    watch = tuple(sorted(cell for cell in grid if cell not in in_set))
+    if source_nodes is None:
+        sim, trial_B, trial_events, trial_intervals, overflow = \
+            _run_lut_trials(grid, in_pos, ttarget, watch)
+    else:
+        sim, trial_B, trial_events, trial_intervals, overflow = \
+            _run_lut_trials(
+                grid, in_pos, ttarget, watch, source_nodes=source_nodes,
+                sink_nodes=set(), external_inputs=external_inputs)
     traces.overflow = overflow
     cidx = sim._cidx
     need_samples = needs_samples(ttarget)
-    used = set()
+    def cell_response(cell):
+        col = cidx[cell]
+        return tuple(
+            (
+                tuple(trial_B[index][:, col].tolist())
+                if need_samples else (),
+                tuple(trial_events[index].get(cell, ())),
+                tuple(tuple(pair)
+                      for pair in trial_intervals[index].get(cell, ())),
+            )
+            for index in range(len(ttarget.trials)))
+
+    candidates = behavior_representatives(
+        watch, cell_response, len(ttarget.outputs))
+    scores = {term.role: {} for term in ttarget.outputs}
     for term in ttarget.outputs:
-        best, best_key, best_aux = None, None, None
-        score_cache = {}
-        for c in cands_by_role[term.role]:
-            if c in used:
-                continue
-            col = cidx[c]
-            ctr, cevents, cintervals, cexp = [], [], [], []
-            for ti, trial in enumerate(ttarget.trials):
-                exp = trial.expected.get(term.role)
-                if exp is None:
+        for cell in candidates:
+            col = cidx[cell]
+            sampled, rises, intervals, expected = [], [], [], []
+            for trial_index, trial in enumerate(ttarget.trials):
+                role_expected = trial.expected.get(term.role)
+                if role_expected is None:
                     continue
-                ctr.append(trial_B[ti][:, col].tolist() if need_samples else [])
-                cevents.append(list(trial_events[ti].get(c, ())))
-                cintervals.append(list(trial_intervals[ti].get(c, ())))
-                cexp.append(exp)
-            if not ctr:
-                s, aux = 0.0, None
-            else:
-                signature = (
-                    tuple(tuple(seq) for seq in ctr),
-                    tuple(tuple(seq) for seq in cevents),
-                    tuple(tuple(tuple(pair) for pair in seq)
-                          for seq in cintervals))
-                cached = score_cache.get(signature)
-                s, aux = cached if cached is not None else (None, None)
-            if ctr and s is None:
-                s, aux = _score_output_candidate(
-                    ctr, cevents, cexp, term.role, ttarget, traces.overflow,
-                    tol=0, intervals=cintervals)        # LUT: strict hold
-            if ctr:
-                score_cache[signature] = (s, aux)
-            key = (-s, abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]), c)
-            if best_key is None or key < best_key:
-                best_key, best, best_aux = key, c, aux
-        if best is None:
-            break
-        used.add(best)
-        out_pos[term.role] = best
+                sampled.append(
+                    trial_B[trial_index][:, col].tolist()
+                    if need_samples else [])
+                rises.append(list(trial_events[trial_index].get(cell, ())))
+                intervals.append(list(
+                    trial_intervals[trial_index].get(cell, ())))
+                expected.append(role_expected)
+            scores[term.role][cell] = (
+                _score_output_candidate(
+                    sampled, rises, expected, term.role, ttarget,
+                    traces.overflow, tol=0, intervals=intervals)[0]
+                if sampled else 0.0)
+
+    assignment = best_distinct_assignment(
+        tuple(out_pos), candidates, scores)
+    if assignment is None:
+        return out_pos, traces
+    out_pos.update(assignment)
+    for term in ttarget.outputs:
+        best = out_pos[term.role]
         col = cidx[best]
-        traces[term.role]  = [trial_B[ti][:, col].tolist() if need_samples else []
-                              for ti in range(len(ttarget.trials))]
-        traces.events[term.role] = [list(trial_events[ti].get(best, ()))
-                                    for ti in range(len(ttarget.trials))]
+        traces[term.role] = [
+            trial_B[index][:, col].tolist() if need_samples else []
+            for index in range(len(ttarget.trials))]
+        traces.events[term.role] = [
+            list(trial_events[index].get(best, ()))
+            for index in range(len(ttarget.trials))]
         traces.intervals[term.role] = [
-            list(trial_intervals[ti].get(best, ()))
-            for ti in range(len(ttarget.trials))]
+            list(trial_intervals[index].get(best, ()))
+            for index in range(len(ttarget.trials))]
     return out_pos, traces
 
 
-def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
+def trace_fixed_outputs(grid, in_pos, out_pos, ttarget, source_nodes=None):
     """Run LUT trials at pre-selected output cells without validation search."""
     from substrates.nervous.io_placement import (output_groups, flat_outputs,
                                      merge_intervals)
@@ -224,8 +252,13 @@ def trace_fixed_outputs(grid, in_pos, out_pos, ttarget):
         return None
     need_samples = needs_samples(ttarget)
     watch = sorted(set(flat_outputs(out_pos)))
-    sim, trial_B, _, trial_intervals, overflow = _run_lut_trials(
-        grid, in_pos, ttarget, watch)
+    if source_nodes is None:
+        sim, trial_B, _, trial_intervals, overflow = _run_lut_trials(
+            grid, in_pos, ttarget, watch)
+    else:
+        sim, trial_B, _, trial_intervals, overflow = _run_lut_trials(
+            grid, in_pos, ttarget, watch, source_nodes=source_nodes,
+            sink_nodes=set())
     traces = TemporalTraces(overflow=overflow)
     traces.hold_tol = 0                        # LUT holds strictly (see place_outputs_by_trace)
     for role, cells in groups.items():
@@ -246,17 +279,28 @@ def prepare_lut(genome, ttarget):
     """Grow + place a genome for a temporal target.
 
     Returns ``(grid, out_pos, traces, in_pos)`` — ``in_pos`` is the driven input
-    cells (the target's seed pads under the default 'fixed' binding; the
-    genome's tag-chosen cells under an evolvable io_placement strategy, see
-    substrates/nervous/io_placement.py) — or None if the net is unusable.
+    sites (native evolved internal pads, native exterior drivers, legacy target
+    pads, or compatibility tag-selected cells) — or None if unusable.
 
-    Spatial genomes nucleate from their heritable input anchors. Tag-rank and
-    type-wiring genomes use one neutral centre because their I/O alleles do not
-    encode developmental coordinates."""
+    Native internal layouts and compatibility spatial genomes nucleate from
+    heritable input coordinates. Exterior mode and the tag/type compatibility
+    strategies use a neutral germline."""
     from substrates.nervous.io_placement import io_strategy, growth_seeds
     strategy = io_strategy(ttarget)
-    grid = grow_lut(genome, seeds=growth_seeds(
-                        ttarget, strategy, genome),
+    mode = lut_io_mode(ttarget)
+    if mode == 'exterior_edges':
+        seeds = lut_growth_seeds(genome, ttarget, strategy)
+        grid = grow_lut(genome, seeds=seeds,
+                        grid_size=ttarget.grid_size, iters=ttarget.iters)
+        return prepare_lut_grid(
+            genome, ttarget, grid, strategy=strategy)
+    evolved_layout = getattr(genome, 'input_layout', None) is not None
+    in_pos = lut_input_positions(genome, ttarget.inputs)
+    if evolved_layout and len(in_pos) != ttarget.n_inputs:
+        return None
+    seeds = in_pos if evolved_layout else growth_seeds(
+        ttarget, strategy, genome)
+    grid = grow_lut(genome, seeds=seeds,
                     grid_size=ttarget.grid_size, iters=ttarget.iters)
     return prepare_lut_grid(genome, ttarget, grid, strategy=strategy)
 
@@ -272,6 +316,33 @@ def prepare_lut_grid(genome, ttarget, grid, strategy=None,
         io_strategy, bind_io, binding_progress, record_binding_progress)
     if strategy is None:
         strategy = io_strategy(ttarget)
+    if lut_io_mode(ttarget) == 'exterior_edges':
+        in_pos, external_inputs = lut_exterior_inputs(
+            genome, grid, ttarget.n_inputs)
+        if (len(in_pos) != ttarget.n_inputs
+                or len(grid) < len(ttarget.outputs)):
+            return None
+        out_pos, traces = place_outputs_by_trace(
+            grid, in_pos, ttarget, source_nodes=set(),
+            external_inputs=external_inputs)
+        if any(out_pos[terminal.role] is None
+               for terminal in ttarget.outputs):
+            return None
+        return grid, out_pos, traces, list(in_pos)
+    evolved_layout = getattr(genome, 'input_layout', None) is not None
+    if evolved_layout:
+        in_pos = lut_input_positions(genome, ttarget.inputs)
+        if (len(in_pos) != ttarget.n_inputs
+                or any(cell not in grid for cell in in_pos)
+                or len(grid) <= len(in_pos)):
+            return None
+        source_nodes = set(in_pos)
+        out_pos, traces = place_outputs_by_trace(
+            grid, in_pos, ttarget, source_nodes=source_nodes)
+        if any(out_pos[terminal.role] is None
+               for terminal in ttarget.outputs):
+            return None
+        return grid, out_pos, traces, list(in_pos)
     node_types = None
     if strategy != 'fixed':
         from .lut import cell_io_tags
@@ -312,7 +383,8 @@ def score_lut_temporal(genome, ttarget):
     return score_contract(prep[2], ttarget)[0]
 
 
-def _place_outputs_combinational(grid, target):
+def _place_outputs_combinational(grid, target, in_pos=None, source_nodes=None,
+                                 external_inputs=None):
     """{role: cell|None} — where each combinational output is read.
 
     Prefers the FITTED placement the scorer uses (the cell that best computes
@@ -320,14 +392,19 @@ def _place_outputs_combinational(grid, target):
     interactive playback, truth-table report — reads the same cell that decides
     fitness. Falls back to nearest-cell proximity when there is no truth table
     to fit against or the fit cannot fill every role."""
-    if getattr(target, 'cases', None) and len(grid) > target.n_inputs:
+    from substrates.nervous.io_placement import flat_inputs
+    actual_inputs = target.inputs if in_pos is None else in_pos
+    internal_inputs = set(flat_inputs(actual_inputs)).intersection(grid)
+    if getattr(target, 'cases', None) and len(grid) > len(internal_inputs):
         try:
-            fitted, _ = _fit_combinational_outputs(grid, target)
+            fitted, _ = _fit_combinational_outputs(
+                grid, target, in_pos=in_pos, source_nodes=source_nodes,
+                external_inputs=external_inputs)
             if all(fitted.get(t.role) is not None for t in target.outputs):
                 return fitted
         except Exception:
             pass
-    in_set    = set(target.inputs)
+    in_set = set(flat_inputs(actual_inputs))
     non_input = [p for p in sorted(grid) if p not in in_set]
     out_pos, used = {}, set()
     for term in target.outputs:
@@ -391,6 +468,40 @@ def _steady_duty(seq):
             reps = length // p                       # whole periods only
             return sum(seq[-reps * p:]) / (reps * p)
     return sum(seq) / n
+
+
+def _steady_duties(matrix):
+    """Vectorized :func:`_steady_duty` for every column of a sample matrix."""
+    import numpy as np
+    values = np.asarray(matrix)
+    if values.ndim != 2:
+        raise ValueError('steady-duty samples must be a 2-D matrix')
+    n, count = values.shape
+    if n == 0:
+        return np.zeros(count, dtype=float)
+    result = values.mean(axis=0, dtype=float)
+    unresolved = np.ones(count, dtype=bool)
+    for period in range(1, n // 2 + 1):
+        equal = values[period:] == values[:-period]
+        reversed_false = ~equal[::-1]
+        has_false = reversed_false.any(axis=0)
+        trailing = np.where(
+            has_false, reversed_false.argmax(axis=0), equal.shape[0])
+        eligible = unresolved & (
+            trailing >= max(3 * period, (n - period + 1) // 2))
+        if not eligible.any():
+            continue
+        # The scalar rule averages whole periods only. Group columns by the
+        # accepted suffix length so each group remains one NumPy reduction.
+        whole = (trailing // period) * period
+        for length in np.unique(whole[eligible]):
+            columns = eligible & (whole == length)
+            result[columns] = values[-int(length):, columns].mean(
+                axis=0, dtype=float)
+        unresolved[eligible] = False
+        if not unresolved.any():
+            break
+    return result
 # Combinational inputs are presented as PULSES, not a level held from t=0. Each
 # trial gives the active inputs a common rising edge after a random delay (so the
 # case's onset is one clean coincident edge) and a random per-line hold width,
@@ -431,7 +542,8 @@ def _combinational_schedule(target, n_trials=N_COMB_TRIALS):
 
 
 def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
-                     watch_groups=()):
+                     watch_groups=(), source_nodes=None,
+                     external_inputs=None):
     """Average, over the schedule's pulse trials, each live non-input cell's
     steady duty read during the held window — {cell: mean duty}.
 
@@ -443,20 +555,34 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
     the vectorised ``run_bits`` matrix so the whole-grid read is not per-tick
     Python.
 
-    ``in_pos`` overrides the driven input cells (the evolvable io_placement
-    binding — may carry per-input attachment groups); None keeps the target's
-    seed pads — the legacy default."""
+    ``in_pos`` overrides the driven input cells (the native or compatibility
+    binding and possibly per-input attachment groups); None keeps the target's
+    legacy pads. ``external_inputs`` maps each outside bus tap to the one
+    perimeter cell/direction it drives."""
     lead, measure = _comb_timing(target.grid_size)
     in_pos  = list(target.inputs) if in_pos is None else list(in_pos)
     flat_pos, lanes = _expand_input_lanes(in_pos)
     in_set  = set(flat_pos)
-    from substrates.nervous.io_placement import terminal_node_sets
-    terminal_inputs, terminal_outputs = terminal_node_sets(
-        target, in_pos,
-        {index: list(group) for index, group in enumerate(watch_groups)})
+    if source_nodes is None:
+        from substrates.nervous.io_placement import terminal_node_sets
+        terminal_inputs, terminal_outputs = terminal_node_sets(
+            target, in_pos,
+            {index: list(group) for index, group in enumerate(watch_groups)})
+    else:
+        terminal_inputs = set(source_nodes)
+        terminal_outputs = set()
     active  = [i for i, b in enumerate(in_bits) if b]
     totals  = None
-    for delay, widths in schedule:
+    sim = AsyncLutSim(
+        grid, input_nodes=terminal_inputs,
+        output_nodes=terminal_outputs,
+        external_inputs=external_inputs)
+    for trial_index, (delay, widths) in enumerate(schedule):
+        if trial_index:
+            # Grid topology, LUT columns and terminal masks are identical for
+            # every timing replicate. Reset only dynamic state instead of
+            # rebuilding those arrays and neighbour-index columns each time.
+            sim.reset()
         # Read the LAST ``measure`` ticks the full pattern is held, so the output
         # has the maximum settling time (>= lead, since widths >= lead+measure)
         # before it is sampled and the input-arrival transient has cleared.
@@ -472,13 +598,11 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
                           else 0)
                          for k in range(len(flat_pos)))
                    for t in range(hi)]
-        sim = AsyncLutSim(
-            grid, input_nodes=terminal_inputs,
-            output_nodes=terminal_outputs)
         levels = sim.run_bits(streams, flat_pos, hi)
         window = levels[lo:hi]
         cells  = sim._cells
-        duties = {cells[j]: _steady_duty(window[:, j].tolist())
+        column_duties = _steady_duties(window)
+        duties = {cells[j]: float(column_duties[j])
                   for j in range(len(cells)) if cells[j] not in in_set}
         # A multi-site output is one physical wired-OR bus, so score the union
         # waveform rather than cherry-picking or averaging its member cells.
@@ -498,6 +622,102 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
     return {c: v / n for c, v in (totals or {}).items()}
 
 
+def _all_case_duties(grid, target, case_inputs, schedule, in_pos=None,
+                     watch_groups=(), source_nodes=None,
+                     external_inputs=None):
+    """Batched equivalent of one :func:`_all_cell_duties` call per case.
+
+    Truth-table cases and timing replicates are independent power-on trials
+    with identical topology.  Running them as the leading NumPy dimension
+    removes thousands of tiny whole-grid operations on hard arithmetic targets
+    while preserving every pulse width, settling window and periodic-duty
+    calculation.
+    """
+    import numpy as np
+    lead, measure = _comb_timing(target.grid_size)
+    in_pos = list(target.inputs) if in_pos is None else list(in_pos)
+    flat_pos, lanes = _expand_input_lanes(in_pos)
+    in_set = set(flat_pos)
+    watch_groups = tuple(tuple(group) for group in watch_groups)
+    if source_nodes is None:
+        from substrates.nervous.io_placement import terminal_node_sets
+        terminal_inputs, terminal_outputs = terminal_node_sets(
+            target, in_pos,
+            {index: list(group)
+             for index, group in enumerate(watch_groups)})
+    else:
+        terminal_inputs = set(source_nodes)
+        terminal_outputs = set()
+    cases = tuple(tuple(bits) for bits in case_inputs)
+    schedule = tuple(schedule)
+    if not cases or not schedule:
+        return [{} for _ in cases]
+
+    records = []
+    max_hi = 0
+    for case_index, in_bits in enumerate(cases):
+        active = [index for index, bit in enumerate(in_bits) if bit]
+        for trial_index, (delay, widths) in enumerate(schedule):
+            if active:
+                hi = delay + min(widths[index] for index in active)
+                lo = max(delay + lead, hi - measure)
+            else:
+                lo, hi = delay + lead, delay + lead + measure
+            records.append((case_index, trial_index, int(lo), int(hi)))
+            max_hi = max(max_hi, int(hi))
+
+    streams = np.zeros(
+        (len(records), max_hi, len(flat_pos)), dtype=np.uint8)
+    for record_index, (case_index, trial_index, _lo, _hi) in enumerate(records):
+        delay, widths = schedule[trial_index]
+        bits = cases[case_index]
+        for attachment, lane in enumerate(lanes):
+            if bits[lane]:
+                streams[
+                    record_index,
+                    int(delay):int(delay + widths[lane]),
+                    attachment,
+                ] = 1
+
+    sim = AsyncLutSim(
+        grid, input_nodes=terminal_inputs,
+        output_nodes=terminal_outputs,
+        external_inputs=external_inputs)
+    levels = sim.run_bits_batch_lattice(streams, flat_pos)
+    starts = np.asarray([record[2] for record in records], dtype=np.intp)
+    lengths = np.asarray(
+        [record[3] - record[2] for record in records], dtype=np.intp)
+    if not np.all(lengths == measure):
+        raise ValueError('combinational duty windows must have fixed length')
+    rows = starts[:, None] + np.arange(measure, dtype=np.intp)[None, :]
+    windows = levels[np.arange(len(records))[:, None], rows]
+
+    # _steady_duties treats columns independently. Flatten trial and cell into
+    # one column axis, then restore [case, timing trial, cell].
+    count = len(sim._cells)
+    steady = _steady_duties(
+        windows.transpose(1, 0, 2).reshape(measure, -1)
+    ).reshape(len(cases), len(schedule), count).mean(axis=1)
+    duty_by_case = [
+        {cell: float(steady[case_index, column])
+         for column, cell in enumerate(sim._cells) if cell not in in_set}
+        for case_index in range(len(cases))
+    ]
+
+    for group in watch_groups:
+        columns = [sim._cidx[cell] for cell in group
+                   if cell in sim._cidx and cell not in in_set]
+        if len(columns) != len(group) or not columns:
+            continue
+        group_windows = windows[:, :, columns].max(axis=2)
+        group_duties = _steady_duties(
+            group_windows.T
+        ).reshape(len(cases), len(schedule)).mean(axis=1)
+        for case_index, duty in enumerate(group_duties):
+            duty_by_case[case_index][group] = float(duty)
+    return duty_by_case
+
+
 def _balanced_match(duties, expected):
     """Balanced per-level match of one cell's per-case duty to an expected bit
     vector — the single-output form of the contract's logic aggregation, used
@@ -510,42 +730,48 @@ def _balanced_match(duties, expected):
     return sum(parts) / len(parts) if parts else 0.0
 
 
-def _fit_combinational_outputs(grid, target):
-    """(out_pos, duty_by_case) — assign each output role to the live cell whose
-    per-case duty best computes that role's truth-table column.
+def _fit_combinational_outputs(grid, target, in_pos=None, source_nodes=None,
+                               external_inputs=None):
+    """Globally assign output roles to distinct cells from per-case duty.
 
     Output identity is a FITTED parameter, exactly as on the temporal path
     (``place_outputs_by_trace``): rather than reading a cell chosen by mere
     proximity to the terminal, the array is treated as a POOL of candidate
-    functions and each role reads the cell that best implements it — its whole
-    point is lookup. One cell is fixed per role across every case (never a
-    different cell per case), so a full score means a single grown cell really
-    computes the function, not a cherry-picked phase. ``duty_by_case[i][cell]``
-    is the phase-invariant steady duty, so a settled cell contributes its exact
-    bit and a cycling cell the fraction of its period it is correct."""
+    functions. One distinct cell is fixed per role across every case (never a
+    different cell per case), and the joint assignment maximizes total score so
+    a greedy early role cannot consume the only strong candidate for a later
+    one. ``duty_by_case[i][cell]`` is phase-invariant steady duty: a settled
+    cell contributes its exact bit and a cycling cell the fraction of its
+    period it is correct."""
     schedule = _combinational_schedule(target)   # one shared pulse battery
-    duty_by_case = [_all_cell_duties(grid, target, in_bits, schedule)
-                    for in_bits, _ in target.cases]
+    duty_by_case = _all_case_duties(
+        grid, target, [in_bits for in_bits, _ in target.cases], schedule,
+        in_pos=in_pos, source_nodes=source_nodes,
+        external_inputs=external_inputs)
     cells = list(duty_by_case[0]) if duty_by_case else []
-    out_pos, used = {}, set()
+    candidates = behavior_representatives(
+        cells,
+        lambda cell: tuple(case.get(cell, 0.0) for case in duty_by_case),
+        len(target.outputs))
+    out_pos = {term.role: None for term in target.outputs}
+    scores = {term.role: {} for term in target.outputs}
     for oi, term in enumerate(target.outputs):
         expected = [out_bits[oi] for _, out_bits in target.cases]
-        free = [c for c in cells if c not in used]
-        if not free:
-            out_pos[term.role] = None
-            continue
-        best = max(free, key=lambda c: (
-            _balanced_match([duty_by_case[i][c] for i in range(len(target.cases))],
-                            expected),
-            -(abs(c[0] - term.pos[0]) + abs(c[1] - term.pos[1]))))
-        used.add(best)
-        out_pos[term.role] = best
+        for cell in candidates:
+            scores[term.role][cell] = _balanced_match(
+                [duty_by_case[index][cell]
+                 for index in range(len(target.cases))],
+                expected)
+    assignment = best_distinct_assignment(
+        tuple(out_pos), candidates, scores)
+    if assignment is not None:
+        out_pos.update(assignment)
     return out_pos, duty_by_case
 
 
 def score_lut_combinational(genome, target):
-    """Hold each input pattern, let the array settle, and read the output at the
-    fitted cell that best computes each role (see _fit_combinational_outputs).
+    """Hold each input pattern, let the array settle, and read globally fitted
+    distinct cells for the output roles (see _fit_combinational_outputs).
     A settled cell scores its exact bit; a cycling cell scores the fraction of
     its period it is correct.
 
@@ -557,8 +783,33 @@ def score_lut_combinational(genome, target):
         io_strategy, bind_io, growth_seeds, binding_progress,
         record_binding_progress)
     strategy = io_strategy(target)
-    grid = grow_lut(genome, seeds=growth_seeds(
-                        target, strategy, genome),
+    mode = lut_io_mode(target)
+    if mode == 'exterior_edges':
+        grid = grow_lut(
+            genome, seeds=lut_growth_seeds(genome, target, strategy),
+            grid_size=target.grid_size, iters=target.iters)
+        in_pos, external_inputs = lut_exterior_inputs(
+            genome, grid, target.n_inputs)
+        if (len(in_pos) != target.n_inputs or not target.cases
+                or not target.outputs):
+            return 0.0
+        out_pos, duty_by_case = _fit_combinational_outputs(
+            grid, target, in_pos=in_pos, source_nodes=set(),
+            external_inputs=external_inputs)
+        if any(out_pos[term.role] is None for term in target.outputs):
+            return 0.0
+        observations = [
+            [duty_by_case[index][out_pos[term.role]]
+             for term in target.outputs]
+            for index in range(len(target.cases))]
+        return score_contract(observations, target)[0]
+    evolved_layout = getattr(genome, 'input_layout', None) is not None
+    in_pos = lut_input_positions(genome, target.inputs)
+    if evolved_layout and len(in_pos) != target.n_inputs:
+        return 0.0
+    seeds = in_pos if evolved_layout else growth_seeds(
+        target, strategy, genome)
+    grid = grow_lut(genome, seeds=seeds,
                     grid_size=target.grid_size, iters=target.iters)
     node_types = None
     if strategy != 'fixed':
@@ -575,6 +826,20 @@ def score_lut_combinational(genome, target):
     if len(target.cases) == 0 or len(target.outputs) == 0:
         return 0.0
 
+    if evolved_layout:
+        if any(cell not in grid for cell in in_pos):
+            return 0.0
+        source_nodes = set(in_pos)
+        out_pos, duty_by_case = _fit_combinational_outputs(
+            grid, target, in_pos=in_pos, source_nodes=source_nodes)
+        if any(out_pos[term.role] is None for term in target.outputs):
+            return 0.0
+        observations = [
+            [duty_by_case[index][out_pos[term.role]]
+             for term in target.outputs]
+            for index in range(len(target.cases))]
+        return score_contract(observations, target)[0]
+
     if strategy != 'fixed':
         from substrates.nervous.io_placement import output_groups
         bound = bind_io(genome, grid, target, strategy,
@@ -584,11 +849,9 @@ def score_lut_combinational(genome, target):
         in_pos, out_pos = bound
         out_groups = output_groups(out_pos)
         schedule = _combinational_schedule(target)
-        duty_by_case = [
-            _all_cell_duties(
-                grid, target, in_bits, schedule, in_pos=in_pos,
-                watch_groups=out_groups.values())
-            for in_bits, _ in target.cases]
+        duty_by_case = _all_case_duties(
+            grid, target, [in_bits for in_bits, _ in target.cases], schedule,
+            in_pos=in_pos, watch_groups=out_groups.values())
         # A bound output that is also a driven input has no duty entry (inputs
         # are excluded from the read); such a binding simply scores 0.
         if any(tuple(out_groups[t.role]) not in duty_by_case[0]
@@ -614,18 +877,54 @@ def lut_case_outputs(genome, target):
     array's response. The LUT analogue of substrates.nervous.nervous_case_outputs."""
     from substrates.nervous.io_placement import io_strategy, bind_io, growth_seeds
     strategy = io_strategy(target)
-    grid = grow_lut(genome, seeds=growth_seeds(
-                        target, strategy, genome),
+    exterior = lut_io_mode(target) == 'exterior_edges'
+    evolved_layout = (
+        not exterior and getattr(genome, 'input_layout', None) is not None)
+    if exterior:
+        seeds = lut_growth_seeds(genome, target, strategy)
+        in_pos = ()
+    else:
+        in_pos = lut_input_positions(genome, target.inputs)
+        if evolved_layout and len(in_pos) != target.n_inputs:
+            return {}, {term.role: None for term in target.outputs}, []
+        seeds = in_pos if evolved_layout else growth_seeds(
+            target, strategy, genome)
+    grid = grow_lut(genome, seeds=seeds,
                     grid_size=target.grid_size, iters=target.iters)
+    external_inputs = None
+    if exterior:
+        in_pos, external_inputs = lut_exterior_inputs(
+            genome, grid, target.n_inputs)
+        if len(in_pos) != target.n_inputs:
+            return grid, {term.role: None for term in target.outputs}, []
     cases = []
-    if len(grid) <= target.n_inputs or not target.cases or not target.outputs:
+    if ((not exterior and len(grid) <= target.n_inputs)
+            or (exterior and len(grid) < len(target.outputs))
+            or not target.cases or not target.outputs):
         return grid, {t.role: None for t in target.outputs}, cases
     # Read at the SAME fitted cells and pulsed trials the scorer uses, so the
     # report reflects the circuit's actual fitness. Node activity for the drawing
     # comes from one representative trial's held window; the reported duty is the
     # trial-averaged value the scorer uses, and a role counts 'settled' only when
     # that averaged duty is an exact 0/1 (a fixed point in every trial).
-    if strategy != 'fixed':
+    bound_outputs = (
+        strategy != 'fixed' and not evolved_layout and not exterior)
+    source_nodes = set() if exterior else (
+        set(in_pos) if evolved_layout else None)
+    if exterior:
+        out_pos, duty_by_case = _fit_combinational_outputs(
+            grid, target, in_pos=in_pos, source_nodes=source_nodes,
+            external_inputs=external_inputs)
+        if any(out_pos[term.role] is None for term in target.outputs):
+            return grid, out_pos, cases
+    elif evolved_layout:
+        if any(cell not in grid for cell in in_pos):
+            return grid, {term.role: None for term in target.outputs}, cases
+        out_pos, duty_by_case = _fit_combinational_outputs(
+            grid, target, in_pos=in_pos, source_nodes=source_nodes)
+        if any(out_pos[term.role] is None for term in target.outputs):
+            return grid, out_pos, cases
+    elif strategy != 'fixed':
         from .lut import cell_io_tags
         from substrates.nervous.io_placement import output_groups
         bound = bind_io(genome, grid, target, strategy,
@@ -635,11 +934,9 @@ def lut_case_outputs(genome, target):
         in_pos, out_pos = bound
         out_groups = output_groups(out_pos)
         schedule = _combinational_schedule(target)
-        duty_by_case = [
-            _all_cell_duties(
-                grid, target, in_bits, schedule, in_pos=in_pos,
-                watch_groups=out_groups.values())
-            for in_bits, _ in target.cases]
+        duty_by_case = _all_case_duties(
+            grid, target, [in_bits for in_bits, _ in target.cases], schedule,
+            in_pos=in_pos, watch_groups=out_groups.values())
         if any(tuple(out_groups[t.role]) not in duty_by_case[0]
                for t in target.outputs):
             return grid, out_pos, cases
@@ -663,17 +960,21 @@ def lut_case_outputs(genome, target):
                           else 0)
                          for k in range(len(flat_pos)))
                    for t in range(hi)]
-        from substrates.nervous.io_placement import terminal_node_sets
-        terminal_inputs, terminal_outputs = terminal_node_sets(
-            target, in_pos, out_pos)
+        if source_nodes is None:
+            from substrates.nervous.io_placement import terminal_node_sets
+            terminal_inputs, terminal_outputs = terminal_node_sets(
+                target, in_pos, out_pos)
+        else:
+            terminal_inputs, terminal_outputs = source_nodes, set()
         sim = AsyncLutSim(
             grid, input_nodes=terminal_inputs,
-            output_nodes=terminal_outputs)
+            output_nodes=terminal_outputs,
+            external_inputs=external_inputs)
         sim.run_bits(streams, flat_pos, hi)
         node_out = {c: (1 if sim.out[c] else 0) for c in grid}
         duty = {
             t.role: duty_by_case[ci][
-                tuple(out_groups[t.role]) if strategy != 'fixed'
+                tuple(out_groups[t.role]) if bound_outputs
                 else out_pos[t.role]]
             for t in target.outputs}
         acts = {r: (int(round(d)) if (d <= 1e-9 or d >= 1 - 1e-9) else None)
@@ -790,7 +1091,10 @@ def _evaluate_lut_selection_record(genome, target):
 
 
 def genome_signature(genome):
-    return (getattr(genome, 'seed_state', None),) + tuple(
+    layout = (
+        None if getattr(genome, 'input_layout', None) is None
+        else tuple(tuple(cell) for cell in genome.input_layout))
+    return (getattr(genome, 'seed_state', None), layout) + tuple(
         (c.tag, c.split, getattr(c, 'telomere', 0), getattr(c, 'wiring', False),
          tuple((g.ctx_n, g.ctx_e, g.ctx_s, g.ctx_w, g.self_in, g.self_out,
                 getattr(g, 'tag', 0), getattr(g, 'io_selector', 0),
@@ -887,7 +1191,10 @@ def _recombine_gene_fields(gene_a, gene_b, fields=None):
 
 def _recombination_signature(genome):
     """Alleles crossover can actually exchange (not slot/object identity)."""
-    return (getattr(genome, 'seed_state', None),) + tuple(
+    layout = (
+        None if getattr(genome, 'input_layout', None) is None
+        else tuple(tuple(cell) for cell in genome.input_layout))
+    return (getattr(genome, 'seed_state', None), layout) + tuple(
         (getattr(chromosome, 'wiring', False),
          tuple((*(getattr(gene, field) for field in _GENE_FIELDS),
                 getattr(gene, 'tag', 0), getattr(gene, 'io_selector', 0),
@@ -974,6 +1281,36 @@ _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
 # (evolve_io) — off by default, so the ordinary mutation stream is unchanged.
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 IO_MUTATION_PROB = 0.20
+
+
+def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
+    """Move one non-anchor source pad by one cardinal square-lattice edge."""
+    layout = getattr(genome, 'input_layout', None)
+    if layout is None or len(layout) < 2:
+        return False
+    try:
+        sites = [tuple(map(int, cell)) for cell in layout]
+    except (TypeError, ValueError):
+        return False
+    domain = set(input_layout_domain(
+        input_layout_radius(max_telomere, len(sites))))
+    occupied = set(sites)
+    indices = list(range(1, len(sites)))
+    random.shuffle(indices)
+    for index in indices:
+        x, y = sites[index]
+        options = [
+            (x + dx, y + dy)
+            for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0))
+            if (x + dx, y + dy) in domain
+            and (x + dx, y + dy) not in occupied
+        ]
+        if not options:
+            continue
+        sites[index] = random.choice(options)
+        genome.input_layout = tuple(sites)
+        return True
+    return False
 
 
 def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
@@ -1095,6 +1432,10 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
         else:
             for _ in range(max(1, int(io_mutations))):
                 _mutate_io_tag(g, io_placement=io_placement)
+    if (getattr(g, 'input_layout', None) is not None
+            and len(g.input_layout) > 1
+            and random.random() < IO_MUTATION_PROB):
+        mutate_input_layout(g, max_telomere)
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
     return g
@@ -1103,6 +1444,14 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
 def crossover_lut(pa, pb):
     """Tag-matched hierarchical crossover, including one-rule chromosomes."""
     ca, cb = clone_genome(pa), clone_genome(pb)
+    layout_a = getattr(pa, 'input_layout', None)
+    layout_b = getattr(pb, 'input_layout', None)
+    if (layout_a is not None and layout_b is not None
+            and len(layout_a) == len(layout_b) and random.random() < 0.5):
+        # The pad arrangement is one co-adapted physical module. Exchange it
+        # whole; per-coordinate crossover could manufacture collisions.
+        ca.input_layout = tuple(tuple(cell) for cell in layout_b)
+        cb.input_layout = tuple(tuple(cell) for cell in layout_a)
     used_b = set()
     for i, chrom_a in enumerate(ca.chromosomes):
         best_j, best_dist = None, float("inf")
@@ -1193,7 +1542,13 @@ def compact_genome(genome, seeds, grid_size=7, iters=30):
     return Genome(
         chromosomes=new_chroms, tag=genome.tag,
         seed_state=getattr(genome, 'seed_state', None),
-        provenance=getattr(genome, 'provenance', ''))
+        provenance=getattr(genome, 'provenance', ''),
+        input_layout=(
+            None if getattr(genome, 'input_layout', None) is None
+            else tuple(tuple(cell) for cell in genome.input_layout)),
+        edge_input_layout=(
+            None if getattr(genome, 'edge_input_layout', None) is None
+            else tuple(int(value) for value in genome.edge_input_layout)))
 
 
 # ── ontogeny seeding is THE seed path (see substrates/lut/ontogeny.py) ──────────────────
@@ -1519,7 +1874,19 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                         max(1, kinds.count(2) // 2))
                 return genome
         else:
-            make_genome = lambda: make_seed_genome(chromosome_count or 2)
+            reference_layout = (
+                getattr(population[0], 'input_layout', None)
+                if population else None)
+            if reference_layout is None:
+                make_genome = lambda: make_seed_genome(chromosome_count or 2)
+            else:
+                def make_genome():
+                    genome = make_seed_genome(chromosome_count or 2)
+                    genome.input_layout = random_input_layout(
+                        len(reference_layout),
+                        (MAX_TELOMERE if ga_config is None
+                         else ga_config.max_telomere))
+                    return genome
     n_elite = elite_count if elite_count is not None else int(pop * ELITE_FRAC)
     n_elite = max(0, min(n_elite, pop))
     n_imm   = min(int(round(pop * immigrant_fraction)), pop)
@@ -1651,6 +2018,10 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                seed=None, escape=None, ga_config=None):
+    if ga_config is not None:
+        setattr(
+            target, 'lut_io_mode',
+            getattr(ga_config, 'lut_io_mode', 'source_pads'))
     if seed is not None:
         random.seed(seed)
         # _ONTO_POOL survives for the life of the PROCESS, so without this a
@@ -1700,7 +2071,14 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                     genome, grid, target, tags=tags)
             return genome
     else:
-        make_genome = lambda: make_seed_genome(n_chroms)  # ontogeny biomorph seeds
+        def make_genome():
+            genome = make_seed_genome(n_chroms)
+            if lut_io_mode(target) != 'exterior_edges':
+                genome.input_layout = random_input_layout(
+                    target.n_inputs,
+                    (MAX_TELOMERE if ga_config is None
+                     else ga_config.max_telomere))
+            return genome
     # Escape mechanisms, resolved and attached exactly as the desktop
     # controller does it, so this headless driver and the app agree.
     import dataclasses as _dc

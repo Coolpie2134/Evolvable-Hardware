@@ -25,20 +25,27 @@ class LutPlayer(AsyncPlayer):
 
     def __init__(self, grid, horizon=DEFAULT_HORIZON, dt=DEFAULT_DT,
                  pulse_width=None, max_events=None, config=None,
-                 inputs=None, outputs=None):
+                 inputs=None, outputs=None, input_nodes=None,
+                 external_inputs=None):
         self.grid       = grid
         self.config     = config
         self.max_events = max_events
         self.inputs     = list(inputs or ())
         self.outputs    = list(outputs or ())
+        self.input_nodes = list(
+            self.inputs if input_nodes is None else input_nodes)
+        self.external_inputs = dict(external_inputs or {})
         super().__init__(horizon=horizon, dt=dt, pulse_width=pulse_width,
                          default_width=TICK)
 
     def _make_sim(self):
         return AsyncLutSim(self.grid, config=self.config,
                            max_events=self.max_events,
-                           input_nodes=self.inputs,
-                           output_nodes=self.outputs)
+                           input_nodes=(
+                               () if self.external_inputs
+                               else self.input_nodes),
+                           output_nodes=self.outputs,
+                           external_inputs=self.external_inputs)
 
     def nibbles(self):
         """{cell: 4-bit N/S/E/W nibble} at the cursor — the emission map the

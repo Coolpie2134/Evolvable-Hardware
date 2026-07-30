@@ -1,9 +1,11 @@
-"""Input/output placement shared by the developmental substrates.
+"""Compatibility input/output placement for SNN and programmatic LUT studies.
 
-The legacy ``fixed`` mode grows from geometrically declared input pads and fits
-outputs after simulation. Tag/type evolvable modes grow from one neutral centre
-and bind ports without looking at target traces. Spatial mode instead makes its
-input alleles the developmental germlines:
+Fresh Nervous/FNV runs use native evolved coordinate layouts plus fitted probes;
+the desktop LUT path uses its native internal-pad or exterior-edge mode. The
+strategies below remain for SNN, old documents, direct experiments, and
+programmatic LUT runs. Legacy ``fixed`` grows from geometrically declared pads.
+Tag/type modes grow from one neutral centre and bind ports without target
+traces; spatial mode makes its input alleles developmental germlines:
 
 ``terminal_nodes``
     Body genes carry a heritable ``io_kind`` allele: ordinary, input terminal,
@@ -1345,7 +1347,9 @@ def terminal_node_sets(target, in_pos, out_pos, genome=None):
     externally-driven terminal in the middle of the organism.
 
     A genome carrying an evolved ``input_layout`` therefore makes exactly its
-    pads sources. Other strategies return two empty sets, keeping every legacy
+    pads sources. Its fitted outputs are non-invasive probes, not sink
+    terminals, so they are checked for overlap but are not added to the sink
+    set. Other strategies return two empty sets, keeping every legacy
     simulation byte-for-byte on its original path — a fixed-input genome keeps
     the old wired-OR input semantics, so existing solutions do not silently
     change physics.
@@ -1353,10 +1357,10 @@ def terminal_node_sets(target, in_pos, out_pos, genome=None):
     pads = layout_pads(genome, target)
     if pads:
         sources = {tuple(cell) for cell in pads}
-        sinks = set(flat_outputs(out_pos))
-        if sources & sinks:
+        probes = set(flat_outputs(out_pos))
+        if sources & probes:
             raise ValueError('input pads and output probes must be distinct')
-        return sources, sinks
+        return sources, set()
     if io_strategy(target) != 'terminal_nodes':
         return set(), set()
     sources = set(flat_inputs(in_pos))

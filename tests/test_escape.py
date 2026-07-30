@@ -842,7 +842,10 @@ def test_lifespan_and_robustness_survive_a_real_evaluation_pass():
     for _ in range(5):
         genome = random_hex_genome(2)
         record = nv_ga._evaluate_nv_selection_record(genome, target)
-        fitness, cases, _progress, juvenile, robust = record
+        (fitness, cases, _progress, juvenile, robust,
+         topology, topology_score) = record
+        # Topology rides in the same record so a CACHE HIT restores it.
+        assert topology_score == topology.score >= 0.0
         assert 0.0 <= fitness <= 1.0
         assert len(cases) == expected
         assert 0.0 <= juvenile <= 1.0

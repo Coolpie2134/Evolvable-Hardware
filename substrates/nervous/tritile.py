@@ -13,7 +13,7 @@ Rather than re-derive the whole event engine, a tri tile is EXPANDED into three
 ordinary single-circuit sub-nodes and simulated on the unchanged PulseSim via
 its pre-resolved-``sources`` hook:
 
-    tile P, state = 12 bits = chanL | chanR<<4 | chanD<<8
+    tile P, state = 15 bits = chanL | chanR<<5 | chanD<<10
       sub-node (P,'L'): circuit driving P's L output, config = chanL
       sub-node (P,'R'): circuit driving P's R output, config = chanR
       sub-node (P,'D'): circuit driving P's D output, config = chanD
@@ -109,7 +109,7 @@ def back_dir(pos, d):
 def interpret_tri(grid, inputs):
     """Expand a grown tri-tile grid into a single-circuit graph.
 
-    ``grid`` = {tile: 12-bit state}; ``inputs`` = iterable of input-terminal tile
+    ``grid`` = {tile: 15-bit state}; ``inputs`` = iterable of input-terminal tile
     positions. Returns a dict with:
         nodes      — set of sub-node keys (x, y, d) with d in L/R/D or 'IN'
         routing    — {node: (e1, e2, i1, 'and')} (informational dirs + op)

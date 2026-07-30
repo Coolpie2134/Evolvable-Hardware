@@ -46,7 +46,8 @@ class _EventLIF:
     """
 
     def __init__(self, neurons, synapses, input_currents, input_events=None,
-                 input_pulses=None, sim_time=SIM_TIME, max_events=None):
+                 input_pulses=None, sim_time=SIM_TIME, max_events=None,
+                 record_segments=True):
         self.neurons = neurons
         self.n       = len(neurons)
         self.sim_time = float(sim_time)
@@ -70,6 +71,7 @@ class _EventLIF:
             None if max_events is None else max(1, int(max_events)))
         self.event_count = 0
         self.overflow = False
+        self.record_segments = bool(record_segments)
 
         self.input_ids = {i for i, nu in enumerate(neurons) if nu.is_input}
         self.outgoing = [[] for _ in range(self.n)]
@@ -93,7 +95,8 @@ class _EventLIF:
         # They let simulate_trace sample an event-driven run for the GUI without
         # reintroducing fixed-step dynamics.
         self.segments = []
-        self._record_segment()
+        if self.record_segments:
+            self._record_segment()
 
         for nid in input_pulses or ():
             if nid in self.input_ids:
@@ -263,13 +266,18 @@ class _EventLIF:
             while self.heap and abs(self.heap[0][0] - when) <= _EPS:
                 _, _, _, kind, nid, value = heapq.heappop(self.heap)
                 self._handle(kind, nid, value)
-            self._record_segment()
+            if self.record_segments:
+                self._record_segment()
         self._advance_to(self.sim_time)
-        self._record_segment()
+        if self.record_segments:
+            self._record_segment()
         return self
 
     def sample_voltage(self, times):
         """Sample the continuous run for display; this does not affect events."""
+        if not self.record_segments:
+            raise RuntimeError(
+                "voltage samples require record_segments=True")
         out = np.zeros((len(times), self.n), dtype=np.float32)
         seg_i = 0
         for row, when in enumerate(times):
@@ -290,11 +298,13 @@ class _EventLIF:
 
 
 def _run(neurons, synapses, input_currents, input_events=None,
-         input_pulses=None, sim_time=SIM_TIME, max_events=None):
+         input_pulses=None, sim_time=SIM_TIME, max_events=None,
+         record_segments=True):
     if not neurons:
         return None
     return _EventLIF(neurons, synapses, input_currents, input_events,
-                     input_pulses, sim_time, max_events).run()
+                     input_pulses, sim_time, max_events,
+                     record_segments=record_segments).run()
 
 
 def simulate(neurons, synapses, input_currents, sim_time=SIM_TIME):
@@ -308,7 +318,7 @@ def simulate(neurons, synapses, input_currents, sim_time=SIM_TIME):
     pulses = [nid for nid, current in (input_currents or {}).items()
               if current and 0 <= nid < len(neurons) and neurons[nid].is_input]
     run = _run(neurons, synapses, input_currents, input_pulses=pulses,
-               sim_time=sim_time)
+               sim_time=sim_time, record_segments=False)
     return {} if run is None else run.spikes
 
 
@@ -321,7 +331,7 @@ def simulate_events(neurons, synapses, input_events, sim_time=SIM_TIME):
     tables.
     """
     run = _run(neurons, synapses, {}, input_events=input_events,
-               sim_time=sim_time)
+               sim_time=sim_time, record_segments=False)
     return {} if run is None else run.spikes
 
 
@@ -338,7 +348,7 @@ def simulate_trace(neurons, synapses, input_currents, sim_time=SIM_TIME,
     pulses = [nid for nid, current in (input_currents or {}).items()
               if current and 0 <= nid < len(neurons) and neurons[nid].is_input]
     run = _run(neurons, synapses, input_currents, input_pulses=pulses,
-               sim_time=sim_time)
+               sim_time=sim_time, record_segments=True)
     if run is None:
         return (times, np.zeros((n_steps, 0), np.float32), {},
                 np.zeros((n_steps, 0), bool))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,6 +36,21 @@ class _Button:
 
     def config(self, **values):
         self.text = values.get('text', self.text)
+
+
+def test_app_keeps_fnv_interactive_tab_in_the_notebook():
+    class Notebook:
+        def __init__(self):
+            self.added = []
+
+        def add(self, frame):
+            self.added.append(frame)
+
+    app = App.__new__(App)
+    app._nb = Notebook()
+    app._interactive_frame = object()
+    App._show_interactive_tab(app)
+    assert app._nb.added == [app._interactive_frame]
 
 
 class _Parent:
@@ -358,6 +374,70 @@ def test_interactive_combinational_cases_load_fitness_pulses():
         starts = [lane[0][0] for lane, b in zip(tab._editor.pulses, in_bits) if b]
         assert all(s == starts[0] for s in starts), 'start edges not aligned'
         assert tab._case_var.value is None
+
+
+def test_interactive_fnv_cases_hold_inputs_for_its_genetic_settling_window():
+    from substrates.fnv.playback import functional_case_pulses
+    from substrates.snn.targets import get_target
+    from ui.interactive import InteractiveTab
+
+    target = get_target('AND')
+    tab = InteractiveTab.__new__(InteractiveTab)
+    tab._backend = 'fnv'
+    tab._in_pos = [(0, 0), (1, -1)]
+    tab._fnv_horizon = 14.0
+
+    for index, (bits, _expected) in enumerate(target.cases):
+        pulses = InteractiveTab._case_pulses(tab, target, index)
+        assert pulses == functional_case_pulses(
+            target, len(tab._in_pos), tab._fnv_horizon, index)
+        assert pulses == [
+            ([(0.0, tab._fnv_horizon)] if bit else [])
+            for bit in bits
+        ]
+
+
+def test_interactive_fnv_builds_and_draws_a_real_functional_player():
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from substrates.fnv.genome import random_functional_genome
+    from substrates.fnv.playback import (
+        FunctionalPlayer, prepare_functional_playback)
+    from substrates.snn.targets import get_target
+    from ui.interactive import InteractiveTab
+
+    target = get_target('AND')
+    random.seed(79)
+    playback = None
+    for _ in range(40):
+        genome = random_functional_genome(
+            2, max_telomere=3, n_inputs=target.n_inputs,
+            families=('LOGIC', 'DELAY'))
+        playback = prepare_functional_playback(genome, target)
+        if playback is not None:
+            break
+    assert playback is not None
+
+    tab = InteractiveTab.__new__(InteractiveTab)
+    (tab._grid, tab._in_pos, tab._out_pos,
+     tab._fnv_horizon) = playback
+    tab._backend = 'fnv'
+    tab._case_kind = 'cases'
+    tab._circuit = {'target': target}
+    tab._running = False
+    tab.fig = Figure(figsize=(6, 4))
+    tab.canvas = FigureCanvasAgg(tab.fig)
+    tab._status = type(
+        'Status', (), {'set': lambda self, value: setattr(self, 'value', value)})()
+
+    InteractiveTab._setup_async(tab, target)
+    assert isinstance(tab._player, FunctionalPlayer)
+    assert tab._player.horizon == tab._fnv_horizon
+    assert set(tab._player.inputs) == set(tab._in_pos)
+    assert set(tab._player.outputs) == set(tab._out_pos.values())
+    tab._player.step()
+    InteractiveTab._draw_async(tab)
+    assert 'output edges:' in tab._status.value
 
 
 def test_interactive_width_strip_clips_open_intervals_to_cursor():

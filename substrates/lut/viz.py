@@ -19,7 +19,8 @@ LUT"). This renderer shows exactly that:
     the paper's Fig. 14 "instantaneous digital state ... coloured in binary
     values red and green" — so the running dynamics can be watched tick by tick.
 
-Input seeds are ringed red (labelled A, B, …), outputs ringed green/labelled.
+Inputs are ringed red and labelled A, B, … (internal pads or every tap of an
+outside perimeter bus); fitted outputs are ringed green and labelled.
 """
 from __future__ import annotations
 import colorsys
@@ -64,18 +65,26 @@ def _wedges(x, y, r):
 
 
 def draw_lut_net(ax, grid, grid_size=None, activity=None, in_pos=None,
-                 out_pos=None, show_edges=True, title=None):
+                 out_pos=None, show_edges=True, title=None,
+                 external_inputs=None):
     """
     grid     : {(x,y): (Ln, Ls, Le, Lw)}  grown 4-LUT cell states
     activity : {(x,y): nibble}  4-bit N/S/E/W emission this tick — if given, the
                wedges show firing (green) / silent instead of LUT-state colour
-    in_pos   : list of input positions (labelled A, B, …)
+    in_pos   : input positions or per-logical-input groups (labelled A, B, …)
     out_pos  : {role: (x,y)} outputs (green-ringed, labelled)
     """
     in_pos  = in_pos or []
     out_pos = out_pos or {}
-    in_set  = set(in_pos)
-    from substrates.nervous.io_placement import output_groups
+    external_inputs = dict(external_inputs or {})
+    from substrates.nervous.io_placement import (
+        flat_inputs,
+        input_groups,
+        output_groups,
+    )
+    logical_inputs = input_groups(in_pos)
+    flat_in_pos = flat_inputs(logical_inputs)
+    in_set  = set(flat_in_pos)
     out_cells = {p: role for role, cells in output_groups(out_pos).items()
                  for p in cells}
     ax.clear()
@@ -109,17 +118,31 @@ def draw_lut_net(ax, grid, grid_size=None, activity=None, in_pos=None,
                      edgecolor=_SEED_EC if seed else _OUT_EC if outp else _CELL_EC,
                      lw=2.2 if (seed or outp) else 0.6, zorder=3))
 
-    for i, (x, y) in enumerate(in_pos):
-        if (x, y) in grid:
-            ax.text(x, y, chr(65 + i) if i < 26 else '*', ha='center', va='center',
-                    fontsize=8, color='#111', fontweight='bold', zorder=5,
-                    bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.7))
+    for source, (cell, _direction) in external_inputs.items():
+        ax.plot([source[0], cell[0]], [source[1], cell[1]],
+                color=_SEED_EC, lw=1.8, zorder=4)
+        ax.scatter(
+            [source[0]], [source[1]], s=80, marker='o',
+            facecolor='white', edgecolor=_SEED_EC, linewidth=2.0, zorder=5)
+    for i, group in enumerate(logical_inputs):
+        label = chr(65 + i) if i < 26 else '*'
+        for x, y in group:
+            if (x, y) in grid:
+                ax.text(x, y, label, ha='center', va='center',
+                        fontsize=8, color='#111', fontweight='bold', zorder=5,
+                        bbox=dict(boxstyle='round,pad=0.1', fc='white',
+                                  ec='none', alpha=0.7))
+            elif (x, y) in external_inputs:
+                ax.text(
+                    x, y, label, ha='center', va='center', fontsize=7,
+                    color='#111', fontweight='bold', zorder=6)
     for p, role in out_cells.items():
         ax.text(p[0], p[1], role[:2], ha='center', va='center', fontsize=7,
                 color='#0d5b1f', fontweight='bold', zorder=5,
                 bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.7))
 
-    xs = [x for (x, _) in grid]; ys = [y for (_, y) in grid]
+    xs = [x for (x, _) in grid] + [p[0] for p in flat_in_pos]
+    ys = [y for (_, y) in grid] + [p[1] for p in flat_in_pos]
     ax.set_xlim(min(xs) - 1, max(xs) + 1)
     ax.set_ylim(min(ys) - 1, max(ys) + 1)
     if title:

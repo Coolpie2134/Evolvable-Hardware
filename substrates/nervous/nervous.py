@@ -344,8 +344,8 @@ def _place_outputs(grid, target):
 def node_delays(genome, grid, config=None):
     """Per-cell delays for evolved-delay width-preserving transport, or None.
 
-    Delay is indexed by the same 5-bit routing state as width evolution. The
-    helper owns the model gate so uniform/evolved-width paths cannot
+    Delay is indexed by the same 5-bit routing state used by the retired
+    single-circuit timing profile. The helper owns the model gate so other paths cannot
     accidentally consume a dormant delay vector from a checkpoint.
     """
     if config is None or getattr(config, 'model', 'uniform') != 'pulse_delay':
@@ -433,14 +433,17 @@ def _input_levels(in_pos, in_bits):
     return levels
 
 
-def score_nervous(genome, target):
+def score_nervous(genome, target, *, _developed=None):
     from .scoring import score_contract
     from .io_placement import (growth_seeds, io_strategy, binding_progress,
                                record_binding_progress)
-    strategy = io_strategy(target)
-    grid = grow_nervous(genome, seeds=growth_seeds(
-                            target, strategy, genome),
-                        grid_size=target.grid_size, iters=target.iters)
+    if _developed is None:
+        strategy = io_strategy(target)
+        grid = grow_nervous(genome, seeds=growth_seeds(
+                                target, strategy, genome),
+                            grid_size=target.grid_size, iters=target.iters)
+    else:
+        grid, strategy = _developed
     if strategy in (
             'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
         record_binding_progress(

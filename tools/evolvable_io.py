@@ -1,14 +1,15 @@
 """
-tools/evolvable_io.py — A/B experiment: does EVOLVABLE I/O binding help?
+tools/evolvable_io.py — retained A/B experiment for legacy I/O bindings.
 
-By default the substrate wires I/O geometrically (inputs = seed pads in declared
-order; outputs = trace-fitted near their terminals). This experiment compares
-that 'fixed' baseline against the two evolvable strategies the request asked for:
+Current Nervous application runs use evolved coordinate pads plus global fitted
+probes and do not expose these strategies. This controlled direct-driver
+experiment compares the older fixed target-pad baseline against the four
+historical binding representations:
 
+  * terminal_nodes — body rules express one-way input/output terminal identity.
   * tag_rank       — attach ports to distinct highest-priority cells in order.
   * wiring_chromosome — chromosome three maps each port to a node type and one
                      ordinal instance in a stable shuffled list of matches.
-
   * spatial_chromosome: chromosome three maps each port to a normalised x/y
                      anchor. Inputs are developmental seeds; outputs claim the
                      nearest available living cell.
