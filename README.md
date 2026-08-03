@@ -36,16 +36,21 @@ A research project implementing **Edwards indirect encoding** to evolve grown ci
   independently selectable, while FNV also exposes per-output balanced
   accuracy, per-row joint correctness, and weakest-output accuracy to parent
   and survivor selection. Reported fitness and certification are unchanged.
-  Crossover transplants complete labelled physical branches instead of mixing
-  the fields of unrelated components.
+  Crossover transplants complete labelled dependency cones instead of mixing
+  the fields of unrelated components; parents with matching input geometry can
+  combine whole multi-branch functions while local collisions displace only
+  the overlapping dependency subtree.
 - **FNV labelled construction genome**: fresh FNV runs no longer use the
   homogeneous-medium nearest-context classifier. Every placement explicitly
   names stable source/output-port labels, a fixed catalogue component, and a
   branch-block label. Dependencies determine placement rather than list order;
   a collision suppresses only the conflicting placement and leaves unrelated
   branches intact. Mutation can extend or join live tips, alter a compatible
-  component, move/duplicate/delete a whole branch block, or move an input pad.
-  Crossover re-anchors and transplants a connected branch with new IDs. Fan-out
+  component, build short or long physical bridges, move/duplicate/delete a
+  whole branch block, or move an input pad. Crossover remaps stable IDs and
+  transplants a complete sink dependency cone when parent layouts match;
+  otherwise it re-anchors one compatible branch without moving the recipient's
+  co-adapted source pads. Fan-out
   remains physicalâ€”only source pads and real two-output components create
   multiple wires. Associative-v2 checkpoints still load under their original
   interpreter, while new runs use constructive v3.
@@ -117,9 +122,13 @@ source pads. Four separate backends interpret and evaluate the resulting grid:
   the target's external input pulse can.
 
   Mutation extends or joins live physical tips, changes compatible fixed
-  components, and reroutes, duplicates, or deletes complete connected branch
-  blocks. Transplantation remaps stable IDs and re-anchors only at a physically
-  compatible live frontier; collisions are never repaired. Abstract fan-out
+  components, constructs explicit DELAY-plus-LOGIC bridges across the empty
+  frontier, and reroutes, duplicates, or deletes complete connected branch
+  blocks. Plateau rescue samples bridge lengths across the available range and
+  may offer a bounded two-bridge cascade, so a neutral first route can be
+  extended without reading target answers. Transplantation remaps stable IDs;
+  matching-layout crossover inherits a complete dependency cone, with
+  different components at overlapping cells displaced locally. Abstract fan-out
   does not exist: multiple branches require a source pad or a fixed component
   with two output ports.
 
@@ -138,11 +147,12 @@ source pads. Four separate backends interpret and evaluate the resulting grid:
   Behavioral correctness dominates selection; FNV currently leaves the
   optional robustness and juvenile-development tiers inactive. Exact fitness
   ties are broken by a target-agnostic physical topology potential. The
-  mature directed wiring graph is traced outward from the source pads and gets
-  bounded credit for multi-input convergence and reachable feedback. Raw
-  reachable node/edge counts remain diagnostic but do not reward copying one
-  signal down an arbitrarily long chain. Disconnected bulk and unreachable
-  loops score nothing. This retains computational stepping stones without recognizing any target-specific
+  mature directed wiring graph is traced outward from the source pads and
+  ranks uncapped counts of distinct input convergence, real multi-input
+  junctions, reachable feedback, reachable edges, and reachable nodes. This
+  deliberately supplies no small-body preference: longer connected routes can
+  survive as neutral stepping stones, while disconnected bulk and unreachable
+  loops score nothing. It retains computational stepping stones without recognizing any target-specific
   Boolean or temporal behavior. Static reports separately show the circuit's
   nonconstant truth-signature repertoire as diagnostic telemetry; it never
   enters selection.
@@ -253,7 +263,7 @@ multiplier within the default eight-step growth bound.
   Multiple restrictions aggregate as half weighted mean plus half worst restriction: useful partial progress remains visible, but an easy restriction cannot hide a failed one, and fitness 1.0 requires every restriction to pass.
 - **Semantic period-stepper contract** (`commanded_cadence`): some behaviours have no single "correct" trace to match. A cadence controller must hold a regular output pulse rate and make it slower after each command. Every command-delimited dwell is checked for sustained regular cadence, and later dwells must have a strictly longer period. A fixed-rate oscillator scores **0** on the change term regardless of raw trace overlap.
 - **Describe a target as spike events** (`substrates.nervous.spike_target`): define a new temporal function directly from test cases — `spike_target(name, cases, T, n_inputs=…)` where each case is `(input_spikes, output_spikes)` (input ticks per input, expected output ticks). Pair it with `substrates.nervous.ga.diversify` to turn one solution into a whole generation of genotypically-unique valid solvers.
-- **Loop-aware GA** (`substrates/nervous/ga.py`, `substrates/topology.py`): a target-blind final ranking tier rewards directed hardware the source pads can actually reach — nodes, wires, multi-input convergence, cyclic nodes, independent loop rank, and distinct feedback regions. Each count receives diminishing-return `log1p` credit; disconnected bulk and unreachable rings receive none. Nervous and FNV share this aggregation but keep separate physical graph extractors. Behavioral fitness—and optional robustness/juvenile objectives where the backend implements them—always ranks above topology. Nervous also retains its older temporal-only loop shaping: below perfection, a writable/readable feedback loop can add at most 5% of the remaining score; periodic combinational wrappers do not receive that bonus.
+- **Loop-aware GA** (`substrates/nervous/ga.py`, `substrates/topology.py`): a target-blind final ranking tier rewards directed hardware the source pads can actually reach — nodes, wires, multi-input convergence, cyclic nodes, independent loop rank, and distinct feedback regions; disconnected bulk and unreachable rings receive none. Nervous aggregates those counts with diminishing-return `log1p` credit. FNV keeps its separate physical extractor and uses the uncapped lexicographic construction potential described above. Behavioral fitness—and optional robustness/juvenile objectives where the backend implements them—always ranks above topology. Nervous also retains its older temporal-only loop shaping: below perfection, a writable/readable feedback loop can add at most 5% of the remaining score; periodic combinational wrappers do not receive that bonus.
 - **Search dynamics** (`substrates/nervous/ga.py`, `substrates/lut/ga.py`, `substrates/fnv/ga.py`): **stress-induced hypermutation** raises the mutation rate after 12 genuinely flat generations and relaxes on either scalar improvement or leximin progress in one organism's declared case vector. This avoids calling improved weakest-case coverage a stall merely because the plotted aggregate is unchanged. **Simulated-annealing mutation decay** multiplies the base rate by editable *Anneal α*. **Plateau β** controls the reheat slope: 0 disables it, 1 preserves the tuned behavior, and larger values raise mutation faster. SNN alone uses a solved-only senescence/parsimony tie-break; Nervous/FNV use topology and LUT intentionally has no small-genome preference.
 - **Evaluation performance**: GUI/controller runs use an explicit **Workers** limit (default `max(1, min(cores - 2, 8))`, allowed 1-16), reuse one persistent worker pool across generations, deduplicate identical genomes before submission, and keep a bounded fitness cache. Stop cancels queued work and drains running workers before another run can begin. Hot paths compile developmental lookups once: Nervous/SNN pack a complete context into one XOR + `bit_count`, constructive FNV resolves named dependencies once (legacy associative-v2 uses its categorical-distance matrix), and LUT retains its vectorized table engine. FNV also compiles phenotype wiring once and reuses it across output fitting, trials, cases, and topology. Acyclic stateless FNV truth tables use an exact bit-parallel settled evaluator; cycles and stateful components fall back to continuous-time events, and certification always replays physical dynamics. Ordinary Nervous evaluation grows once for both behavior and topology; LUT resets one compiled simulator between timing replicates and vectorizes steady-duty extraction; fitness-only SNN runs skip voltage-history recording. Nervous target-only expected windows are cached during global probe fitting, and an event overflow stops the remaining trials immediately because overflow already guarantees zero fitness. Structural cloning avoids recursive `deepcopy` while preserving each backend's mutation semantics. Representative local microbenchmarks for the earlier optimization pass improved FNV 2-bit evaluation by about 47%, FNV reproduction by 40%, Nervous selection evaluation by 52%, SNN evaluation by 18%, and LUT evaluation by 12%; these are implementation checks, not universal throughput guarantees.
 - **Nervous sampled-state fast path**: persistence targets still receive exactly the same half-tick logical samples, but fitness no longer constructs `T × cells` full-grid dictionaries. It reconstructs only candidate/output traces from the physical pulse intervals already emitted by the engine; equivalence tests cover uniform, paper-analog, and tri-circuit physics.

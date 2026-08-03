@@ -87,12 +87,14 @@ def _evaluate_record(genome, target):
     # must not steer selection toward Boolean-rich bodies under another name.
     topology_rank = (
         topology.max_input_convergence,
-        min(topology.distinct_convergence_cones, 16),
-        min(topology.fully_integrating_nodes, 8),
-        min(topology.integrating_nodes, 16),
-        min(topology.loop_rank, 4),
-        min(topology.loop_regions, 4),
-        min(topology.cyclic_nodes, 12),
+        topology.distinct_convergence_cones,
+        topology.fully_integrating_nodes,
+        topology.integrating_nodes,
+        topology.loop_rank,
+        topology.loop_regions,
+        topology.cyclic_nodes,
+        topology.reachable_edges,
+        topology.reachable_nodes,
     )
     behavior_diagnostic = (
         topology.distinct_behaviors,
@@ -181,7 +183,7 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
             float(record[5]) if len(record) > 5 else 0.0)
         genome._topology_rank = (
             tuple(record[6]) if len(record) > 6 else
-            (0, 0, 0, 0, 0, 0, 0))
+            (0, 0, 0, 0, 0, 0, 0, 0, 0))
         genome._behavior_diagnostic = (
             tuple(record[7]) if len(record) > 7 else (0, 0, 0, 0))
     return [record[0] for record in records], [record[1] for record in records]
@@ -795,7 +797,7 @@ def crossover_functional(parent_a, parent_b, families=DEFAULT_FAMILIES):
 def _topology_rank(genome):
     return tuple(getattr(
         genome, "_topology_rank",
-        (0, 0, 0, 0, 0, 0, 0)))
+        (0, 0, 0, 0, 0, 0, 0, 0, 0)))
 
 
 def rank_key(genome, fitness):

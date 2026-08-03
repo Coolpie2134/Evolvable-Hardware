@@ -962,7 +962,7 @@ def test_parallel_population_evaluation_returns_case_vectors():
         isinstance(genome._topology_score, float)
         and genome._topology_score >= 0.0
         for genome in population)
-    assert all(len(genome._topology_rank) == 7 for genome in population)
+    assert all(len(genome._topology_rank) == 9 for genome in population)
     assert all(len(genome._behavior_diagnostic) == 4
                for genome in population)
     expected_topology = [
@@ -1015,6 +1015,45 @@ def test_constructive_fnv_resolves_named_dependencies_not_gene_order():
     }
     assert grow_functional(forward, forward.input_layout) == expected
     assert grow_functional(reversed_genes, reversed_genes.input_layout) == expected
+
+
+def test_constructive_crossover_transplants_a_complete_dependency_module():
+    from substrates.fnv.construction import develop_constructive
+    from substrates.fnv.construction_ga import (
+        crossover_constructive, placement_genes)
+    from substrates.fnv.genome import (
+        CONSTRUCTIVE_ENCODING, BranchRef, PlacementGene)
+
+    layout = ((0, 0), (0, 2))
+    independent = PlacementGene(
+        1, BY_NAME["DELAY1_R_TO_LD"].id,
+        (BranchRef(-1, "R"),), 1)
+    left = Genome(
+        [Chromosome([independent], telomere=1)],
+        input_layout=layout, encoding=CONSTRUCTIVE_ENCODING,
+        next_gene_id=2)
+
+    donor_root = PlacementGene(
+        7, BY_NAME["DELAY1_R_TO_LD"].id,
+        (BranchRef(-2, "R"),), 7)
+    donor_tip = PlacementGene(
+        8, BY_NAME["DELAY1_L_TO_RD"].id,
+        (BranchRef(7, "L"),), 7)
+    right = Genome(
+        [Chromosome([donor_tip, donor_root], telomere=1)],
+        input_layout=layout, encoding=CONSTRUCTIVE_ENCODING,
+        next_gene_id=9)
+
+    child = crossover_constructive(left, right, ("LOGIC", "DELAY"))
+    trace = develop_constructive(child, layout)
+    assert set(trace.coordinates.values()) == {
+        (0, 0), (0, 2), (1, 0), (1, 2), (2, 2)}
+    assert trace.active_ids == frozenset((1, 2, 3))
+    genes = {gene.gene_id: gene for gene in placement_genes(child)}
+    assert genes[2].inputs == (BranchRef(-2, "R"),)
+    assert genes[3].inputs == (BranchRef(2, "L"),)
+    # The donor's numeric IDs are remapped; only stable dependencies survive.
+    assert not {7, 8}.intersection(genes)
 
 
 def test_constructive_fnv_collision_fails_only_that_branch():
@@ -1181,6 +1220,38 @@ def test_constructive_bridge_is_an_explicit_target_blind_component_path():
     assert genes[-1].inputs[0].node_id == logic[0].gene_id
     trace = develop_constructive(genome, genome.input_layout)
     assert trace.active_ids == frozenset(gene.gene_id for gene in genes)
+
+
+def test_constructive_bridge_allows_distinct_multi_source_intermediates():
+    from substrates.fnv.construction_ga import (
+        _bridge_options, placement_genes, plateau_candidates_constructive)
+    from substrates.fnv.genome import (
+        CONSTRUCTIVE_ENCODING, BranchRef, PlacementGene)
+
+    # Both fan-out tips inherit the same two-input ancestry.  That does not
+    # make their future signals behaviorally equivalent, so a later physical
+    # gate must still be allowed to join them.
+    gate = PlacementGene(
+        1, BY_NAME["AND_LR_TO_D"].id,
+        (BranchRef(-1, "L"), BranchRef(-2, "R")), 1)
+    fanout = PlacementGene(
+        2, BY_NAME["DELAY1_D_TO_LR"].id,
+        (BranchRef(1, "D"),), 1)
+    genome = Genome(
+        [Chromosome([gate, fanout], telomere=1)],
+        input_layout=((-1, 0), (1, 0)),
+        encoding=CONSTRUCTIVE_ENCODING, next_gene_id=3)
+
+    options = _bridge_options(
+        genome, genome.input_layout, ("LOGIC", "DELAY"),
+        max_delays=4, limit=5000)
+    assert any(
+        option[0].node_id == option[5].node_id == 2
+        for option in options)
+    candidates = plateau_candidates_constructive(
+        genome, limit=8, families=("LOGIC", "DELAY"))
+    assert sum(len(placement_genes(candidate)) > 2
+               for candidate in candidates) >= 2
 
 
 def test_constructive_checkpoint_keeps_labels_and_legacy_v2_still_loads():

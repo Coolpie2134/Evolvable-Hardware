@@ -689,7 +689,15 @@ def _bridge_options(genome, seeds, families, max_delays=8, limit=96):
                     left_cone = lineage(start_ref)
                     right_cone = lineage(other_ref)
                     if (other_direction == receiver
-                            or left_cone == right_cone):
+                            # Two copies of one raw source contain no new
+                            # information.  Equal multi-source ancestry is not
+                            # redundant, however: distinct intermediate
+                            # functions of A/B/C must be allowed to meet to
+                            # form another Boolean level (Full Adder is the
+                            # minimal example).  Ancestry is structural and
+                            # cannot distinguish those functions.
+                            or (left_cone == right_cone
+                                and len(left_cone) < 2)):
                         continue
                     available_inputs = {receiver, other_direction}
                     for entry in logic_entries:
@@ -816,11 +824,40 @@ def _bridge_live_tips(genome, seeds, families):
 
     best = max(convergence(option) for option in options)
     productive = [option for option in options
-                  if convergence(option) == best]
+                   if convergence(option) == best]
     shortest = min(len(option[1]) for option in productive)
     near = [option for option in productive
             if len(option[1]) <= shortest + 1]
-    return _install_bridge_option(genome, random.choice(near))
+    # Short routes remain the common edit, but long routes must stay reachable:
+    # mature intermediate functions often need physical separation before they
+    # can reconverge.  Always taking ``near`` made an eight-cell Full Adder
+    # stepping stone legal in the grammar but impossible under mutation.
+    pool = productive if random.random() < 0.35 else near
+    return _install_bridge_option(genome, random.choice(pool))
+
+
+def _length_stratified_bridges(options):
+    """Yield bridge options across the available physical length range."""
+    buckets = {}
+    for option in options:
+        buckets.setdefault(len(option[1]), []).append(option)
+    for bucket in buckets.values():
+        random.shuffle(bucket)
+    lengths = sorted(buckets)
+    order = []
+    while lengths:
+        order.append(lengths.pop(0))
+        if lengths:
+            order.append(lengths.pop())
+    while order:
+        remaining = []
+        for length in order:
+            bucket = buckets[length]
+            if bucket:
+                yield bucket.pop()
+            if bucket:
+                remaining.append(length)
+        order = remaining
 
 
 def seed_convergent_bridges(genome, families, max_bridges=2):
@@ -955,7 +992,7 @@ def plateau_candidates_constructive(
     random.shuffle(priority_options)
     random.shuffle(other_options)
     cascade_options = priority_options + other_options
-    cascade_quota = max(1, limit // 2)
+    cascade_quota = max(1, (limit * 2) // 5)
     for option in cascade_options:
         if len(proposals) >= cascade_quota:
             break
@@ -970,7 +1007,7 @@ def plateau_candidates_constructive(
     # Preserve a bounded share of rescue for exposing consumed signals.  These
     # variants are neutral unless later routing uses the new physical branch,
     # which is exactly the stepping stone a constructive encoding needs.
-    fanout_quota = min(limit, len(proposals) + max(1, limit // 6))
+    fanout_quota = min(limit, len(proposals) + max(1, limit // 8))
     for option in _fanout_options(genome, seeds, families):
         if len(proposals) >= fanout_quota:
             break
@@ -1002,8 +1039,20 @@ def plateau_candidates_constructive(
     joins.sort(key=lambda choice: (
         -convergence(choice)[0], -convergence(choice)[1],
         choice[0], int(choice[1])))
+    # Once a body already contains a computed multi-input cone, reserve rescue
+    # capacity for paths between its intermediate results.  Filling the entire
+    # batch with immediately facing joins stranded mature Full Adders even
+    # though an exact circuit was two neutral bridge edits away.  Raw source
+    # layouts still devote the whole batch to cheaper direct joins.
+    has_computed_cone = any(
+        int(node_id) >= 0 and len(cone) >= 2
+        for node_id, cone in ancestry.items())
+    bridge_reserve = (
+        min(limit, max(4, (limit * 2) // 5))
+        if has_computed_cone else 0)
+    join_limit = max(len(proposals), limit - bridge_reserve)
     for choice in joins:
-        if len(proposals) >= limit:
+        if len(proposals) >= join_limit:
             break
         candidate = clone_constructive(genome)
         if not append_logic_with_fanout(
@@ -1014,14 +1063,20 @@ def plateau_candidates_constructive(
             seen.add(signature)
             proposals.append(candidate)
 
-    # Then expose short physical bridges.  One bridge is one structural edit
-    # but remains an explicit list of fixed component IDs in the genome.
+    # Expose both single bridge stepping stones and a bounded share of two-step
+    # bridge cascades.  The latter are target-blind plateau probes: each step is
+    # still an explicit path of fixed components, but a neutral first route no
+    # longer has to become the sole topology champion before its continuation
+    # can be tried.
     if len(proposals) < limit:
         bridges = _bridge_options(
             genome, seeds, families, limit=max(24, limit * 3))
-        bridges.sort(key=lambda option: len(option[1]))
-        for option in bridges:
-            if len(proposals) >= limit:
+        bridge_slots = limit - len(proposals)
+        single_quota = min(
+            bridge_slots, max(2, bridge_slots // 3))
+        installed = []
+        for option in _length_stratified_bridges(bridges):
+            if len(installed) >= single_quota:
                 break
             candidate = clone_constructive(genome)
             if not _install_bridge_option(candidate, option):
@@ -1030,6 +1085,36 @@ def plateau_candidates_constructive(
             if signature not in seen:
                 seen.add(signature)
                 proposals.append(candidate)
+                installed.append((candidate, option))
+
+        # Try continuations from long routes first: they reach spatially new
+        # branch pairings that a direct join or one-cell bridge cannot expose.
+        installed.sort(key=lambda item: len(item[1][1]), reverse=True)
+        continuation_count = max(1, (len(installed) + 1) // 2)
+        second_pools = []
+        for base, _first_option in installed[:continuation_count]:
+            second_options = _bridge_options(
+                base, seeds, families, limit=max(96, limit * 6))
+            random.shuffle(second_options)
+            if second_options:
+                second_pools.append((base, second_options))
+        while second_pools and len(proposals) < limit:
+            remaining = []
+            for base, second_options in second_pools:
+                while second_options:
+                    candidate = clone_constructive(base)
+                    if _install_bridge_option(
+                            candidate, second_options.pop()):
+                        signature = constructive_signature(candidate)
+                        if signature not in seen:
+                            seen.add(signature)
+                            proposals.append(candidate)
+                            break
+                if second_options:
+                    remaining.append((base, second_options))
+                if len(proposals) >= limit:
+                    break
+            second_pools = remaining
 
     attempts = max(24, limit * 8)
     while len(proposals) < limit and attempts > 0:

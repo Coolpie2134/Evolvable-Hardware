@@ -389,8 +389,10 @@ counts reachable nodes and wires, nodes influenced by multiple inputs, cyclic
 nodes, independent loop rank, and distinct strongly connected feedback
 regions. Every count receives `log1p` diminishing-return credit. Disconnected
 bulk and unreachable loops score zero; target names, expected traces, fitted
-outputs, gene count, and telomeres never enter this tier. FNV uses the same
-aggregation over its own component-port graph.
+outputs, gene count, and telomeres never enter this tier. FNV has its own
+component-port extractor and uncapped lexicographic construction rank; its
+details are specified in section 2.4 rather than sharing Nervous's `log1p`
+aggregation.
 
 This final tie-break is separate from Nervous's older `LOOP_WEIGHT = 0.05`
 temporal shaping. On an unsolved non-combinational target, a feedback loop that
@@ -649,10 +651,19 @@ evolved source pads. Combinational runs seed from LOGIC plus DELAY when both
 families are enabled because degree-3 gates require physical routing and
 fan-out; the complete user-selected bank remains reachable during mutation.
 Mutation can extend a live output tip, join two converging tips, switch to a
-compatible fixed component, or reroute/duplicate/delete a connected labelled
-branch block. A block move changes its root references while internal stable
-IDs preserve the descendant structure. Duplication and crossover allocate new
-IDs and transplant a block only onto a physically compatible frontier. Fan-out
+compatible fixed component, construct an explicit DELAY-plus-LOGIC bridge, or
+reroute/duplicate/delete a connected labelled branch block. Bridge search
+samples both short and long empty-cell routes; equal single-source ancestry is
+discarded as redundant, but equal multi-source ancestry remains composable
+because structurally identical input cones can carry different intermediate
+functions. Plateau rescue reserves candidates for these routes and may compose
+two bridges in one bounded, target-blind proposal. A block move changes its root
+references while internal stable IDs preserve the descendant structure.
+Matching-layout crossover allocates new IDs and transplants an entire sink
+dependency cone; a different component at an overlapping site displaces only
+that local target subtree, while identical components may be shared. Parents
+with different layouts retain the recipient's co-adapted pads and use the
+physically re-anchored single-block fallback. Fan-out
 is never virtual: it exists only at source pads and fixed unary components with
 two output ports. Input-layout mutations move one pad by one honeycomb edge and
 therefore translate only branches that name that source.
@@ -671,10 +682,11 @@ telomere cost. Behavioral fitness comes first; FNV currently leaves the
 optional robustness and juvenile-development tiers inactive. Exact fitness
 ties are separated by `FunctionalTopology`, computed from the same effective
 directed wires as `FunctionalSim`. A graph traversal starts at every source-only
-input pad. Selection rewards input convergence and reachable feedback, with
-small target-independent saturation caps so a long chain that merely copies one
-already-known signal cannot win by consuming the whole placement budget.
-Reachable node/edge counts remain diagnostic. Unreachable components,
+input pad. Selection lexicographically rewards maximum and distinct input
+convergence, real multi-input junctions, reachable feedback, reachable edges,
+and reachable nodes. These physical counts are uncapped within the 128-placement
+genome ceiling: FNV intentionally has no hidden small-body preference, allowing
+long connected routes to persist as neutral construction material. Unreachable components,
 disconnected islands, and loops that no input can activate contribute zero. No truth table, expected event,
 component family, fitted output, or target name enters this topology objective.
 Tournament selection and survivor ranking use it as their final key; ε-lexicase
@@ -722,7 +734,8 @@ port dependencies.
 
 **Chromosomes.** Nervous/LUT chromosomes retain split points, tags, and
 telomeres. FNV chromosomes are hereditary containers for labelled branches;
-crossover exchanges connected branch blocks rather than list suffixes. FNV is
+crossover exchanges complete dependency modules (or a re-anchored branch when
+input layouts differ) rather than list suffixes. FNV is
 capped at 64 placements per container and 128 across the constructive genome.
 Old version-2 checkpoints retain their original rule containers.
 Chromosome count is capped at 32. The app's "Chroms" field is a structural
