@@ -9,6 +9,7 @@ Run under pytest, or standalone:  py tests/test_certification.py
 import os
 import sys
 import dataclasses
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -66,6 +67,48 @@ def test_certify_non_oracle_target_is_uncertified_without_scoring():
                   train=1.0, backend='nervous')
     assert res['verdict'].startswith('UNCERTIFIED')
     assert res['holdouts'] is None and res['holdout'] is None
+
+
+def test_combinational_certification_replays_shuffled_exhaustive_tables():
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Full adder'))
+    seen_orders = []
+
+    def frozen(_genome, holdout, _fitted):
+        seen_orders.append(tuple(holdout.combinational_cases))
+        return 1.0
+
+    with mock.patch(
+            'substrates.nervous.evaluation.fit_readout',
+            return_value=object()), mock.patch(
+                'substrates.nervous.evaluation.score_frozen',
+                side_effect=frozen):
+        result = certify(
+            object(), target, train=1.0, backend='nervous',
+            seeds=(11, 12, 13))
+    assert result['verdict'] == 'CERTIFIED'
+    assert result['holdouts'] == [1.0, 1.0, 1.0]
+    expected_rows = set(target.combinational_cases)
+    assert all(set(order) == expected_rows for order in seen_orders)
+    assert len(set(seen_orders)) > 1
+
+
+def test_combinational_certification_requires_near_perfect_holdout():
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Half adder'))
+    with mock.patch(
+            'substrates.nervous.evaluation.fit_readout',
+            return_value=object()), mock.patch(
+                'substrates.nervous.evaluation.score_frozen',
+                return_value=0.95):
+        result = certify(
+            object(), target, train=1.0, backend='fnv', seeds=(1, 2))
+    assert result['verdict'].startswith('BELOW THRESHOLD 1.00')
+    assert not result['verdict'].startswith('CERTIFIED')
 
     # Exterior LUT training/playback is implemented, but its frozen adapter
     # cannot yet replay outside-to-facing-edge links. Never substitute the

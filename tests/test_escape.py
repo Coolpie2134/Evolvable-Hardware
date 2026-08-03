@@ -3,10 +3,9 @@ tests/test_escape.py — the local-minimum escape mechanisms (runtime/escape.py)
 
 Three things are checked, in order of how badly they would hurt if wrong:
 
-  1. DEFAULTS ARE INERT. Every mechanism is off unless asked for, and with them
-     off the GA must behave exactly as it did before the module existed —
-     identical rank ordering, identical case vectors, identical bred population
-     for a given seed. Nothing here is allowed to quietly change a run.
+  1. OPTIONAL ESCAPE DEFAULTS ARE INERT. Every escape mechanism is off unless
+     asked for. Contract-elite survival is baseline selection, tested
+     separately: it acts only when real per-case evidence is present.
   2. EACH MECHANISM ACTUALLY DOES ITS JOB when switched on, and the safety
      properties hold — most importantly that neither escape objective can
      outrank correctness.
@@ -32,7 +31,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from runtime.config import GAConfig, RunConfig
 from runtime.controller import run_evolution
 from runtime.escape import (OFF, EscapeConfig, EscapeState, aggregate_robustness,
-                            build_escape_state, genome_descriptor,
+                            build_escape_state, complementary_parent_index,
+                            contract_progress_key,
+                            genome_descriptor,
                             genome_distance, inherit_mutation_rate,
                             jitter_physics, lexicase_case_subset,
                             mutation_rate_of, population_mutation_rate,
@@ -68,7 +69,8 @@ def test_every_mechanism_is_off_by_default():
     assert not config.any_enabled
     assert config.summary() == 'none'
     for flag in ('lifespan_scoring', 'crowding', 'neutral_drift',
-                 'self_adaptive_mutation', 'rebirth', 'robustness'):
+                 'self_adaptive_mutation', 'rebirth', 'lineage_walk',
+                 'robustness', 'islands'):
         assert getattr(config, flag) is False
     assert config.lexicase_downsample == 1.0
     assert GAConfig().escape == OFF
@@ -327,9 +329,8 @@ def test_a_fully_crowded_population_can_never_move_downhill():
 
 
 def test_a_partial_reserve_keeps_generational_churn():
-    """The fix: below 1.0 the un-reserved slots keep this project's pre-solve
-    strict generational replacement, so the population can still move downhill
-    and the mean still fluctuates."""
+    """Below 1.0 the un-reserved slots still permit downhill movement and
+    population-mean fluctuation."""
     random.seed(9)
     parents = [random_hex_genome(2) for _ in range(8)]
     fitnesses = [0.4] * 8
@@ -369,9 +370,81 @@ def test_merge_generation_keeps_the_original_behaviour_when_crowding_is_off():
     state = EscapeState(OFF, rank=nv_ga.rank_key)
     population, fitnesses, cases = state.merge_generation(
         parents, [0.9, 0.9, 0.9], None, offspring, [0.1, 0.1, 0.1], None)
-    # Strict pre-solve generational replacement: no evaluated parent survives.
+    # Without case evidence the historical generational replacement is exact.
     assert population is offspring and fitnesses == [0.1, 0.1, 0.1]
     assert cases is None
+
+
+def test_contract_elites_preserve_lower_average_missing_case_specialists():
+    """A unique case expert must survive long enough for lexicase/crossover.
+
+    Both specialists have lower scalar fitness than every offspring, so any
+    scalar-only environmental selection deletes exactly the material needed to
+    combine the two cases into a 1.0 circuit.
+    """
+    parents = [random_hex_genome(2) for _ in range(10)]
+    offspring = [random_hex_genome(2) for _ in range(10)]
+    parent_cases = [(1.0, 0.0), (0.0, 1.0)] + [(0.0, 0.0)] * 8
+    offspring_cases = [(0.8, 0.8)] * 10
+    state = EscapeState(OFF, rank=nv_ga.rank_key)
+    population, fitnesses, cases = state.merge_generation(
+        parents, [0.5] * 10, parent_cases,
+        offspring, [0.8] * 10, offspring_cases)
+
+    assert len(population) == len(fitnesses) == len(cases) == 10
+    assert any(genome is parents[0] for genome in population)
+    assert any(genome is parents[1] for genome in population)
+    assert sum(any(genome is parent for parent in parents)
+               for genome in population) == 2
+    for genome, fitness, vector in zip(population, fitnesses, cases):
+        if genome is parents[0]:
+            assert fitness == 0.5 and vector == (1.0, 0.0)
+        elif genome is parents[1]:
+            assert fitness == 0.5 and vector == (0.0, 1.0)
+        else:
+            assert any(genome is child for child in offspring)
+            assert fitness == 0.8 and vector == (0.8, 0.8)
+    assert state.contract_elite_carries == 2
+
+
+def test_contract_elite_ties_rotate_across_large_case_banks():
+    parents = [random_hex_genome(2) for _ in range(10)]
+    offspring = [random_hex_genome(2) for _ in range(10)]
+    parent_cases = [
+        tuple(1.0 if case == index else 0.0 for case in range(10))
+        for index in range(10)]
+    offspring_cases = [(0.5,) * 10] * 10
+    state = EscapeState(OFF, rank=nv_ga.rank_key)
+
+    first, _, first_cases = state.merge_generation(
+        parents, [0.1] * 10, parent_cases,
+        offspring, [0.5] * 10, offspring_cases)
+    second, _, _ = state.merge_generation(
+        parents, [0.1] * 10, parent_cases,
+        offspring, [0.5] * 10, offspring_cases)
+    assert any(genome is parents[0] for genome in first)
+    assert any(genome is parents[1] for genome in first)
+    assert any(genome is parents[4] for genome in second)
+    assert any(genome is parents[5] for genome in second)
+    assert all(len(vector) == 10 for vector in first_cases)
+
+
+def test_contract_progress_prefers_one_organism_covering_its_weakest_case():
+    # A population-wide per-case envelope would call the left population
+    # perfect even though no genome solves both cases. Progress is deliberately
+    # measured on one integrated organism instead.
+    specialists = [(1.0, 0.0), (0.0, 1.0)]
+    integrated = [(0.6, 0.6), (0.0, 1.0)]
+    assert contract_progress_key(integrated) > contract_progress_key(specialists)
+
+
+def test_contract_progress_resets_stress_even_when_scalar_is_flat():
+    state = EscapeState(OFF)
+    assert not state.note_contract_progress([(1.0, 0.0)], [0.5])
+    assert state.note_contract_progress([(0.6, 0.4)], [0.5])
+    assert not state.note_contract_progress([(0.7, 0.3)], [0.5])
+    assert state.contract_progress_events == 1
+    assert state.stats()['contract_progress_events'] == 1
 
 
 def test_merge_generation_prefers_terminal_consolidation_once_solved():
@@ -637,6 +710,34 @@ def test_epsilon_lexicase_keeps_near_best_candidates_on_continuous_scores():
     assert id(population[3]) not in winners     # the genuinely bad one does not
 
 
+def test_binary_lexicase_never_treats_wrong_as_epsilon_close():
+    """A 50/50 binary split has MAD 1 under the upper-median convention.
+
+    Applying that ε to exact truth-table facts retained wrong candidates. Exact
+    Boolean cases must filter at ε=0 while continuous cases keep MAD ε.
+    """
+    population = [random_hex_genome(2) for _ in range(4)]
+    cases = [(1.0,), (1.0,), (0.0,), (0.0,)]
+    random.seed(81)
+    winners = {id(nv_ga._lexicase_parent(population, cases))
+               for _ in range(80)}
+    assert winners == {id(population[0]), id(population[1])}
+
+
+def test_complementary_mating_covers_the_first_parents_missing_cases():
+    cases = [
+        (1.0, 0.0, 0.0),  # selected first parent
+        (1.0, 1.0, 0.0),  # overlaps it and leaves case 2 absent
+        (0.0, 1.0, 1.0),  # complements it to a perfect pair envelope
+    ]
+    random.seed(83)
+    assert complementary_parent_index(
+        0, [1, 2], cases, [0.34, 0.67, 0.67]) == 2
+    # Downsampled lexicase deliberately limits mating to the sampled contract.
+    assert complementary_parent_index(
+        0, [1, 2], cases, [0.34, 0.67, 0.67], (0, 1)) == 1
+
+
 # ── 9. both GA drive paths apply the same machinery ───────────────────────────
 
 def test_controller_and_headless_drivers_build_the_same_escape_state():
@@ -645,7 +746,7 @@ def test_controller_and_headless_drivers_build_the_same_escape_state():
     escape = EscapeConfig(crowding=True, rebirth=True, neutral_drift=True,
                           self_adaptive_mutation=True)
     config = GAConfig(chromosome_count=2, escape=escape, mutation_limit=6.0)
-    for backend in ('nervous', 'lut', 'snn'):
+    for backend in ('nervous', 'fnv', 'lut', 'snn'):
         state = build_escape_state(backend, config, chromosome_count=2)
         assert state.config is escape
         assert state.mutation_limit == 6.0
@@ -719,7 +820,8 @@ def test_controller_reports_live_escape_telemetry():
     assert len(reports) == 3
     assert reports[0]['summary'] == 'crowding/16@50%'
     assert set(reports[0]) >= {'rebirths', 'archive', 'crowding_replacements',
-                               'robust_blend', 'mean_rate'}
+                               'robust_blend', 'mean_rate', 'migrations',
+                               'lineage_walk_steps'}
 
 
 def test_no_escape_telemetry_when_every_mechanism_is_off():
@@ -746,6 +848,46 @@ def test_no_escape_telemetry_when_every_mechanism_is_off():
             results_dir=directory)
 
     assert not any(m[0] == 'escape' for m in messages.queue)
+
+
+def test_controller_restarts_have_fresh_escape_state_and_initial_archives():
+    target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
+    config = _nv_config(escape=EscapeConfig(
+        rebirth=True, archive_interval=5, rebirth_patience=15))
+    messages, stop = queue.Queue(), threading.Event()
+    states = []
+
+    def evaluate(genomes, *_args, **_kwargs):
+        return [0.5] * len(genomes), [None] * len(genomes)
+
+    real_build = build_escape_state
+
+    def capture(*args, **kwargs):
+        state = real_build(*args, **kwargs)
+        states.append(state)
+        return state
+
+    with tempfile.TemporaryDirectory() as directory, \
+            mock.patch('runtime.controller.ProcessPoolExecutor',
+                       return_value=FakePool()), \
+            mock.patch('runtime.controller.build_escape_state',
+                       side_effect=capture), \
+            mock.patch.object(nv_ga, 'eval_batch_cases', side_effect=evaluate), \
+            mock.patch.object(
+                nv_ga, 'next_population',
+                side_effect=lambda population, *a, **k: [
+                    nv_ga.clone_genome(g) for g in population]), \
+            mock.patch('substrates.nervous.certification.certify',
+                       return_value=None):
+        run_evolution(
+            gens=1, pop=4, n_chroms=2, tries=2, target=target, arch=None,
+            messages=messages, stop_event=stop, base_seed=812,
+            backend='nervous', run_config=config, results_dir=directory)
+
+    assert len(states) == 2 and states[0] is not states[1]
+    # Interval five would otherwise leave a one-generation restart empty. The
+    # initial champion is now always a valid rebirth branch point at gen zero.
+    assert [state.archive[0][0] for state in states] == [0, 0]
 
 
 def test_every_backend_breeder_accepts_the_escape_parameters():
@@ -794,6 +936,7 @@ def test_all_mechanisms_together_drive_a_real_run_and_fire_a_rebirth():
         crowding=True, crowding_window=4, neutral_drift=True,
         self_adaptive_mutation=True, rebirth=True, rebirth_patience=3,
         rebirth_ancestors=2, rebirth_fraction=0.5, archive_interval=1,
+        lineage_walk=True, lineage_walk_fraction=0.25,
         lexicase_downsample=0.5)
     config = _nv_config(escape=escape, elite_count=2)
     messages, stop = queue.Queue(), threading.Event()
@@ -824,6 +967,7 @@ def test_all_mechanisms_together_drive_a_real_run_and_fire_a_rebirth():
     assert final['rebirths'] == len(rebirths)
     assert final['archive'] > 0
     assert final['crowding_replacements'] > 0
+    assert final['lineage_walk_steps'] > 0
     assert final['mean_rate'] > 0.0
     assert queued[-1][0] == 'done'
 
@@ -885,6 +1029,59 @@ def test_a_jitter_probe_never_recurses_into_lifespan_or_robustness():
 
 
 # ── 9b. island model ──────────────────────────────────────────────────────────
+
+
+@dataclasses.dataclass
+class _ValleyGenome:
+    value: int
+
+
+def test_lineage_walk_crosses_a_real_three_generation_fitness_valley():
+    """The protected cohort must do something the former escape portfolio did
+    not: keep a WORSE intermediate alive long enough to mutate it again."""
+    landscape = {0: 0.8, 1: 0.2, 2: 0.1, 3: 1.0}
+    config = EscapeConfig(
+        lineage_walk=True, lineage_walk_fraction=0.25,
+        crowding=True, crowding_fraction=0.5)
+    state = EscapeState(
+        config,
+        clone=lambda genome: dataclasses.replace(genome),
+        mutate=lambda genome, _rate: _ValleyGenome(genome.value + 1),
+        rank=lambda _genome, fitness: fitness)
+    population = [_ValleyGenome(0) for _ in range(8)]
+    fitnesses = [landscape[0]] * len(population)
+
+    # Ordinary selected offspring remain pinned at the local optimum. Only a
+    # persistent, score-blind lineage can traverse 0 -> 1 -> 2 -> 3.
+    selected_step = lambda deme, _fits, _cases, _rate: [
+        dataclasses.replace(genome) for genome in deme]
+    for generation in range(1, 4):
+        offspring = state.breed(
+            generation, population, fitnesses, None, 4.0, selected_step)
+        offspring_fitnesses = [landscape[genome.value]
+                               for genome in offspring]
+        population, fitnesses, _ = state.merge_generation(
+            population, fitnesses, None,
+            offspring, offspring_fitnesses, None)
+
+    assert max(fitnesses) == 1.0
+    assert any(genome.value == 3 for genome in population)
+    assert state.lineage_walk_steps == 6
+
+
+def test_lineage_walk_uses_one_local_event_not_the_reheated_run_rate():
+    seen_rates = []
+    state = EscapeState(
+        EscapeConfig(lineage_walk=True, lineage_walk_fraction=0.25),
+        clone=lambda genome: dataclasses.replace(genome),
+        mutate=lambda genome, rate: (
+            seen_rates.append(rate) or _ValleyGenome(genome.value + 1)))
+    population = [_ValleyGenome(0) for _ in range(8)]
+    state.breed(1, population, [0.5] * 8, None, 8.0,
+                lambda deme, _f, _c, _r: list(deme))
+    # Every substrate mutation operator enforces at least one event; Poisson
+    # mean zero therefore means exactly one, never a reheated multi-edit burst.
+    assert seen_rates == [0.0, 0.0]
 
 def test_islands_are_off_by_default_and_breed_as_one_pool():
     state = EscapeState(OFF, rank=nv_ga.rank_key)
@@ -959,12 +1156,43 @@ def test_migration_moves_the_best_into_the_next_deme_on_a_ring():
     signatures = [nv_ga.genome_signature(g) for g in population]
     bred = state.breed(1, population, fitnesses, None, 4.0,
                        lambda d, f, c, r: list(d))
+    bred, bred_fitnesses, _ = state.merge_generation(
+        population, fitnesses, None, bred, list(fitnesses), None)
     assert state.migrations == 1
     # A's best (slot 0) replaces B's worst (slot 2); B's best (slot 3)
     # replaces A's worst (slot 1). A ring, so a discovery diffuses gradually.
     assert nv_ga.genome_signature(bred[2]) == signatures[0]
     assert nv_ga.genome_signature(bred[1]) == signatures[3]
     assert nv_ga.genome_signature(bred[0]) == signatures[0]
+    assert bred_fitnesses == [0.9, 0.3, 0.9, 0.3]
+
+
+def test_migration_ranks_evaluated_offspring_not_old_parent_slots():
+    config = EscapeConfig(islands=True, island_count=2, island_migrants=1,
+                          island_migration_interval=1)
+    state = EscapeState(
+        config, clone=lambda genome: dataclasses.replace(genome),
+        rank=lambda _genome, fitness: fitness)
+    parents = [_ValleyGenome(value) for value in range(4)]
+    parent_fitnesses = [0.9, 0.1, 0.2, 0.3]
+    # Reverse each deme: a new genome no longer occupies its parent's old slot.
+    offspring = state.breed(
+        1, parents, parent_fitnesses, None, 4.0,
+        lambda deme, _f, _c, _r: list(reversed(deme)))
+    offspring_fitnesses = [0.1, 0.9, 0.3, 0.2]
+    for genome in offspring:
+        genome._topology_score = genome.value + 10.0
+    offspring_cases = [(genome.value,) for genome in offspring]
+    population, fitnesses, cases = state.merge_generation(
+        parents, parent_fitnesses, [(9,)] * 4,
+        offspring, offspring_fitnesses, offspring_cases)
+    # Evaluated best A (value 0) goes to B; evaluated best B (value 3) goes to
+    # A. The former pre-evaluation code incorrectly sent values 1 and 2.
+    assert [genome.value for genome in population] == [3, 0, 3, 0]
+    assert fitnesses == [0.3, 0.9, 0.3, 0.9]
+    assert cases == [(3,), (0,), (3,), (0,)]
+    assert [genome._topology_score for genome in population] == [
+        13.0, 10.0, 13.0, 10.0]
 
 
 def test_migration_is_rare_by_design():
@@ -973,9 +1201,14 @@ def test_migration_is_rare_by_design():
                           island_migration_interval=5)
     state = EscapeState(config, clone=nv_ga.clone_genome, rank=nv_ga.rank_key)
     population = [random_hex_genome(2) for _ in range(6)]
+    fitnesses = [0.5] * 6
     for generation in range(1, 11):
-        state.breed(generation, population, [0.5] * 6, None, 4.0,
-                    lambda d, f, c, r: list(d))
+        offspring = state.breed(
+            generation, population, fitnesses, None, 4.0,
+            lambda d, f, c, r: list(d))
+        population, fitnesses, _ = state.merge_generation(
+            population, fitnesses, None,
+            offspring, list(fitnesses), None)
     assert state.migrations == 2            # generations 5 and 10 only
 
 
@@ -1010,12 +1243,15 @@ def test_escape_config_rejects_nonsense():
                    {'rebirth_mutation_multiplier': 0.5},
                    {'archive_interval': 0},
                    {'archive_size': 0},
+                   {'lineage_walk_fraction': 0.0},
+                   {'lineage_walk_fraction': 1.0},
                    {'robustness_jitter': 1.0},
                    {'robustness_jitter': -0.1},
                    {'robustness_samples': 0},
                    {'lexicase_downsample': 0.0},
                    {'lexicase_downsample': 1.5},
-                   {'crowding': 'yes'}):
+                   {'crowding': 'yes'},
+                   {'lineage_walk': 'yes'}):
         try:
             EscapeConfig(**kwargs)
         except ValueError:
@@ -1038,3 +1274,4 @@ def test_summary_names_exactly_the_active_mechanisms():
     assert summary == 'neutral-drift, rebirth@25'
     assert 'downsample 0.50' in EscapeConfig(
         lexicase_downsample=0.5).summary()
+    assert EscapeConfig(lineage_walk=True).summary() == 'lineage-walk@10%'

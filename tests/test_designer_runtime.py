@@ -12,7 +12,7 @@ from ui.app import App
 from substrates.nervous.targets import TEMPORAL_TARGETS
 from substrates.nervous.pulse import PulseConfig
 from substrates.nervous.genome import random_hex_genome
-from runtime.config import (NV_NEW_RUN_PROFILES, GAConfig,
+from runtime.config import (LUT_FUNCTION_FAMILIES, NV_NEW_RUN_PROFILES, GAConfig,
                                 is_current_nv_profile,
                                 validate_new_nv_profile)
 
@@ -51,6 +51,25 @@ def test_app_keeps_fnv_interactive_tab_in_the_notebook():
     app._interactive_frame = object()
     App._show_interactive_tab(app)
     assert app._nb.added == [app._interactive_frame]
+
+
+def test_app_reads_lut_function_banks_in_permanent_family_order():
+    class Variable:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+    selected = {'XOR', 'ROUTING', 'MUX'}
+    app = App.__new__(App)
+    app._lut_function_family_vars = {
+        family: Variable(family in selected)
+        for family in reversed(LUT_FUNCTION_FAMILIES)
+    }
+
+    assert App._selected_lut_function_families(app) == (
+        'ROUTING', 'XOR', 'MUX')
 
 
 class _Parent:

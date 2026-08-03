@@ -148,3 +148,86 @@ def test_fnv_compiled_wiring_matches_fresh_wiring():
         grid, [source], {}, streams, len(streams),
         _compiled=compile_functional_grid(grid, [source]))
     assert fresh == compiled
+
+
+def test_nervous_output_fitting_stops_at_first_overflow(monkeypatch):
+    """An invalid event storm must not run the target's remaining trials."""
+    from substrates.nervous import temporal
+    from substrates.nervous.scoring import PhysicalEvents
+    from substrates.nervous.targets import TEMPORAL_TARGETS
+
+    target = TEMPORAL_TARGETS['SR latch']
+    grid = {(0, 0): 1, (1, 0): 1, (2, 0): 1, (3, 0): 1}
+    calls = []
+
+    def overflow(*_args, **_kwargs):
+        calls.append(1)
+        return [], {}, PhysicalEvents(), True
+
+    monkeypatch.setattr(temporal, 'input_cone',
+                        lambda *_args: set(grid))
+    monkeypatch.setattr(temporal, 'run_nervous_events', overflow)
+    monkeypatch.setattr(
+        temporal, '_score_output_candidate',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('overflow reached candidate fitting')))
+
+    outputs, traces = temporal.place_outputs_by_trace(
+        grid, {}, [(0, 0), (1, 0)], target)
+
+    assert len(target.trials) > 1
+    assert len(calls) == 1
+    assert traces.overflow
+    assert all(position is None for position in outputs.values())
+
+
+def test_expected_target_windows_are_compiled_once():
+    from substrates.nervous.scoring import _expected_windows
+
+    expected = [None, 0, 0, 1, 1, None, 0]
+    _expected_windows.cache_clear()
+    first = _expected_windows(expected)
+    second = _expected_windows(list(expected))
+
+    assert first is second
+    assert first == ((0, (1, 2)), (1, (3, 4)), (0, (6,)))
+    assert _expected_windows.cache_info().hits == 1
+
+
+def test_interval_reconstruction_matches_engine_half_tick_samples():
+    """Fitness can skip full-grid snapshots without changing sampled state."""
+    from substrates.nervous.hexgrid import ROUTING_HEX
+    from substrates.nervous.pulse import PulseConfig
+    from substrates.nervous.temporal import (
+        _sample_intervals, run_nervous_events)
+    from substrates.nervous.tritile import TRI_SEED_STATE
+
+    source, body = (0, 0), (1, 0)
+    streams = [(0,), (1,), (1,), (0,), (0,), (1,), (0,), (0,)]
+    single_grid = {source: 1, body: 2}
+    single_routing = {
+        cell: ROUTING_HEX[state] for cell, state in single_grid.items()}
+    cases = [
+        (single_grid, single_routing, 'single', PulseConfig()),
+        (single_grid, single_routing, 'single',
+         PulseConfig(model='paper_analog')),
+        ({source: TRI_SEED_STATE, body: TRI_SEED_STATE}, {}, 'tri3',
+         PulseConfig(model='paper_analog')),
+    ]
+
+    for grid, routing, arch, config in cases:
+        sampled, _, _, sampled_overflow = run_nervous_events(
+            grid, routing, [source], {}, streams, len(streams), prune=False,
+            sample=True, config=config, arch=arch,
+            terminal_inputs={source})
+        _, _, events, event_overflow = run_nervous_events(
+            grid, routing, [source], {}, streams, len(streams), prune=False,
+            sample=False, config=config, arch=arch,
+            terminal_inputs={source})
+
+        assert not sampled_overflow and not event_overflow
+        for cell in grid:
+            expected = tuple(state.get(cell, 0) for state in sampled)
+            actual = _sample_intervals(
+                events.intervals.get(cell, ()), len(streams))
+            assert actual == expected, (arch, cell, actual, expected)

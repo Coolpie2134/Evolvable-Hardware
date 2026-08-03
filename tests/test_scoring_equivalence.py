@@ -106,6 +106,39 @@ def test_logic_contract_rewards_partial_correctness_monotonically():
     assert prev == 1.0
 
 
+def test_multi_output_logic_ranks_balanced_progress_above_easy_output_only():
+    """The same 12/16 correct cells can describe very different progress.
+
+    Solving Carry while leaving Sum at chance must not tie a Full Adder that is
+    75% correct on both required outputs.  This was the misleading 0.75 shelf
+    produced by the old plain output mean.
+    """
+    target = get_target('Full adder')
+    expected = [list(out_bits) for _, out_bits in target.cases]
+
+    easy_only = [row[:] for row in expected]
+    for row in easy_only:
+        row[0] = 0
+
+    balanced = [row[:] for row in expected]
+    for output in range(2):
+        zero_row = next(
+            index for index, row in enumerate(expected)
+            if row[output] == 0)
+        one_row = next(
+            index for index, row in enumerate(expected)
+            if row[output] == 1)
+        balanced[zero_row][output] = 1
+        balanced[one_row][output] = 0
+
+    easy_score, easy_cases, _ = score_contract(easy_only, target)
+    balanced_score, balanced_cases, _ = score_contract(balanced, target)
+    assert sum(easy_cases) == sum(balanced_cases) == 12
+    assert easy_score == 0.625
+    assert balanced_score == 0.75
+    assert balanced_score > easy_score
+
+
 def test_event_contract_requires_one_to_one_edges_and_silence():
     target = TEMPORAL_TARGETS['Coincidence (2-in)']
     perfect = TemporalTraces(

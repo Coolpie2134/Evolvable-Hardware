@@ -231,6 +231,30 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                         terminal_outputs=terminal_outputs)
 
 
+def _sample_intervals(intervals, ticks):
+    """Reconstruct the engine's half-tick samples from physical intervals.
+
+    PulseSim, AnalogPulseSim, and TriSim all define a wire as high on the
+    half-open interval ``[start, end)``. Temporal scoring samples at
+    ``(tick + 0.5) * TICK``. Replaying those immutable intervals after the run
+    is therefore exactly equivalent to building a full-grid state dictionary
+    at every tick, while avoiding that allocation in the fitness hot path.
+    """
+    ordered = tuple(intervals)
+    values = [0] * int(ticks)
+    interval_index = 0
+    for tick in range(int(ticks)):
+        when = (tick + 0.5) * TICK
+        while (interval_index < len(ordered)
+               and ordered[interval_index][1] <= when):
+            interval_index += 1
+        if (interval_index < len(ordered)
+                and ordered[interval_index][0] <= when
+                < ordered[interval_index][1]):
+            values[tick] = 1
+    return tuple(values)
+
+
 # Outputs are NON-HERITABLE PROBES over the WHOLE organism.
 #
 # This used to examine only the twelve cells nearest the target's declared
@@ -299,8 +323,9 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
     traces  = TemporalTraces()
     if len(grid) <= len(in_set):
         return out_pos, traces
-    # one dynamics run per trial, observed to _obs_len (past T) so a delayed
-    # output's late events are captured; every cell's trace falls out of the states
+    # One dynamics run per trial, observed to _obs_len (past T) so a delayed
+    # output's late events are captured. Sampled traces are reconstructed from
+    # the engine's complete physical intervals after each run.
     obs = _obs_len(ttarget)
     relations = set(contract_relations(ttarget))
     need_samples = needs_samples(ttarget)
@@ -317,25 +342,32 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
     # Probes must be FITTED under the same physics they will be SCORED under.
     # Running placement without the terminal sets and then tracing with them
     # selects a cell for behaviour the final run never reproduces.
-    runs = [run_nervous_events(
-                sub, routing, in_pos, {}, tr.streams, obs, prune=False,
-                max_events=getattr(ttarget, 'max_events', 2048),
-                sample=need_samples, config=config,
-                input_events=getattr(tr, 'input_events', None), delays=delays,
-                arch=arch, terminal_inputs=source_nodes,
-                terminal_outputs=sink_nodes)
-            for tr in ttarget.trials]
-    trial_states = [run[0] for run in runs]
+    runs = []
+    for trial in ttarget.trials:
+        run = run_nervous_events(
+            sub, routing, in_pos, {}, trial.streams, obs, prune=False,
+            max_events=getattr(ttarget, 'max_events', 2048),
+            sample=False, config=config,
+            input_events=getattr(trial, 'input_events', None), delays=delays,
+            arch=arch, terminal_inputs=source_nodes,
+            terminal_outputs=sink_nodes)
+        runs.append(run)
+        # Overflow invalidates the complete behavioral contract. Continuing
+        # the remaining schedules and then fitting every output candidate can
+        # only spend more time to return the same zero fitness.
+        if run[3]:
+            traces.overflow = True
+            return out_pos, traces
     trial_events = [run[2] for run in runs]
     trial_intervals = [getattr(run[2], 'intervals', {}) for run in runs]
-    traces.overflow = any(run[3] for run in runs)
+    traces.overflow = False
+
     def cell_response(c):
         """This cell's complete observed response, across every trial."""
         return (
             tuple(
-                tuple(trial_states[ti][t].get(c, 0)
-                      if t < len(trial_states[ti]) else 0
-                      for t in range(obs))
+                _sample_intervals(
+                    trial_intervals[ti].get(c, ()), obs)
                 if need_samples else ()
                 for ti in range(len(ttarget.trials))),
             tuple(tuple(trial_events[ti].get(c, ()))
@@ -346,27 +378,34 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
     # Cells that respond identically are interchangeable as probes, so only
     # enough of each distinct response to still allow one cell per role are
     # scored. This is what keeps whole-organism candidacy affordable.
+    response_cache = {}
+    def cached_response(cell):
+        response = response_cache.get(cell)
+        if response is None:
+            response = cell_response(cell)
+            response_cache[cell] = response
+        return response
+
     candidates = behavior_representatives(
-        _output_candidates(grid, in_set), cell_response,
+        _output_candidates(grid, in_set), cached_response,
         len(ttarget.outputs))
+    candidate_responses = {
+        cell: response_cache[cell] for cell in candidates}
 
     scores = {term.role: {} for term in ttarget.outputs}
     for term in ttarget.outputs:
         for c in candidates:
             ctr, cevents, cintervals, cexp = [], [], [], []
+            sampled_response, event_response, interval_response = \
+                candidate_responses[c]
             for ti, trial in enumerate(ttarget.trials):
                 exp = trial.expected.get(term.role)
                 if exp is None:
                     continue
-                # a trial that overflowed breaks its sampling loop early, so its
-                # state list can be shorter than obs — pad the missing ticks with
-                # 0 (overflow already forces this candidate's score to 0) instead
-                # of indexing off the end.
-                si = trial_states[ti]
-                ctr.append([si[t].get(c, 0) if t < len(si) else 0
-                            for t in range(obs)] if need_samples else [])
-                cevents.append(list(trial_events[ti].get(c, ())))
-                cintervals.append(list(trial_intervals[ti].get(c, ())))
+                ctr.append(list(sampled_response[ti])
+                           if need_samples else [])
+                cevents.append(list(event_response[ti]))
+                cintervals.append(list(interval_response[ti]))
                 cexp.append(exp)
             if not ctr:
                 scores[term.role][c] = 0.0
@@ -378,15 +417,15 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
     # Globally best injective assignment, not role-by-role greedy: a greedy
     # first role can spend the only strong cell and strand a later one.
     assignment = best_distinct_assignment(
-        tuple(out_pos), candidates, scores)
+        tuple(out_pos), candidates, scores,
+        balance_worst=bool(getattr(ttarget, 'combinational_cases', ())))
     if assignment is None:
         return out_pos, traces
     out_pos.update(assignment)
     for term in ttarget.outputs:
         best = out_pos[term.role]
         traces[term.role] = [
-            [trial_states[ti][t].get(best, 0) if t < len(trial_states[ti]) else 0
-             for t in range(obs)]
+            list(candidate_responses[best][0][ti])
             if need_samples else []
             for ti in range(len(ttarget.trials))]
         traces.events[term.role] = [list(trial_events[ti].get(best, ()))
@@ -428,30 +467,38 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
     else:
         cone = input_cone(grid, routing, in_pos)
         sub = grid if len(cone) == len(grid) else {c: grid[c] for c in cone}
-    runs = [run_nervous_events(
-                sub, routing, in_pos, out_pos, trial.streams, obs,
-                prune=False, max_events=getattr(ttarget, 'max_events', 2048),
-                sample=need_samples, config=config,
-                input_events=getattr(trial, 'input_events', None),
-                delays=delays, arch=arch,
-                terminal_inputs=terminal_inputs,
-                terminal_outputs=terminal_outputs)
-            for trial in ttarget.trials]
+    runs = []
+    for trial in ttarget.trials:
+        run = run_nervous_events(
+            sub, routing, in_pos, out_pos, trial.streams, obs,
+            prune=False, max_events=getattr(ttarget, 'max_events', 2048),
+            sample=False, config=config,
+            input_events=getattr(trial, 'input_events', None),
+            delays=delays, arch=arch,
+            terminal_inputs=terminal_inputs,
+            terminal_outputs=terminal_outputs)
+        if run[3]:
+            return TemporalTraces(overflow=True)
+        runs.append(run)
+    role_intervals = {
+        role: [merge_intervals(
+                   [getattr(run[2], 'intervals', {}).get(cell, ())
+                    for cell in cells])
+               for run in runs]
+        for role, cells in groups.items()}
     traces = TemporalTraces(
-        {role: [run[1].get(role, []) for run in runs] for role in groups},
+        {
+            role: [list(_sample_intervals(intervals, obs))
+                   if need_samples else []
+                   for intervals in role_intervals[role]]
+            for role in groups
+        },
         events={
-            role: [[start for start, _ in merge_intervals(
-                        [getattr(run[2], 'intervals', {}).get(cell, ())
-                         for cell in cells])]
-                   for run in runs]
-            for role, cells in groups.items()},
-        intervals={
-            role: [merge_intervals(
-                       [getattr(run[2], 'intervals', {}).get(cell, ())
-                        for cell in cells])
-                   for run in runs]
-            for role, cells in groups.items()},
-        overflow=any(run[3] for run in runs))
+            role: [[start for start, _ in intervals]
+                   for intervals in role_intervals[role]]
+            for role in groups},
+        intervals=role_intervals,
+        overflow=False)
     return traces
 
 

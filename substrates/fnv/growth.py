@@ -1,10 +1,12 @@
-"""Telomere-bounded associative development for the Functional NV Net."""
+"""Constructive FNV placement and associative-v2 compatibility growth."""
 from __future__ import annotations
 
 from substrates.nervous.hexgrid import hex_dirs, hex_frontier_cells
 
 from .catalogue import STATE_DISTANCES
-from .genome import germline_telomere, input_seed_grid
+from .genome import (
+    PlacementGene, germline_telomere, input_seed_grid, is_constructive,
+)
 
 
 def _compile_lookup(genome):
@@ -110,6 +112,9 @@ def grow_functional(genome, seeds, grid_size=None, iters=None):
     seeds = tuple(tuple(seed) for seed in seeds)
     if not seeds:
         seeds = ((0, 0),)
+    if is_constructive(genome):
+        from .construction import develop_constructive
+        return develop_constructive(genome, seeds).grid
     germline = germline_telomere(genome)
     program = _compile_lookup(genome)
     seed_states = input_seed_grid(seeds)
@@ -128,6 +133,10 @@ def grow_functional(genome, seeds, grid_size=None, iters=None):
 def grow_functional_snapshots(genome, seeds, grid_size=None, iters=None):
     del grid_size, iters
     seeds = tuple(tuple(seed) for seed in seeds) or ((0, 0),)
+    if is_constructive(genome):
+        from .construction import develop_constructive
+        return list(develop_constructive(
+            genome, seeds, snapshots=True).snapshots)
     germline = germline_telomere(genome)
     program = _compile_lookup(genome)
     seed_states = input_seed_grid(seeds)
@@ -145,12 +154,22 @@ def grow_functional_snapshots(genome, seeds, grid_size=None, iters=None):
     return snapshots
 
 
-def active_gene_loci(genome, seeds):
-    """Return rules that win a lookup on the mature body or its frontier.
+def active_gene_loci_and_contexts(genome, seeds):
+    """Return winning rules and encountered mature/frontier contexts.
 
     This is a search hint only. Development itself still evaluates every gene
     with the unchanged first-wins categorical-distance rule.
     """
+    if is_constructive(genome):
+        from .construction import develop_constructive
+        active = develop_constructive(genome, seeds).active_ids
+        loci = tuple(
+            (chromosome_index, gene_index)
+            for chromosome_index, chromosome in enumerate(genome.chromosomes)
+            for gene_index, gene in enumerate(chromosome.genes)
+            if isinstance(gene, PlacementGene)
+            and int(gene.gene_id) in active)
+        return loci, ()
     grid = grow_functional(genome, seeds)
     program = [
         (
@@ -187,8 +206,8 @@ def active_gene_loci(genome, seeds):
     active = set()
     distances = STATE_DISTANCES
     for context in contexts:
-        best, best_distance = None, 1 << 30
         s_l, s_r, s_d, self_state = context
+        best, best_distance = None, 1 << 30
         for (chromosome_index, gene_index, ctx_l, ctx_r, ctx_d,
              self_in, _self_out) in program:
             if self_state == 0 and self_in != 0:
@@ -204,4 +223,9 @@ def active_gene_loci(genome, seeds):
                 best_distance = distance
         if best is not None:
             active.add(best)
-    return tuple(sorted(active))
+    return tuple(sorted(active)), tuple(sorted(set(contexts)))
+
+
+def active_gene_loci(genome, seeds):
+    """Return rules that win a lookup on the mature body or its frontier."""
+    return active_gene_loci_and_contexts(genome, seeds)[0]

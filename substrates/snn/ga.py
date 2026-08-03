@@ -613,6 +613,7 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
         best_genome  = clone_genome(population[best_idx])
         best_fitness = fitnesses[best_idx]
         best_rank = rank_key(best_genome, best_fitness)
+        escape_state.record_champion(0, best_genome, best_fitness)
         stagnation = 0
         mutation_rate = MEAN_MUTATIONS
 

@@ -258,9 +258,13 @@ def _lut_adapter():
         from .io_placement import evolves_io
         strategy = getattr(getattr(config, 'ga', None),
                            'io_placement', 'fixed')
+        function_families = getattr(
+            getattr(config, 'ga', None),
+            'lut_function_families', None)
         return mutate_lut(clone_genome(genome), 1.0,
                           chromosome_count=chromosome_count,
-                          evolve_io=evolves_io(strategy))
+                          evolve_io=evolves_io(strategy),
+                          function_families=function_families)
 
     return {'signature': genome_signature, 'grow': grow, 'probe': probe,
             'score': score_lut_temporal, 'mutate': mutate}

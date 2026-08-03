@@ -9,6 +9,7 @@ restrictions, and perfect fitness requires every declared restriction to pass.
 """
 from __future__ import annotations
 from bisect import bisect_left
+from functools import lru_cache
 import math
 
 from . import pulse
@@ -80,23 +81,38 @@ class TemporalTraces(dict):
 # is penalised. Isolated single-tick expectations (echo, oscillator) are
 # length-1 windows, for which coverage reduces to exact per-tick matching.
 
-def _expected_windows(exp):
-    """[(level, [ticks])] — maximal constant-level runs of scored ticks."""
+@lru_cache(maxsize=8192)
+def _expected_windows_cached(exp):
+    """Immutable maximal constant-level runs of scored ticks."""
     wins, cur, lvl = [], [], None
     for t, e in enumerate(exp):
         if e is None:
             if cur:
-                wins.append((lvl, cur))
+                wins.append((lvl, tuple(cur)))
             cur, lvl = [], None
         elif lvl is None or e == lvl:
             lvl = e
             cur.append(t)
         else:
-            wins.append((lvl, cur))
+            wins.append((lvl, tuple(cur)))
             lvl, cur = e, [t]
     if cur:
-        wins.append((lvl, cur))
-    return wins
+        wins.append((lvl, tuple(cur)))
+    return tuple(wins)
+
+
+def _expected_windows(exp):
+    """Return cached constant-level windows for one expected target trace.
+
+    Expected traces belong to the target, not to an output candidate. During
+    global probe fitting the same trace can be scored thousands of times, so
+    compile it once instead of repeatedly rediscovering identical windows.
+    """
+    return _expected_windows_cached(tuple(exp))
+
+
+_expected_windows.cache_clear = _expected_windows_cached.cache_clear
+_expected_windows.cache_info = _expected_windows_cached.cache_info
 
 
 def _window_score(trace, lvl, ticks):
@@ -892,7 +908,9 @@ def _logic_contract_score(observations, target):
     observation; the contract owns all expectation comparison and aggregation.
 
     Aggregation is BALANCED per output: each output's expected-1 rows and
-    expected-0 rows are averaged separately, then those two averages are meaned.
+    expected-0 rows are averaged separately, then those two averages are
+    meaned. Multiple outputs use mean-and-worst aggregation, so an easy output
+    cannot hide a chance-level hard output.
     A flat mean over every (case, output) cell — what this used to do — lets a
     do-nothing constant win whenever the truth table is lopsided: outputting
     always-0 scored 0.75 on AND and 0.78 on the 2x2 multiplier, because those
@@ -928,7 +946,14 @@ def _logic_contract_score(observations, target):
                        for cells in levels.values() if cells]
         if group_means:
             output_scores.append(sum(group_means) / len(group_means))
-    total = (sum(output_scores) / len(output_scores)) if output_scores else 0.0
+    # This must match the periodic truth-table path below.  The old plain mean
+    # made a Full Adder that solved Carry but guessed Sum score 0.75, exactly
+    # the same as a circuit that was genuinely 75% correct on BOTH outputs.
+    # Mean-and-worst keeps a gradient but makes the weakest required output
+    # matter: those examples score 0.625 and 0.75 respectively.
+    total = (
+        0.5 * (sum(output_scores) / len(output_scores) + min(output_scores))
+        if output_scores else 0.0)
     return total, tuple(cases), None
 
 
@@ -2338,14 +2363,18 @@ def behavior_representatives(candidates, signature, multiplicity):
     return tuple(representatives)
 
 
-def best_distinct_assignment(roles, candidates, scores):
-    """Maximise total role score while assigning a DISTINCT cell to each role.
+def best_distinct_assignment(
+        roles, candidates, scores, *, balance_worst=False):
+    """Choose distinct output cells under the contract's role aggregation.
 
     A role-by-role greedy choice can spend the only strong cell on an early
     role and leave a later one with nothing — the greedy answer is not merely
     suboptimal, it can be arbitrarily bad on exactly the multi-output targets
-    that matter. This small bitmask dynamic program finds the globally best
-    injective assignment instead.
+    that matter. By default this small bitmask dynamic program maximises the
+    total role score. With ``balance_worst`` it instead maximises the same
+    half-mean plus half-worst objective used by multi-output truth-table
+    scoring. Otherwise probe fitting can install a readout that the final
+    contract immediately considers inferior.
 
     Compactness is NOT an objective here: coordinate order enters only as a
     deterministic tie-break between assignments of equal total score, so the
@@ -2364,31 +2393,65 @@ def best_distinct_assignment(roles, candidates, scores):
         return tuple(sentinel if cell is None else tuple(cell)
                      for cell in assignment)
 
-    def prefer(candidate, incumbent):
+    def prefer_sum(candidate, incumbent):
         if incumbent is None:
             return True
         if candidate[0] != incumbent[0]:
             return candidate[0] > incumbent[0]
         return assignment_key(candidate[1]) < assignment_key(incumbent[1])
 
-    empty = (None,) * len(roles)
-    states = {0: (0.0, empty)}
-    for cell in candidates:
-        updated = dict(states)
-        for mask, (total, assignment) in states.items():
-            for role_index, role in enumerate(roles):
-                bit = 1 << role_index
-                if mask & bit:
-                    continue
-                trial = list(assignment)
-                trial[role_index] = cell
-                record = (total + float(scores[role].get(cell, 0.0)),
-                          tuple(trial))
-                next_mask = mask | bit
-                if prefer(record, updated.get(next_mask)):
-                    updated[next_mask] = record
-        states = updated
-    record = states.get((1 << len(roles)) - 1)
+    def best_sum(minimum=None):
+        """Best additive assignment whose every role clears ``minimum``."""
+        empty = (None,) * len(roles)
+        states = {0: (0.0, empty)}
+        for cell in candidates:
+            updated = dict(states)
+            for mask, (total, assignment) in states.items():
+                for role_index, role in enumerate(roles):
+                    bit = 1 << role_index
+                    if mask & bit:
+                        continue
+                    value = float(scores[role].get(cell, 0.0))
+                    if minimum is not None and value < minimum - 1e-12:
+                        continue
+                    trial = list(assignment)
+                    trial[role_index] = cell
+                    record = (total + value, tuple(trial))
+                    next_mask = mask | bit
+                    if prefer_sum(record, updated.get(next_mask)):
+                        updated[next_mask] = record
+            states = updated
+        return states.get((1 << len(roles)) - 1)
+
+    if not balance_worst or len(roles) == 1:
+        record = best_sum()
+    else:
+        # For a fixed lower bound on the weakest role, maximising the remaining
+        # mean is additive and the DP above is exact. The optimum's weakest
+        # score must be one of the finite edge scores, so checking those
+        # thresholds finds the exact mean-and-worst optimum without enumerating
+        # candidate permutations (organisms may expose hundreds of probes).
+        thresholds = sorted({
+            float(scores[role].get(cell, 0.0))
+            for role in roles for cell in candidates
+        })
+        record, record_key = None, None
+        for threshold in thresholds:
+            candidate = best_sum(threshold)
+            if candidate is None:
+                continue
+            total, assignment = candidate
+            values = [
+                float(scores[role].get(cell, 0.0))
+                for role, cell in zip(roles, assignment)]
+            weakest = min(values)
+            objective = 0.5 * (total / len(roles) + weakest)
+            key = (objective, weakest, total)
+            if (record_key is None or key > record_key
+                    or (key == record_key
+                        and assignment_key(assignment)
+                        < assignment_key(record[1]))):
+                record, record_key = candidate, key
     if record is None:
         return None
     return dict(zip(roles, record[1]))

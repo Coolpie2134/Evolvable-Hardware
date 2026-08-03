@@ -24,8 +24,8 @@ move through it.
 | Architecture | Module | What a cell is |
 | :---- | :---- | :---- |
 | Nervous net (Arch 1) | `substrates/nervous/` | Hex lattice, 3 neighbours (L/R/D). A cell is a pulse node: coincidence or buffer, plus inhibition. Fresh runs use the paper's three independent L/R/D circuits with analog physics; retired single-tile and digital engines remain for checkpoints and ablations. See 2.2. |
-| Functional NV Net (FNV) | `substrates/fnv/` | Hex lattice, 3 neighbours and two antiparallel wires per physical edge. A cell is one fixed routed component: logic, delay, normalizer, hold, C-element, toggle, or enable-gated oscillator. Continuous-time event-driven logic. |
-| LUT array (Arch 2) | `substrates/lut/` | Square lattice, 4 neighbours (N/S/E/W). A cell holds four 16-bit lookup tables, one per output direction. Continuous-time asynchronous level logic. |
+| Functional NV Net (FNV) | `substrates/fnv/` | Hex lattice, 3 neighbours and two antiparallel wires per physical edge. A cell is one fixed routed component: binary/ternary logic, delay, normalizer, hold, C-element, toggle, or enable-gated oscillator. Continuous-time event-driven logic. |
+| LUT array (Arch 2) | `substrates/lut/` | Square lattice, 4 neighbours (N/S/E/W). A cell holds four directional 16-bit truth tables, optionally restricted to selected permanent gate banks. Continuous-time asynchronous level logic. |
 | SNN (comparison) | `substrates/snn/` | Square lattice. A cell is a leaky integrate-and-fire neuron with an evolvable threshold and time constant, wired by excitatory and inhibitory synapses. |
 
 The nervous net and the LUT array are the paper's two architectures and the
@@ -464,6 +464,36 @@ context. During growth each direction is looked up with the context rotated to
 that direction. `self_out == 0` (the all-zero table) means that direction is
 dead; a cell with all four tables zero is removed.
 
+**Physical function banks.** `GAConfig.lut_function_families` is a run-level
+inventory of permanent 16-bit tables defined in `substrates/lut/functions.py`.
+It can enable any combination of:
+
+| Bank | Exact variants |
+| :---- | :---- |
+| `ROUTING` | 4 single-input relays, one per N/S/E/W input |
+| `AND` / `OR` / `XOR` | 11 each: every 2-, 3-, and 4-input subset |
+| `VETO` | 12 ordered `A AND NOT B` input pairs |
+| `THRESHOLD` | 4 majority-of-three variants plus at-least-2-of-4 and at-least-3-of-4 |
+| `MUX` | 24 directional 2:1 muxes: each select input and each ordered high/low pair among the other three |
+| `UNRESTRICTED` | all 65,536 truth tables; the historical/default “Arbitrary LUT” mode |
+
+`OFF` (table zero) is always available. Every named table has output zero at
+all-zero input, so a named-bank-only run is quiescent. These are hardware
+choices, not per-node parameters: `self_out` and the four germline tables must
+belong to the selected inventory, while `ctx_n/e/s/w` and `self_in` remain full
+16-bit CAM recognition patterns because they select developmental rules rather
+than execute as production gates.
+
+Initialization samples a bank before a variant, preventing the 24-entry MUX
+bank from receiving six times the prior of four-entry routing. Mutation stays
+in the current bank 78% of the time and chooses a minimum-Hamming alternative;
+the rest crosses to another selected bank. The `UNRESTRICTED`-only path is a
+strict no-op around the historical random generator and bit-flip mutation, so
+old runs remain bit-identical. Checkpoints without the field load as
+`('UNRESTRICTED',)`. The spatial hard-target compiler rescue runs only when
+`UNRESTRICTED` is enabled, because a synthesized arbitrary table need not exist
+in a named physical bank.
+
 **Dynamics.** `substrates/lut/pulse.py: AsyncLutSim` is continuous-time asynchronous
 level logic with inertial delay. A cell re-evaluates its tables when a neighbour
 changes and the new value lands one gate delay later, but a pending change
@@ -474,10 +504,11 @@ lattice with `delay == TICK` a vectorised fast path reproduces the old
 synchronous engine (`LutSim`) bit for bit; `LutSim` is retained as the
 quantization reference.
 
-Two consequences are worth knowing. The array is spontaneously active: a table
-with its index-0 bit set outputs high for the all-zero neighbourhood, so it fires
-at power-on with no input, at exactly `t = 0`. That is honest LUT physics and the
-deliberate contrast with the nervous net's quiescence. Second, recurrent LUT
+Two consequences are worth knowing. An unrestricted array can be spontaneously
+active: a table with its index-0 bit set outputs high for the all-zero
+neighbourhood, so it fires at power-on with no input, at exactly `t = 0`. That is
+honest LUT physics and the deliberate contrast with the nervous net's
+quiescence; named-bank-only runs exclude those tables. Second, recurrent LUT
 bodies may oscillate or become chaotic rather than settling. Raw static
 truth-table scoring is therefore a poor interface for this backend;
 combinational targets are converted to widely spaced, repeated event-driven
@@ -523,9 +554,10 @@ checkpoints with a missing/null layout retain their target-declared pads.
 ### 2.4 Functional NV Net (`substrates/fnv`)
 
 FNV is its own substrate rather than another nervous-net node model. It retains
-the degree-3 honeycomb, local L/R/D orientation, indirect context-to-state
-development, unbounded field, and telomere bound. Its mature hardware and state
-alphabet are independent.
+the degree-3 honeycomb, local L/R/D orientation, and unbounded physical field.
+Its mature hardware, state alphabet, and constructive genome are independent.
+Ordinary nervous net remains the Edwards associative-development experiment;
+FNV is the fixed-component evolvable-routing control arm.
 
 Each physical adjacency contains two separately driven antiparallel wires. A
 component only reads the directions declared as its inputs and only drives its
@@ -534,7 +566,7 @@ side. Unary components have all three input orientations; for each orientation
 there are two one-output routes and one two-output route. Asymmetric VETO has
 both A/not-B assignments for each possible output direction.
 
-The initial append-only catalogue has 118 permanent IDs:
+The append-only catalogue has 118 permanent IDs:
 
 * `EMPTY`;
 * AND, OR, XOR, and VETO routing forms;
@@ -552,8 +584,9 @@ the logic catalogue are not duplicated. Every timing choice and route is a
 separate type ID so a future physical realization can map a genotype directly
 to a component inventory. Checkpoints carry a SHA-256 catalogue hash; changing
 the type-to-ID mapping makes them fail to load rather than silently becoming a
-different circuit. They also carry an FNV development version, so a change such
-as the polarized germline policy cannot silently reinterpret an older genome.
+different circuit. They also carry an FNV development version. Fresh runs write
+constructive v3; associative-v2 checkpoints load under their original
+interpreter instead of being translated or silently reinterpreted.
 
 `FunctionalSim` is a continuous-time event engine. Logic transitions are
 inertial; delays transport both edges; stateful elements retain only their
@@ -574,12 +607,10 @@ collisions. The pad positions are germline seeds, so they affect development as
 well as runtime injection. Legacy checkpoints that lack this field continue to
 use the target-declared fixed inputs.
 
-The first four logical inputs retain fixed, distinct dual-output delay-component
-identities during growth. This is physical port polarization, not an evolvable
-per-component parameter: external injection drives every pad identically, while
-the distinct catalogue states let the developmental rules distinguish A, B,
-select, and a fourth input instead of imposing an accidental reflection
-symmetry on asymmetric circuits.
+Input pads retain fixed, distinct display component identities. Runtime source
+membership overrides their printed ports and drives all three adjacent wires;
+the constructive genome names each logical source directly with permanent
+negative IDs, so input roles do not rely on component-state symmetry breaking.
 
 FNV output terminals are fitted read-only probes. The fitter scores every mature
 non-input component rather than a radius-limited neighbourhood around the
@@ -597,22 +628,40 @@ changes preserve exploration. The native one-component baseline shown in the
 report is informational only: it never rejects a target or prevents evolution
 from discovering a harder emergent circuit.
 
-FNV initialization is strictly forward-developmental. Every initial candidate
-and random immigrant is an unrestricted random `FunctionalGene` genome drawn
-from the enabled component families plus a compact random relative input
-layout. The ordinary growth engine alone determines its mature body. The
-evolutionary path contains no component-grid scaffold, target-shaped route
-planner, phenotype-to-genome translation, or special timing-motif coverage
-bank.
+Fresh FNV chromosomes contain `PlacementGene` records. Each record has a unique
+positive ID, one permanent catalogue component ID, an ordered tuple of
+`BranchRef(node_id, direction)` inputs, and a branch-block ID. Negative node IDs
+name logical input pads. Positive IDs may name earlier or later placement genes;
+list position is never an anchor. A component is placed only when all named
+source ports exist, drive the named direction, face the component's fixed input
+pins, and converge on one empty honeycomb cell.
 
-FNV reproduction uses expression-aware mutation. Rules that win a lookup in the
-mature body or its frontier receive most mutation events, with a minority left
-fully unrestricted so dormant rules and new morphologies remain reachable.
-Input-layout mutations are interleaved with those rule edits, so placement and
-morphology can co-adapt. Combinational runs further favor expressed
-LOGIC/C-element outputs. Incomplete
-phenotypes still emit a zero for every declared contract case, keeping FNV case
-vectors rectangular and making ε-lexicase safe. `tools/benchmark_fnv.py` runs
+The interpreter repeatedly resolves dependency-ready genes by stable ID. A
+collision leaves the existing occupant in place and suppresses only the losing
+placement. Its explicitly dependent descendants remain dormant; independent
+branches continue. Invalid or missing dependencies are not relocated, clamped,
+or repaired. Electrical feedback remains possible because a newly placed
+component may drive an already occupied neighbour even though the placement
+dependency graph itself is acyclic.
+
+Initialization assembles a compact target-blind inventory outward from the
+evolved source pads. Combinational runs seed from LOGIC plus DELAY when both
+families are enabled because degree-3 gates require physical routing and
+fan-out; the complete user-selected bank remains reachable during mutation.
+Mutation can extend a live output tip, join two converging tips, switch to a
+compatible fixed component, or reroute/duplicate/delete a connected labelled
+branch block. A block move changes its root references while internal stable
+IDs preserve the descendant structure. Duplication and crossover allocate new
+IDs and transplant a block only onto a physically compatible frontier. Fan-out
+is never virtual: it exists only at source pads and fixed unary components with
+two output ports. Input-layout mutations move one pad by one honeycomb edge and
+therefore translate only branches that name that source.
+
+None of these operators reads expected outputs, target names, fitted probes, or
+desired component coordinates. There is no automatic route search,
+phenotype-to-genome conversion, target scaffold, or inverse development.
+Incomplete phenotypes still emit a zero for every declared contract case, keeping FNV case
+vectors rectangular and making ε-lexicase safe. `tools/benchmark.py` runs
 deterministic, process-isolated target and seed comparisons through the real
 controller; it can survey every FNV-supported temporal target, select tournament
 or lexicase, and show case vectors.
@@ -622,15 +671,18 @@ telomere cost. Behavioral fitness comes first; FNV currently leaves the
 optional robustness and juvenile-development tiers inactive. Exact fitness
 ties are separated by `FunctionalTopology`, computed from the same effective
 directed wires as `FunctionalSim`. A graph traversal starts at every source-only
-input pad. It counts reachable non-input components and wires, components
-reachable from at least two logical inputs, cyclic nodes, independent cycle
-rank, and separate strongly connected feedback regions. Each term enters as
-`log(1 + count)`, so more connected structure and feedback are always preferred
-but returns diminish. Unreachable components, disconnected islands, and loops
-that no input can activate contribute zero. No truth table, expected event,
+input pad. Selection rewards input convergence and reachable feedback, with
+small target-independent saturation caps so a long chain that merely copies one
+already-known signal cannot win by consuming the whole placement budget.
+Reachable node/edge counts remain diagnostic. Unreachable components,
+disconnected islands, and loops that no input can activate contribute zero. No truth table, expected event,
 component family, fitted output, or target name enters this topology objective.
 Tournament selection and survivor ranking use it as their final key; ε-lexicase
 uses it only after behavioral cases have filtered the acceptable parent set.
+For static diagnostics FNV also records the number of distinct nonconstant node
+truth signatures and their input dependence. That repertoire never consults
+the desired output, but it is still behavioral under the target's input bank,
+so it is report-only telemetry and never part of the topology rank.
 
 ### 2.5 The SNN comparison backend (`substrates/snn`)
 
@@ -654,25 +706,25 @@ feedback fail deterministically. The GA constants remain SNN-specific.
 
 ## 3. Genome translation for all models
 
-Genotype to phenotype is the same three-step pipeline everywhere: genes, grown
-state map, interpreted hardware. Only the alphabet changes.
+Genotype to phenotype always ends in a physical state map and interpreted
+hardware. Nervous/LUT use associative growth; constructive FNV resolves named
+port dependencies.
 
 |  | Nervous net | FNV | LUT array |
 | :---- | :---- | :---- | :---- |
-| Gene | `HexGene(ctx_l, ctx_r, ctx_d, self_in, self_out)`: five state-valued fields; 5-bit under `single`, 15-bit under `tri3` | `FunctionalGene(ctx_l, ctx_r, ctx_d, self_in, self_out)`: five permanent component IDs | `LutGene(ctx_n, ctx_e, ctx_s, ctx_w, self_in, self_out)`: five 16-bit LUT-valued fields |
-| State alphabet | 0–31 (5-bit): 0 dead, 1–15 paper routing, 16–31 OR twins. Under `tri3`, 15-bit: three packed 5-bit AND/OR-capable configurations (0 = dead channel). | 0–117: 0 empty, 117 fixed component-and-routing types | 0–65535 (16-bit table): 0 = dead direction |
-| Context match | min Hamming over (L, R, D, self) | categorical physical distance over family, function, routing, and fixed timing | min Hamming over the full 80-bit rotated context |
-| Growth rule | `self_in == 0` matches empty cells, the only kind that can birth a cell | same empty-cell convention | same convention; roughly 1 in 65536 by chance, so random genomes are seeded with them explicitly |
+| Gene | `HexGene(ctx_l, ctx_r, ctx_d, self_in, self_out)`: five state-valued fields; 5-bit under `single`, 15-bit under `tri3` | `PlacementGene(gene_id, component_id, inputs, branch_id)`: stable labelled physical placement | `LutGene(ctx_n, ctx_e, ctx_s, ctx_w, self_in, self_out)`: five 16-bit LUT-valued fields |
+| State alphabet | 0–31 (5-bit): 0 dead, 1–15 paper routing, 16–31 OR twins. Under `tri3`, 15-bit: three packed 5-bit AND/OR-capable configurations (0 = dead channel). | 0–117: 0 empty, 117 fixed component-and-routing types | 0–65535 (16-bit table): 0 = dead direction. A run may restrict executable values to permanent gate banks while CAM inputs retain the full alphabet. |
+| Context match | min Hamming over (L, R, D, self) | none; named source ports must physically converge on one empty cell | min Hamming over the full 80-bit rotated context |
+| Growth rule | `self_in == 0` matches empty cells, the only kind that can birth a cell | dependency-ready placements resolve by stable ID; collisions fail locally | same convention; roughly 1 in 65536 by chance, so random genomes are seeded with them explicitly |
 | Interpretation | `interpret_nervous`: state → `ROUTING_HEX[state & 0x1F]` → `(E1, E2, I1, op)` | catalogue ID directly names the physical component and ports | the four tables are the hardware; no decode step |
 | Extra vectors | `state_delays` (32 floats, model-gated, not read during growth) | — | — |
 | Tile architecture | `Genome.arch`: `'single'` (one Fig. 3 circuit per tile) or `'tri3'` (three independent L/R/D circuits). Part of the genome signature, so the two never share a cache slot. | one component per honeycomb vertex | — |
 
-**Chromosomes.** A genome is a list of chromosomes; each has genes, a split point
-(the crossover boundary), a tag (used to pair homologs), and a telomere. Gene
-count is capped at `MAX_GENES = 24` for Nervous and LUT and 64 for FNV; the
-higher FNV ceiling leaves room for more complex fixed-component rule sets
-without directing development from a target-shaped scaffold. Random FNV
-chromosomes still start with 3–12 genes.
+**Chromosomes.** Nervous/LUT chromosomes retain split points, tags, and
+telomeres. FNV chromosomes are hereditary containers for labelled branches;
+crossover exchanges connected branch blocks rather than list suffixes. FNV is
+capped at 64 placements per container and 128 across the constructive genome.
+Old version-2 checkpoints retain their original rule containers.
 Chromosome count is capped at 32. The app's "Chroms" field is a structural
 constraint that reproduction enforces exactly, not an initial-population hint.
 
@@ -684,9 +736,9 @@ a threshold/tau index plus synapse polarity rather than a routing table.
 Nervous, LUT, and SNN offspring share immutable-by-convention gene objects and
 copy only the mutable container structure; their mutation operators therefore
 replace genes and vectors rather than editing shared objects in place.
-`_mutate_state_delay` builds a fresh vector every time. FNV mutations edit gene
-objects, so `clone_genome` shallow-copies every scalar-only `FunctionalGene`
-while still avoiding recursive `deepcopy`.
+`_mutate_state_delay` builds a fresh vector every time. FNV mutations edit
+placement objects, so `clone_genome` shallow-copies every placement while its
+frozen `BranchRef` tuples remain safely shared.
 
 ## 4. How the genetic algorithm works
 
@@ -726,9 +778,12 @@ no size preference for LUT).
 Key constants (`substrates/nervous/ga.py`): `POPSIZE = 120`, `MEAN_MUTATIONS = 4.0` (a hot
 start for simulated annealing), `MUT_DECAY = 0.997`, a deliberately slow cooldown
 because hard recurrent tasks need late variation: 0.997 cools 4.0 to about 0.89
-by generation 500, where the older 0.99 crashed it to about 0.03. Every backend
-uses `N_WORKERS = max(1, min((cores or 2) - 2, 16))`, and the fitness cache is
-bounded at 200,000 entries for long runs. One process pool remains alive across
+by generation 500, where the older 0.99 crashed it to about 0.03. Direct backend
+APIs retain an `N_WORKERS` ceiling of 16. GUI/controller runs instead record
+`GAConfig.evaluation_workers`, defaulting to `max(1, min(cores - 2, 8))` and validated
+from 1 through 16; the controller also avoids starting more workers than there
+are genomes. The fitness cache is bounded at 200,000 entries for long runs. One
+process pool remains alive across
 generations; starting and importing fresh Windows workers every generation used
 to dominate short evaluations. Duplicate signatures within a generation are
 submitted once and their result is fanned back to every matching individual.
@@ -736,7 +791,7 @@ submitted once and their result is fanned back to every matching individual.
 **Evaluation hot paths preserve semantics while reusing invariant work.**
 Nervous and SNN compile each developmental rule context into one packed integer,
 so a lookup is one XOR plus `int.bit_count()`. FNV precomputes its complete
-118-by-118 categorical distance matrix, flattens a genome's rule program once
+124-by-124 categorical distance matrix, flattens a genome's rule program once
 per growth, compiles the mature component wiring once, and reuses that wiring
 across output fitting, trials, truth-table cases, and topology. Ordinary Nervous
 selection grows once and shares the mature phenotype between behavior and its
@@ -747,6 +802,17 @@ computes steady duty for every trial/cell in one operation; equivalence tests
 compare the batch directly with separately reset simulators. SNN fitness paths
 do not record voltage segments; `simulate_trace` still records them when the GUI
 actually requests a plot.
+
+Nervous global probe fitting caches the target-only decomposition of expected
+state traces; candidate cells reuse it rather than reconstructing identical
+windows. If any nervous trial crosses the deterministic event cap, fitting and
+frozen-readout replay stop immediately: `score_contract` defines overflow as
+zero fitness, so later trials and candidate scoring cannot change the result.
+Persistence scoring also avoids full-grid per-tick state dictionaries. The
+engine runs to the physical horizon once, then reconstructs only candidate and
+fitted-output half-tick traces from its recorded `[start, end)` pulse intervals.
+Uniform, paper-analog, and tri-circuit equivalence tests compare this directly
+with the engine's sampled state.
 
 Reproduction likewise avoids recursive `copy.deepcopy`. Nervous/LUT/SNN clone
 their mutable containers and share never-mutated-in-place gene objects; FNV
@@ -760,7 +826,7 @@ verify the pass on one machine; they are not portable throughput promises.
 
 ### 4.2 Selection
 
-**Tournament (default).** `rank_key(genome, fitness)` is the ranking key. Fitness
+**Tournament (temporal default).** `rank_key(genome, fitness)` is the ranking key. Fitness
 dominates absolutely. SNN applies fewer genes and then shorter germline
 telomere only after the solved threshold. Nervous and FNV instead use
 input-reachable connectivity/feedback potential, with no genome-size term; LUT
@@ -769,13 +835,45 @@ solved run still reads exactly 1.0. Elites form
 the breeding pool (truncation selection) rather than a copied-forward elite:
 parents are drawn by tournament within that pool.
 
-**ε-lexicase (optional).** `_lexicase_parent(population, case_vecs)` streams the
+**Case-aware lexicase.** `_lexicase_parent(population, case_vecs)` streams the
 test cases in random order and, at each case, keeps only candidates within ε
 (median absolute deviation) of that case's best. A mean hides a single failing
 trial, roughly 1/12 of the score; lexicase makes every case a hard filter some of
 the time, so specialists on the currently-failing cases get selected and
 recombined. It must stream over the whole population, so it bypasses the elite
-pool.
+pool. Nervous, FNV, and LUT combinational targets enable it automatically and
+retain one case per truth-table row/output check; the GUI checkbox remains the
+choice for ordinary temporal targets. Exact 0/1 cases use ε=0—a MAD of 1 on an
+even 50/50 split would otherwise retain candidates known to be wrong—while
+continuous timing and LUT-duty cases keep MAD ε.
+
+Lexicase parent selection is paired with **contract-elite environmental
+memory**. Before the first solve, `contract_elite_survivors` reserves at most
+40% of the population for distinct behaviors that are best on a rotating set
+of the currently hardest cases; the rest remains strict generational
+replacement. Equal-hardness case order rotates so a large truth table cannot
+permanently privilege its first rows. Candidate ties use a leximin comparison
+of the complete case vector, then mean and scalar fitness. Thus a lower-average
+genome that uniquely passes a missing row or trial remains available for the
+next generation rather than disappearing before lexicase can select it.
+
+When case vectors are available, the two crossover parents are not independent
+draws. The first is selected normally; `complementary_parent_index` chooses the
+second by the leximin profile of the pairwise envelope
+`max(left_case, right_case)`. This directly favors parents whose partial
+behaviors cover each other's gaps while remaining agnostic about whether a case
+represents a truth-table cell, pulse schedule, state epoch, or cadence dwell.
+Downsampled lexicase limits the complement comparison to that generation's
+sampled cases.
+
+The scalar combinational score is still useful for progress display and the
+exact 1.0 solve boundary, but it is no longer asked to express the whole search
+ordering. Expected-0 and expected-1 rows are balanced per output, and multiple
+outputs aggregate as half mean plus half weakest output. The shared global
+probe fitter used by Nervous, FNV, and LUT optimizes that same mean-and-worst
+objective through a thresholded injective-assignment DP. Previously the fitter
+maximized plain role sum, so it could choose a set of cells that the final
+contract immediately ranked below another available set.
 
 ### 4.3 Mutation operators
 
@@ -828,22 +926,29 @@ effective rate is just the annealed rate, floored at 1 and capped by
 `mutation_limit`. Past that it ramps as `1 + beta × plateau_age` up to the same
 hard cap; `beta = 0` disables reheating entirely.
 
+“Flat” is case-aware when an evaluator supplies contract cases. The shared
+escape state compares the best single organism by its sorted weakest-to-
+strongest case vector (leximin), then mean and scalar fitness. Improvement
+there resets the stress clock even when the plotted aggregate is unchanged.
+It deliberately does not use the population-wide per-case envelope: a set of
+mutually exclusive specialists is not yet one circuit satisfying the contract.
+
 **Solved runs do not reheat.** `solved=True` pins the rate to the capped annealed
 value. This fixed a real defect: SOS hypermutation was reheating a solved run to
 maximum, overriding the anneal and holding the population mean down even though
 the best was 1.0.
 
 Past `STRESS_PATIENCE`, reproduction also keeps producing mutated descendants
-of the separately archived all-time champion. This does not copy an evaluated
-parent into the live population: every archive descendant contains a real
-mutation, so pre-solve generational replacement remains intact. Evolvable I/O
+of the separately archived all-time champion. Every archive descendant contains
+a real mutation; separately, the baseline contract-elite reserve may retain a
+bounded set of evaluated best-on-case behaviors. Evolvable I/O
 descendants may receive a coordinated multi-port bundle rather than one
 independent port edit.
 
 ### 4.5.0 Escaping a local minimum (`runtime/escape.py`)
 
 The SOS reheat above is one population-wide response to a stall. `runtime/escape.py`
-adds six more, all **off by default** — an unconfigured run, and any checkpoint
+adds a target-blind portfolio, all **off by default** — an unconfigured run, and any checkpoint
 written before the module existed, behaves exactly as it did before it.
 
 Before reaching for any of them it is worth knowing which failure you have,
@@ -861,8 +966,10 @@ problem at all — see 5.6 and `tools/probe_trivial_baselines.py`.
 | Crowding (`crowding`, `crowding_window`, `crowding_fraction`) | off, 16, 0.5 | Restricted tournament replacement over a **reserve** of the population: an offspring competes against the most genetically **similar** member of a random window. |
 | Neutral drift (`neutral_drift`) | off | Accepts equal-ranked challengers rather than demanding strict improvement. |
 | Self-adaptive mutation (`self_adaptive_mutation`, `adaptive_tau`) | off, 0.25 | Each individual carries its own heritable mutation rate. |
-| Rebirth (`rebirth`, `rebirth_patience`, `rebirth_fraction`, `rebirth_ancestors`, `rebirth_mutation_multiplier`, `archive_interval`, `archive_size`) | off, 40, 0.5, 4, 3.0, 10, 24 | On a stall, rebuilds part of the population from **diverse** archived ancestors at an elevated rate. |
+| Rebirth (`rebirth`, `rebirth_patience`, `rebirth_fraction`, `rebirth_ancestors`, `rebirth_mutation_multiplier`, `archive_interval`, `archive_size`) | off, 15, 0.5, 4, 3.0, 5, 24 | On a stall, rebuilds part of the population from **diverse** archived ancestors at an elevated rate. |
+| Lineage walk (`lineage_walk`, `lineage_walk_fraction`) | off, 0.10 | Reserves mutation-only, fitness-blind lineages that can retain a worse stepping stone for multiple generations. The fraction is only used when explicitly enabled; it is not a recommended preset. |
 | Robustness (`robustness`, `robustness_jitter`, `robustness_samples`) | off, 0.15, 2 | A second objective scored under jittered physics, ranked strictly below correctness. |
+| Islands (`islands`, `island_count`, `island_migration_interval`, `island_migrants`, `island_rate_spread`) | off, 4, 20, 1, 2.0 | Breeds separate cold-to-hot demes and rarely migrates each evaluated deme's best around a ring. |
 | Lexicase sample (`lexicase_downsample`) | 1.0 | Fraction of cases ε-lexicase streams per generation. |
 
 **Lifespan scoring** answers the flat-plateau case. A genome whose stage-6 body
@@ -921,11 +1028,33 @@ also silently overrides this project's deliberate pre-solve rule that elites
 breed but never survive.
 
 So `crowding_fraction` (default 0.5) crowds only part of the next population;
-the remaining slots are filled from the offspring under ordinary strict
-generational replacement, which is where the exploratory churn lives. At the
+the remaining slots are filled from the offspring, subject to the same bounded
+contract-elite reserve, which is where the exploratory churn lives. At the
 default the same runs show 7–33 mean decreases per 60 generations — churn
 restored, niches still protected. Setting it to 1.0 restores textbook
 whole-population RTR, monotone mean and all.
+
+**Lineage walk is the explicit fitness-valley mechanism.** Neutral drift only
+accepts equal-ranked variants, crowding is monotone inside its reserve, and a
+rebirth must jump from an archived ancestor to the far basin in one mutation
+transaction. None of those guarantees that a genuinely worse intermediate can
+mutate a second time. A lineage walk spends `lineage_walk_fraction` of the
+existing population slots on persistent mutation-only walkers. Each slot takes
+exactly one local mutation from its own previous genome per generation without
+behavioral selection. Its score is still evaluated normally; if a walker
+becomes better than the weakest member of the ordinary pool it is copied back
+into normal breeding, while its original walk continues. The method adds no
+evaluations, no target cases, and no hidden fitness term. A deterministic
+regression landscape in `test_escape.py` requires it to traverse two lower
+fitness states before reaching a better basin.
+
+The starting share is **0.10** only to keep the walker cohort lean when the
+mechanism is explicitly enabled. A paired 2026-08-02 NV Full-Adder screen found
+higher aggregate training scores at that setting, but no run solved. Because a
+scalar plateau does not establish case coverage, certification, or solve rate,
+that screen is **inconclusive** and does not justify enabling or recommending
+lineage walk. Raw reports are retained under
+`results/escape_lineage_search/` with that limitation stated explicitly.
 
 **Rebirth** keeps a ring buffer of champion snapshots and, on a stall, rebuilds
 `rebirth_fraction` of the population from `rebirth_ancestors` *maximally
@@ -936,6 +1065,18 @@ branch point. The current elites are retained — this is a backtrack, not an
 extinction — the reborn cohort mutates at `rebirth_mutation_multiplier ×` the
 run rate so it leaves in a different direction, and a cooldown equal to the
 patience stops it re-firing every generation while one stall persists.
+The initial champion is archived at generation zero. The default trigger was
+reduced from 40 to 15 generations and the archive interval from 10 to 5: the
+former settings allowed only one late attempt in a 50-generation run and left
+no time for the cohort to reproduce.
+
+**Islands migrate only after evaluation.** Earlier code bred a new generation
+and ranked those offspring using the previous parents' fitness values at the
+same list indices. Crossover and mutation break that positional association, so
+the selected migrants were arbitrary. Migration now snapshots the evaluated
+genome, its own fitness and its case vector as one unit. When crowding and
+islands are both active, survivor selection runs inside each deme rather than
+immediately mixing the demes back into one population.
 
 **Downsampled ε-lexicase** streams a fresh random subset of cases each
 generation. At equal evaluation budget that buys several times more generations
@@ -952,7 +1093,7 @@ the project has two GA drivers per backend — the headless `evolve_*` and
 `runtime/controller.py` — and they have drifted before, with benchmarks
 measuring one while the application ran the other. `build_escape_state` is the
 single construction point for the clone/mutate/rank closures, and
-`EscapeState.merge_generation`, `.accepts`, `.record_champion`, `.maybe_rebirth`,
+`EscapeState.breed`, `.merge_generation`, `.accepts`, `.record_champion`, `.maybe_rebirth`,
 `.apply_robustness_blend` and `.tick` are called by every driver. Re-evaluation
 of the reborn cohort is sequenced inside `maybe_rebirth` rather than in each
 loop for the same reason. `tests/test_escape.py` asserts both that the defaults
@@ -966,7 +1107,7 @@ placement menu:
 | Backend | Inputs | Outputs |
 | :---- | :---- | :---- |
 | Nervous | Evolved relative honeycomb pads; pad 0 is the origin gauge, other pads move one edge, and every pad is a developmental germline plus source-only runtime member. | Globally fitted distinct read-only probes over every mature non-input tile. |
-| FNV | The same geometric policy on the honeycomb, with fixed role-indexed source component identities during development. | Globally fitted distinct read-only component probes. |
+| FNV | Evolved honeycomb source pads are permanent negative-ID branch anchors; moving one pad translates only its dependent branches. | Globally fitted distinct read-only component probes. |
 | LUT `source_pads` | Evolved relative square-lattice pads; non-anchor pads move by cardinal edges. | Globally fitted distinct read-only LUT-cell probes. |
 | LUT `exterior_edges` | Fixed round-robin buses cover every true outside-facing boundary link after growth from one neutral germline (A/B/A/B for two inputs). | The same global fitter as `source_pads`; exterior drivers are never candidates. |
 
@@ -1035,6 +1176,11 @@ solutions are isolated spikes it returns however few exist.
 Because uniqueness is enforced by construction, the genotype counts of a
 `diversify` pool describe the tool rather than the substrate. Measure the GA's
 own post-solve population separately (see 6.9).
+The controller runs this optional phase only when
+`GAConfig.diversify_solvers` is true. Oracle-backed targets must also have a
+`CERTIFIED` verdict; an OVERFIT, BELOW THRESHOLD, or failed certification saves
+the ordinary solver subset without launching 25 more diversity rounds.
+Benchmarks disable the phase by default because it is not part of solve rate.
 
 ### 4.7 The tuning options
 
@@ -1047,15 +1193,18 @@ own post-solve population separately (see 6.9).
 | Elites (`elite_count`) | 1 | Size of the breeding pool, not copies carried forward. |
 | Anneal (`mutation_decay`) | 0.997 | Per-generation multiplier on the base rate. |
 | Beta (`stagnation_beta`) | 1.0 | Plateau response strength; 0 disables SOS reheating, larger ramps faster after `STRESS_PATIENCE` (12) flat generations. |
-| ε-lexicase (`selection`) | tournament | Switches parent selection to lexicase. |
+| ε-lexicase (`selection`) | tournament for ordinary temporal targets | Switches temporal parent selection to lexicase. Asynchronous combinational truth tables always use their retained row/output case vectors. |
 | Recombine (`recombination_enabled`) | true | Off means clone-and-mutate, no crossover. |
+| Workers (`evaluation_workers`) | up to 8 | Persistent evaluation processes used by GUI/controller runs; configurable from 1 to 16 and capped to population size at runtime. |
+| Solver diversity (`diversify_solvers`) | true | After a credible solve, search for a genetically distinct solver bank. Benchmark CLI defaults this off; `--diversify-solvers` enables it. |
 | Max telomere (`max_telomere`) | 20 (LUT 8) | Ceiling on the evolvable growth radius. |
 | Chroms (`chromosome_count`) | None | Fixed chromosome count, enforced by every operator. |
 | NV profile (`tile_arch` + `node_model`) | analog tri-circuit | The ONE profile a new nervous run may use (2.2). The dropdown has a single entry; the single-tile and digital tri-circuit engines are retired. |
 | Delay / Width / Coinc (`PulseConfig`) | 1.0 / 1.0 / 0.5 | Nervous-net physics: propagation delay, emitted pulse width, coincidence window. |
 | Analog node (`analog_threshold`, `analog_step`, `analog_tau_leak`, `analog_hysteresis`) | 0.5 / 0.34 / 1.10 / 0.08 | Analog profile only: the Figure 1 constants. Validated as a coupled set (2.2), so an impossible combination is reported as invalid tuning rather than crashing a run. Untouched defaults reproduce the audited physics exactly. |
 | FNV families (`FNVConfig.families`) | all seven | Enables or disables LOGIC, DELAY, NORMALIZER, HOLD, C_ELEMENT, TOGGLE, and GATED_OSCILLATOR as whole families. At least one is required. |
-| Escape (`escape`) | all off | The local-minimum escape mechanisms of 4.5.0, on their own two-row control block. `EscapeConfig` validates its own ranges, so a nonsensical entry is reported as invalid tuning on Run. Lifespan, Robustness and Lexicase sample read the temporal contract's per-case vectors and are therefore disabled for the SNN backend; FNV also disables options its adapter cannot honor. The population-level mechanisms apply to all four. |
+| LUT function banks (`lut_function_families`) | `UNRESTRICTED` | Run-level executable truth-table inventory: ROUTING, AND, OR, XOR, VETO, THRESHOLD, MUX, and/or UNRESTRICTED. OFF is permanent and at least one bank is required. |
+| Escape (`escape`) | all off | The local-minimum escape mechanisms of 4.5.0, on their own three-row control block. `EscapeConfig` validates its own ranges, so a nonsensical entry is reported as invalid tuning on Run. Lifespan, Robustness and Lexicase sample read the temporal contract's per-case vectors and are therefore disabled for the SNN backend; FNV also disables options its adapter cannot honor. The population-level mechanisms apply to all four. |
 
 The whole configuration is an immutable, process-safe
 `RunConfig(ga, pulse, fnv)`.
@@ -1070,7 +1219,8 @@ on load. Such a run is flagged in the status line as retired physics, because
 single-tile `uniform` is not the current profile.
 
 The desktop app intentionally supplies run-oriented defaults on top of the
-dataclass: population 50, generations 500, restarts 1, chromosomes 2, and an
+dataclass: population 50, generations 500, restarts 1, workers up to 8,
+chromosomes 2, and an
 elite breeding pool of 5. `GAConfig.elite_count` remains 1 for direct API
 construction and checkpoint compatibility.
 
@@ -1212,6 +1362,14 @@ training readout and alignment frozen, and returns a verdict:
   I/O mode lacks an audited frozen-validation adapter. Autonomous rhythms have
   no input-to-output relation to sample, so they stay hand-built by necessity.
 
+Periodic combinational targets use a stricter variant of the same frozen
+readout test. Every held-out seed shuffles the complete truth table into a new
+periodic schedule, then replays the already fitted input pads, output probes,
+and alignment. Because all Boolean rows are exhaustive rather than a sample,
+their certification threshold is 0.999, not 0.90. This rejects a recurrent
+circuit that learned the training row order and counts only schedule-independent
+1.0 behavior as a certified logic solve.
+
 This path currently covers Nervous, FNV, and LUT internal source pads. LUT
 exterior-edge runs deliberately return an explicit **UNCERTIFIED** verdict
 until `score_frozen` can replay the frozen outside-to-facing-edge links;
@@ -1313,7 +1471,30 @@ a straight comparison confounds them. The legacy and analog tri-circuit profiles
 evolvability. That pairing is not offered for new runs and is reachable only
 programmatically or from an old checkpoint.
 
-### 5.9 Contract-v1 evolution matrix
+### 5.9 Local terminal benchmark matrix
+
+`tools/benchmark.py` is the ordinary local comparison entry point. It drives
+`runtime/controller.py`, the same evolution path as the application, and
+expands a requested Cartesian product of architectures and targets. Individual
+architectures are `nervous`, `fnv`, `lut`, and `snn`; the named sets `paper`,
+`nv`, `cellular`, and `all` provide common combinations. Targets accept exact
+registered names or the `temporal`, `combinational`, and `all` categories.
+
+`--dry-run` resolves backend support, configuration, and the complete matrix
+without evolving or writing. A real run prints generation and seed progress in
+the terminal, atomically rewrites a local JSON record after each seed, and
+writes a local Markdown summary. `--resume` continues compatible JSON without
+repeating completed cells. Architecture-specific controls include FNV component
+families and LUT I/O/function banks; the remaining advanced flags mirror the
+application's GA, physics, and escape controls. The module imports no
+version-control command runner and contains no network or remote-publication
+hook.
+Benchmark solver diversification is off by default so cell duration ends after
+evolution and certification; `--diversify-solvers` restores the GUI's optional
+solver-bank phase. `--workers` records and applies the same 1-16 process limit
+as the GUI.
+
+### 5.10 Contract-v1 evolution matrix
 
 `tools/benchmark_contracts.py` is the retained historical/ablation runner. It
 enumerates the Cartesian matrix of the 15 logic and 31 temporal targets against
@@ -1347,6 +1528,9 @@ Above the tabs, and shared by all of them:
 * **Gens / Pop / Chroms / Tries / Seed** — run size and reproducibility.
   Evaluation is deterministic, so a seed pins the entire evolutionary
   trajectory.
+* **Workers** - process limit for parallel genome evaluation. The default is at
+  most 8, the accepted range is 1-16, and runs with smaller populations start
+  no more processes than genomes.
 * **Substrate (Vth / Syn / Input) and Graded** — SNN only; disabled and
   irrelevant for the paper architectures.
 * **GA tuning row** — mutations, limit, immigrants, tournament, elites, anneal,
@@ -1364,21 +1548,27 @@ Above the tabs, and shared by all of them:
   the retained fixed/tag/wiring/spatial choices for SNN. Loading a legacy
   fixed-input Nervous checkpoint changes the description to make that fallback
   visible rather than pretending its pads evolved.
-* **FNV family row** — whole-family switches for logic, delay, normalizer, hold,
+* **FNV family row** — whole-family switches for binary logic, ternary logic, delay, normalizer, hold,
   C-element, toggle, and gated oscillator, plus a scrollable **Node number
   dictionary** decoding all 118 permanent IDs into names, routes, and timing.
   At least one family remains enabled; timing and routing variants are never
   exposed as numeric parameters.
-* **Escape block** (two rows) — the local-minimum mechanisms of 4.5.0: Lifespan
+* **LUT function-bank row** — whole-bank switches for routing, AND, OR, XOR,
+  veto, threshold, mux, and arbitrary LUTs. OFF remains implicit and always
+  available. The row appears only for LUT runs, locks with the other run
+  controls, and round-trips through checkpoints.
+* **Escape block** (three rows) — the local-minimum mechanisms of 4.5.0: Lifespan
   (+ stages), Crowding (+ window), Neutral drift, Self-adaptive mutation,
-  Rebirth (+ stall, frac), Robustness (+ jitter), Lexicase sample, and a Reset
+  Rebirth (+ stall, frac), Robustness (+ jitter), Islands (+ demes, migration),
+  Lexicase sample, Lineage walk (+ share), and a Reset
   escape button. Every control carries a hover tooltip explaining what it does
   and what it costs. Lifespan, Robustness and Lexicase sample are disabled for
   SNN, which has no per-case temporal contract; FNV also disables the mechanisms
   its adapter cannot honor. The population-level mechanisms stay live on all
   four backends. To the right, a live telemetry line reports
   the active mechanisms, rebirth count and the generations its ancestors came
-  from, archive size, cumulative crowding replacements, how far the robustness
+  from, archive size, cumulative crowding replacements, island migrations,
+  lineage-walker steps, how far the robustness
   aggregator has annealed toward worst-case, and the population's mean
   self-adaptive mutation rate. It reads `off` when nothing is enabled.
 * **Run / Stop / Pause / Save / Load Saved / Reset tuning** — checkpoints carry
@@ -1575,7 +1765,7 @@ than loop-bonus-shaped fitness. Four numbers are reported:
 ## 7. Verification
 
 `py tests/run_tests.py` runs the whole suite with bare Python; the current
-collection is **508 tests across 26 files**. Tests are organised by the claim
+collection is **533 tests across 28 files**. Tests are organised by the claim
 they defend rather than by module.
 
 | File | Claim it defends |
@@ -1592,13 +1782,15 @@ they defend rather than by module.
 | `test_oracle_logic.py` | Each oracle state machine encodes its stated behaviour, and its banks contain the positive, negative, boundary, re-arm and silence cases they claim. |
 | `test_ga_dynamics.py` | Reproduction invariants: chromosome-count constraints survive every operator, children are non-clones from distinct parents, recombination can be disabled without disabling reproduction, configs round-trip; Stop drains its pool and saves both the full evaluated generation and solver subset. |
 | `test_diversity.py` / `test_diversity_ui.py` | The four diversity levels distinguish what they claim and nothing more, including an unsuccessful analog tri-tile population; silent mutants are separated from survivors, and the tab's worker, empty-population, cancel and error paths release their controls. |
-| `test_escape.py` | The local-minimum escape mechanisms (4.5.0): every one is inert by default and leaves rank ordering, case-vector length and the bred generation untouched; neither escape objective can outrank correctness; lifespan scoring never inflates the reported fitness; jitter probes are deterministic and do not recurse; crowding displaces the nearest incumbent rather than the worst; rebirth fires only on a stall, draws diverse ancestors, keeps elites and cools down; and every GA driver calls every shared hook. |
+| `test_escape.py` | The local-minimum escape mechanisms (4.5.0): every one is inert by default and leaves rank ordering, case-vector length and the bred generation untouched; neither escape objective can outrank correctness; lifespan scoring never inflates the reported fitness; jitter probes are deterministic and do not recurse; crowding displaces the nearest incumbent rather than the worst; lineage walk crosses a deterministic multi-generation fitness valley; rebirth fires only on a stall, draws diverse ancestors, keeps elites and cools down; island migration uses evaluated offspring fitness and aligned case vectors; and every GA driver calls every shared hook. |
 | `test_io_placement.py` | The retained tag/wiring/spatial and LUT terminal placement machinery has deterministic binding, mutation, crossover, checkpoint, simulator, and replay semantics; fresh Nervous runs reject those retired strategies rather than fabricating a migration. |
 | `test_input_layout.py` / `test_source_pads.py` | Nervous relative pads are anchored, collision-free, whole-layout inherited, locally mutable, checkpointed, unrepairable when invalid, and source-only by explicit membership under both single and tri physics. |
 | `test_lut_input_layout.py` / `test_lut_exterior_io.py` | Internal LUT pads evolve and round-trip as source-only germlines; fixed exterior buses cover every true outer face in alternating logical-input order, drive only the facing LUT input, obey propagation delay, and ignore retired point-layout alleles. |
+| `test_lut_function_banks.py` | Permanent gate-table catalogues and direction indexing; OFF/quiescence rules; old-checkpoint and unrestricted bit-identical compatibility; restricted initialization, mutation, breeding, and mature-grid invariants. |
+| `test_benchmark_cli.py` | Local benchmark architecture-set expansion, terminal listing, no-write dry runs, worker/diversification defaults, and the absence of version-control or remote-publication hooks and CI-only flags. |
 | `test_fnv.py` | The permanent component catalogue, physical simulation, indirect development, evolved pads, global fitted probes, family controls, forward-only initialization, interactive preparation, and checkpoint compatibility. |
 | `test_topology.py` | Nervous and FNV use the same target-blind topology aggregation over their own physical graphs; only source-reachable connectivity and feedback count, correctness ranks first, and gradient-jitter probe helpers remain deterministic. |
-| `test_performance_equivalence.py` | Packed SNN lookup, vectorized LUT steady duty, batched internal/exterior LUT lattice trials, and compiled FNV wiring are exactly equivalent to their straightforward reference paths. |
+| `test_performance_equivalence.py` | Packed SNN lookup, vectorized LUT steady duty, batched internal/exterior LUT lattice trials, and compiled FNV wiring are exactly equivalent to their straightforward reference paths; nervous overflow short-circuiting, target-window caching, and interval-derived samples retain their contracts. |
 | `test_null_models.py` | The gauntlet of idealised cheats — a run is only a result if a trivial strategy could not have produced it. |
 | `test_certification.py` | The held-out verdict rule. |
 | `test_designer_runtime.py` | GUI-free controller checks: playback loops, physics precedence, the Interactive case dropdown, the width strip, the capacitor charge model. |

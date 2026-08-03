@@ -19,6 +19,9 @@ from functools import lru_cache
 from typing import List
 
 from runtime.limits import MAX_CHROMOSOME_COUNT
+from .functions import (
+    project_function_table, random_function_table, unrestricted_only,
+)
 
 LUT_BITS     = 16
 LUT_STATES   = 1 << LUT_BITS     # 65536 possible cell states
@@ -270,7 +273,7 @@ def lut_exterior_inputs(genome: Genome, grid, n_inputs: int):
     return positions, links
 
 
-def random_lut_gene() -> LutGene:
+def random_lut_gene(function_families=None) -> LutGene:
     # self_in == 0 makes a GROWTH rule — the only kind that can bring a dead
     # direction to life under the sim6 empty-cell guard, and the kind expired
     # by telomeres. With uniform 16-bit self_in the chance of one is ~1/65536,
@@ -282,15 +285,20 @@ def random_lut_gene() -> LutGene:
         ctx_s    = random.randrange(LUT_STATES),
         ctx_w    = random.randrange(LUT_STATES),
         self_in  = 0 if random.random() < 0.25 else random.randrange(LUT_STATES),
-        self_out = random.randrange(LUT_STATES),
+        self_out = (
+            random.randrange(LUT_STATES)
+            if unrestricted_only(function_families)
+            else random_function_table(function_families)),
     )
 
 
-def random_lut_chromosome(n_genes=None, wiring=False) -> Chromosome:
+def random_lut_chromosome(n_genes=None, wiring=False,
+                          function_families=None) -> Chromosome:
     if n_genes is None:
         n_genes = random.randint(3, MAX_GENES // 2)
     return Chromosome(
-        genes = [random_lut_gene() for _ in range(n_genes)],
+        genes = [
+            random_lut_gene(function_families) for _ in range(n_genes)],
         split = (0 if n_genes < 2 else random.randint(1, n_genes - 1)),
         tag   = random.randint(0, 999),
         telomere = random.randint(2, min(5, MAX_TELOMERE)),
@@ -303,9 +311,12 @@ def random_lut_genome(n_chroms=2, wiring_chromosome=False, n_ports=None,
                       terminal_nodes=False, n_inputs=0,
                       n_outputs=0, input_layout=False,
                       edge_input_layout=False,
-                      max_telomere=MAX_TELOMERE) -> Genome:
+                      max_telomere=MAX_TELOMERE,
+                      function_families=None) -> Genome:
     """Build a fixed genome or seed one of the evolvable I/O strategies."""
-    chroms = [random_lut_chromosome() for _ in range(n_chroms)]
+    chroms = [
+        random_lut_chromosome(function_families=function_families)
+        for _ in range(n_chroms)]
     genome = Genome(
         chromosomes = chroms,
         tag = random.randint(0, 9999),
@@ -322,4 +333,10 @@ def random_lut_genome(n_chroms=2, wiring_chromosome=False, n_ports=None,
         genome.input_layout = random_input_layout(n_inputs, max_telomere)
     if edge_input_layout:
         genome.edge_input_layout = random_edge_input_layout(n_inputs)
+    if not unrestricted_only(function_families):
+        # The historical 0xFFFE germline is four-input OR. A restricted run
+        # receives an equally physical table from its selected banks instead.
+        genome.seed_state = tuple(
+            project_function_table(0xFFFE, function_families)
+            for _ in range(4))
     return genome

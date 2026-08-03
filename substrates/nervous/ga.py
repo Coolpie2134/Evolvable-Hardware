@@ -62,7 +62,6 @@ from .genome import (MAX_STATE, TRI_STATE_MAX, MAX_GENES, MAX_CHROMS, MAX_TELOME
                      random_hex_gene, random_hex_chromosome, random_hex_genome,
                      random_input_layout)
 from .hexgrid import hex_frontier_cells
-from .nervous import score_nervous
 
 
 def clone_genome(genome):
@@ -175,16 +174,18 @@ def _loop_bonus_tri(grid, in_pos, out_pos):
 def evaluate_nv_full(genome, target, *, _developed=None):
     """(scalar fitness, per-case score vector). Cases are the individual
     (trial, role) traces — the units ε-lexicase selection streams over. For
-    combinational targets there is no trial structure: cases is None and
-    selection falls back to tournament.
+    Static combinational cases are the individual truth-table row/output
+    checks.  They are deliberately retained rather than compressed into the
+    scalar score, so selection can act on actual correctness.
 
     Under LIFESPAN SCORING (runtime/escape.py) the case vector is extended by
     one entry per developmental checkpoint. The scalar fitness is unaffected:
     it remains the ADULT organism's score, so a solved run still reads 1.0 for
     the circuit that actually gets grown."""
     if not getattr(target, 'temporal', False):
-        return score_nervous(
-            genome, target, _developed=_developed), None
+        from .nervous import score_nervous_full
+        return score_nervous_full(
+            genome, target, _developed=_developed)
     escape = getattr(target, '_escape', None)
     lifespan = escape is not None and escape.lifespan_scoring
     n_cases = total_case_count(target)
@@ -1032,9 +1033,17 @@ def _lexicase_parent(population, case_vecs, case_subset=None):
     for c in random.sample(pool, len(pool)):
         vals = [case_vecs[i][c] for i in cand]
         best = max(vals)
-        srt  = sorted(vals)
-        med  = srt[len(srt) // 2]
-        eps  = sorted(abs(v - med) for v in vals)[len(vals) // 2]
+        # A truth-table check is an exact 0/1 fact, not a noisy measurement.
+        # MAD ε can become 1.0 on an even 50/50 split and retain BOTH the right
+        # and wrong candidates, making that case exert no selection at all.
+        # Keep ε for genuinely continuous temporal/duty scores, but use exact
+        # lexicase whenever every value is discrete.
+        if all(abs(v - round(v)) <= 1e-12 for v in vals):
+            eps = 0.0
+        else:
+            srt = sorted(vals)
+            med = srt[len(srt) // 2]
+            eps = sorted(abs(v - med) for v in vals)[len(vals) // 2]
         cand = [i for i, v in zip(cand, vals) if v >= best - eps]
         if len(cand) == 1:
             break
@@ -1075,8 +1084,8 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
                            offspring, offspring_fitnesses, offspring_cases):
     """Terminal ``(mu + lambda)`` selection after a perfect solution exists.
 
-    Ordinary evolution is strict generational replacement: elites breed but do
-    not survive. Once fitness 1.0 has been reached, this terminal phase selects
+    Ordinary evolution is mostly generational, with a bounded rotating reserve
+    of distinct best-on-case behaviors. Once fitness 1.0 has been reached, this terminal phase selects
     the best population-sized set from evaluated parents and offspring so
     perfect circuits can accumulate and the population mean can converge to 1.
     Exact-rank ties are shuffled before sorting to preserve neutral turnover.
@@ -1326,7 +1335,18 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             return pick_index(candidates)
 
         first = choose()
-        second = choose(first)
+        if use_lexicase:
+            from runtime.escape import complementary_parent_index
+            candidates = [i for i in range(pop) if i != first]
+            distinct = [
+                i for i in candidates
+                if recombination_signatures[i]
+                != recombination_signatures[first]]
+            second = complementary_parent_index(
+                first, distinct or candidates, case_vecs, fitnesses,
+                case_subset)
+        else:
+            second = choose(first)
         if recombination_signatures[second] == recombination_signatures[first]:
             # Different population slots can still be the same genotype.  If
             # any genuinely different breeding material exists, use it; this is
@@ -1500,7 +1520,9 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         growth_seeds, io_strategy, seed_spatial, seed_wiring_from_phenotype,
         uses_port_chromosome)
     strategy = io_strategy(target)
-    if selection is None and getattr(target, 'combinational_cases', ()):
+    if (selection is None
+            and (not getattr(target, 'temporal', False)
+                 or getattr(target, 'combinational_cases', ()))):
         selection = 'lexicase'
     if uses_port_chromosome(strategy) and n_chroms < 3:
         raise ValueError('chromosome-based I/O requires n_chroms >= 3')
@@ -1551,6 +1573,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         best_genome  = clone_genome(population[bi])
         best_fitness = fitnesses[bi]
         best_rank    = rank_key(best_genome, best_fitness)
+        escape_state.record_champion(0, best_genome, best_fitness)
+        escape_state.note_contract_progress(cases, fitnesses)
 
         # The target's timing model enables its matching timing mutation.
         _pc = getattr(target, 'pulse_config', None)
@@ -1659,8 +1683,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                 list(parents) + list(offspring),
                 max(best_fitness, max(offspring_fitnesses)))
             # Survivor selection, shared with the desktop controller: terminal
-            # consolidation once solved, otherwise crowding when it is on,
-            # otherwise strict generational replacement.
+            # consolidation once solved, otherwise optional crowding plus the
+            # baseline rotating contract-elite reserve.
             population, fitnesses, cases = escape_state.merge_generation(
                 parents, parent_fitnesses, parent_cases,
                 offspring, offspring_fitnesses, offspring_cases,
@@ -1669,9 +1693,12 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             gi = max(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]))
             gen_rank = rank_key(population[gi], fitnesses[gi])
-            # SOS tracks FITNESS plateaus only: a topology-only win can update
-            # the champion but must NOT reset the stress counter.
-            if fitnesses[gi] > best_fitness + 1e-12:
+            # Topology-only wins do not reset stress. Honest scalar progress or
+            # improvement in one organism's weakest declared cases does.
+            case_progress = escape_state.note_contract_progress(
+                cases, fitnesses)
+            if (fitnesses[gi] > best_fitness + 1e-12
+                    or case_progress):
                 stagnation = 0
             else:
                 stagnation += 1
@@ -1690,6 +1717,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                 # A rebirth answers the stall that triggered it; leaving the
                 # counter set would re-fire it on the very next generation.
                 stagnation = 0
+                escape_state.note_contract_progress(cases, fitnesses)
                 if verbose:
                     print('Rebirth at generation %d: %d genomes from ancestors '
                           '%s at rate %.2f'

@@ -156,7 +156,7 @@ _IDS_BY_FAMILY = {
 }
 
 if len(COMPONENTS) != 118:  # catalogue edits must be conscious and append-only
-    raise RuntimeError("the initial FNV catalogue must contain exactly 118 types")
+    raise RuntimeError("the FNV catalogue must contain exactly 118 types")
 
 
 def component(component_id: int) -> ComponentType:
@@ -200,8 +200,6 @@ def _catalogue_payload() -> list[dict]:
 CATALOGUE_HASH = hashlib.sha256(json.dumps(
     _catalogue_payload(), sort_keys=True, separators=(",", ":")
 ).encode("utf-8")).hexdigest()
-
-
 def verify_catalogue_hash(value: str) -> None:
     if str(value) != CATALOGUE_HASH:
         raise ValueError(
@@ -275,6 +273,27 @@ def local_component_ids(component_id: int,
         int(component_id), normalise_families(families))
 
 
+@lru_cache(maxsize=None)
+def behavior_component_ids(component_id: int) -> tuple[int, ...]:
+    """Same physical route with a different fixed gate behavior.
+
+    Catalogue distance correctly treats small route edits as very local, but
+    that made AND/OR/XOR substitutions rare even though swapping the gate
+    component while keeping its pins is an equally physical mutation. VETO's
+    ordered A/B inputs remain distinct.
+    """
+    current = component(component_id)
+    if current.family != LOGIC:
+        return ()
+    return tuple(
+        candidate.id for candidate in COMPONENTS
+        if candidate.family == current.family
+        and candidate.id != current.id
+        and candidate.inputs == current.inputs
+        and candidate.outputs == current.outputs
+        and candidate.behavior != current.behavior)
+
+
 def quiescent_component(component_type: ComponentType) -> bool:
     """Catalogue-level power-on invariant.
 
@@ -283,7 +302,8 @@ def quiescent_component(component_type: ComponentType) -> bool:
     admission gate.
     """
     return component_type.behavior in {
-        "EMPTY", "AND", "OR", "XOR", "VETO", "DELAY", "NORMALIZER",
+        "EMPTY", "AND", "OR", "XOR", "VETO",
+        "DELAY", "NORMALIZER",
         "HOLD", "C_ELEMENT", "TOGGLE", "GATED_OSCILLATOR",
     }
 

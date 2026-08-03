@@ -29,7 +29,11 @@ from .genome import (LUT_STATES, MAX_CHROMS, MAX_TELOMERE,
                      lut_input_positions, lut_exterior_inputs,
                      lut_growth_seeds, lut_io_mode,
                      random_lut_gene, random_lut_chromosome)
-from .lut import grow_lut, grow_lut_tracked
+from .functions import (
+    UNRESTRICTED, allowed_function_table, mutate_function_table,
+    normalise_function_families, project_function_table, unrestricted_only,
+)
+from .lut import SEED_LUT, grow_lut, grow_lut_tracked
 from .pulse import AsyncLutSim
 
 
@@ -57,6 +61,37 @@ def clone_genome(genome):
         # Heritable self-adaptive mutation rate; see substrates.nervous.ga.
         clone._mut_rate = genome._mut_rate
     return clone
+
+
+def constrain_genome_functions(genome, function_families=None):
+    """Project every executable LUT state into the selected physical banks.
+
+    Context and ``self_in`` fields remain unrestricted 16-bit CAM patterns;
+    only the tables that can actually be installed at runtime are constrained.
+    The unrestricted default is a strict no-op.
+    """
+    families = normalise_function_families(function_families)
+    if unrestricted_only(families):
+        return genome
+    for chromosome in genome.chromosomes:
+        if getattr(chromosome, 'wiring', False):
+            continue
+        for index, gene in enumerate(chromosome.genes):
+            value = int(gene.self_out) & 0xFFFF
+            if allowed_function_table(value, families):
+                continue
+            edited = copy.copy(gene)
+            edited.self_out = project_function_table(value, families)
+            chromosome.genes[index] = edited
+    seed = (
+        tuple(int(value) & 0xFFFF for value in genome.seed_state)
+        if getattr(genome, 'seed_state', None) is not None
+        else (SEED_LUT,) * 4)
+    genome.seed_state = tuple(
+        value if allowed_function_table(value, families)
+        else project_function_table(value, families)
+        for value in seed)
+    return genome
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT set
@@ -224,7 +259,8 @@ def place_outputs_by_trace(grid, in_pos, ttarget, source_nodes=None,
                 if sampled else 0.0)
 
     assignment = best_distinct_assignment(
-        tuple(out_pos), candidates, scores)
+        tuple(out_pos), candidates, scores,
+        balance_worst=bool(getattr(ttarget, 'combinational_cases', ())))
     if assignment is None:
         return out_pos, traces
     out_pos.update(assignment)
@@ -763,14 +799,16 @@ def _fit_combinational_outputs(grid, target, in_pos=None, source_nodes=None,
                  for index in range(len(target.cases))],
                 expected)
     assignment = best_distinct_assignment(
-        tuple(out_pos), candidates, scores)
+        tuple(out_pos), candidates, scores, balance_worst=True)
     if assignment is not None:
         out_pos.update(assignment)
     return out_pos, duty_by_case
 
 
-def score_lut_combinational(genome, target):
-    """Hold each input pattern, let the array settle, and read globally fitted
+def score_lut_combinational_full(genome, target):
+    """Return fitness plus the exact row/output correctness vector.
+
+    Hold each input pattern, let the array settle, and read globally fitted
     distinct cells for the output roles (see _fit_combinational_outputs).
     A settled cell scores its exact bit; a cycling cell scores the fraction of
     its period it is correct.
@@ -779,9 +817,11 @@ def score_lut_combinational(genome, target):
     output cells come from the genome's tags instead (no duty-fitting search —
     the binding is heritable, not fitted). Spatial input anchors also serve as
     germline positions; other evolvable modes nucleate from one neutral centre."""
+    from substrates.nervous.scoring import contract_case_count
     from substrates.nervous.io_placement import (
         io_strategy, bind_io, growth_seeds, binding_progress,
         record_binding_progress)
+    failed = (0.0, (0.0,) * contract_case_count(target))
     strategy = io_strategy(target)
     mode = lut_io_mode(target)
     if mode == 'exterior_edges':
@@ -792,21 +832,22 @@ def score_lut_combinational(genome, target):
             genome, grid, target.n_inputs)
         if (len(in_pos) != target.n_inputs or not target.cases
                 or not target.outputs):
-            return 0.0
+            return failed
         out_pos, duty_by_case = _fit_combinational_outputs(
             grid, target, in_pos=in_pos, source_nodes=set(),
             external_inputs=external_inputs)
         if any(out_pos[term.role] is None for term in target.outputs):
-            return 0.0
+            return failed
         observations = [
             [duty_by_case[index][out_pos[term.role]]
              for term in target.outputs]
             for index in range(len(target.cases))]
-        return score_contract(observations, target)[0]
+        score, cases, _ = score_contract(observations, target)
+        return score, cases
     evolved_layout = getattr(genome, 'input_layout', None) is not None
     in_pos = lut_input_positions(genome, target.inputs)
     if evolved_layout and len(in_pos) != target.n_inputs:
-        return 0.0
+        return failed
     seeds = in_pos if evolved_layout else growth_seeds(
         target, strategy, genome)
     grid = grow_lut(genome, seeds=seeds,
@@ -822,30 +863,31 @@ def score_lut_combinational(genome, target):
                 genome,
                 binding_progress(genome, grid, target, tags=node_types))
     if len(grid) <= target.n_inputs:
-        return 0.0
+        return failed
     if len(target.cases) == 0 or len(target.outputs) == 0:
-        return 0.0
+        return failed
 
     if evolved_layout:
         if any(cell not in grid for cell in in_pos):
-            return 0.0
+            return failed
         source_nodes = set(in_pos)
         out_pos, duty_by_case = _fit_combinational_outputs(
             grid, target, in_pos=in_pos, source_nodes=source_nodes)
         if any(out_pos[term.role] is None for term in target.outputs):
-            return 0.0
+            return failed
         observations = [
             [duty_by_case[index][out_pos[term.role]]
              for term in target.outputs]
             for index in range(len(target.cases))]
-        return score_contract(observations, target)[0]
+        score, cases, _ = score_contract(observations, target)
+        return score, cases
 
     if strategy != 'fixed':
         from substrates.nervous.io_placement import output_groups
         bound = bind_io(genome, grid, target, strategy,
                         tags=node_types)
         if bound is None:
-            return 0.0
+            return failed
         in_pos, out_pos = bound
         out_groups = output_groups(out_pos)
         schedule = _combinational_schedule(target)
@@ -856,18 +898,25 @@ def score_lut_combinational(genome, target):
         # are excluded from the read); such a binding simply scores 0.
         if any(tuple(out_groups[t.role]) not in duty_by_case[0]
                for t in target.outputs):
-            return 0.0
+            return failed
         observations = [[duty_by_case[i][tuple(out_groups[t.role])]
                          for t in target.outputs]
                         for i in range(len(target.cases))]
-        return score_contract(observations, target)[0]
+        score, cases, _ = score_contract(observations, target)
+        return score, cases
 
     out_pos, duty_by_case = _fit_combinational_outputs(grid, target)
     if any(out_pos[t.role] is None for t in target.outputs):
-        return 0.0
+        return failed
     observations = [[duty_by_case[i][out_pos[t.role]] for t in target.outputs]
                     for i in range(len(target.cases))]
-    return score_contract(observations, target)[0]
+    score, cases, _ = score_contract(observations, target)
+    return score, cases
+
+
+def score_lut_combinational(genome, target):
+    """Scalar compatibility wrapper for combinational LUT evaluation."""
+    return score_lut_combinational_full(genome, target)[0]
 
 
 def lut_case_outputs(genome, target):
@@ -1043,14 +1092,14 @@ def lut_truth_table(genome, target):
 
 
 def evaluate_lut_full(genome, target):
-    """(scalar fitness, per-case vector) — cases are per (trial, role) traces,
-    the units ε-lexicase streams over (None for combinational targets).
+    """(scalar fitness, per-case vector) — cases are the units ε-lexicase
+    streams over. Static truth tables retain one case per row/output check.
 
     Under LIFESPAN SCORING the vector is extended by one entry per
     developmental checkpoint; the scalar stays the ADULT organism's score (see
     substrates/nervous/objectives.py)."""
     if not getattr(target, 'temporal', False):
-        return score_lut_combinational(genome, target), None
+        return score_lut_combinational_full(genome, target)
     from substrates.nervous.objectives import (
         grown_snapshots, juvenile_scores, prepare_grid, total_case_count)
     escape = getattr(target, '_escape', None)
@@ -1227,15 +1276,17 @@ def _soft_lut_excluding(value, parent_value):
     return value ^ _SOFT_LUT_MASKS[pick]
 
 
-def _force_nonparent_tweak(genome, parent):
+def _force_nonparent_tweak(genome, parent, function_families=None):
     """End a multi-edit transaction at an allele distinct from its parent."""
     with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
                   if chromosome.genes and not getattr(chromosome, 'wiring', False)]
     if not with_genes:
         if not genome.chromosomes:
-            genome.chromosomes.append(random_lut_chromosome())
+            genome.chromosomes.append(random_lut_chromosome(
+                function_families=function_families))
         else:
-            random.choice(genome.chromosomes).genes.append(random_lut_gene())
+            random.choice(genome.chromosomes).genes.append(
+                random_lut_gene(function_families))
         with_genes = [ci for ci, chromosome in enumerate(genome.chromosomes)
                       if chromosome.genes]
     ci = random.choice(with_genes)
@@ -1246,18 +1297,25 @@ def _force_nonparent_tweak(genome, parent):
     if (ci < len(parent.chromosomes)
             and gi < len(parent.chromosomes[ci].genes)):
         parent_value = getattr(parent.chromosomes[ci].genes[gi], field)
-    setattr(gene, field, _soft_lut_excluding(
-        getattr(gene, field), parent_value))
+    if field == 'self_out' and not unrestricted_only(function_families):
+        gene.self_out = mutate_function_table(
+            gene.self_out, function_families,
+            forbidden=(() if parent_value is None else (parent_value,)))
+    else:
+        setattr(gene, field, _soft_lut_excluding(
+            getattr(gene, field), parent_value))
     genome.chromosomes[ci].genes[gi] = gene
 
 
-def _tweak_gene(gene):
+def _tweak_gene(gene, function_families=None):
     """Soft mutation: usually flip 1-3 bits of one 16-bit field (a nearby
     boolean function), sometimes replace the field entirely. self_in has an
     extra chance of snapping to 0 — growth rules must stay reachable."""
     g   = copy.copy(gene)
     fld = random.choice(_GENE_FIELDS)
-    if fld == 'self_in' and g.self_in != 0 and random.random() < 0.2:
+    if fld == 'self_out' and not unrestricted_only(function_families):
+        g.self_out = mutate_function_table(g.self_out, function_families)
+    elif fld == 'self_in' and g.self_in != 0 and random.random() < 0.2:
         g.self_in = 0
     elif random.random() < 0.5:
         v = getattr(g, fld)
@@ -1315,14 +1373,15 @@ def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
 
 def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
                      chromosome_count=None, evolve_io=False,
-                     io_placement=None):
+                     io_placement=None, function_families=None):
     """Apply one feasible, state-changing mutation to a LUT genome.
 
     ``evolve_io`` adds the I/O-tag and wiring-chromosome mutations that let an
     evolvable io_placement strategy re-wire its ports; off by default so the
     ordinary mutation stream is byte-identical."""
     if not genome.chromosomes:
-        genome.chromosomes.append(random_lut_chromosome())
+        genome.chromosomes.append(random_lut_chromosome(
+            function_families=function_families))
         return
 
     chroms = genome.chromosomes
@@ -1368,7 +1427,8 @@ def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
     if op == 'tweak':
         chromosome = random.choice(with_genes)
         index = random.randrange(len(chromosome.genes))
-        chromosome.genes[index] = _tweak_gene(chromosome.genes[index])
+        chromosome.genes[index] = _tweak_gene(
+            chromosome.genes[index], function_families)
     elif op == 'duplicate':
         chromosome = random.choice([
             item for item in body
@@ -1376,19 +1436,21 @@ def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
         ])
         chromosome.genes.insert(
             random.randrange(len(chromosome.genes) + 1),
-            _tweak_gene(random.choice(chromosome.genes)))
+            _tweak_gene(
+                random.choice(chromosome.genes), function_families))
     elif op == 'add_gene':
         chromosome = random.choice([
             item for item in body if len(item.genes) < _gene_cap()
         ])
-        chromosome.genes.append(random_lut_gene())
+        chromosome.genes.append(random_lut_gene(function_families))
     elif op == 'del_gene':
         chromosome = random.choice([
             item for item in body if len(item.genes) > 1
         ])
         chromosome.genes.pop(random.randrange(len(chromosome.genes)))
     elif op == 'add_chrom':
-        chroms.append(random_lut_chromosome())
+        chroms.append(random_lut_chromosome(
+            function_families=function_families))
     elif op == 'del_chrom':
         chroms.remove(min(body, key=lambda item: len(item.genes)))
     elif op == 'split':
@@ -1401,7 +1463,8 @@ def _mutate_once_lut(genome, max_telomere=MAX_TELOMERE,
 
 def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
                chromosome_count=None, evolve_io=False, io_placement=None,
-               io_mutations=1, coordinated_io=False):
+               io_mutations=1, coordinated_io=False,
+               function_families=None):
     if (chromosome_count is not None
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
@@ -1415,14 +1478,16 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
         _mutate_once_lut(
             g, max_telomere=max_telomere,
             chromosome_count=chromosome_count, evolve_io=evolve_io,
-            io_placement=io_placement)
+            io_placement=io_placement,
+            function_families=function_families)
     if events == 1:
         _mutate_once_lut(
             g, max_telomere=max_telomere,
             chromosome_count=chromosome_count, evolve_io=evolve_io,
-            io_placement=io_placement)
+            io_placement=io_placement,
+            function_families=function_families)
     else:
-        _force_nonparent_tweak(g, genome)
+        _force_nonparent_tweak(g, genome, function_families)
     if evolve_io and random.random() < IO_MUTATION_PROB:
         if coordinated_io:
             from substrates.nervous.io_placement import mutate_io_bundle
@@ -1438,7 +1503,10 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
         mutate_input_layout(g, max_telomere)
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
-    return g
+    # Also makes switching an existing/legacy population to a restricted
+    # inventory safe: inherited executable alleles are projected even when
+    # this particular mutation event touched some other gene field.
+    return constrain_genome_functions(g, function_families)
 
 
 def crossover_lut(pa, pb):
@@ -1613,7 +1681,8 @@ def _gene_cap():
 
 
 def plateau_rescue_candidates(
-        genome, target, limit=48, max_telomere=MAX_TELOMERE):
+        genome, target, limit=48, max_telomere=MAX_TELOMERE,
+        function_families=None):
     """Legitimate rescue genomes for a stalled spatial-I/O LUT run.
 
     Three failure modes are covered:
@@ -1651,16 +1720,18 @@ def plateau_rescue_candidates(
         seen.add(signature)
         destination.append(candidate)
 
+    families = normalise_function_families(function_families)
     compiled = []
-    from .synthesis import (
-        SynthesisError, synthesize_combinational_genome)
-    try:
-        result = synthesize_combinational_genome(
-            target, chromosome_count=len(genome.chromosomes),
-            max_telomere=max_telomere)
-        unique(result.genome, compiled)
-    except SynthesisError:
-        pass
+    if UNRESTRICTED in families:
+        from .synthesis import (
+            SynthesisError, synthesize_combinational_genome)
+        try:
+            result = synthesize_combinational_genome(
+                target, chromosome_count=len(genome.chromosomes),
+                max_telomere=max_telomere)
+            unique(result.genome, compiled)
+        except SynthesisError:
+            pass
 
     if len(compiled) >= limit:
         return compiled[:limit]
@@ -1740,7 +1811,11 @@ def plateau_rescue_candidates(
             candidate = clone_genome(genome)
             chromosome = candidate.chromosomes[chromosome_index]
             gene = copy.copy(chromosome.genes[gene_index])
-            gene.self_out ^= 1 << bit
+            if unrestricted_only(families):
+                gene.self_out ^= 1 << bit
+            else:
+                gene.self_out = mutate_function_table(
+                    gene.self_out, families)
             chromosome.genes[gene_index] = gene
             unique(candidate, rule)
 
@@ -1803,7 +1878,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     chromosome_count=None, recombination=True,
                     evolve_io=False, io_placement=None, archive_parent=None,
                     stagnation=0, rescue_candidates=None, escape=None,
-                    mutation_limit=None):
+                    mutation_limit=None, function_families=None):
     """One generation of a steady, exploratory GA — elitism + immigrants +
     recombination/mutation, parents via ε-lexicase when per-case vectors are
     available (temporal targets), else tournament. Elites are breeders only;
@@ -1840,6 +1915,11 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     strategy = (io_placement or (
         getattr(ga_config, 'io_placement', 'fixed')
         if ga_config is not None else 'fixed'))
+    if function_families is None:
+        function_families = (
+            getattr(ga_config, 'lut_function_families', None)
+            if ga_config is not None else None)
+    function_families = normalise_function_families(function_families)
     evolve_io = evolve_io or strategy in (
         'terminal_nodes', 'tag_rank', 'wiring_chromosome',
         'spatial_chromosome')
@@ -1855,7 +1935,9 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                 inferred_ports = len(mapping.genes) if mapping is not None else 0
             def make_genome():
                 genome = seed_io_metadata(
-                    make_seed_genome(chromosome_count or 2),
+                    constrain_genome_functions(
+                        make_seed_genome(chromosome_count or 2),
+                        function_families),
                     wiring_chromosome=(strategy == 'wiring_chromosome'),
                     spatial_chromosome=(strategy == 'spatial_chromosome'),
                     n_ports=inferred_ports,
@@ -1878,10 +1960,14 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                 getattr(population[0], 'input_layout', None)
                 if population else None)
             if reference_layout is None:
-                make_genome = lambda: make_seed_genome(chromosome_count or 2)
+                make_genome = lambda: constrain_genome_functions(
+                    make_seed_genome(chromosome_count or 2),
+                    function_families)
             else:
                 def make_genome():
-                    genome = make_seed_genome(chromosome_count or 2)
+                    genome = constrain_genome_functions(
+                        make_seed_genome(chromosome_count or 2),
+                        function_families)
                     genome.input_layout = random_input_layout(
                         len(reference_layout),
                         (MAX_TELOMERE if ga_config is None
@@ -1898,10 +1984,13 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     # Plateau-rescue proposals and archived-champion descendants are still new,
     # mutated genomes; no evaluated parent survives into this generation.
     new_pop = [
-        clone_genome(candidate)
+        constrain_genome_functions(
+            clone_genome(candidate), function_families)
         for candidate in list(rescue_candidates or ())[:pop]]
     remaining = pop - len(new_pop)
-    new_pop += [make_genome() for _ in range(min(n_imm, remaining))]
+    new_pop += [
+        constrain_genome_functions(make_genome(), function_families)
+        for _ in range(min(n_imm, remaining))]
     if (archive_parent is not None and stagnation >= STRESS_PATIENCE
             and len(new_pop) < pop):
         archive_count = min(
@@ -1914,7 +2003,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                 chromosome_count=chromosome_count, evolve_io=evolve_io,
                 io_placement=strategy,
                 io_mutations=2,
-                coordinated_io=(evolve_io and index % 2 == 0)))
+                coordinated_io=(evolve_io and index % 2 == 0),
+                function_families=function_families))
     use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
     # One downsampled case set per generation, shared by every selection event.
@@ -1959,7 +2049,18 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             return pick_index(candidates)
 
         first = choose()
-        second = choose(first)
+        if use_lexicase:
+            from runtime.escape import complementary_parent_index
+            candidates = [index for index in range(pop) if index != first]
+            distinct = [
+                index for index in candidates
+                if recombination_signatures[index]
+                != recombination_signatures[first]]
+            second = complementary_parent_index(
+                first, distinct or candidates, case_vecs, fitnesses,
+                case_subset)
+        else:
+            second = choose(first)
         if recombination_signatures[second] == recombination_signatures[first]:
             distinct = [
                 index for index in range(pop)
@@ -2003,12 +2104,14 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         new_pop.append(mutate_lut(
             ca, child_rate(ca), max_telomere,
             chromosome_count=chromosome_count, evolve_io=evolve_io,
-            io_placement=strategy))
+            io_placement=strategy,
+            function_families=function_families))
         if len(new_pop) < pop:
             new_pop.append(mutate_lut(
                 cb, child_rate(cb), max_telomere,
                 chromosome_count=chromosome_count, evolve_io=evolve_io,
-                io_placement=strategy))
+                io_placement=strategy,
+                function_families=function_families))
     if (chromosome_count is not None
             and any(len(genome.chromosomes) != chromosome_count
                     for genome in new_pop)):
@@ -2018,10 +2121,22 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 
 def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                seed=None, escape=None, ga_config=None):
-    if ga_config is not None:
-        setattr(
-            target, 'lut_io_mode',
-            getattr(ga_config, 'lut_io_mode', 'source_pads'))
+    import dataclasses as _dc
+    from runtime.config import GAConfig
+    from runtime.escape import build_escape_state, OFF
+    if ga_config is None:
+        ga_config = GAConfig(chromosome_count=n_chroms)
+    if escape is not None:
+        ga_config = _dc.replace(ga_config, escape=escape)
+    if (not getattr(target, 'temporal', False)
+            or getattr(target, 'combinational_cases', ())):
+        ga_config = _dc.replace(ga_config, selection='lexicase')
+    function_families = normalise_function_families(
+        getattr(ga_config, 'lut_function_families', None))
+    setattr(
+        target, 'lut_io_mode',
+        getattr(ga_config, 'lut_io_mode', 'source_pads'))
+    setattr(target, '_lut_function_families', function_families)
     if seed is not None:
         random.seed(seed)
         # _ONTO_POOL survives for the life of the PROCESS, so without this a
@@ -2051,7 +2166,8 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
     if evolve_io:
         def make_genome():
             genome = seed_io_metadata(
-                make_seed_genome(n_chroms),
+                constrain_genome_functions(
+                    make_seed_genome(n_chroms), function_families),
                 wiring_chromosome=(strategy == 'wiring_chromosome'),
                 spatial_chromosome=(strategy == 'spatial_chromosome'),
                 n_ports=n_ports, tag_rank=(strategy == 'tag_rank'))
@@ -2072,22 +2188,15 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
             return genome
     else:
         def make_genome():
-            genome = make_seed_genome(n_chroms)
+            genome = constrain_genome_functions(
+                make_seed_genome(n_chroms), function_families)
             if lut_io_mode(target) != 'exterior_edges':
                 genome.input_layout = random_input_layout(
                     target.n_inputs,
-                    (MAX_TELOMERE if ga_config is None
-                     else ga_config.max_telomere))
+                    ga_config.max_telomere)
             return genome
     # Escape mechanisms, resolved and attached exactly as the desktop
     # controller does it, so this headless driver and the app agree.
-    import dataclasses as _dc
-    from runtime.config import GAConfig
-    from runtime.escape import build_escape_state, OFF
-    if ga_config is None:
-        ga_config = GAConfig(chromosome_count=n_chroms)
-    if escape is not None:
-        ga_config = _dc.replace(ga_config, escape=escape)
     escape_cfg = ga_config.escape or OFF
     setattr(target, '_escape', escape_cfg)
     cache       = LRUCache(FITNESS_CACHE_MAX)
@@ -2097,7 +2206,8 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)
         escape_state = build_escape_state(
             'lut', ga_config, chromosome_count=n_chroms,
-            io_placement=strategy, evolve_io=evolve_io)
+            io_placement=strategy, evolve_io=evolve_io,
+            lut_function_families=function_families)
         escape_state.apply_robustness_blend(population, max(fitnesses))
         bi = max(
             range(pop),
@@ -2105,6 +2215,8 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
         best_genome  = clone_genome(population[bi])
         best_fitness = fitnesses[bi]
         best_rank = rank_key(best_genome, best_fitness)
+        escape_state.record_champion(0, best_genome, best_fitness)
+        escape_state.note_contract_progress(cases, fitnesses)
         stagnation   = 0
         mut_rate     = MEAN_MUTATIONS        # annealing schedule (see MUT_DECAY)
         for gen in range(generations):
@@ -2114,7 +2226,8 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
             parents, parent_fitnesses, parent_cases = population, fitnesses, cases
             rescue = (
                 plateau_rescue_candidates(
-                    best_genome, target, limit=min(48, max(1, pop // 2)))
+                    best_genome, target, limit=min(48, max(1, pop // 2)),
+                    function_families=function_families)
                 if (stagnation >= STRESS_PATIENCE
                     and best_fitness < 1.0) else ())
             offspring = next_population(
@@ -2122,14 +2235,15 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                 chromosome_count=n_chroms, evolve_io=evolve_io,
                 io_placement=strategy, archive_parent=best_genome,
                 stagnation=stagnation, rescue_candidates=rescue,
-                escape=escape_cfg, mutation_limit=ga_config.mutation_limit)
+                escape=escape_cfg, mutation_limit=ga_config.mutation_limit,
+                function_families=function_families)
             offspring_fitnesses, offspring_cases = eval_batch_cases(
                 offspring, target, cache, ex)
             escape_state.apply_robustness_blend(
                 list(parents) + list(offspring),
                 max(best_fitness, max(offspring_fitnesses)))
-            # Terminal consolidation once solved, otherwise crowding when it is
-            # on, otherwise strict generational replacement. Shared decision.
+            # Terminal consolidation once solved, otherwise optional crowding
+            # plus the baseline rotating contract-elite reserve.
             population, fitnesses, cases = escape_state.merge_generation(
                 parents, parent_fitnesses, parent_cases,
                 offspring, offspring_fitnesses, offspring_cases,
@@ -2138,7 +2252,10 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
             gi = max(
                 range(pop),
                 key=lambda i: rank_key(population[i], fitnesses[i]))
-            if fitnesses[gi] > best_fitness + 1e-12:
+            case_progress = escape_state.note_contract_progress(
+                cases, fitnesses)
+            if (fitnesses[gi] > best_fitness + 1e-12
+                    or case_progress):
                 stagnation = 0
             else:
                 stagnation += 1
@@ -2156,6 +2273,7 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                         genomes, target, cache, ex))
             if rebirth_info is not None:
                 stagnation = 0
+                escape_state.note_contract_progress(cases, fitnesses)
                 if verbose:
                     print('Rebirth at generation %d: %d genomes from ancestors '
                           '%s at rate %.2f'
@@ -2173,7 +2291,7 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
               cache=None, executor=None, should_stop=None, on_progress=None,
               max_telomere=MAX_TELOMERE, chromosome_count=None,
-              evolve_io=False, io_placement=None):
+              evolve_io=False, io_placement=None, function_families=None):
     """Build evaluated, rule-distinct valid offspring; see NV's implementation."""
     if cache is None:
         cache = LRUCache(FITNESS_CACHE_MAX)
@@ -2215,7 +2333,8 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
             c = mutate_lut(base, max_telomere=max_telomere,
                            chromosome_count=chromosome_count,
                            evolve_io=evolve_io,
-                           io_placement=io_placement)
+                           io_placement=io_placement,
+                           function_families=function_families)
             s = _recombination_signature(c)
             if s not in seen:
                 seen.add(s)

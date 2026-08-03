@@ -1,4 +1,4 @@
-"""Native indirect genome for the Functional NV Net."""
+"""Constructive FNV genome plus exact associative-v2 compatibility types."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -18,9 +18,13 @@ from .catalogue import (
 # forward-random chromosomes start with 3..12 genes and may subsequently grow
 # by ordinary structural mutation.
 MAX_GENES = 64
+MAX_PLACEMENTS = 128
 MAX_CHROMS = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20
-DEVELOPMENT_VERSION = 2
+LEGACY_DEVELOPMENT_VERSION = 2
+DEVELOPMENT_VERSION = 3
+ASSOCIATIVE_ENCODING = "associative_v2"
+CONSTRUCTIVE_ENCODING = "constructive_v3"
 SEED_STATE = BY_NAME["DELAY1_D_TO_LR"].id
 # Fixed source-interface identities break an otherwise artificial symmetry
 # between logical input roles during development. FunctionalSim treats every
@@ -95,6 +99,36 @@ class FunctionalGene:
     self_out: int = 0
 
 
+@dataclass(frozen=True, order=True)
+class BranchRef:
+    """Stable reference to one physical output port.
+
+    Negative ``node_id`` values name logical input pads (input zero is -1).
+    Positive values name a :class:`PlacementGene`. ``direction`` is the
+    source component's local L/R/D output port, not an absolute coordinate.
+    """
+
+    node_id: int
+    direction: str
+
+
+@dataclass
+class PlacementGene:
+    """One dependency-addressed fixed component placement.
+
+    The first input does not act as an implicit developmental cursor: every
+    input explicitly names the output port that must face this component.
+    Output branch labels are the stable pairs ``(gene_id, direction)``.
+    ``branch_id`` groups a connected unary/fan-out branch for block mutation
+    and crossover; a binary join starts a new block.
+    """
+
+    gene_id: int
+    component_id: int
+    inputs: tuple[BranchRef, ...] = ()
+    branch_id: int = 0
+
+
 @dataclass
 class Chromosome:
     genes: list[FunctionalGene] = field(default_factory=list)
@@ -111,6 +145,25 @@ class Genome:
     # pad position per logical input. Input zero is pinned only to remove
     # behaviorally meaningless whole-organism translation.
     input_layout: tuple[tuple[int, int], ...] | None = None
+    # Explicit because old FNV checkpoints remain loadable under their exact
+    # associative physics. Fresh runs use dependency-addressed construction.
+    encoding: str = ASSOCIATIVE_ENCODING
+    next_gene_id: int = 1
+
+
+def is_constructive(genome: Genome) -> bool:
+    return getattr(genome, "encoding", ASSOCIATIVE_ENCODING) == \
+        CONSTRUCTIVE_ENCODING
+
+
+def input_node_id(index: int) -> int:
+    """Permanent branch owner ID for one logical source pad."""
+    return -int(index) - 1
+
+
+def genome_development_version(genome: Genome) -> int:
+    return (DEVELOPMENT_VERSION if is_constructive(genome)
+            else LEGACY_DEVELOPMENT_VERSION)
 
 
 def functional_input_positions(genome: Genome, fallback) -> tuple:
@@ -199,19 +252,46 @@ def random_functional_genome(
     enabled = normalise_families(families)
     if not enabled:
         raise ValueError("an FNV run must enable at least one component family")
-    return Genome(
-        chromosomes=[
-            random_functional_chromosome(
-                max_telomere=max_telomere, families=enabled,
-                context_empty_probability=context_empty_probability,
-                output_empty_probability=output_empty_probability)
-            for _ in range(int(n_chroms))
-        ],
+    # Chromosomes remain as hereditary branch containers so the run's existing
+    # chromosome-count control and checkpoint metadata retain meaning. Their
+    # genes are constructive placements rather than associative CAM rows.
+    genome = Genome(
+        chromosomes=[Chromosome(
+            genes=[], split=0, tag=random.randint(0, 999), telomere=1)
+            for _ in range(int(n_chroms))],
         tag=random.randint(0, 9999),
         input_layout=(
             random_input_layout(n_inputs, max_telomere)
             if n_inputs is not None else None),
+        encoding=CONSTRUCTIVE_ENCODING,
+        next_gene_id=1,
     )
+    # Import lazily to keep the immutable data model independent of its
+    # developmental interpreter.
+    from .construction import seed_constructive_genome
+    target_count = max(6, min(24, 6 * int(n_chroms)))
+    basic_logic_body = (
+        "LOGIC" in enabled and "DELAY" in enabled
+        and enabled.issubset({"LOGIC", "DELAY"}))
+    if basic_logic_body and n_inputs is not None and int(n_inputs) > 1:
+        # Establish the labelled source cones before filling space at random,
+        # so generic bridges stay short and the starting body contains gates
+        # rather than spending most of its capacity routing around filler.
+        warm_count = min(target_count, max(3, 2 * int(n_inputs)))
+        seed_constructive_genome(
+            genome, enabled, target_count=warm_count,
+            source_fanout=True)
+        from .construction_ga import seed_convergent_bridges
+        seed_convergent_bridges(
+            genome, enabled,
+            max_bridges=min(8, max(3, 2 * int(n_inputs))))
+        seed_constructive_genome(
+            genome, enabled, target_count=target_count,
+            source_fanout=False)
+    else:
+        seed_constructive_genome(
+            genome, enabled, target_count=target_count)
+    return genome
 
 
 def validate_genome(genome: Genome, families=None) -> None:
@@ -232,6 +312,33 @@ def validate_genome(genome: Genome, families=None) -> None:
             raise ValueError("FNV input zero must be at the canonical origin")
         if len(set(sites)) != len(sites):
             raise ValueError("FNV input pads must occupy distinct sites")
+    if is_constructive(genome):
+        seen = set()
+        for chromosome in genome.chromosomes:
+            for gene in chromosome.genes:
+                if not isinstance(gene, PlacementGene):
+                    raise ValueError(
+                        "constructive FNV chromosome contains a legacy rule")
+                if int(gene.gene_id) <= 0 or int(gene.gene_id) in seen:
+                    raise ValueError(
+                        "constructive FNV placement IDs must be unique positive integers")
+                seen.add(int(gene.gene_id))
+                if int(gene.component_id) not in enabled_ids or not int(
+                        gene.component_id):
+                    raise ValueError(
+                        "FNV placement uses a disabled or unknown component")
+                if int(gene.branch_id) == 0:
+                    raise ValueError("FNV placement branch ID cannot be zero")
+                for ref in gene.inputs:
+                    if ref.direction not in ("L", "R", "D"):
+                        raise ValueError("FNV branch direction is invalid")
+                    if int(ref.node_id) == 0:
+                        raise ValueError("FNV branch owner ID cannot be zero")
+        if len(seen) > MAX_PLACEMENTS:
+            raise ValueError("FNV constructive genome exceeds placement limit")
+        if int(getattr(genome, "next_gene_id", 1)) <= max(seen, default=0):
+            raise ValueError("FNV next placement ID is stale")
+        return
     for chromosome in genome.chromosomes:
         if not chromosome.genes:
             raise ValueError("FNV chromosome has no genes")

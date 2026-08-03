@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from substrates.nervous.pulse import PulseConfig
 from .escape import EscapeConfig
@@ -9,9 +10,19 @@ from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
+MAX_EVALUATION_WORKERS = 16
+# Physical cores are usually the useful ceiling for these CPU-heavy event
+# simulations. There is no portable stdlib physical-core count, so default to
+# at most eight processes and leave two logical CPUs for Tk/Windows.
+DEFAULT_EVALUATION_WORKERS = max(
+    1, min((os.cpu_count() or 2) - 2, 8))
 FNV_FAMILIES = (
     'LOGIC', 'DELAY', 'NORMALIZER', 'HOLD', 'C_ELEMENT', 'TOGGLE',
     'GATED_OSCILLATOR',
+)
+LUT_FUNCTION_FAMILIES = (
+    'ROUTING', 'AND', 'OR', 'XOR', 'VETO', 'THRESHOLD', 'MUX',
+    'UNRESTRICTED',
 )
 
 # The only NV Net substrates exposed for NEW runs. Older node models remain in
@@ -144,6 +155,10 @@ class GAConfig:
     # logical-input buses whose taps face inward through one directional input
     # of every perimeter LUT face.
     lut_io_mode: str = 'source_pads'
+    # LUT-only physical truth-table inventory. Named banks contain concrete
+    # 16-bit tables; UNRESTRICTED is the historical all-65,536-table substrate.
+    # The tuple is a run-level hardware selection, never a per-node parameter.
+    lut_function_families: tuple[str, ...] = ('UNRESTRICTED',)
     # Delay-mutation toggle, decoupled from the model name for ablations.
     # ``None`` keeps the model's pairing (pulse_delay <-> delay mutation). An
     # explicit False disables it — node_model='pulse_delay' with
@@ -160,6 +175,13 @@ class GAConfig:
     # constraint, not merely an initial-population hint.
     chromosome_count: int | None = None
     cache_size: int = 200_000
+    # One process per independently evaluated genome. Keeping this in the run
+    # config makes GUI and benchmark load comparable and prevents a default run
+    # from saturating every logical CPU on a desktop machine.
+    evaluation_workers: int = DEFAULT_EVALUATION_WORKERS
+    # Useful for an interactive solver bank, but not part of measuring whether
+    # a target was solved. Benchmarks disable this extra post-solve search.
+    diversify_solvers: bool = True
     # Reserved / no-op: evaluation now runs one saturated, cancellation-aware
     # pool pass per generation (runtime.parallel.map_ordered) instead of
     # chunked barriers, so this multiplier is no longer consumed. Kept as a
@@ -199,6 +221,23 @@ class GAConfig:
         if self.lut_io_mode not in ('source_pads', 'exterior_edges'):
             raise ValueError(
                 "lut_io_mode must be 'source_pads' or 'exterior_edges'")
+        lut_families = tuple(
+            str(family).upper() for family in self.lut_function_families)
+        unknown_lut_families = set(lut_families).difference(
+            LUT_FUNCTION_FAMILIES)
+        if unknown_lut_families:
+            raise ValueError(
+                'unknown LUT function families: %s' %
+                ', '.join(sorted(unknown_lut_families)))
+        if not lut_families:
+            raise ValueError(
+                'at least one LUT function family must be enabled')
+        if len(set(lut_families)) != len(lut_families):
+            raise ValueError('LUT function families may not be repeated')
+        object.__setattr__(
+            self, 'lut_function_families',
+            tuple(family for family in LUT_FUNCTION_FAMILIES
+                  if family in lut_families))
         # tri3 evolves routing only, so it pairs with the routing-only engines:
         # 'uniform' (digital) or 'paper_analog' (analog). The width/delay vectors
         # are single-tile node-type features and have no tri3 meaning.
@@ -219,6 +258,11 @@ class GAConfig:
             raise ValueError('recombination_enabled must be boolean')
         if self.max_telomere < 1 or self.cache_size < 1:
             raise ValueError('max_telomere and cache_size must be positive')
+        if not 1 <= self.evaluation_workers <= MAX_EVALUATION_WORKERS:
+            raise ValueError('evaluation_workers must be between 1 and %d' %
+                             MAX_EVALUATION_WORKERS)
+        if not isinstance(self.diversify_solvers, bool):
+            raise ValueError('diversify_solvers must be boolean')
         if (self.chromosome_count is not None
                 and not 1 <= self.chromosome_count <= MAX_CHROMOSOME_COUNT):
             raise ValueError('chromosome_count must be between 1 and %d' %
@@ -246,6 +290,9 @@ class GAConfig:
         # migrate on load so those checkpoints keep working.
         if values.get('io_placement') == 'sex_chromosome':
             values['io_placement'] = 'wiring_chromosome'
+        if 'lut_function_families' in values:
+            values['lut_function_families'] = tuple(
+                values['lut_function_families'])
         # dataclasses.asdict flattens the nested escape config to a plain dict;
         # rebuild it (tolerantly, so a checkpoint from a different revision of
         # the mechanism set still loads with the rest of its run intact).

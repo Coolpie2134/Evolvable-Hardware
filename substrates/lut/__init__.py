@@ -27,11 +27,19 @@ from .genome import (LutGene, Chromosome, Genome, LUT_STATES,
                      random_lut_gene, random_lut_chromosome, random_lut_genome)
 from .lut import SEED_STATE, grow_lut, grow_lut_snapshots, LutSim
 from .pulse import LutConfig, AsyncLutSim
+from .functions import (
+    AND, MUX, OR, ROUTING, THRESHOLD, UNRESTRICTED, VETO, XOR,
+    DEFAULT_FUNCTION_FAMILIES, FAMILY_TABLES, FUNCTION_FAMILIES,
+    INPUT_TABLES, allowed_function_table, enabled_named_tables,
+    mutate_function_table, normalise_function_families,
+    project_function_table, random_function_table,
+)
 from .ga import (mutate_lut, crossover_lut,
                  tournament_lut, next_population, evolve_lut, lut_report,
                  prepare_lut, place_outputs_by_trace, trace_fixed_outputs,
                  score_lut_temporal,
                  score_lut_combinational, lut_case_outputs, lut_truth_table,
-                 genome_signature, diversify, compact_genome)
+                 genome_signature, diversify, compact_genome,
+                 constrain_genome_functions)
 from .viz import draw_lut_net, draw_lut_table
 from .boolfn import lut_sop, minterms, popcount, INPUT_NAMES

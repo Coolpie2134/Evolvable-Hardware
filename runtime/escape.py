@@ -8,8 +8,10 @@ before: a mechanism landed in one, benchmarks measured the other. Both drivers
 now own an :class:`EscapeState` and call the same hooks, so a mechanism cannot
 exist on one path and not the other.
 
-Six mechanisms, every one OFF by default so an unconfigured run is
-byte-identical to the behaviour that preceded this module:
+Eight optional mechanisms are OFF by default. Case-aware contract elites and
+complementary mating are baseline selection behavior rather than escape
+switches: they preserve evidence already earned on declared cases without
+changing the fitness contract or the 1.0 boundary.
 
   LIFESPAN SCORING
       Score the organism at several points along its DEVELOPMENT rather than
@@ -42,6 +44,19 @@ byte-identical to the behaviour that preceded this module:
       an elevated mutation rate, deliberately backtracking to an earlier branch
       point to leave it in a different direction.
 
+  LINEAGE WALK
+      Reserve a small cohort for mutation-only, fitness-blind random walks.
+      Each walker descends from its own previous state, so a temporarily worse
+      intermediate survives long enough to mutate again. Useful discoveries
+      are copied back into the ordinary breeding pool. This is the mechanism
+      here that can cross a genuine fitness valley rather than only move along
+      a plateau or jump across it in one mutation transaction.
+
+  ISLANDS
+      Breed independent cold-to-hot demes and occasionally copy each evaluated
+      deme's best into its neighbour. Separate demes keep alternate basins from
+      immediately collapsing back into the global champion's lineage.
+
   ROBUSTNESS
       A second objective scored under jittered physics, aggregated by WORST
       case rather than mean, and ranked strictly BELOW nominal fitness so it
@@ -72,24 +87,217 @@ DEFAULT_CROWDING_WINDOW = 16
 # exploratory churn the rest of the plateau machinery depends on was gone.
 DEFAULT_CROWDING_FRACTION = 0.5
 DEFAULT_ADAPTIVE_TAU = 0.25
-DEFAULT_REBIRTH_PATIENCE = 40
+# A 40-generation trigger gave a 50-generation run one late attempt with no
+# time for the rebuilt cohort to reproduce. Rebirth is useful only when it can
+# fire, develop, and (if necessary) fire again inside a normal short run.
+DEFAULT_REBIRTH_PATIENCE = 15
 DEFAULT_REBIRTH_FRACTION = 0.5
 DEFAULT_REBIRTH_ANCESTORS = 4
 DEFAULT_REBIRTH_MULTIPLIER = 3.0
-DEFAULT_ARCHIVE_INTERVAL = 10
+DEFAULT_ARCHIVE_INTERVAL = 5
 DEFAULT_ARCHIVE_SIZE = 24
+# A lean walker reserve leaves most capacity under behavioral selection. The
+# fraction is only a tuning default when the mechanism is explicitly enabled;
+# it is not a recommended preset. The initial raw-score screen did not measure
+# solved/certified outcomes and therefore cannot establish an escape winner.
+DEFAULT_LINEAGE_WALK_FRACTION = 0.10
 DEFAULT_ROBUSTNESS_JITTER = 0.15
 DEFAULT_ROBUSTNESS_SAMPLES = 2
 DEFAULT_ISLAND_COUNT = 4
 DEFAULT_ISLAND_MIGRATION_INTERVAL = 20
 DEFAULT_ISLAND_MIGRANTS = 1
 DEFAULT_ISLAND_RATE_SPREAD = 2.0
+# Environmental case memory, independent of the optional escape switches.
+# Most of the population must remain generational so exploration still churns;
+# two fifths can retain one expert for every row/output of a 16-case contract
+# in the standard 40-member diagnostic population while leaving most slots to
+# generational exploration.
+CONTRACT_ELITE_FRACTION = 0.40
 
 # Self-adaptive rates are clamped to this band. The floor is 1 because the
 # mutation operators always perform at least one event (same reasoning as
 # runtime/mutation.adaptive_mutation_rate); the ceiling comes from the run's
 # own mutation cap, passed in at call time.
 MIN_ADAPTIVE_RATE = 1.0
+
+
+def contract_progress_key(case_vectors, fitnesses=None):
+    """Best integrated all-case progress in an evaluated population.
+
+    The headline fitness is intentionally a useful aggregate, but a flat
+    aggregate does not imply that search is stalled: an individual may have
+    improved its weakest declared case while trading a little score on an easy
+    one.  Sort each behavior vector from weakest to strongest and compare it
+    lexicographically (leximin), then use mean and reported fitness only as
+    ties.  This is target-agnostic and rewards progress toward *one organism*
+    satisfying the whole contract, not a population whose specialists merely
+    cover it collectively.
+
+    ``None`` means that no valid case evidence was supplied.
+    """
+    if not case_vectors:
+        return None
+    vectors = []
+    width = None
+    for index, vector in enumerate(case_vectors):
+        if vector is None:
+            return None
+        values = tuple(float(value) for value in vector)
+        if not values:
+            return None
+        if width is None:
+            width = len(values)
+        elif len(values) != width:
+            return None
+        scalar = (
+            float(fitnesses[index])
+            if fitnesses is not None and index < len(fitnesses) else 0.0)
+        vectors.append((
+            tuple(sorted(values)), sum(values) / len(values), scalar))
+    return max(vectors) if vectors else None
+
+
+def contract_elite_survivors(
+        parents, parent_fitnesses, parent_cases,
+        offspring, offspring_fitnesses, offspring_cases,
+        *, fraction=CONTRACT_ELITE_FRACTION, case_offset=0):
+    """Keep a small rotating reserve of distinct best-on-case behaviors.
+
+    A scalar champion is not a substitute for a population on a multi-case
+    contract. Before a perfect solution exists, strict generational
+    replacement can delete the only genome that passes a missing row/trial;
+    next generation's lexicase selection cannot choose a specialist that no
+    longer exists. This merge preserves a bounded number of evaluated
+    specialists from ``parents + offspring`` and fills every other slot from
+    the new offspring in their original order.
+
+    Cases are ordered hardest-first by the best score currently available.
+    Equal-hardness cases rotate via ``case_offset`` so a large contract does
+    not permanently privilege its first rows. Candidates tie on the selected
+    case by leximin quality across the whole vector, then mean, scalar fitness,
+    and finally recency (offspring). Identical behavior vectors consume only
+    one reserve slot. No target name, topology, or desired mechanism enters.
+    """
+    pop = len(offspring)
+    if (pop < 2 or parent_cases is None or offspring_cases is None
+            or len(parents) != len(parent_fitnesses)
+            or len(offspring) != len(offspring_fitnesses)
+            or len(parent_cases) != len(parents)
+            or len(offspring_cases) != len(offspring)):
+        return offspring, offspring_fitnesses, offspring_cases
+    all_cases = list(parent_cases) + list(offspring_cases)
+    if not all_cases or any(vector is None for vector in all_cases):
+        return offspring, offspring_fitnesses, offspring_cases
+    n_cases = len(all_cases[0])
+    if n_cases < 1 or any(len(vector) != n_cases for vector in all_cases):
+        return offspring, offspring_fitnesses, offspring_cases
+
+    parents = list(parents)
+    offspring = list(offspring)
+    genomes = parents + offspring
+    fitnesses = list(parent_fitnesses) + list(offspring_fitnesses)
+    vectors = [tuple(float(value) for value in vector)
+               for vector in all_cases]
+    reserve = min(
+        n_cases, pop - 1,
+        max(1, int(round(pop * float(fraction)))))
+    offset = int(case_offset) % n_cases
+    best_by_case = [max(vector[case] for vector in vectors)
+                    for case in range(n_cases)]
+    case_order = sorted(
+        range(n_cases),
+        key=lambda case: (
+            best_by_case[case], (case - offset) % n_cases))
+
+    selected = []
+    selected_behaviors = set()
+    for case in case_order:
+        eligible = [
+            index for index, vector in enumerate(vectors)
+            if vector not in selected_behaviors]
+        if not eligible:
+            break
+
+        def candidate_key(index):
+            vector = vectors[index]
+            ordered = tuple(sorted(vector))
+            mean = sum(vector) / n_cases
+            return (
+                vector[case], ordered, mean, float(fitnesses[index]),
+                index >= len(parents))
+
+        winner = max(eligible, key=candidate_key)
+        selected.append(winner)
+        selected_behaviors.add(vectors[winner])
+        if len(selected) >= reserve:
+            break
+
+    # Preserve the chosen specialists, then use the genuinely new generation
+    # for all remaining capacity. An offspring already selected is not copied
+    # twice; parent specialists survive only when no equivalent offspring does.
+    kept_genomes = [genomes[index] for index in selected]
+    kept_fitnesses = [fitnesses[index] for index in selected]
+    kept_cases = [all_cases[index] for index in selected]
+    selected_offspring = {
+        index - len(parents) for index in selected
+        if index >= len(parents)}
+    for index, genome in enumerate(offspring):
+        if len(kept_genomes) >= pop:
+            break
+        if index in selected_offspring:
+            continue
+        kept_genomes.append(genome)
+        kept_fitnesses.append(offspring_fitnesses[index])
+        kept_cases.append(offspring_cases[index])
+    return kept_genomes, kept_fitnesses, kept_cases
+
+
+def complementary_parent_index(
+        first, candidates, case_vectors, fitnesses=None, case_subset=None):
+    """Choose a mate whose contract behavior best fills the first parent's gaps.
+
+    Independent lexicase draws often return two specialists for the same easy
+    cases. Crossover can only assemble a complete solution when its parents
+    carry complementary partial behaviors. Rank each possible pair by the
+    leximin profile of their per-case envelope ``max(left, right)``; this first
+    improves the pair's weakest jointly covered case, then its next weakest,
+    and so on. The mate's own leximin profile and scalar fitness break exact
+    envelope ties. No assumption is made about what a case means.
+    """
+    candidates = list(candidates)
+    if not candidates:
+        return first
+    if case_vectors is None or first >= len(case_vectors):
+        return random.choice(candidates)
+    left = case_vectors[first]
+    if left is None:
+        return random.choice(candidates)
+    indices = (list(case_subset) if case_subset is not None
+               else list(range(len(left))))
+    if not indices:
+        return random.choice(candidates)
+    viable = [
+        index for index in candidates
+        if index < len(case_vectors)
+        and case_vectors[index] is not None
+        and len(case_vectors[index]) == len(left)]
+    if not viable:
+        return random.choice(candidates)
+
+    def key(index):
+        right = case_vectors[index]
+        envelope = tuple(sorted(
+            max(float(left[case]), float(right[case]))
+            for case in indices))
+        own = tuple(sorted(float(right[case]) for case in indices))
+        scalar = (
+            float(fitnesses[index])
+            if fitnesses is not None and index < len(fitnesses) else 0.0)
+        return envelope, own, scalar
+
+    best_key = max(key(index) for index in viable)
+    best = [index for index in viable if key(index) == best_key]
+    return random.choice(best)
 
 
 @dataclass(frozen=True)
@@ -116,8 +324,8 @@ class EscapeConfig:
     #: ranks at least as well — so at 1.0 the whole population can never move
     #: downhill and the mean rises without fluctuation. That is niche
     #: PRESERVATION, and it is the opposite of what crossing a valley needs.
-    #: Below 1.0 the remaining slots keep this project's pre-solve strict
-    #: generational replacement, so churn survives alongside the niches.
+    #: Below 1.0 the remaining slots keep this project's pre-solve generational
+    #: churn, subject to the bounded contract-elite reserve.
     crowding_fraction: float = DEFAULT_CROWDING_FRACTION
 
     # ── neutral drift ──
@@ -142,6 +350,13 @@ class EscapeConfig:
     archive_interval: int = DEFAULT_ARCHIVE_INTERVAL
     #: archive ring-buffer length.
     archive_size: int = DEFAULT_ARCHIVE_SIZE
+
+    # ── fitness-blind stepping-stone lineages ──
+    lineage_walk: bool = False
+    #: share of population slots that take one mutation-only step per
+    #: generation without behavioral selection. Their score is still measured
+    #: normally and a useful walker is admitted to the ordinary breeding pool.
+    lineage_walk_fraction: float = DEFAULT_LINEAGE_WALK_FRACTION
 
     # ── robustness second objective ──
     robustness: bool = False
@@ -195,6 +410,8 @@ class EscapeConfig:
             raise ValueError('archive_interval must be at least 1')
         if self.archive_size < 1:
             raise ValueError('archive_size must be at least 1')
+        if not 0 < self.lineage_walk_fraction < 1:
+            raise ValueError('lineage_walk_fraction must be in (0, 1)')
         if not 0 <= self.robustness_jitter < 1:
             raise ValueError('robustness_jitter must be in [0, 1)')
         if self.robustness_samples < 1:
@@ -210,8 +427,8 @@ class EscapeConfig:
         if self.island_rate_spread < 1:
             raise ValueError('island_rate_spread must be at least 1')
         for name in ('lifespan_scoring', 'crowding', 'neutral_drift',
-                     'self_adaptive_mutation', 'rebirth', 'robustness',
-                     'islands'):
+                     'self_adaptive_mutation', 'rebirth', 'lineage_walk',
+                     'robustness', 'islands'):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError('%s must be boolean' % name)
 
@@ -246,8 +463,9 @@ class EscapeConfig:
         """True when this run departs from the pre-escape-module behaviour."""
         return bool(
             self.lifespan_scoring or self.crowding or self.neutral_drift
-            or self.self_adaptive_mutation or self.rebirth or self.robustness
-            or self.islands or self.lexicase_downsample < 1.0)
+            or self.self_adaptive_mutation or self.rebirth
+            or self.lineage_walk or self.robustness or self.islands
+            or self.lexicase_downsample < 1.0)
 
     def summary(self):
         """One short line naming the active mechanisms (for the GUI/status)."""
@@ -264,6 +482,9 @@ class EscapeConfig:
             active.append('self-adaptive-mut')
         if self.rebirth:
             active.append('rebirth@%d' % self.rebirth_patience)
+        if self.lineage_walk:
+            active.append('lineage-walk@%.0f%%'
+                          % (self.lineage_walk_fraction * 100))
         if self.robustness:
             active.append('robustness±%d%%'
                           % round(self.robustness_jitter * 100))
@@ -502,7 +723,32 @@ class EscapeState:
         self.robust_blend = 0.0
         self.migrations = 0
         self.islands_bred = 0
+        self.lineage_walk_steps = 0
         self._cooldown = 0
+        self._lineage_started = False
+        self._lineage_start = None
+        self._island_bounds = ()
+        self._pending_migration = False
+        self._contract_case_offset = 0
+        self._contract_progress = None
+        self.contract_elite_carries = 0
+        self.contract_progress_events = 0
+
+    def _clone_evaluated(self, genome):
+        """Clone a survivor while retaining its already-measured rank data.
+
+        Backend clone functions deliberately copy only heritable structure:
+        normal clones are offspring and will immediately be evaluated. A
+        post-evaluation migrant or main-pool admission is different; dropping
+        these transient values would pair the right behavioral fitness with
+        zeroed robustness/juvenile/topology tiers until its next evaluation.
+        """
+        clone = self._clone(genome)
+        for name in ('_io_binding_progress', '_robust_cases', '_robustness',
+                     '_juvenile_score', '_topology_score', '_mut_rate'):
+            if hasattr(genome, name):
+                setattr(clone, name, getattr(genome, name))
+        return clone
 
     # ── champion / archive ──
 
@@ -649,18 +895,115 @@ class EscapeState:
                       perfect circuit exists, evaluated parents and offspring
                       compete so the population mean can converge to 1.
           crowding    restricted tournament replacement.
-          otherwise   strict generational replacement — unchanged: before the
-                      first solve, elites breed but never survive.
+          otherwise   generational offspring plus a bounded, rotating reserve
+                      of distinct best-on-case behaviors.
         """
         if solved and consolidate is not None:
-            return consolidate(parents, parent_fitnesses, parent_cases,
-                               offspring, offspring_fitnesses, offspring_cases)
-        crowded = self.survivor_selection(
-            parents, parent_fitnesses, parent_cases,
-            offspring, offspring_fitnesses, offspring_cases)
-        if crowded is not None:
-            return crowded
-        return offspring, offspring_fitnesses, offspring_cases
+            result = consolidate(
+                parents, parent_fitnesses, parent_cases,
+                offspring, offspring_fitnesses, offspring_cases)
+            # Once solved, terminal consolidation deliberately mixes the whole
+            # population. There is no remaining local minimum to escape and an
+            # island migration would only duplicate already-selected entries.
+            self._pending_migration = False
+            return result
+
+        if self.config.crowding and self._island_bounds:
+            # Crowding used to merge all demes back into one pool immediately,
+            # nullifying the island model whenever both boxes were checked.
+            # Select survivors inside each deme; a lineage-walk tail (which is
+            # outside the bounds) remains generational and fitness-blind.
+            pop, fits = [], []
+            cases = [] if (parent_cases is not None) else None
+            for start, stop in self._island_bounds:
+                selected = self.survivor_selection(
+                    parents[start:stop], parent_fitnesses[start:stop],
+                    (parent_cases[start:stop]
+                     if parent_cases is not None else None),
+                    offspring[start:stop], offspring_fitnesses[start:stop],
+                    (offspring_cases[start:stop]
+                     if offspring_cases is not None else None))
+                deme, deme_fits, deme_cases = selected
+                pop.extend(deme)
+                fits.extend(deme_fits)
+                if cases is not None:
+                    cases.extend(deme_cases)
+            end = self._island_bounds[-1][1]
+            pop.extend(offspring[end:])
+            fits.extend(offspring_fitnesses[end:])
+            if cases is not None:
+                cases.extend(offspring_cases[end:])
+            result = pop, fits, cases
+        elif self.config.crowding and self._lineage_start is not None:
+            # Without islands there is still one selected main pool followed
+            # by the protected walker cohort. Crowding only the main pool keeps
+            # RTR from randomly deleting or reordering those persistent walks.
+            end = self._lineage_start
+            pop, fits, cases = self.survivor_selection(
+                parents[:end], parent_fitnesses[:end],
+                (parent_cases[:end] if parent_cases is not None else None),
+                offspring[:end], offspring_fitnesses[:end],
+                (offspring_cases[:end]
+                 if offspring_cases is not None else None))
+            pop.extend(offspring[end:])
+            fits.extend(offspring_fitnesses[end:])
+            if cases is not None:
+                cases.extend(offspring_cases[end:])
+            result = pop, fits, cases
+        else:
+            crowded = self.survivor_selection(
+                parents, parent_fitnesses, parent_cases,
+                offspring, offspring_fitnesses, offspring_cases)
+            result = (crowded if crowded is not None else
+                      (offspring, offspring_fitnesses, offspring_cases))
+
+        # Keep the best known behaviors on a rotating subset of the hardest
+        # declared cases. This is environmental memory, not an escape toggle:
+        # parent selection cannot recombine a missing-case specialist after
+        # strict generational replacement has deleted it. Island demes and the
+        # lineage tail depend on stable slot boundaries, so their own survival
+        # rules remain authoritative when explicitly enabled.
+        if (parent_cases is not None and result[2] is not None
+                and not self._island_bounds
+                and self._lineage_start is None):
+            before = {id(genome) for genome in result[0]}
+            result = contract_elite_survivors(
+                parents, parent_fitnesses, parent_cases,
+                result[0], result[1], result[2],
+                case_offset=self._contract_case_offset)
+            self.contract_elite_carries += sum(
+                1 for genome in result[0]
+                if id(genome) not in before)
+            if result[2] and result[2][0]:
+                self._contract_case_offset = (
+                    self._contract_case_offset
+                    + max(1, int(round(
+                        len(result[0]) * CONTRACT_ELITE_FRACTION)))) \
+                    % len(result[2][0])
+
+        if self._pending_migration and self._island_bounds:
+            result = self._migrate(*result, self._island_bounds)
+        self._pending_migration = False
+        return result
+
+    def note_contract_progress(self, case_vectors, fitnesses=None):
+        """Record case-level high-water progress; return True on improvement.
+
+        Drivers use this alongside scalar progress to decide whether the
+        stress clock should advance.  The first observation establishes the
+        baseline and is not itself an improvement event.
+        """
+        key = contract_progress_key(case_vectors, fitnesses)
+        if key is None:
+            return False
+        if self._contract_progress is None:
+            self._contract_progress = key
+            return False
+        if key > self._contract_progress:
+            self._contract_progress = key
+            self.contract_progress_events += 1
+            return True
+        return False
 
     # ── islands ──
 
@@ -684,11 +1027,26 @@ class EscapeState:
         replacing that deme's worst — a ring topology, so a discovery diffuses
         gradually instead of sweeping every deme at once.
         """
+        self._pending_migration = False
+        self._lineage_start = None
+        if (self.config.lineage_walk and self._mutate is not None
+                and len(population) > 1):
+            return self._breed_with_lineage_walk(
+                generation, population, fitnesses, cases, rate, step)
+        return self._breed_selected_pool(
+            generation, population, fitnesses, cases, rate, step)
+
+    def _breed_selected_pool(self, generation, population, fitnesses, cases,
+                             rate, step):
+        """Breed the behaviorally selected pool, optionally as islands."""
         if not self.config.islands:
+            self._island_bounds = ()
             return step(population, fitnesses, cases, rate)
         bounds = self.config.island_slices(len(population))
         if len(bounds) < 2:
+            self._island_bounds = ()
             return step(population, fitnesses, cases, rate)
+        self._island_bounds = tuple(bounds)
         offspring = []
         for index, (start, stop) in enumerate(bounds):
             deme_rate = min(self.mutation_limit, max(
@@ -701,34 +1059,119 @@ class EscapeState:
             offspring.extend(bred[:stop - start])
         # A deme whose breeder returned short would silently shrink the run.
         while len(offspring) < len(population):
-            offspring.append(offspring[-1])
+            offspring.append(self._clone(offspring[-1]))
         self.islands_bred += 1
-        if generation and generation % self.config.island_migration_interval:
-            return offspring[:len(population)]
-        return self._migrate(offspring[:len(population)], fitnesses, bounds)
+        self._pending_migration = (
+            generation % self.config.island_migration_interval == 0)
+        return offspring[:len(population)]
 
-    def _migrate(self, offspring, fitnesses, bounds):
-        """Ring migration: each deme's best replace the next deme's worst."""
+    def _lineage_seed_indices(self, population, fitnesses, count):
+        """Choose a promising but structurally spread set of first walkers."""
+        pool = list(range(len(population)))
+        first = max(pool, key=lambda i: self._rank(
+            population[i], fitnesses[i]))
+        chosen = [first]
+        pool.remove(first)
+        descriptors = [genome_descriptor(genome) for genome in population]
+        while pool and len(chosen) < count:
+            pick = max(pool, key=lambda i: min(
+                genome_distance(descriptors[i], descriptors[j])
+                for j in chosen))
+            pool.remove(pick)
+            chosen.append(pick)
+        return chosen
+
+    def _breed_with_lineage_walk(self, generation, population, fitnesses,
+                                 cases, rate, step):
+        """Breed an ordinary pool plus persistent fitness-blind random walks.
+
+        A local minimum is separated from a better basin by genomes that score
+        worse. Neutral drift cannot retain them and a high-rate restart must
+        clear the entire valley in one lucky transaction. Walkers instead take
+        exactly one mutation event from their own prior state every generation,
+        regardless of score. They therefore retain partial, temporarily bad
+        construction long enough for the next edit to build on it.
+        """
+        size = len(population)
+        count = max(1, min(size - 1, int(round(
+            size * self.config.lineage_walk_fraction))))
+        main_count = size - count
+        self._lineage_start = main_count
+        main_pop = list(population[:main_count])
+        main_fits = list(fitnesses[:main_count])
+        main_cases = (list(cases[:main_count]) if cases is not None else None)
+
+        if self._lineage_started:
+            walker_indices = list(range(main_count, size))
+        else:
+            walker_indices = self._lineage_seed_indices(
+                population, fitnesses, count)
+            self._lineage_started = True
+
+        # Feed an improvement found by a walker back into ordinary selection,
+        # but never replace a main-pool parent with a worse walker. The walker's
+        # own lineage continues independently either way.
+        if main_pop and walker_indices:
+            best_walker = max(walker_indices, key=lambda i: self._rank(
+                population[i], fitnesses[i]))
+            worst_main = min(range(main_count), key=lambda i: self._rank(
+                main_pop[i], main_fits[i]))
+            if (self._rank(population[best_walker], fitnesses[best_walker])
+                    > self._rank(main_pop[worst_main],
+                                 main_fits[worst_main])):
+                main_pop[worst_main] = self._clone_evaluated(
+                    population[best_walker])
+                main_fits[worst_main] = fitnesses[best_walker]
+                if main_cases is not None:
+                    main_cases[worst_main] = cases[best_walker]
+
+        offspring = self._breed_selected_pool(
+            generation, main_pop, main_fits, main_cases, rate, step)
+        # One event, not the globally reheated rate: the point is to accumulate
+        # small edits over generations instead of making another destructive
+        # jump from the same champion.
+        for index in walker_indices:
+            offspring.append(self._mutate(
+                self._clone(population[index]), 0.0))
+            self.lineage_walk_steps += 1
+        return offspring[:size]
+
+    def _migrate(self, population, fitnesses, cases, bounds):
+        """Ring migration using the evaluated genomes' own fitnesses.
+
+        Migration previously ran in :meth:`breed`, before offspring had been
+        evaluated, and paired each new genome with the old parent's fitness at
+        the same list slot. That made "best migrant" effectively arbitrary.
+        It now runs from :meth:`merge_generation` after evaluation and moves a
+        matching genome/fitness/case-vector snapshot as one unit.
+        """
         count = min(int(self.config.island_migrants),
                     min(stop - start for start, stop in bounds))
         if count < 1:
-            return offspring
+            return population, fitnesses, cases
         senders = []
         for start, stop in bounds:
             order = sorted(range(start, stop),
-                           key=lambda i: self._rank(offspring[i],
+                           key=lambda i: self._rank(population[i],
                                                     fitnesses[i]),
                            reverse=True)
-            senders.append(order[:count])
+            senders.append([
+                (self._clone_evaluated(population[i]), fitnesses[i],
+                 (cases[i] if cases is not None else None))
+                for i in order[:count]])
         for index, (start, stop) in enumerate(bounds):
             source = senders[index - 1]                  # -1 wraps: a ring
             order = sorted(range(start, stop),
-                           key=lambda i: self._rank(offspring[i],
+                           key=lambda i: self._rank(population[i],
                                                     fitnesses[i]))
-            for slot, donor in zip(order[:count], source):
-                offspring[slot] = self._clone(offspring[donor])
+            for slot, (donor, donor_fit, donor_cases) in zip(
+                    order[:count], source):
+                population[slot] = donor
+                fitnesses[slot] = donor_fit
+                if cases is not None:
+                    cases[slot] = donor_cases
         self.migrations += 1
-        return offspring
+        return population, fitnesses, cases
 
     def tick(self):
         """Advance one generation of rebirth cooldown."""
@@ -776,9 +1219,8 @@ class EscapeState:
         population that can never move downhill cannot cross a valley.
 
         So only ``crowding_fraction`` of the next population is crowded. The
-        rest is filled from the offspring under this project's ordinary
-        pre-solve rule (strict generational replacement, no evaluated parent
-        carried over), which is where the exploratory churn lives. At
+        rest is filled from the offspring, subject to the bounded contract-
+        elite reserve, which is where the exploratory churn lives. At
         ``crowding_fraction == 1.0`` this reduces exactly to textbook RTR over
         the whole population.
         """
@@ -857,12 +1299,16 @@ class EscapeState:
             'crowding_replacements': self.crowding_replacements,
             'robust_blend': self.robust_blend,
             'migrations': self.migrations,
+            'lineage_walk_steps': self.lineage_walk_steps,
+            'contract_elite_carries': self.contract_elite_carries,
+            'contract_progress_events': self.contract_progress_events,
         }
 
 
 def build_escape_state(backend, ga_config, chromosome_count=None,
                        io_placement='fixed', evolve_io=False,
-                       evolve_delay=None, fnv_families=None):
+                       evolve_delay=None, fnv_families=None,
+                       lut_function_families=None):
     """Construct the run's :class:`EscapeState` for one backend.
 
     THE single construction point. Both drive paths call this rather than
@@ -884,7 +1330,8 @@ def build_escape_state(backend, ga_config, chromosome_count=None,
         from substrates.lut.ga import clone_genome, mutate_lut, rank_key
         mutate = lambda genome, rate: mutate_lut(
             genome, rate, max_telomere, chromosome_count=chromosome_count,
-            evolve_io=evolve_io, io_placement=io_placement)
+            evolve_io=evolve_io, io_placement=io_placement,
+            function_families=lut_function_families)
     elif backend == 'fnv':
         from substrates.fnv.catalogue import DEFAULT_FAMILIES
         from substrates.fnv.ga import (

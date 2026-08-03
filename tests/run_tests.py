@@ -8,6 +8,7 @@ combined pass/fail summary. Exit code is non-zero if any test fails, so it can
 gate a commit or CI step. (If pytest is installed, `py -m pytest` also works.)
 """
 import importlib.util
+import inspect
 import os
 import sys
 import traceback
@@ -21,8 +22,46 @@ def _load(path):
     spec = importlib.util.spec_from_file_location(
         "suite_" + os.path.splitext(os.path.basename(path))[0], path)
     module = importlib.util.module_from_spec(spec)
+    # importlib's low-level loader does not register the module for us.
+    # Dataclasses and other runtime type resolvers look up cls.__module__ in
+    # sys.modules while the file is executing, so bare-runner modules must be
+    # visible there just like modules loaded through normal import machinery.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class _MonkeyPatch:
+    """Minimal pytest-compatible setattr fixture for the bare-Python runner."""
+
+    def __init__(self):
+        self._changes = []
+
+    def setattr(self, target, name, value):
+        self._changes.append((target, name, getattr(target, name)))
+        setattr(target, name, value)
+
+    def undo(self):
+        for target, name, value in reversed(self._changes):
+            setattr(target, name, value)
+        self._changes.clear()
+
+
+def _run(function):
+    parameters = tuple(inspect.signature(function).parameters)
+    if not parameters:
+        function()
+        return
+    if parameters == ('monkeypatch',):
+        monkeypatch = _MonkeyPatch()
+        try:
+            function(monkeypatch)
+        finally:
+            monkeypatch.undo()
+        return
+    raise TypeError(
+        'bare runner does not provide fixture(s): %s' %
+        ', '.join(parameters))
 
 
 def main():
@@ -38,7 +77,7 @@ def main():
         for fn in tests:
             total += 1
             try:
-                fn()
+                _run(fn)
                 print("  PASS  %s" % fn.__name__)
                 passed += 1
             except Exception as e:                 # noqa: BLE001

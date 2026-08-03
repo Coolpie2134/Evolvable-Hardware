@@ -433,10 +433,19 @@ def _input_levels(in_pos, in_bits):
     return levels
 
 
-def score_nervous(genome, target, *, _developed=None):
-    from .scoring import score_contract
+def score_nervous_full(genome, target, *, _developed=None):
+    """Return behavioral fitness and the exact truth-table case vector.
+
+    Static Nervous evaluation used to discard ``score_contract``'s second
+    return value.  That forced selection to collapse every row/output result
+    into one average even though the evaluator had already measured the
+    individual checks.  Keep those checks so combinational evolution can use
+    case-aware selection without another growth or simulation pass.
+    """
+    from .scoring import contract_case_count, score_contract
     from .io_placement import (growth_seeds, io_strategy, binding_progress,
                                record_binding_progress)
+    failed = (0.0, (0.0,) * contract_case_count(target))
     if _developed is None:
         strategy = io_strategy(target)
         grid = grow_nervous(genome, seeds=growth_seeds(
@@ -449,23 +458,23 @@ def score_nervous(genome, target, *, _developed=None):
         record_binding_progress(
             genome, binding_progress(genome, grid, target))
     if len(grid) <= target.n_inputs:
-        return 0.0
+        return failed
     arch = getattr(genome, 'arch', 'single')
     routing, in_pos, out_pos = interpret_nervous(grid, target, arch=arch)
     resolved = _resolve_io_binding(genome, grid, target, in_pos, out_pos)
     if resolved is None:
-        return 0.0
+        return failed
     in_pos, out_pos = resolved
     if any(out_pos[t.role] is None for t in target.outputs):
-        return 0.0
+        return failed
     from .io_placement import (flat_inputs, output_groups,
                                terminal_node_sets)
     live = set(grid)
     if any(p not in live for p in flat_inputs(in_pos)):
-        return 0.0
+        return failed
     n_checks = len(target.cases) * len(target.outputs)
     if n_checks == 0:
-        return 0.0
+        return failed
     observations = []
     terminal_inputs, terminal_outputs = terminal_node_sets(
         target, in_pos, out_pos)
@@ -480,7 +489,14 @@ def score_nervous(genome, target, *, _developed=None):
         observations.append([
             float(any(outs.get(cell, 0) for cell in groups[term.role]))
             for term in target.outputs])
-    return score_contract(observations, target)[0]
+    score, cases, _ = score_contract(observations, target)
+    return score, cases
+
+
+def score_nervous(genome, target, *, _developed=None):
+    """Scalar compatibility wrapper around :func:`score_nervous_full`."""
+    return score_nervous_full(
+        genome, target, _developed=_developed)[0]
 
 
 def nervous_case_outputs(genome, target):

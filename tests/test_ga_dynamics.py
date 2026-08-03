@@ -12,7 +12,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from runtime.config import (GAConfig, MAX_CHROMOSOME_COUNT, RunConfig,
+from runtime.config import (DEFAULT_EVALUATION_WORKERS, GAConfig,
+                                MAX_CHROMOSOME_COUNT,
+                                MAX_EVALUATION_WORKERS, RunConfig,
                                 default_max_telomere)
 from runtime.checkpoint import load_checkpoint, save_checkpoint
 from runtime.controller import (run_evolution, save_evaluated_generation,
@@ -248,22 +250,29 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
     original = RunConfig(ga=GAConfig(
         chromosome_count=MAX_CHROMOSOME_COUNT, stagnation_beta=2.5,
         mutation_limit=12.0, recombination_enabled=False,
+        evaluation_workers=3, diversify_solvers=False,
         io_placement='spatial_chromosome'))
     rebuilt = RunConfig.from_dict(dataclasses.asdict(original))
     assert rebuilt.ga.chromosome_count == MAX_CHROMOSOME_COUNT
     assert rebuilt.ga.stagnation_beta == 2.5
     assert rebuilt.ga.mutation_limit == 12.0
     assert rebuilt.ga.recombination_enabled is False
+    assert rebuilt.ga.evaluation_workers == 3
+    assert rebuilt.ga.diversify_solvers is False
     assert rebuilt.ga.io_placement == 'spatial_chromosome'
 
     legacy = dataclasses.asdict(original)
     legacy['ga'].pop('chromosome_count')
     legacy['ga'].pop('mutation_limit')
     legacy['ga'].pop('recombination_enabled')
+    legacy['ga'].pop('evaluation_workers')
+    legacy['ga'].pop('diversify_solvers')
     legacy_config = RunConfig.from_dict(legacy).ga
     assert legacy_config.chromosome_count is None
     assert legacy_config.mutation_limit == 8.0
     assert legacy_config.recombination_enabled is True
+    assert legacy_config.evaluation_workers == DEFAULT_EVALUATION_WORKERS
+    assert legacy_config.diversify_solvers is True
 
     try:
         GAConfig(chromosome_count=MAX_CHROMOSOME_COUNT + 1)
@@ -271,6 +280,37 @@ def test_chromosome_count_round_trips_and_rejects_out_of_range_values():
         pass
     else:
         raise AssertionError('chromosome_count above the backend limit was accepted')
+
+    for invalid_workers in (0, MAX_EVALUATION_WORKERS + 1):
+        try:
+            GAConfig(evaluation_workers=invalid_workers)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid evaluation worker count was accepted')
+
+
+def test_diversity_requires_certification_only_when_an_oracle_exists():
+    from runtime.controller import _certification_permits_diversity
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    oracle_target = TEMPORAL_TARGETS['SR latch']
+    assert _certification_permits_diversity(
+        oracle_target, {'verdict': 'CERTIFIED'})
+    assert not _certification_permits_diversity(
+        oracle_target, {'verdict': 'OVERFIT (memorised timing)'})
+    assert not _certification_permits_diversity(
+        oracle_target, {'verdict': 'BELOW THRESHOLD 0.90'})
+    assert not _certification_permits_diversity(oracle_target, None)
+    assert _certification_permits_diversity(
+        TEMPORAL_TARGETS['Oscillator'],
+        {'verdict': 'UNCERTIFIED (no oracle reference for this target)'})
+    logic_target = periodic_combinational_target(get_target('Full adder'))
+    assert _certification_permits_diversity(
+        logic_target, {'verdict': 'CERTIFIED'})
+    assert not _certification_permits_diversity(
+        logic_target, {'verdict': 'OVERFIT (memorised row order)'})
 
 
 def test_terminal_node_io_config_round_trips_without_wiring_chromosome():
@@ -618,7 +658,7 @@ def test_controller_invokes_lut_rescue_only_after_plateau_patience():
 
     with tempfile.TemporaryDirectory() as directory, \
             mock.patch('runtime.controller.ProcessPoolExecutor',
-                       return_value=FakePool()), \
+                       return_value=FakePool()) as pool_factory, \
             mock.patch.object(
                 lut_ga, 'make_seed_genome',
                 side_effect=lambda count: random_lut_genome(count)), \
@@ -636,14 +676,19 @@ def test_controller_invokes_lut_rescue_only_after_plateau_patience():
 
     assert rescue.call_count == 1
     assert rescue.call_args.kwargs['limit'] == 1
+    # The configured default exceeds this tiny population; the controller
+    # should not start idle processes.
+    assert pool_factory.call_args.kwargs['max_workers'] == 2
 
 
 def test_controller_uses_row_lexicase_for_combinational_nervous_targets():
     from substrates.nervous.scoring import contract_case_count
-    from substrates.nervous.targets import periodic_combinational_target
     from substrates.snn.targets import get_target
 
-    target = periodic_combinational_target(get_target('Half adder'))
+    # The ordinary GUI Full/Half-adder path is a static truth table. It used to
+    # discard its row vector and silently fall back to scalar tournament even
+    # though periodic wrappers already used row-wise lexicase.
+    target = get_target('Half adder')
     config = RunConfig(
         ga=GAConfig(
             chromosome_count=2, selection='tournament',

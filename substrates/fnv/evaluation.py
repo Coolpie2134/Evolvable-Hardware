@@ -1,7 +1,7 @@
 """Target adapters and readout fitting for the Functional NV Net."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from substrates.nervous.scoring import (
@@ -10,7 +10,10 @@ from substrates.nervous.scoring import (
     contract_case_count, needs_samples, score_contract,
 )
 
-from .genome import functional_input_positions, germline_telomere
+from .catalogue import BY_ID
+from .genome import (
+    functional_input_positions, germline_telomere, is_constructive,
+)
 from .growth import grow_functional
 from .simulation import (
     FunctionalSim, TICK, compile_functional_grid, effective_wiring_edges,
@@ -24,6 +27,13 @@ class FunctionalTopology:
     reachable_nodes: int = 0
     reachable_edges: int = 0
     integrating_nodes: int = 0
+    max_input_convergence: int = 0
+    fully_integrating_nodes: int = 0
+    distinct_convergence_cones: int = 0
+    distinct_behaviors: int = 0
+    multi_input_behaviors: int = 0
+    fully_input_dependent_behaviors: int = 0
+    max_behavioral_inputs: int = 0
     cyclic_nodes: int = 0
     loop_rank: int = 0
     loop_regions: int = 0
@@ -34,6 +44,8 @@ class FunctionalTopology:
             math.log1p(self.reachable_nodes)
             + math.log1p(self.reachable_edges)
             + math.log1p(self.integrating_nodes)
+            + math.log1p(self.max_input_convergence)
+            + math.log1p(self.fully_integrating_nodes)
         )
 
     @property
@@ -130,10 +142,27 @@ def functional_topology(grid, inputs, *, _compiled=None):
         for source, destination in edges
         if source in reachable and destination in reachable_nodes
     )
-    integrating_nodes = sum(
-        1 for cell in reachable_nodes
-        if sum(cell in reached for reached in per_input) >= 2
-    )
+    convergence = {
+        cell: sum(cell in reached for reached in per_input)
+        for cell in reachable_nodes}
+    max_input_convergence = max(convergence.values(), default=0)
+    incoming = {cell: set() for cell in reachable_nodes}
+    for source, destination in reachable_edges:
+        incoming.setdefault(destination, set()).add(source)
+    # Count physical convergence junctions, not every unary delay downstream
+    # of a junction.  The old definition let one gate followed by a long wire
+    # masquerade as a rich integrating morphology.
+    junctions = {
+        cell for cell, sources in incoming.items()
+        if len(sources) >= 2 and convergence.get(cell, 0) >= 2}
+    integrating_nodes = len(junctions)
+    distinct_convergence_cones = len({
+        tuple(index for index, reached in enumerate(per_input)
+              if cell in reached)
+        for cell in junctions})
+    fully_integrating_nodes = sum(
+        bool(per_input) and convergence[cell] == len(per_input)
+        for cell in junctions)
 
     cyclic_nodes, loop_rank, loop_regions = 0, 0, 0
     for component in _strong_components(reachable_nodes, adjacency):
@@ -156,9 +185,57 @@ def functional_topology(grid, inputs, *, _compiled=None):
         reachable_nodes=len(reachable_nodes),
         reachable_edges=len(reachable_edges),
         integrating_nodes=integrating_nodes,
+        max_input_convergence=max_input_convergence,
+        fully_integrating_nodes=fully_integrating_nodes,
+        distinct_convergence_cones=distinct_convergence_cones,
         cyclic_nodes=cyclic_nodes,
         loop_rank=loop_rank,
         loop_regions=loop_regions,
+    )
+
+
+def logic_behavior_diversity(cases, target):
+    """Diagnostic computational repertoire of a static circuit.
+
+    A signature is one node's settled truth table over the exhaustive input
+    rows. We count distinct nonconstant signatures and how many logical input
+    variables can actually change each one. Desired outputs are deliberately
+    never consulted. The result is telemetry only: although it does not inspect
+    desired answers, it still describes behavior under the target's input bank
+    and therefore must not enter FNV selection.
+    """
+    rows = [tuple(map(int, input_bits)) for input_bits, _ in target.cases]
+    if not rows or not cases:
+        return 0, 0, 0, 0
+    cells = set().union(*(case.get("node_levels", {}) for case in cases))
+    signatures = {
+        tuple(int(case.get("node_levels", {}).get(cell, 0))
+              for case in cases)
+        for cell in cells}
+    nonconstant = {signature for signature in signatures
+                   if len(set(signature)) > 1}
+    row_index = {bits: index for index, bits in enumerate(rows)}
+    arities = []
+    for signature in nonconstant:
+        influence = 0
+        for bit in range(len(rows[0])):
+            changes = False
+            for input_bits, index in row_index.items():
+                other = list(input_bits)
+                other[bit] ^= 1
+                other_index = row_index.get(tuple(other))
+                if (other_index is not None
+                        and signature[index] != signature[other_index]):
+                    changes = True
+                    break
+            influence += int(changes)
+        arities.append(influence)
+    n_inputs = len(rows[0])
+    return (
+        len(nonconstant),
+        sum(arity >= 2 for arity in arities),
+        sum(arity == n_inputs for arity in arities),
+        max(arities, default=0),
     )
 
 
@@ -364,7 +441,8 @@ def place_temporal_outputs(grid, inputs, target, *, _compiled=None):
             scores[terminal.role][cell] = score
 
     assignment = best_distinct_assignment(
-        tuple(out_positions), candidates, scores)
+        tuple(out_positions), candidates, scores,
+        balance_worst=bool(getattr(target, "combinational_cases", ())))
     if assignment is None:
         return out_positions, traces
     out_positions.update(assignment)
@@ -461,6 +539,10 @@ def functional_logic_horizon(genome):
     It is genotype-derived because FNV growth is bounded by the germline
     telomere rather than by the target's display grid.
     """
+    if is_constructive(genome):
+        from .construction import constructive_depth
+        seeds = tuple(getattr(genome, "input_layout", None) or ((0, 0),))
+        return 2 * max(1, constructive_depth(genome, seeds)) + 4
     return 2 * germline_telomere(genome) + 4
 
 
@@ -479,6 +561,78 @@ def _run_logic_case(genome, grid, inputs, bits, target, *, _compiled=None):
     return dict(sim.ever), dict(sim.levels), sim.overflow
 
 
+def _bit_parallel_logic_runs(grid, inputs, target, circuit):
+    """Exact steady truth tables for acyclic stateless FNV hardware.
+
+    One Python integer packs all declared rows. Delays are identity at settled
+    level and fixed gates become bit operations. Stateful components and any
+    directed cycle fall back to the continuous-time simulator, preserving the
+    physical semantics for precisely the cases where timing/history matters.
+    """
+    supported = {"AND", "OR", "XOR", "VETO", "DELAY"}
+    input_set = set(inputs)
+    nodes = [cell for cell in grid if cell not in input_set]
+    if any(BY_ID[grid[cell]].behavior not in supported for cell in nodes):
+        return None
+
+    dependents = {cell: [] for cell in nodes}
+    indegree = {cell: 0 for cell in nodes}
+    for cell in nodes:
+        for source in circuit.inputs.get(cell, ()):
+            if source is not None and source not in input_set:
+                if source not in indegree:
+                    return None
+                dependents[source].append(cell)
+                indegree[cell] += 1
+    pending = sorted(cell for cell, degree in indegree.items() if degree == 0)
+    order = []
+    while pending:
+        cell = pending.pop()
+        order.append(cell)
+        for destination in dependents[cell]:
+            indegree[destination] -= 1
+            if indegree[destination] == 0:
+                pending.append(destination)
+    if len(order) != len(nodes):
+        return None
+
+    row_count = len(target.cases)
+    mask = (1 << row_count) - 1
+    tables = {}
+    for input_index, cell in enumerate(inputs):
+        tables[cell] = sum(
+            (1 << row_index)
+            for row_index, (bits, _expected) in enumerate(target.cases)
+            if input_index < len(bits) and bits[input_index])
+    for cell in order:
+        entry = BY_ID[grid[cell]]
+        values = tuple(
+            0 if source is None else tables.get(source, 0)
+            for source in circuit.inputs.get(cell, ()))
+        if entry.behavior == "AND":
+            value = values[0] & values[1]
+        elif entry.behavior == "OR":
+            value = values[0] | values[1]
+        elif entry.behavior == "XOR":
+            value = values[0] ^ values[1]
+        elif entry.behavior == "VETO":
+            value = values[0] & (~values[1] & mask)
+        else:  # settled DELAY
+            value = values[0]
+        tables[cell] = value & mask
+
+    return [
+        (
+            {cell: int(bool(table & (1 << row_index)))
+             for cell, table in tables.items()},
+            {cell: int(bool(table & (1 << row_index)))
+             for cell, table in tables.items()},
+            False,
+        )
+        for row_index in range(row_count)
+    ]
+
+
 def place_logic_outputs(genome, grid, inputs, target, *, _compiled=None):
     input_set = set(inputs)
     if _compiled is None:
@@ -489,35 +643,37 @@ def place_logic_outputs(genome, grid, inputs, target, *, _compiled=None):
             for bits, _ in target.cases
         ]
     else:
-        runs = [
-            _run_logic_case(
-                genome, grid, inputs, bits, target, _compiled=_compiled)
-            for bits, _ in target.cases
-        ]
+        runs = _bit_parallel_logic_runs(grid, inputs, target, _compiled)
+        if runs is None:
+            runs = [
+                _run_logic_case(
+                    genome, grid, inputs, bits, target, _compiled=_compiled)
+                for bits, _ in target.cases
+            ]
     positions = {terminal.role: None for terminal in target.outputs}
     candidates = _output_candidates(grid, input_set)
     candidates = behavior_representatives(
         candidates,
-        lambda cell: tuple(run[0].get(cell, 0) for run in runs),
+        lambda cell: tuple(run[1].get(cell, 0) for run in runs),
         len(target.outputs),
     )
     scores = {terminal.role: {} for terminal in target.outputs}
     for output_index, terminal in enumerate(target.outputs):
         for cell in candidates:
             correct = sum(
-                int(run[0].get(cell, 0) == expected[output_index])
+                int(run[1].get(cell, 0) == expected[output_index])
                 for run, (_, expected) in zip(runs, target.cases)
             )
             scores[terminal.role][cell] = correct
     assignment = best_distinct_assignment(
-        tuple(positions), candidates, scores)
+        tuple(positions), candidates, scores, balance_worst=True)
     if assignment is not None:
         positions.update(assignment)
     cases = []
     for run, (input_bits, expected) in zip(runs, target.cases):
         acts = {
             terminal.role: (
-                run[0].get(positions[terminal.role], 0)
+                run[1].get(positions[terminal.role], 0)
                 if positions[terminal.role] is not None else 0)
             for terminal in target.outputs
         }
@@ -537,12 +693,12 @@ def score_fixed_logic_outputs(genome, grid, inputs, output_positions, target):
     circuit = compile_functional_grid(grid, inputs)
     rows = []
     for bits, _ in target.cases:
-        ever, _, overflow = _run_logic_case(
+        _, levels, overflow = _run_logic_case(
             genome, grid, inputs, bits, target, _compiled=circuit)
         if overflow:
             return None
         rows.append([
-            float(ever.get(output_positions[terminal.role], 0))
+            float(levels.get(output_positions[terminal.role], 0))
             for terminal in target.outputs
         ])
     return rows
@@ -572,6 +728,13 @@ def evaluate_functional_full(genome, target, *, include_topology=False):
                 for case in observations
             ]
             score, cases, _ = score_contract(rows, target)
+            diversity = logic_behavior_diversity(observations, target)
+            topology = replace(
+                topology,
+                distinct_behaviors=diversity[0],
+                multi_input_behaviors=diversity[1],
+                fully_input_dependent_behaviors=diversity[2],
+                max_behavioral_inputs=diversity[3])
         result = score, cases
     return (*result, topology) if include_topology else result
 
@@ -616,6 +779,9 @@ def functional_report(target, genome=None):
         return "\n".join(lines + ["", "(circuit incomplete)"])
     grid, inputs, outputs, observations = prepared
     topology = functional_topology(grid, inputs)
+    behavior_diagnostic = (
+        logic_behavior_diversity(observations, target)
+        if not getattr(target, "temporal", False) else None)
     family_counts = {}
     from .catalogue import BY_ID
     for state in grid.values():
@@ -647,6 +813,12 @@ def functional_report(target, genome=None):
             topology.loop_regions,
         ),
     ])
+    if behavior_diagnostic is not None:
+        distinct, multi, full, max_inputs = behavior_diagnostic
+        lines.append(
+            "Behavior diagnostic (not selected): distinct=%d, multi-input=%d, "
+            "fully-input-dependent=%d, max-input-dependence=%d" % (
+                distinct, multi, full, max_inputs))
     if not getattr(target, "temporal", False):
         lines.append("")
         for case in observations:

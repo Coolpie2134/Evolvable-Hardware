@@ -75,7 +75,9 @@ from ui.diversity_ui import DiversityTab
 from ui.target_ui import TargetPicker
 from ui import ui_compat
 from runtime.config import (FNVConfig, FNV_FAMILIES, GAConfig, RunConfig,
-                                NV_NEW_RUN_PROFILES,
+                                DEFAULT_EVALUATION_WORKERS,
+                                LUT_FUNCTION_FAMILIES, NV_NEW_RUN_PROFILES,
+                                MAX_EVALUATION_WORKERS,
                                 MAX_CHROMOSOME_COUNT as MAX_CHROMS,
                                 default_max_telomere)
 from runtime.checkpoint import load_checkpoint, save_checkpoint
@@ -285,19 +287,31 @@ def build_genome_text(genome, fitness=None, binding=None):
         head += '   (fitness = %.4f)' % fitness
     L.append(head)
     L.append('')
-    g0 = chroms[0].genes[0] if (chroms and chroms[0].genes) else None
+    g0 = next((gene for chromosome in chroms
+               for gene in chromosome.genes), None)
+    constructive_fnv = g0 is not None and hasattr(g0, 'component_id')
     hexmode = g0 is not None and hasattr(g0, 'ctx_l')
     lutmode = g0 is not None and hasattr(g0, 'ctx_n')
-    sides = ('rotated circuit context L/R/D (4-bit states 0-15)' if hexmode
+    sides = ('named FNV output ports and dependency labels'
+             if constructive_fnv else
+             'rotated circuit context L/R/D (4-bit states 0-15)' if hexmode
              else 'the 4 sides N/E/S/W (each a 16-bit LUT)' if lutmode
              else 'the 4 sides N/E/S/W')
     element = 'core circuit' if hexmode else 'cell'
-    L.append('Each gene maps an expected neighbourhood (%s + the %s' %
-             (sides, element))
-    L.append('itself) to an output state. During growth a %s adopts the output of the' %
-             element)
-    L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
-    if hexmode:
+    if constructive_fnv:
+        L.append('Each placement gene installs one permanent FNV component at')
+        L.append('the empty honeycomb site faced by all of its named input ports.')
+        L.append('IDs and output-port labels are stable: list order is not a cursor.')
+        L.append('A collision suppresses only that placement; unrelated branches survive.')
+    else:
+        L.append('Each gene maps an expected neighbourhood (%s + the %s' %
+                 (sides, element))
+        L.append('itself) to an output state. During growth a %s adopts the output of the' %
+                 element)
+        L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
+    if constructive_fnv:
+        L.append('branch labels group connected blocks for duplication, rerouting, and crossover.')
+    elif hexmode:
         L.append('Each rule develops one 4-bit core circuit and is applied independently')
         L.append("to a tile's L/R/D circuits in their rotated orientation. out = 0 switches")
         L.append('that circuit off; the phenotype tile disappears only when all three are off.')
@@ -310,8 +324,11 @@ def build_genome_text(genome, fitness=None, binding=None):
         L.append('stays dead.  Raw hex is kept in brackets for reference.')
     else:
         L.append("'until' = the gene only applies while the growth iteration <= that limit.")
-    L.append('split = the between-gene crossover point; a one-gene chromosome')
-    L.append('recombines the rule fields inside that gene instead.')
+    if constructive_fnv:
+        L.append('Chromosomes are hereditary containers; crossover exchanges labelled branch blocks.')
+    else:
+        L.append('split = the between-gene crossover point; a one-gene chromosome')
+        L.append('recombines the rule fields inside that gene instead.')
     if show_iotags:
         if spatial_iotags:
             L.append('On chromosome 3, io-tag/selector encode a normalised')
@@ -330,7 +347,10 @@ def build_genome_text(genome, fitness=None, binding=None):
     iotag_hdr, iotag_sep = (
         (' | x/y  ', '+-------') if spatial_iotags
         else ((' | iotag', '+-------') if show_iotags else ('', '')))
-    if hexmode:
+    if constructive_fnv:
+        hdr = '    #  | stable id | component | branch | named input ports'
+        sep = '  -----+-----------+-----------+--------+------------------'
+    elif hexmode:
         hdr = '    #  | ctx L ctx R ctx D | self |  out' + iotag_hdr
         sep = '  -----+----------------+------+------' + iotag_sep
     elif lutmode:
@@ -360,7 +380,15 @@ def build_genome_text(genome, fitness=None, binding=None):
                             getattr(g, 'io_selector', 0)))
             else:
                 iotag = ''
-            if hexmode:
+            if constructive_fnv:
+                from substrates.fnv.catalogue import BY_ID
+                refs = ', '.join('%d:%s' % (ref.node_id, ref.direction)
+                                 for ref in g.inputs)
+                name = BY_ID[g.component_id].name
+                L.append('  %4d | %9d | %4d %-15s | %6d | %s'
+                         % (gi, g.gene_id, g.component_id, name,
+                            g.branch_id, refs))
+            elif hexmode:
                 L.append('  %4d | %4d %4d %4d | %4d | %4d%s'
                          % (gi, g.ctx_l, g.ctx_r, g.ctx_d, g.self_in,
                             g.self_out, iotag))
@@ -607,6 +635,8 @@ class App:
         self._gens_var  = lentry(run_ctrl, 'Generations:', 500)
         self._tries_var = lentry(run_ctrl, 'Restarts:', 1)
         self._seed_var  = lentry(run_ctrl, 'Seed:', 'random', width=7)
+        self._workers_var = lentry(
+            run_ctrl, 'Workers:', DEFAULT_EVALUATION_WORKERS, width=3)
 
         self._progress = ttk.Progressbar(run_ctrl, length=130, mode='determinate')
         self._progress.pack(side='right', padx=(8, 4), fill='x', expand=True)
@@ -844,10 +874,41 @@ class App:
             command=self._show_fnv_node_dictionary)
         self._fnv_dictionary_btn.pack(side='left')
 
+        # LUT gate banks restrict executable truth tables while leaving the
+        # developmental CAM context patterns fully expressive.
+        self._lut_function_row = ttk.Frame(
+            self.root, padding=(6, 0, 6, 4))
+        ttk.Label(
+            self._lut_function_row,
+            text='LUT function banks:').pack(side='left', padx=(2, 6))
+        self._lut_function_family_vars = {}
+        self._lut_function_family_checks = []
+        lut_family_labels = {
+            'ROUTING': 'Routing',
+            'AND': 'AND',
+            'OR': 'OR',
+            'XOR': 'XOR',
+            'VETO': 'Veto',
+            'THRESHOLD': 'Threshold',
+            'MUX': 'Mux',
+            'UNRESTRICTED': 'Arbitrary LUT',
+        }
+        for family in LUT_FUNCTION_FAMILIES:
+            variable = tk.BooleanVar(value=(family == 'UNRESTRICTED'))
+            check = ttk.Checkbutton(
+                self._lut_function_row,
+                text=lut_family_labels[family], variable=variable)
+            check.pack(side='left', padx=(0, 8))
+            self._lut_function_family_vars[family] = variable
+            self._lut_function_family_checks.append(check)
+        ttk.Label(
+            self._lut_function_row,
+            text='(OFF is always available)', foreground='#777777').pack(
+                side='left', padx=(4, 0))
+
         # ── fourth row: local-minimum escape mechanisms (runtime/escape.py) ──
-        # Every one is OFF by default, so an untouched row runs exactly the
-        # evolution this application ran before they existed. They apply to all
-        # four backends and to both GA drive paths.
+        # EscapeConfig, new sessions, and Reset remain all-off. Every mechanism
+        # applies to all four backends and both GA drive paths.
         from runtime.escape import EscapeConfig as _EC
         _ED = _EC()
         self._escape_defaults = dict(
@@ -857,17 +918,20 @@ class App:
             drift=False, adaptive=False,
             rebirth=False, patience=_ED.rebirth_patience,
             fraction=_ED.rebirth_fraction,
+            lineage_walk=False, lineage_fraction=_ED.lineage_walk_fraction,
             robust=False, jitter=_ED.robustness_jitter,
             islands=False, island_count=_ED.island_count,
             island_interval=_ED.island_migration_interval,
             downsample=_ED.lexicase_downsample)
-        # Two sub-rows: all of these on one line overflows the window at its
+        # Three sub-rows: all of these on one line overflows the window at its
         # natural width, and a control the user cannot see is a control that
         # silently does not exist.
         self._escape_row = ttk.Frame(self.root, padding=(6, 0, 6, 0))
         self._escape_row.pack(fill='x', side='top')
         esc1 = ttk.Frame(self._escape_row); esc1.pack(fill='x', side='top')
         esc2 = ttk.Frame(self._escape_row); esc2.pack(fill='x', side='top',
+                                                      pady=(2, 0))
+        esc3 = ttk.Frame(self._escape_row); esc3.pack(fill='x', side='top',
                                                       pady=(2, 4))
         ctrl4 = esc1
         ttk.Label(esc1, text='Escape:').pack(side='left', padx=(2, 0))
@@ -991,6 +1055,23 @@ class App:
              'selection quality,\nand because the sample is redrawn every '
              'generation it is also what "rotate the\nstimulus set" amounts to '
              'here. Only acts when ε-lexicase is selected.')
+        # A genuine valley needs a lineage that is allowed to be worse for more
+        # than one generation. Keep this on its own row: unlike neutral drift
+        # and high-rate rebirth, its guarantee is easy to state precisely.
+        ctrl4 = esc3
+        ttk.Label(esc3, text='          ').pack(side='left', padx=(2, 0))
+        self._lineage_walk_var = echeck(
+            'Lineage walk',
+            'Reserve a small cohort for FITNESS-BLIND, mutation-only random '
+            'walks. Each walker\ndescends from its own previous state, so a '
+            'temporarily worse intermediate survives\nlong enough to mutate '
+            'again. A walker that improves is copied into the ordinary '
+            'breeding\npool. This is target-blind and uses no extra '
+            'evaluations; it spends the selected share\nof existing '
+            'population slots on true multi-generation valley crossing.')
+        self._lineage_fraction_var = aentry(
+            ctrl4, 'share:', _ED.lineage_walk_fraction, width=4,
+            store=self._escape_entries)
         self._escape_reset_btn = ttk.Button(
             ctrl4, text='Reset escape', width=13,
             command=self._reset_escape)
@@ -999,7 +1080,7 @@ class App:
         # rate. Populated from the worker's 'escape' messages.
         self._escape_status = tk.StringVar(value='off')
         self._escape_status_label = ttk.Label(
-            esc2, textvariable=self._escape_status, foreground='#777777',
+            esc3, textvariable=self._escape_status, foreground='#777777',
             anchor='w')
         self._escape_status_label.pack(side='left', padx=(8, 0),
                                        fill='x', expand=True)
@@ -1157,6 +1238,12 @@ class App:
                     fill='x', side='top', before=self._escape_row)
             else:
                 self._fnv_row.pack_forget()
+        if hasattr(self, '_lut_function_row'):
+            if backend == 'lut':
+                self._lut_function_row.pack(
+                    fill='x', side='top', before=self._escape_row)
+            else:
+                self._lut_function_row.pack_forget()
         # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
         # feeds the nervous, FNV and LUT GAs; SNN uses its own fixed constants
         # and ignores them — so disable the whole row for SNN rather than let it look
@@ -1432,7 +1519,7 @@ class App:
 
     def _targets_for_backend(self, backend):
         """Return static SNN targets or periodic asynchronous targets."""
-        if backend in ('nervous', 'lut', 'fnv'):
+        if backend in ('nervous', 'lut'):
             d = {
                 name: (target if getattr(target, 'temporal', False)
                        else self._periodic_target(target))
@@ -1564,6 +1651,8 @@ class App:
         self._rebirth_var.set(d['rebirth'])
         self._rebirth_patience_var.set(str(d['patience']))
         self._rebirth_fraction_var.set(str(d['fraction']))
+        self._lineage_walk_var.set(d['lineage_walk'])
+        self._lineage_fraction_var.set(str(d['lineage_fraction']))
         self._robust_var.set(d['robust'])
         self._robust_jitter_var.set(str(d['jitter']))
         self._islands_var.set(d['islands'])
@@ -1591,6 +1680,9 @@ class App:
                 rebirth=bool(self._rebirth_var.get()),
                 rebirth_patience=int(self._rebirth_patience_var.get()),
                 rebirth_fraction=float(self._rebirth_fraction_var.get()),
+                lineage_walk=bool(self._lineage_walk_var.get()),
+                lineage_walk_fraction=float(
+                    self._lineage_fraction_var.get()),
                 robustness=bool(self._robust_var.get()),
                 robustness_jitter=float(self._robust_jitter_var.get()),
                 islands=bool(self._islands_var.get()),
@@ -1608,6 +1700,13 @@ class App:
             family for family in FNV_FAMILIES
             if self._fnv_family_vars[family].get())
 
+    def _selected_lut_function_families(self):
+        if not hasattr(self, '_lut_function_family_vars'):
+            return ('UNRESTRICTED',)
+        return tuple(
+            family for family in LUT_FUNCTION_FAMILIES
+            if self._lut_function_family_vars[family].get())
+
     def _read_run_config(self, chromosome_count=None):
         """Parse controls into an immutable, process-safe run configuration."""
         try:
@@ -1617,6 +1716,7 @@ class App:
             mutation_limit = float(self._mutation_limit_var.get())
             elite = int(self._elite_var.get())
             max_telomere = int(self._maxtel_var.get())
+            evaluation_workers = int(self._workers_var.get())
             delay = float(self._delay_var.get()); width = float(self._width_var.get())
             coincidence = float(self._coinc_var.get())
             node_model, evolve_delay = self._selected_node_model()
@@ -1634,6 +1734,7 @@ class App:
                     or not (0 < alpha <= 1) or not (0 <= beta <= 10)
                     or mutation_limit < 1
                     or elite < 0 or max_telomere < 2
+                    or not 1 <= evaluation_workers <= MAX_EVALUATION_WORKERS
                     or not all(math.isfinite(value) for value in
                                (delay, width, coincidence))
                     or delay <= 0 or width <= 0 or coincidence < 0):
@@ -1656,28 +1757,39 @@ class App:
             fnv_config = FNVConfig(self._selected_fnv_families())
         except ValueError:
             return None
-        return RunConfig(
-            ga=GAConfig(
-                mean_mutations=mut, immigrant_fraction=imm,
-                mutation_limit=mutation_limit,
-                tournament_size=tournament, elite_count=elite,
-                mutation_decay=alpha,
-                stagnation_beta=beta,
-                selection=('lexicase' if bool(self._lexicase_var.get())
-                           else 'tournament'),
-                recombination_enabled=bool(self._recombination_var.get()),
-                max_telomere=max_telomere,
-                # The selected profile owns the architecture/physics pairing.
-                # node_model must still mirror pulse.model for worker processes.
-                node_model=node_model,
-                evolve_delay=evolve_delay,
-                tile_arch=tile_arch,
-                io_placement=self._selected_io_placement(),
-                lut_io_mode=self._selected_lut_io_mode(),
-                chromosome_count=chromosome_count,
-                escape=escape),
-            pulse=pulse_config,
-            fnv=fnv_config)
+        lut_function_families = self._selected_lut_function_families()
+        if not lut_function_families:
+            return None
+        try:
+            return RunConfig(
+                ga=GAConfig(
+                    mean_mutations=mut, immigrant_fraction=imm,
+                    mutation_limit=mutation_limit,
+                    tournament_size=tournament, elite_count=elite,
+                    mutation_decay=alpha,
+                    stagnation_beta=beta,
+                    selection=(
+                        'lexicase' if bool(self._lexicase_var.get())
+                        else 'tournament'),
+                    recombination_enabled=bool(
+                        self._recombination_var.get()),
+                    max_telomere=max_telomere,
+                    # The selected profile owns the architecture/physics
+                    # pairing. node_model must still mirror pulse.model for
+                    # worker processes.
+                    node_model=node_model,
+                    evolve_delay=evolve_delay,
+                    tile_arch=tile_arch,
+                    io_placement=self._selected_io_placement(),
+                    lut_io_mode=self._selected_lut_io_mode(),
+                    lut_function_families=lut_function_families,
+                    chromosome_count=chromosome_count,
+                    evaluation_workers=evaluation_workers,
+                    escape=escape),
+                pulse=pulse_config,
+                fnv=fnv_config)
+        except ValueError:
+            return None
 
     def _backend(self):
         v = self._backend_var.get().lower()
@@ -1783,6 +1895,8 @@ class App:
                 state=('disabled' if locked or self._backend() == 'fnv'
                        else 'readonly'))
         for widget in getattr(self, '_fnv_family_checks', ()):
+            widget.configure(state='disabled' if locked else 'normal')
+        for widget in getattr(self, '_lut_function_family_checks', ()):
             widget.configure(state='disabled' if locked else 'normal')
 
     def _sync_telomere_backend(self, backend=None):
@@ -1925,11 +2039,12 @@ class App:
             self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
                              'Tournament>=1, Elites>=0, 0<α<=1, 0<=β<=10, '
                              'Mutation cap>=1, '
+                             'Workers=1-%d, '
                              'Max telomere>=2, '
                              'at least one FNV family enabled, '
                              'Delay/Width>0, Coinc>=0; analog: 0<Vth<1, '
                              '(1-Vth)/2<Step<1-Vth, Tau>0, Hyst>=0, '
-                             'Vth+Hyst<1.')
+                             'Vth+Hyst<1.' % MAX_EVALUATION_WORKERS)
             return
 
         backend = self._backend()
@@ -2134,8 +2249,12 @@ class App:
                 saved_target, 'lut_io_mode',
                 getattr(normalized_config.ga,
                         'lut_io_mode', 'source_pads'))
+            setattr(
+                saved_target, '_lut_function_families',
+                normalized_config.ga.lut_function_families)
         self._beta_var.set(str(normalized_config.ga.stagnation_beta))
         self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
+        self._workers_var.set(str(normalized_config.ga.evaluation_workers))
         self._recombination_var.set(normalized_config.ga.recombination_enabled)
         self._delay_var.set(str(normalized_config.pulse.delay))
         self._width_var.set(str(normalized_config.pulse.width))
@@ -2179,6 +2298,10 @@ class App:
         for family, variable in getattr(
                 self, '_fnv_family_vars', {}).items():
             variable.set(family in normalized_config.fnv.families)
+        for family, variable in getattr(
+                self, '_lut_function_family_vars', {}).items():
+            variable.set(
+                family in normalized_config.ga.lut_function_families)
         self._sync_nv_profile_controls()
         self._sync_recombination()
         self._chroms_var.set(str(actual_chroms))
@@ -2366,6 +2489,9 @@ class App:
                                      % stats['crowding_replacements'])
                     if stats.get('migrations'):
                         parts.append('migrations %d' % stats['migrations'])
+                    if stats.get('lineage_walk_steps'):
+                        parts.append('walker steps %d'
+                                     % stats['lineage_walk_steps'])
                     if stats.get('robust_blend'):
                         parts.append('worst-case %.0f%%'
                                      % (stats['robust_blend'] * 100))
@@ -3214,7 +3340,25 @@ class App:
             ax.text(cx + sz / 2, cy + sz / 2,
                     ('%04X' % val) if lut else str(val), ha='center', va='center',
                     fontsize=(fs * 0.55) if lut else fs,
-                    fontweight='bold', color=txt, zorder=3)
+                         fontweight='bold', color=txt, zorder=3)
+
+        if hasattr(gene, 'component_id'):
+            from substrates.fnv.catalogue import BY_ID
+            entry = BY_ID[gene.component_id]
+            refs = ', '.join('%d:%s' % (ref.node_id, ref.direction)
+                             for ref in gene.inputs)
+            ax.text(ox + 0.15, oy + 0.25, 'id %d   branch %d' % (
+                gene.gene_id, gene.branch_id), fontsize=7.5,
+                color='#556', zorder=3)
+            chip(ox + 0.2, oy + 1.05, gene.component_id, sz=1.25, fs=10)
+            ax.text(ox + 1.7, oy + 1.15, entry.name, fontsize=7.2,
+                    fontweight='bold', color='#223', zorder=3)
+            ax.text(ox + 1.7, oy + 1.75, 'inputs: ' + refs,
+                    fontsize=7.0, color='#556', zorder=3)
+            ax.text(ox + 1.7, oy + 2.35,
+                    'outputs: ' + ','.join(entry.outputs),
+                    fontsize=7.0, color='#556', zorder=3)
+            return
 
         # neighbourhood (y grows downward; axis is inverted below)
         if hasattr(gene, 'ctx_l'):                         # hex gene: L / R / D
@@ -3296,6 +3440,7 @@ class App:
         title += self._seed_tag()
 
         g0 = next((g for c in chroms for g in c.genes), None)
+        constructive_fnv = g0 is not None and hasattr(g0, 'component_id')
         lutmode = g0 is not None and hasattr(g0, 'ctx_n')
         CARD_CAP = 24
         # A dense LUT genome (hundreds of ontogeny genes) can't be shown as one
@@ -3353,15 +3498,24 @@ class App:
                 break
 
         _hex = bool(g0 is not None and hasattr(g0, 'ctx_l'))
-        _sides = ('rotated L/R/D circuit states (each 0-15)'
-                  if _hex else 'N/E/S/W sides')
-        _tail = ('.' if _hex else
-                 ', active while iter <= limit.')
-        ax.text(0.0, y + 0.2,
-                'card = one gene: the cluster is the expected neighbourhood '
-                '(%s + centre = self), the chip after -> is the output state; '
-                 'growth picks the gene closest (min Hamming distance) to a circuit%s'
-                % (_sides, _tail),
+        if constructive_fnv:
+            _sides = 'stable source/output-port labels'
+            _tail = '; dependency order places components and collisions fail locally.'
+        else:
+            _sides = ('rotated L/R/D circuit states (each 0-15)'
+                      if _hex else 'N/E/S/W sides')
+            _tail = ('.' if _hex else
+                     ', active while iter <= limit.')
+        explanation = (
+            'card = one fixed component placement: its stable ID owns the '
+            'listed output ports and its named inputs anchor it to existing '
+            'physical branches%s' % _tail
+            if constructive_fnv else
+            'card = one gene: the cluster is the expected neighbourhood '
+            '(%s + centre = self), the chip after -> is the output state; '
+            'growth picks the gene closest (min Hamming distance) to a circuit%s'
+            % (_sides, _tail))
+        ax.text(0.0, y + 0.2, explanation,
                 fontsize=7.5, color='#666', va='bottom', wrap=True)
         y += 1.0
         # Evolved I/O binding footer: which allele/anchor each port selected and

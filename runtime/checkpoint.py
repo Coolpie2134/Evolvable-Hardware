@@ -42,7 +42,11 @@ def _genome_types(backend):
 
 def genome_to_dict(genome, backend):
     from substrates.nervous.tritile import _CHAN_BITS
-    fields = _FIELDS[backend]
+    constructive_fnv = False
+    if backend == 'fnv':
+        from substrates.fnv.genome import is_constructive
+        constructive_fnv = is_constructive(genome)
+    fields = (() if constructive_fnv else _FIELDS[backend])
     def split_for(chromosome):
         count = len(chromosome.genes)
         return (0 if count < 2 else
@@ -50,16 +54,49 @@ def genome_to_dict(genome, backend):
     sd = getattr(genome, 'state_delays', None)     # nervous width-preserving model
     if backend == 'fnv':
         from substrates.fnv.catalogue import CATALOGUE_HASH
-        from substrates.fnv.genome import DEVELOPMENT_VERSION
+        from substrates.fnv.genome import genome_development_version
         catalogue_hash = CATALOGUE_HASH
-        development_version = DEVELOPMENT_VERSION
+        development_version = genome_development_version(genome)
     else:
         catalogue_hash = None
         development_version = None
+    if constructive_fnv:
+        chromosome_documents = [
+            {
+                'tag': int(c.tag),
+                'split': split_for(c),
+                'telomere': int(getattr(c, 'telomere', 1)),
+                'wiring': False,
+                'genes': [
+                    {
+                        'id': int(g.gene_id),
+                        'component': int(g.component_id),
+                        'branch': int(g.branch_id),
+                        'inputs': [
+                            [int(ref.node_id), str(ref.direction)]
+                            for ref in g.inputs],
+                    }
+                    for g in c.genes
+                ],
+            }
+            for c in genome.chromosomes]
+    else:
+        chromosome_documents = [
+            {'tag': int(c.tag), 'split': split_for(c),
+             'telomere': int(getattr(c, 'telomere', 1)),
+             # wiring-chromosome marker for evolvable I/O binding (Method B)
+             'wiring': bool(getattr(c, 'wiring', False)),
+             'genes': [[1 if f == 'io_limit' else int(getattr(g, f))
+                        for f in fields] for g in c.genes]}
+            for c in genome.chromosomes]
     return {
         'tag': int(genome.tag), 'gene_fields': list(fields),
         'catalogue_hash': catalogue_hash,
         'development_version': development_version,
+        'encoding': getattr(genome, 'encoding', None) if backend == 'fnv' else None,
+        'next_gene_id': (
+            int(getattr(genome, 'next_gene_id', 1))
+            if constructive_fnv else None),
         'seed_state': (
             [int(value) for value in genome.seed_state]
             if backend == 'lut' and getattr(genome, 'seed_state', None)
@@ -82,14 +119,7 @@ def genome_to_dict(genome, backend):
             if backend == 'lut'
             and getattr(genome, 'edge_input_layout', None) is not None
             else None),
-        'chromosomes': [
-            {'tag': int(c.tag), 'split': split_for(c),
-             'telomere': int(getattr(c, 'telomere', 1)),
-             # wiring-chromosome marker for evolvable I/O binding (Method B)
-             'wiring': bool(getattr(c, 'wiring', False)),
-             'genes': [[1 if f == 'io_limit' else int(getattr(g, f))
-                        for f in fields] for g in c.genes]}
-            for c in genome.chromosomes],
+        'chromosomes': chromosome_documents,
         'state_delays': ([float(x) for x in sd] if sd else None),
         'arch': getattr(genome, 'arch', 'single'),      # nervous tile architecture
         # Tri channel field width. Absent (or 4) marks the pre-OR layout, which
@@ -99,6 +129,45 @@ def genome_to_dict(genome, backend):
 
 
 def genome_from_dict(data, backend):
+    if backend == 'fnv' and data.get('encoding') == 'constructive_v3':
+        from substrates.fnv.catalogue import verify_catalogue_hash
+        from substrates.fnv.genome import (
+            CONSTRUCTIVE_ENCODING, DEVELOPMENT_VERSION, BranchRef,
+            Chromosome, Genome, PlacementGene,
+        )
+        verify_catalogue_hash(data.get('catalogue_hash'))
+        if int(data.get('development_version', -1)) != DEVELOPMENT_VERSION:
+            raise ValueError(
+                "FNV checkpoint development version mismatch: expected %d, "
+                "found %r" % (
+                    DEVELOPMENT_VERSION, data.get('development_version')))
+        chromosomes = []
+        for item in data.get('chromosomes', ()):
+            genes = [PlacementGene(
+                gene_id=int(row['id']),
+                component_id=int(row['component']),
+                inputs=tuple(BranchRef(int(ref[0]), str(ref[1]))
+                             for ref in row.get('inputs', ())),
+                branch_id=int(row.get('branch', row['id'])),
+            ) for row in item.get('genes', ())]
+            split = (0 if len(genes) < 2 else max(
+                1, min(int(item.get('split', 0)), len(genes) - 1)))
+            chromosomes.append(Chromosome(
+                genes=genes, split=split, tag=int(item.get('tag', 0)),
+                telomere=int(item.get('telomere', 1))))
+        layout = data.get('input_layout')
+        max_id = max((gene.gene_id for chromosome in chromosomes
+                      for gene in chromosome.genes), default=0)
+        return Genome(
+            chromosomes=chromosomes,
+            tag=int(data.get('tag', 0)),
+            input_layout=(
+                tuple((int(cell[0]), int(cell[1])) for cell in layout)
+                if layout is not None else None),
+            encoding=CONSTRUCTIVE_ENCODING,
+            next_gene_id=max(
+                max_id + 1, int(data.get('next_gene_id') or 1)),
+        )
     Gene, Chromosome, Genome = _genome_types(backend)
     fields = tuple(data.get('gene_fields') or _FIELDS[backend])
     chroms = []
@@ -138,21 +207,26 @@ def genome_from_dict(data, backend):
         })
     elif backend == 'fnv':
         layout = data.get('input_layout')
-        backend_fields['input_layout'] = (
-            tuple((int(cell[0]), int(cell[1])) for cell in layout)
-            if layout is not None else None)
+        from substrates.fnv.genome import ASSOCIATIVE_ENCODING
+        backend_fields.update({
+            'input_layout': (
+                tuple((int(cell[0]), int(cell[1])) for cell in layout)
+                if layout is not None else None),
+            'encoding': ASSOCIATIVE_ENCODING,
+        })
     genome = Genome(
         chromosomes=chroms, tag=int(data.get('tag', 0)),
         **backend_fields)
     if backend == 'fnv':
         from substrates.fnv.catalogue import verify_catalogue_hash
-        from substrates.fnv.genome import DEVELOPMENT_VERSION
+        from substrates.fnv.genome import LEGACY_DEVELOPMENT_VERSION
         verify_catalogue_hash(data.get('catalogue_hash'))
-        if data.get('development_version') != DEVELOPMENT_VERSION:
+        if data.get('development_version') != LEGACY_DEVELOPMENT_VERSION:
             raise ValueError(
                 "FNV checkpoint development version mismatch: expected %d, "
                 "found %r" % (
-                    DEVELOPMENT_VERSION, data.get('development_version')))
+                    LEGACY_DEVELOPMENT_VERSION,
+                    data.get('development_version')))
     # 'state_widths' appears in checkpoints written before width evolution was
     # retired. It is deliberately ignored: the vector no longer exists on the
     # genome and no engine reads it (RunConfig.from_dict moves such runs onto
@@ -387,6 +461,9 @@ def load_checkpoint(path):
         setattr(target, 'pulse_config', run_config.pulse)
         if backend == 'lut':
             setattr(target, 'lut_io_mode', run_config.ga.lut_io_mode)
+            setattr(
+                target, '_lut_function_families',
+                run_config.ga.lut_function_families)
         return {'genomes': [genome_from_dict(g, backend) for g in doc['genomes']],
                 'target': target, 'backend': backend,
                 'valid': doc.get('valid', 0.999), 'run_config': run_config,
@@ -406,6 +483,9 @@ def load_checkpoint(path):
     setattr(target, 'pulse_config', run_config.pulse)
     if backend == 'lut':
         setattr(target, 'lut_io_mode', run_config.ga.lut_io_mode)
+        setattr(
+            target, '_lut_function_families',
+            run_config.ga.lut_function_families)
     return {'best_genome': genome_from_dict(doc['genome'], backend),
             'best_fitness': float(doc['fitness']), 'target': target,
             'target_name': target.name, 'arch': arch, 'seed': doc.get('seed'),
