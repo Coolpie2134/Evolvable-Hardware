@@ -1,10 +1,10 @@
 """
-tests/test_analog.py — the analog Fig. 1 node engine (substrates/nervous/analog.py).
+tests/test_analog.py - the analog Fig. 1 node engine (substrates/nervous/analog.py).
 
 The digital engine hard-codes coincidence width, output width and refractory as
 independent constants. The analog node DERIVES them from one charge/leak/
 comparator mechanism. These tests pin the emergent behaviours that were the
-whole point of the model — each is a property the digital engine cannot exhibit
+whole point of the model - each is a property the digital engine cannot exhibit
 from its own parameters:
 
   * a BUFFER (both terminals on one source) fires on a SINGLE edge;
@@ -192,7 +192,7 @@ def test_discrete_step_surface_matches_held_input_semantics():
     assert len(sim.rise_times['y']) == 1
 
 
-# ── standalone runner ────────────────────────────────────────────────────────────
+# -- standalone runner ------------------------------------------------------------
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
@@ -219,8 +219,8 @@ def test_analog_node_honours_the_or_routing_op():
 
     The engine decides firing by summed charge, so it originally read only
     (e1, e2, i1) and dropped the op. Every OR routing therefore behaved as its
-    AND twin: half the state alphabet was inert, and the tri tile — whose
-    channels are the same alphabet — could not sustain a circulating pulse at
+    AND twin: half the state alphabet was inert, and the tri tile - whose
+    channels are the same alphabet - could not sustain a circulating pulse at
     all (Oscillator scored 0 under paper_analog while the digital engines
     solved it). OR is wired as the buffer's own trick: each input couples to
     both terminals, so one edge delivers 2*step.

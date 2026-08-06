@@ -1,5 +1,5 @@
 """
-substrates/nervous/ga.py — genetic algorithm native to the nervous net, tuned for
+substrates/nervous/ga.py - genetic algorithm native to the nervous net, tuned for
 evolving loops and memory.
 
 Temporal fitness landscapes are deceptive: an SR latch scores nothing until a
@@ -18,7 +18,7 @@ differs from substrates/snn's in seven ways:
 
   2. Loop-aware shaping: a small bonus, scaled by (1 - score) so a perfect
      score is still exactly 1.0, rewards nets whose signal graph contains
-     directed cycles — especially "relevant" cycles that inputs can write and
+     directed cycles - especially "relevant" cycles that inputs can write and
      outputs can read (loop_profile). Among equally scoring nets, the ones
      structurally *capable* of memory win the tie.
 
@@ -39,7 +39,7 @@ differs from substrates/snn's in seven ways:
      multi-input integration, and feedback. Disconnected bulk earns nothing,
      and gene count/telomere never enter this rank.
 
-  7. Stress-induced mutagenesis (adaptive_mutation_rate): the bacterial SOS response —
+  7. Stress-induced mutagenesis (adaptive_mutation_rate): the bacterial SOS response -
      hold the mutation rate at baseline until the run stalls, then ramp it up the
      longer it stays stuck and relax the instant progress resumes. Aimed squarely
      at the deceptive temporal plateaus where only a burst of variation reaches
@@ -66,8 +66,8 @@ from .hexgrid import hex_frontier_cells
 
 def clone_genome(genome):
     """Fast structural copy: new Genome/Chromosome objects with fresh gene LISTS
-    but SHARED gene objects. Safe because genes are never mutated in place —
-    mutation always builds a new gene via _tweak_gene — so sharing the (immutable)
+    but SHARED gene objects. Safe because genes are never mutated in place -
+    mutation always builds a new gene via _tweak_gene - so sharing the (immutable)
     gene objects is equivalent to deep-copying them. copy.deepcopy dominated
     reproduction (~90% of next_population's time); this replaces it on the hot
     path with an identical-behaviour, ~10x cheaper copy."""
@@ -107,17 +107,17 @@ ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELIT
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
 # Preserve specialist lineages: small elite pools otherwise produce nearly
-# exclusive champion × champion reproduction.
+# exclusive champion x champion reproduction.
 EXPLORATION_PARENT_FRAC = 0.30
 MEAN_MUTATIONS = 4.0         # HOT-START mutation rate for simulated annealing:
                             # broad early exploration, cooled each generation by
                             # MUT_DECAY toward ~0 as the genes self-organise.
-                            # (Was 1.2; annealing wants a high start — see below.)
+                            # (Was 1.2; annealing wants a high start - see below.)
 MUT_DECAY      = 0.997       # slow cooldown: hard recurrent tasks need late
-                             # variation — 0.997 cools 4.0 -> ~0.89 by gen 500,
-                             # where the old 0.99 crashed it to ~0.03. α is
-                             # PER-GENERATION, so tie it to run length — for very
-                             # long runs use α close to 1 (e.g. 0.9999); α = 1.0
+                             # variation - 0.997 cools 4.0 -> ~0.89 by gen 500,
+                             # where the old 0.99 crashed it to ~0.03. alpha is
+                             # PER-GENERATION, so tie it to run length - for very
+                             # long runs use alpha close to 1 (e.g. 0.9999); alpha = 1.0
                              # disables annealing.
 LOOP_WEIGHT    = 0.05          # max shaping bonus, as a fraction of (1 - score)
 # Population evaluation is embarrassingly parallel; the old min(cpu, 8) left
@@ -126,14 +126,14 @@ LOOP_WEIGHT    = 0.05          # max shaping bonus, as a fraction of (1 - score)
 # (measured: 16->20 workers gained <1.1x while adding IPC overhead).
 N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))
 
-# Very long runs (10k–100k generations) accumulate one fitness-cache entry per
+# Very long runs (10k-100k generations) accumulate one fitness-cache entry per
 # distinct genome ever seen. That is the only structure that grows without bound
 # over a run, so cap it: when it exceeds this, drop it and let it refill (elites
 # re-cache within a generation). Everything else the loop keeps is O(1) per gen.
 FITNESS_CACHE_MAX = 200_000
 
 
-# ── evaluation ─────────────────────────────────────────────────────────────────
+# -- evaluation -----------------------------------------------------------------
 
 def _loop_bonus(grid, routing, in_pos, out_pos):
     """[0,1] structural credit for memory capability. Any cycle earns a little;
@@ -173,7 +173,7 @@ def _loop_bonus_tri(grid, in_pos, out_pos):
 
 def evaluate_nv_full(genome, target, *, _developed=None):
     """(scalar fitness, per-case score vector). Cases are the individual
-    (trial, role) traces — the units ε-lexicase selection streams over. For
+    (trial, role) traces - the units epsilon-lexicase selection streams over. For
     Static combinational cases are the individual truth-table row/output
     checks.  They are deliberately retained rather than compressed into the
     scalar score, so selection can act on actual correctness.
@@ -218,7 +218,7 @@ def evaluate_nv_full(genome, target, *, _developed=None):
             # so it owns the whole evaluation. Lifespan checkpoints would have to
             # re-run that session per stage; instead the juvenile slots inherit
             # the adult score, leaving the case vector the right LENGTH (which is
-            # all ε-lexicase requires) without inventing a juvenile measurement.
+            # all epsilon-lexicase requires) without inventing a juvenile measurement.
             if lifespan:
                 cases = tuple(cases or ()) + (
                     (float(s),) * escape.lifespan_checkpoints)
@@ -336,7 +336,7 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
     ({signature: (fit, cases, binding_progress)}, owned by the caller) skips
     seen genomes. If a
     persistent `executor` (a ProcessPoolExecutor) is passed, it is reused instead
-    of spawning a fresh worker pool every call — on Windows the per-generation
+    of spawning a fresh worker pool every call - on Windows the per-generation
     spawn+re-import dominated runtime, so reuse is a large speed-up. Omitting it
     keeps the original one-shot-pool behaviour. `should_stop`/`on_progress` are
     threaded to map_ordered so a run stays cancellable without a chunk barrier."""
@@ -412,7 +412,7 @@ def eval_batch_nv(genomes, target, cache=None):
     return eval_batch_cases(genomes, target, cache)[0]
 
 
-# ── genetic operators ────────────────────────────────────────────────────────────
+# -- genetic operators ------------------------------------------------------------
 
 def _poisson(lam):
     L = math.exp(-lam); k, p = 0, 1.0
@@ -437,8 +437,8 @@ def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
     """Move exactly ONE non-anchor input pad by ONE valid honeycomb edge.
 
     This is the whole input-placement neighbourhood, and it is deliberately
-    tiny. A grown input terminal has a cliff — a genome that fails to express
-    one required terminal receives no meaningful evaluation at all — whereas a
+    tiny. A grown input terminal has a cliff - a genome that fails to express
+    one required terminal receives no meaningful evaluation at all - whereas a
     discrete pad list always carries exactly the required number of pads, so
     every mutation lands on a valid, evaluable layout one step away from its
     parent.
@@ -542,7 +542,7 @@ def _canonicalise(value, bits=_STATE_BITS, terminals=False):
     The register is physically 5 bits and mutation really is a single bit flip,
     but only 22 of the 32 settings are distinct circuits (see
     hexgrid.CANONICAL_STATES). Normalising after the flip keeps the hardware
-    model while stopping a genome from drifting into alias encodings — where a
+    model while stopping a genome from drifting into alias encodings - where a
     provably-inert bit would consume mutation events and split one circuit
     across two apparent node types.
     """
@@ -565,7 +565,7 @@ def _other_state(value, bits=_STATE_BITS, terminals=False):
     Canonicalising a raw flip is not enough: flipping the AND/OR select bit of a
     buffer produces that buffer's own alias, which normalises straight back to
     where it started. That silently turned a fifth of all state mutations into
-    no-ops — and a no-op mutation lets a multi-event transaction cancel back to
+    no-ops - and a no-op mutation lets a multi-event transaction cancel back to
     an exact copy of its parent, which reproduction relies on never happening.
     So the flip is drawn from the one-bit neighbours that are a different
     circuit, which is the same rule ``_state_excluding`` already applies.
@@ -696,7 +696,7 @@ _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
                 "add_chrom", "del_chrom", "split", "telomere", "delay"]
 # Delay appears only under the width-preserving model. Its weight keeps timing
 # tuning frequent enough to evolve alongside routing. I/O mutation is scheduled
-# when an evolvable io_placement strategy is active (evolve_io) — off by default,
+# when an evolvable io_placement strategy is active (evolve_io) - off by default,
 # separately below, so structural reheating cannot repeatedly scramble it.
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08, 0.30]
 
@@ -794,7 +794,7 @@ def _mutate_once_nv(genome, max_telomere=MAX_TELOMERE,
 def timing_mutation_flags(model, evolve_delay=None):
     """Resolve the delay-mutation toggle for a node-timing model.
 
-    ``None`` keeps the model's pairing ('pulse_delay' <-> delay mutation) —
+    ``None`` keeps the model's pairing ('pulse_delay' <-> delay mutation) -
     today's behaviour. An explicit False disables it, giving width-preserving
     transport at the FIXED base delay: the ablation that isolates width
     preservation from delay evolvability when comparing models."""
@@ -928,7 +928,7 @@ def crossover_nv(pa, pb, io_placement=None):
     # Input geometry is a single co-adapted physical module. Recombining
     # individual pad coordinates would manufacture collisions and tear apart
     # relative arrangements that only work together, so a child takes one
-    # parent's LAYOUT ENTIRE or the other's — never a mixture.
+    # parent's LAYOUT ENTIRE or the other's - never a mixture.
     layout_b = getattr(pb, 'input_layout', None)
     layout_a = getattr(pa, 'input_layout', None)
     for child, mine, theirs in ((ca, layout_a, layout_b),
@@ -1005,17 +1005,17 @@ def tournament_nv(population, fitnesses):
 
 
 def _lexicase_parent(population, case_vecs, case_subset=None):
-    """ε-lexicase selection (La Cava et al.): stream the cases in random order;
-    at each case keep only candidates within ε (median absolute deviation) of
+    """epsilon-lexicase selection (La Cava et al.): stream the cases in random order;
+    at each case keep only candidates within epsilon (median absolute deviation) of
     that case's best. Averages hide a single failing trial (~1/12 of a mean);
     lexicase makes every case a hard filter some of the time, so specialists on
-    the currently-failing cases are selected and recombined — the mechanism that
+    the currently-failing cases are selected and recombined - the mechanism that
     drives populations to ALL-cases-perfect rather than high-average.
 
-    The ε is what makes this usable on CONTINUOUS scores. Plain lexicase filters
+    The epsilon is what makes this usable on CONTINUOUS scores. Plain lexicase filters
     on exact ties, which essentially never occur between floats, so the first
     case drawn would decide every selection on its own and the rest would be
-    dead weight — indistinguishable from single-case selection while still
+    dead weight - indistinguishable from single-case selection while still
     looking like it maintains diversity.
 
     ``case_subset`` restricts the stream to a sample of case indices for this
@@ -1034,9 +1034,9 @@ def _lexicase_parent(population, case_vecs, case_subset=None):
         vals = [case_vecs[i][c] for i in cand]
         best = max(vals)
         # A truth-table check is an exact 0/1 fact, not a noisy measurement.
-        # MAD ε can become 1.0 on an even 50/50 split and retain BOTH the right
+        # MAD epsilon can become 1.0 on an even 50/50 split and retain BOTH the right
         # and wrong candidates, making that case exert no selection at all.
-        # Keep ε for genuinely continuous temporal/duty scores, but use exact
+        # Keep epsilon for genuinely continuous temporal/duty scores, but use exact
         # lexicase whenever every value is discrete.
         if all(abs(v - round(v)) <= 1e-12 for v in vals):
             eps = 0.0
@@ -1053,7 +1053,7 @@ def _lexicase_parent(population, case_vecs, case_subset=None):
 # Parent-selection scheme. Measured head-to-head at equal budget (see memory):
 # lexicase helped only the pair detector (+0.11), regressed coincidence (-0.13)
 # and pattern (-0.13), and left every plateau (latch/toggle/stepper) at the
-# IDENTICAL value tournament reaches — the plateaus are representational, not a
+# IDENTICAL value tournament reaches - the plateaus are representational, not a
 # selection-pressure problem. Tournament is the better default; lexicase stays
 # available for experiments.
 SELECTION = 'tournament'          # 'tournament' | 'lexicase'
@@ -1076,7 +1076,7 @@ def select_parent(population, fitnesses, case_vecs=None, case_subset=None):
 
 # Stress-induced mutagenesis (the bacterial SOS response): baseline mutation
 # until the population has stalled for STRESS_PATIENCE generations, then the rate
-# ramps toward STRESS_MAX_MULT the longer it stays stuck — raising variation to
+# ramps toward STRESS_MAX_MULT the longer it stays stuck - raising variation to
 # climb off a plateau, then relaxing the instant progress resumes. The temporal
 # plateaus (latch/toggle/stepper) are exactly the deceptive landscapes this is
 # meant for: flat regions where only a burst of variation reaches the next rung.
@@ -1168,7 +1168,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         evolve_io = True
     if make_genome is None:
         # Immigrants must match the population's tile architecture, or a 'single'
-        # immigrant would pollute a tri3 run (and vice-versa) — different hardware
+        # immigrant would pollute a tri3 run (and vice-versa) - different hardware
         # under the same integer genome. Method B immigrants also need a flagged
         # wiring chromosome with a seeded port map.
         want_wiring = strategy in (
@@ -1217,7 +1217,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     else ga_config.max_telomere)
                 return genome
     # Enable the timing mutation belonging to the selected node model. An
-    # explicit argument wins; otherwise read the run configuration — its
+    # explicit argument wins; otherwise read the run configuration - its
     # evolve_delay toggle overrides the model pairing (None = paired).
     if evolve_delay is None:
         model = (getattr(ga_config, 'node_model', 'uniform')
@@ -1234,7 +1234,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     # n_elite genomes breed the offspring. The sole exception is one cloned
     # archive champion during a stalled spatial local-search phase.
     # Parents are drawn by
-    # tournament WITHIN that pool (TOURNAMENT_K=1 → uniform among elites). n_elite==0
+    # tournament WITHIN that pool (TOURNAMENT_K=1 -> uniform among elites). n_elite==0
     # falls back to normal selection over the whole population.
     spatial_plateau = (
         strategy == 'spatial_chromosome'
@@ -1266,13 +1266,13 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     and bool(getattr(
                         archive_parent, 'routing_patches', None))
                     and index < max(1, archive_count // 2))))
-    # ε-lexicase (when selected) must stream over the WHOLE population; the elite-only
+    # epsilon-lexicase (when selected) must stream over the WHOLE population; the elite-only
     # breeding pool would otherwise mask it whenever elites>0, so bypass the pool then.
     selection = ((SELECTION if ga_config is None else ga_config.selection)
                  if selection is None else selection)
     use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
-    # One case sample per GENERATION, shared by every selection event in it —
+    # One case sample per GENERATION, shared by every selection event in it -
     # resampling per parent would average the downsampling away and lose the
     # selection pressure it is supposed to concentrate.
     case_subset = None
@@ -1368,7 +1368,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     def child_rate(child):
         # Under self-adaptive mutation each individual carries its own rate, so
         # a stuck lineage can heat up while a lineage that is still improving
-        # stays cool — the per-lineage counterpart to the population-wide SOS
+        # stays cool - the per-lineage counterpart to the population-wide SOS
         # reheat in runtime/mutation.py.
         if not escape.self_adaptive_mutation:
             return mean_mutations
@@ -1441,7 +1441,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     return new_pop[:pop]
 
 
-# ── main loop (headless; the GUI runs its own equivalent in app.py) ──────────────
+# -- main loop (headless; the GUI runs its own equivalent in app.py) --------------
 
 def _assimilate_timing_parents(population, fitnesses, target, count,
                                samples, seed, step):
@@ -1738,7 +1738,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         ex.shutdown()
 
 
-# ── diversification: a whole generation of DISTINCT valid solutions ──────────────
+# -- diversification: a whole generation of DISTINCT valid solutions --------------
 
 def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
               cache=None, executor=None, should_stop=None, on_progress=None,
@@ -1753,7 +1753,7 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
 
     Returns the list of unique valid genomes found (up to pop_size). Where the
     target has a broad neutral network it fills the population; where solutions
-    are isolated spikes it returns however few exist — an honest ceiling, not a
+    are isolated spikes it returns however few exist - an honest ceiling, not a
     monoculture faked with copies."""
     if cache is None:
         cache = LRUCache(FITNESS_CACHE_MAX)

@@ -12,9 +12,9 @@ Usage
     )
 
     # Caller must supply:
-    #   solution  — 2-D list [SIZEX][SIZEY] written to by make_solution()
-    #   fitness_function(bitstream) — returns a numeric score
-    #   SIZEX, SIZEY, CELLSXY      — grid dimensions
+    #   solution  - 2-D list [SIZEX][SIZEY] written to by make_solution()
+    #   fitness_function(bitstream) - returns a numeric score
+    #   SIZEX, SIZEY, CELLSXY      - grid dimensions
 """
 import random
 
@@ -34,8 +34,8 @@ def find_solution(node, bitstream, bitidx, fitness_function, sizex, sizey, cells
     ----------
     node            : dict with keys 'zero', 'one', 'fitness'
     bitstream       : 2-D list [sizex][sizey]
-    bitidx          : current flat index (0 … cellsxy-1)
-    fitness_function: callable(bitstream) → numeric score
+    bitidx          : current flat index (0 ... cellsxy-1)
+    fitness_function: callable(bitstream) -> numeric score
     sizex, sizey, cellsxy : grid dimensions
 
     Returns the cached or freshly computed fitness.

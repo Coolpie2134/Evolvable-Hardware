@@ -1,10 +1,10 @@
 """
-substrates/nervous/simulation.py — the single construction and schedule API for nervous
+substrates/nervous/simulation.py - the single construction and schedule API for nervous
 nets: the audited path for asynchronous robustness testing.
 
 temporal.py drives circuits from tick-quantised streams (`start * TICK`, integer
 edges). That is fine for evolution, but it keeps the whole experiment on an
-integer timing lattice — so it cannot certify that behaviour is ASYNCHRONOUS
+integer timing lattice - so it cannot certify that behaviour is ASYNCHRONOUS
 rather than merely clocked at TICK granularity. This module drives the same
 `PulseSim` from schedules of arbitrary FLOAT event times, and provides the pure
 schedule primitives the metamorphic synchrony audit and the robustness harness
@@ -73,7 +73,7 @@ def normalize(schedule):
 
 
 def effective_edges(schedule):
-    """Per-input leading-edge times AFTER wired-OR merging — the edge train the
+    """Per-input leading-edge times AFTER wired-OR merging - the edge train the
     substrate actually receives, which is what state semantics (e.g. parity) must
     be computed from, not the pre-merge schedule."""
     return [[t for (t, _w) in ev] for ev in normalize(schedule)]
@@ -81,7 +81,7 @@ def effective_edges(schedule):
 
 def streams_to_schedule(streams, n_inputs, T, config=None):
     """The nominal lattice schedule: each contiguous high run in the integer
-    trial `streams` becomes one float pulse `(start*TICK, run_len*TICK)` — the
+    trial `streams` becomes one float pulse `(start*TICK, run_len*TICK)` - the
     same wired-OR edge decomposition temporal._inject_stream_edges uses, but
     returned as a transformable float schedule instead of injected in place."""
     schedule = [[] for _ in range(n_inputs)]
@@ -107,9 +107,9 @@ def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
                  return_intervals=False, arch='single',
                  terminal_inputs=None, terminal_outputs=None):
     """Inject `schedule` at float times and run the event-driven sim to
-    `horizon`, enforcing `max_events` (overflow ⇒ the run is invalid, exactly as
+    `horizon`, enforcing `max_events` (overflow => the run is invalid, exactly as
     in scoring). Returns ({cell: [leading-edge times]}, overflow) for `out_cells`
-    (all live cells if None) — continuous, no tick quantisation.
+    (all live cells if None) - continuous, no tick quantisation.
 
     ``delays`` drives evolved-delay, width-preserving transport. Set
     ``return_intervals`` to receive complete physical output intervals instead
@@ -141,7 +141,7 @@ def run_schedule(grid, routing, in_pos, schedule, horizon, out_cells=None,
     return {c: list(sim.rise_times.get(c, [])) for c in cells}, sim.overflow
 
 
-# ── pure schedule transforms (perturbations + metamorphic relations) ────────────
+# -- pure schedule transforms (perturbations + metamorphic relations) ------------
 
 def translate(schedule, delta):
     """Shift every input event by `delta`."""

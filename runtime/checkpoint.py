@@ -16,7 +16,7 @@ _FIELDS = {
     # Nervous no longer writes the retired per-gene I/O alleles (tag, io_limit,
     # io_selector, io_kind): its I/O is an evolved input LAYOUT on the genome
     # plus fitted output probes, so those fields encode nothing. Old documents
-    # carry their own 'gene_fields' list and still load — the fields are read
+    # carry their own 'gene_fields' list and still load - the fields are read
     # only to identify and cleanly reject an incompatible retired-placement run.
     'nervous': ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'),
     'lut': ('ctx_n', 'ctx_e', 'ctx_s', 'ctx_w', 'self_in', 'self_out', 'tag',
@@ -109,7 +109,7 @@ def genome_to_dict(genome, backend):
              for patch in (getattr(genome, 'routing_patches', None) or ())]
             if backend == 'nervous' else []),
         # Evolved input pads. Absent/null marks a FIXED-input genome, which
-        # keeps reading its pads from the target — that is the documented
+        # keeps reading its pads from the target - that is the documented
         # legacy load path, not a missing field to be repaired.
         'input_layout': (
             [[int(cell[0]), int(cell[1])] for cell in genome.input_layout]
@@ -186,7 +186,7 @@ def genome_from_dict(data, backend):
         chroms.append(Chromosome(
             genes=genes, split=split,
             tag=int(item.get('tag', 0)), telomere=int(item.get('telomere', 1)),
-            # 'sex' is the flag's retired spelling — readable, never written
+            # 'sex' is the flag's retired spelling - readable, never written
             **({'wiring': bool(item.get('wiring', item.get('sex', False)))}
                if backend != 'fnv' else {})))
     seed_state = data.get('seed_state') if backend == 'lut' else None
@@ -424,7 +424,7 @@ def _reject_retired_nervous_placement(backend, run_config):
     Those bindings live in per-gene tags, a reserved wiring chromosome or
     normalised x/y anchors. None of them carry the information the coordinate
     layout needs, so any automatic conversion would be an invention rather than
-    a migration — the run would silently become a DIFFERENT organism wearing the
+    a migration - the run would silently become a DIFFERENT organism wearing the
     old fitness. Refusing is the honest outcome.
     """
     if backend != 'nervous' or run_config is None:

@@ -82,7 +82,7 @@ class _Parent:
 
 def test_app_exposes_only_the_current_nv_profiles():
     # ONE profile. The single-tile and digital tri-circuit engines are retired:
-    # measured worse on score, solve rate and — decisively — on held-out
+    # measured worse on score, solve rate and - decisively - on held-out
     # certification, where legacy's Toggle "solve" was 3/5 OVERFIT.
     assert NV_NEW_RUN_PROFILES == {
         'analog_tri': ('tri3', 'paper_analog', None),
@@ -336,7 +336,7 @@ def test_interactive_case_dropdown_loads_each_trial():
 def test_interactive_combinational_cases_load_fitness_pulses():
     """A COMBINATIONAL target has no temporal trials, only a truth table, so the
     Interactive tab must enumerate its cases and load the SAME input pulses
-    fitness scores (aligned-start, schedule widths for LUT) — otherwise 'see what
+    fitness scores (aligned-start, schedule widths for LUT) - otherwise 'see what
     fitness scored' shows nothing for gates/adders."""
     from ui.interactive import InteractiveTab
     from substrates.nervous.playback import pulses_from_case
@@ -351,7 +351,7 @@ def test_interactive_combinational_cases_load_fitness_pulses():
     tab._in_pos = list(target.inputs)
     tab._backend = 'lut'
     tab._running = False
-    # no _case_kind set — the tab must derive 'cases' from the target itself.
+    # no _case_kind set - the tab must derive 'cases' from the target itself.
 
     labels = InteractiveTab._case_labels(tab, target)
     assert len(labels) == len(target.cases)

@@ -1,5 +1,5 @@
 """
-substrates/nervous/diversity.py — how much genuine variety is in an evaluated population?
+substrates/nervous/diversity.py - how much genuine variety is in an evaluated population?
 
 Once every genome scores 1.0, every fitness-derived spread measure (sigma,
 best-minus-mean, ...) is identically zero: they go blind exactly where the
@@ -11,27 +11,27 @@ costumes, while 120 collapsing to 40 is a broad neutral network.
 
 The four levels, from most to least generous:
 
-  exact       — the full inherited genome identity (``genome_signature``):
+  exact       - the full inherited genome identity (``genome_signature``):
                 rule alleles, gene order, chromosome tags, split points,
                 telomeres, timing vectors, architecture, native input layout,
                 and any compatibility routing patches. Tags and splits do not
                 touch THIS organism's development, but they steer future
                 crossover, so they are real heritable variation.
-  functional  — variation that can affect a phenotype: architecture, ordered
+  functional  - variation that can affect a phenotype: architecture, ordered
                 rule alleles, germline telomere (it sets growth radius L AND
                 the settle budget), active timing vectors, native input/seed
-                geometry, and—under a compatibility I/O strategy—the mapping
+                geometry, and-under a compatibility I/O strategy-the mapping
                 alleles it actually reads.
-  phenotype   — the realised circuit: architecture, the grown state grid,
+  phenotype   - the realised circuit: architecture, the grown state grid,
                 evolved I/O attachments, and timing values referenced by states
                 PRESENT in that grid.
                 Two different rule sets that grow the same body with the same
                 per-node delays are the same circuit.
-  behavior    — quantised output edges on a frozen OFF-SPEC probe bank, read at
+  behavior    - quantised output edges on a frozen OFF-SPEC probe bank, read at
                 the genome's own fitted output cell. Off-spec matters: if the
                 target pins one exact behaviour then every perfect solver
-                SHOULD look identical on the target's own stimuli — that is
-                success, not monoculture — so differences can only show up
+                SHOULD look identical on the target's own stimuli - that is
+                success, not monoculture - so differences can only show up
                 where selection never constrained them.
 
 What this does NOT measure is mechanism. Two structurally different circuits
@@ -118,7 +118,7 @@ ROBUSTNESS_MEANING = (
 )
 
 
-# ── cluster statistics ───────────────────────────────────────────────────────
+# -- cluster statistics -------------------------------------------------------
 
 @dataclass(frozen=True)
 class ClusterStats:
@@ -137,7 +137,7 @@ class ClusterStats:
 
     @property
     def effective(self):
-        """exp(Shannon entropy) — the number of EVENLY-sized clusters that
+        """exp(Shannon entropy) - the number of EVENLY-sized clusters that
         would give the same entropy. Equals `distinct` only when every cluster
         is the same size; collapses toward 1 when one cluster dominates."""
         if not self.total:
@@ -152,7 +152,7 @@ class ClusterStats:
 
 def cluster_stats(level, signatures):
     """Bucket signatures into equivalence classes. ``None`` marks a genome that
-    could not be measured (dead organism, unusable readout) — counted and
+    could not be measured (dead organism, unusable readout) - counted and
     reported rather than silently dropped."""
     counts = {}
     unmeasured = 0
@@ -167,7 +167,7 @@ def cluster_stats(level, signatures):
                         unmeasured=unmeasured)
 
 
-# ── backend adapters ─────────────────────────────────────────────────────────
+# -- backend adapters ---------------------------------------------------------
 
 def _hashable(value):
     """Coerce a grown-grid cell value into something hashable and comparable."""
@@ -279,7 +279,7 @@ def _adapter(backend):
                      "('nervous', 'lut'), not %r" % (backend,))
 
 
-# ── the four signatures ──────────────────────────────────────────────────────
+# -- the four signatures ------------------------------------------------------
 
 def exact_signature(genome, backend):
     """Complete inherited identity, including tags/splits/telomeres/timing."""
@@ -423,13 +423,13 @@ def phenotype_signature(genome, backend, target, config=None, adapter=None):
             _grid_signature(grid), live_delays, binding)
 
 
-# ── off-spec behavioural probes ──────────────────────────────────────────────
+# -- off-spec behavioural probes ----------------------------------------------
 
 def make_probe_bank(target, seed=PROBE_SEED, n_trials=PROBE_TRIALS):
     """A frozen OFF-SPEC stimulus bank: same I/O geometry as ``target`` but
     randomly placed float pulses that the target's own banks never contained.
 
-    Expectations are dummies — nothing here is scored. The point is to observe
+    Expectations are dummies - nothing here is scored. The point is to observe
     the circuit where selection did NOT constrain it, which is the only place
     two equally-perfect solvers are free to differ."""
     rng = random.Random(seed)
@@ -490,7 +490,7 @@ def behavior_signature(genome, backend, target, probe_target=None, config=None,
     return (round(quantum, 9), tuple(out))
 
 
-# ── the funnel ───────────────────────────────────────────────────────────────
+# -- the funnel ---------------------------------------------------------------
 
 @dataclass
 class DiversityReport:
@@ -637,14 +637,14 @@ def format_report(report, population=None, target_name=None, valid=None):
     return '\n'.join(lines)
 
 
-# ── mutational robustness ────────────────────────────────────────────────────
+# -- mutational robustness ----------------------------------------------------
 # Diversity and robustness are independent axes: a population can be one cloned
 # genotype with a huge neutral neighbourhood, or many genotypes each on an
 # isolated spike. Robustness answers "how much neutral room surrounds each
 # genome", NOT "how many distinct genomes are there".
 
 #: The mutation kernel is part of the measurement and is reported with it.
-#: One call to the backend's own weighted mutation operator at mean 1.0 — which
+#: One call to the backend's own weighted mutation operator at mean 1.0 - which
 #: draws Poisson(1) events with a floor of one and guarantees a non-clone. This
 #: is the kernel evolution actually uses, so the number means something for
 #: evolvability rather than describing an idealised single bit flip.

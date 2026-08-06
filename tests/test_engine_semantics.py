@@ -1,14 +1,14 @@
 """
-tests/test_engine_semantics.py — deterministic event-pulse engine semantics.
+tests/test_engine_semantics.py - deterministic event-pulse engine semantics.
 
 Geometry-free checks of the invariants the asynchronous model rests on, so a
 refactor of substrates.nervous.pulse / substrates.nervous.simulation cannot silently change them:
 
-  * WIRED-OR — a net re-driven while still high shows ONE leading edge, not two
+  * WIRED-OR - a net re-driven while still high shows ONE leading edge, not two
     (inputs are pulse injections onto a shared net, not level clamps).
-  * HELD LEVEL = ONE EDGE — a contiguous high run in a trial stream is one long
+  * HELD LEVEL = ONE EDGE - a contiguous high run in a trial stream is one long
     pulse (one edge), so a stored bit is a single circulating pulse, not a train.
-  * PULSE WIDTH — a driven wire is high for exactly [t, t+width).
+  * PULSE WIDTH - a driven wire is high for exactly [t, t+width).
 
 Run under pytest, or standalone:  py tests/test_engine_semantics.py
 """
@@ -41,13 +41,13 @@ def test_normalize_merges_overlapping_pulses():
 
 def test_effective_edges_are_post_merge_leading_edges():
     """The edge train the substrate receives is the leading edge of each merged
-    run — an overlapping re-drive does NOT add an edge."""
+    run - an overlapping re-drive does NOT add an edge."""
     edges = sim.effective_edges([[(1.0, 2.0), (2.0, 3.0), (10.0, 1.0)]])
     assert edges == [[1.0, 10.0]], edges
 
 
 def test_held_level_is_one_pulse():
-    """A contiguous high run in a stream becomes ONE pulse (one edge) — the basis
+    """A contiguous high run in a stream becomes ONE pulse (one edge) - the basis
     of circulating-pulse memory: a stored bit is a single pulse, not a train."""
     # stream: input 0 high on ticks 2,3,4 (a held level), then low
     streams = [[0], [0], [1], [1], [1], [0], [0]]

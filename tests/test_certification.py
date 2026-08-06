@@ -1,5 +1,5 @@
 """
-tests/test_certification.py — the held-out verdict rule that guards every
+tests/test_certification.py - the held-out verdict rule that guards every
 "solved" claim (substrates.nervous.certification). Fast/pure: no growth, no evolution, no
 multiprocessing. The end-to-end certify() on a real evolved winner is exercised
 by reproduce.py.

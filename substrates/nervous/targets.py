@@ -1,5 +1,5 @@
 """
-substrates/nervous/targets.py — temporal targets for the hex nervous net.
+substrates/nervous/targets.py - temporal targets for the hex nervous net.
 
 A TemporalTarget scores behavior over time instead of a truth table.  Each
 Trial drives a stimulus stream and may define raw expected point events,
@@ -7,7 +7,7 @@ sampled state/persistence windows, or a target-specific cadence invariant.
 
 Every preset carries SEVERAL trials with different pulse timings. A net that
 merely matches one fixed schedule (a lucky delay chain) fails the shifted
-trials; only genuine state — a loop holding a circulating value — passes all
+trials; only genuine state - a loop holding a circulating value - passes all
 of them. That is what makes these targets select for memory.
 
 The nervous backend also runs the combinational targets registered in
@@ -63,15 +63,15 @@ class TemporalTarget:
     T:               int
     trials:          List[Trial]
     grid_size:       int = 7
-    iters:           int = 30      # safety CAP — growth stops at its attractor
+    iters:           int = 30      # safety CAP - growth stops at its attractor
     output_strategy: str = "terminals"
     # Compatibility I/O strategy consumed by SNN/programmatic LUT experiments.
     # Current Nervous/FNV runs require 'fixed' here while resolving their native
     # genome layouts and fitted probes elsewhere.
-    #   'fixed'          — use the backend's native/default binding.
-    #   'tag_rank'       — ports bind to the highest-tagged cells, in order
+    #   'fixed'          - use the backend's native/default binding.
+    #   'tag_rank'       - ports bind to the highest-tagged cells, in order
     #                      (Method A). Placement becomes an evolvable genome trait.
-    #   'wiring_chromosome' — chromosome 3 maps each port to a desired node type,
+    #   'wiring_chromosome' - chromosome 3 maps each port to a desired node type,
     #                      then selects one matching instance (Method B).
     #   'spatial_chromosome': chromosome 3 maps each port to an evolvable
     #                      normalised (x, y) anchor. Input anchors seed
@@ -101,7 +101,7 @@ class TemporalTarget:
     # Empty means every nervous node-timing model (see substrates/nervous/pulse.NODE_MODELS)
     # can attempt the target. Waveform-contract targets demand input-DEPENDENT
     # output durations, which the fixed-width 'uniform' node physically
-    # cannot emit (regenerated widths, single-driver wires) — they declare
+    # cannot emit (regenerated widths, single-driver wires) - they declare
     # ('pulse_delay',) so a run under the wrong model is filtered out instead
     # of silently capping below 1.0. Only consulted for the nervous backend.
     supported_models: Tuple[str, ...] = ()
@@ -162,11 +162,11 @@ class TemporalTarget:
     high = 1.0
 
 
-# ── trace-building helpers ──────────────────────────────────────────────────────
+# -- trace-building helpers ------------------------------------------------------
 
 # Unscored grace ticks after an input event: the output has this long to
 # respond (and settle) before it is scored, so a valid circuit is not required
-# to react at one exact tick — a Set that takes 2 ticks and a Reset that takes
+# to react at one exact tick - a Set that takes 2 ticks and a Reset that takes
 # 2-5 are all accepted. Too small over-penalises legitimate response-latency
 # variation (measured: raising 3 -> 5 lifted the SR-latch ceiling ~0.96 -> ~0.98
 # by no longer marking slightly-slow resets wrong); too large leaves too few
@@ -179,7 +179,7 @@ def describe_target(goal, tests):
     how it is exercised.
 
     There is deliberately no 'Scoring:' section. How a target is scored is not
-    prose chosen when the target is written — it is the executable contract, and
+    prose chosen when the target is written - it is the executable contract, and
     every report renders that through contracts.behavior_contract_lines(). A
     hand-written copy here could drift from the contract, and it did: after the
     contract rewrite the GUI printed the old mode-based scoring description
@@ -195,7 +195,7 @@ def _zero_row_holds_sole_negative(cases, zero_outputs, n_outputs):
     compatibility check still preserves the historical physical case-valid
     lane for tables whose zero row was the sole negative evidence.
 
-    OR is exactly this shape — its only 0 is ``00 -> 0`` — and it "solved" for a
+    OR is exactly this shape - its only 0 is ``00 -> 0`` - and it "solved" for a
     blanket-firing circuit until the strobe was forced here. The check is
     deliberately narrow: it fires only when the zero row actually SUPPLIES the
     missing level, so a genuinely constant output is left alone.
@@ -218,8 +218,8 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
     presented as its own isolated test window: a 1 emits a single point event, a
     0 stays silent, and the expected output emits an event ``latency`` ticks
     later for the rows whose output is 1. Consecutive windows are separated by a
-    generous settle gap — ``spacing`` ticks between onsets, several times the
-    few-tick transient of these small grids — so any circulating pulse from one
+    generous settle gap - ``spacing`` ticks between onsets, several times the
+    few-tick transient of these small grids - so any circulating pulse from one
     case dies out before the next begins and no test can contaminate the next.
 
     The whole table then repeats ``repeats`` times (so a circuit must re-arm,
@@ -253,8 +253,8 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
     grid_size = max(5, 2 * span + 1)
     if spacing is None:
         # Each window must outlast the substrate's settling transient, which
-        # grows with the grid: a circulating nervous pulse — and especially the
-        # LUT array, which often rings for several passes before it stabilises —
+        # grows with the grid: a circulating nervous pulse - and especially the
+        # LUT array, which often rings for several passes before it stabilises -
         # can take multiple traversals of a G-wide grid to die out. Four
         # grid-widths sits comfortably above the ~2G grid diameter and scales up
         # automatically for the larger grids that back the multi-bit targets, so
@@ -383,17 +383,24 @@ def _hold_trace(T, events):
     return exp
 
 
-# ── general spike-event target builder ──────────────────────────────────────────
+# -- general spike-event target builder ------------------------------------------
 
 def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
                  inputs=None, out_pos=(2, 2), grid_size=5, iters=30,
-                 description=''):
-    """Describe a temporal function purely as SPIKE EVENTS — the easy path to a
+                 description='', outputs=None):
+    """Describe a temporal function purely as SPIKE EVENTS - the easy path to a
     new target. Each case in `cases` is ``(input_spikes, output_spikes)``:
 
-        input_spikes  — {input_index: [ticks]}, or a list-of-lists (one ticks
+        input_spikes  - {input_index: [ticks]}, or a list-of-lists (one ticks
                         list per input), giving the ticks each input pulses on.
-        output_spikes — the list of ticks the output should fire on.
+        output_spikes - the list of ticks the output should fire on. For a
+                        MULTI-OUTPUT target pass ``{role: [ticks]}`` and name
+                        the roles through ``outputs``; a role left out of one
+                        case's dict is simply silent for that case.
+
+    ``outputs`` is an optional list of ``(role, pos)`` terminals. Supplying it
+    is what makes a target multi-output; leaving it None keeps the historical
+    single-``output_role`` behaviour byte for byte.
 
     Expected outputs are stored as point-event timestamps. A net that stays
     silent is penalised for every missing event and a net that fires spuriously
@@ -406,7 +413,7 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
     at ANY consistent delay scores the same. Describe the RELATIVE event
     structure; the absolute input->output delay is free.
 
-    Example — a coincidence detector (fires one tick after A and B coincide)::
+    Example - a coincidence detector (fires one tick after A and B coincide)::
 
         spike_target('Coincidence', [
             ({0: [20],     1: [20]},     [21]),   # A & B on tick 20 -> spike @21
@@ -420,20 +427,41 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
             return {int(i): list(ts) for i, ts in input_spikes.items()}
         return {i: list(ts) for i, ts in enumerate(input_spikes)}
 
-    norm_cases = [(_norm(isp), set(osp)) for isp, osp in cases]
+    def _norm_out(output_spikes):
+        if isinstance(output_spikes, dict):
+            return {str(role): set(ticks)
+                    for role, ticks in output_spikes.items()}
+        return {output_role: set(output_spikes)}
+
+    norm_cases = [(_norm(isp), _norm_out(osp)) for isp, osp in cases]
     if n_inputs is None:
         n_inputs = max([0] + [i + 1 for isp, _ in norm_cases for i in isp])
     if inputs is None:
         inputs = [(0, min(grid_size - 1, 1 + 2 * i)) for i in range(n_inputs)]
-    out = OutputTerminal(output_role, out_pos)
+    if outputs is None:
+        terminals = [OutputTerminal(output_role, out_pos)]
+    else:
+        terminals = [OutputTerminal(str(role), tuple(pos))
+                     for role, pos in outputs]
+    roles = [terminal.role for terminal in terminals]
     trials = []
-    for pulse_dict, out_set in norm_cases:
+    for pulse_dict, out_sets in norm_cases:
+        unknown = set(out_sets) - set(roles)
+        if unknown:
+            raise ValueError('%s: case names unknown output role(s) %s'
+                             % (name, ', '.join(sorted(unknown))))
         streams = _pulse_streams(T, n_inputs, pulse_dict)
-        exp = [1 if t in out_set else (None if t < latency else 0)
-               for t in range(T)]
-        trials.append(Trial(streams, {output_role: exp},
-                            {output_role: sorted(float(t) for t in out_set)}))
-    return TemporalTarget(name, list(inputs), [out], T, trials,
+        expected, events = {}, {}
+        for role in roles:
+            # A role absent from this case is silent, not unscored: a spurious
+            # edge on it still has to cost something.
+            out_set = out_sets.get(role, set())
+            expected[role] = [
+                1 if t in out_set else (None if t < latency else 0)
+                for t in range(T)]
+            events[role] = sorted(float(t) for t in out_set)
+        trials.append(Trial(streams, expected, events))
+    return TemporalTarget(name, list(inputs), terminals, T, trials,
                           grid_size=grid_size, iters=iters,
                           contract=event_contract(),
                           description=description or describe_target(
@@ -442,7 +470,7 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
         'the surrounding silence window.'))
 
 
-# ── preset temporal targets ─────────────────────────────────────────────────────
+# -- preset temporal targets -----------------------------------------------------
 # Inputs/outputs kept close together (nervous nets need short signal paths).
 
 # Trial banks are deliberately DIVERSE in pulse count, spacing and gap parity:
@@ -453,7 +481,7 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
 def sr_latch(grid_size=5):
     """Set/Reset latch: a Set pulse drives Q to 1 (and it holds); a Reset pulse
     drives it to 0. Five trials with shifted timings and mixed set->reset gap
-    parities — including a long hold with no reset — so only a real, timing-
+    parities - including a long hold with no reset - so only a real, timing-
     independent latch scores 1.0."""
     T = 20
     Set, Reset = (0, 1), (0, 3)
@@ -487,7 +515,7 @@ def _toggle_trial(T, pulses):
 def toggle_ff(grid_size=5):
     """T flip-flop: each input pulse flips the output (period-2 memory).
     Six trials spanning 2/3-pulse schedules with odd AND even gaps at varied
-    phases — a phase-locked ring that only toggles for one spacing fails."""
+    phases - a phase-locked ring that only toggles for one spacing fails."""
     T = 24
     In  = (0, 2)
     out = OutputTerminal('Q', (2, 2))
@@ -505,13 +533,13 @@ def toggle_ff(grid_size=5):
 
 def oscillator(grid_size=5, period=2):
     """Kicked oscillator: a startup pulse injects a value into a loop, which then
-    rings on its own (no input needed to sustain — but, correctly, an input IS
+    rings on its own (no input needed to sustain - but, correctly, an input IS
     needed to start it: nothing comes from nothing). Output should thereafter
     keep toggling; the exact phase is not scored (only that Q alternates and is
     never stuck), so any circulating loop of the right period qualifies.
 
     Two trials (kick at different ticks) so a fixed one-shot pulse chain that
-    just happens to blip once can't pass — only a genuinely ringing loop does.
+    just happens to blip once can't pass - only a genuinely ringing loop does.
     """
     T = 20
     In  = (0, 2)
@@ -542,18 +570,18 @@ def oscillator(grid_size=5, period=2):
 
 
 def pattern_generator(grid_size=5, pattern=(1, 0, 0, 0)):
-    """Kicked pattern generator (paper §3: "simple pattern generation circuits
+    """Kicked pattern generator (paper section 3: "simple pattern generation circuits
     can be built from these circuits, connected in loops"): one kick pulse must
-    start the output repeating `pattern` indefinitely — a loop whose length and
+    start the output repeating `pattern` indefinitely - a loop whose length and
     loading encode the bit sequence.
 
-    The honeycomb is BIPARTITE — every edge joins an (x+y)-even node to an odd
+    The honeycomb is BIPARTITE - every edge joins an (x+y)-even node to an odd
     one (see hexgrid.hex_dirs), so every cycle has even length and a single
     circulating pulse can only produce an EVEN period. An ODD-period pattern
     like 100 is therefore geometrically out of reach on the cheap one-pulse
     route: it would need a SECOND pulse injected half a loop away (output_period
     = loop_length / n_pulses), a conjunction the GA path dips through lower
-    fitness to reach and empirically never crosses — neither a bigger grid nor
+    fitness to reach and empirically never crosses - neither a bigger grid nor
     200 generations moved it, it just parked on local optima (a one-pulse
     period-6 loop, F1 ~0.67; a 3-spike burst that then dies, F1 ~0.76). So the
     default pattern is 1000: period 4, a single pulse circulating a length-4
@@ -588,7 +616,7 @@ def pattern_generator(grid_size=5, pattern=(1, 0, 0, 0)):
 
 
 def echo(grid_size=5, delay=3):
-    """Echo: output reproduces the input pulse train `delay` ticks later — the
+    """Echo: output reproduces the input pulse train `delay` ticks later - the
     simplest temporal target (a delay line), a stepping stone to real memory.
     Four pulse trains with varied spacing.  Distinct pulse edges are separated
     by at least one low tick; adjacent high samples would be one held pulse in
@@ -613,10 +641,10 @@ def echo(grid_size=5, delay=3):
 
 
 def coincidence_detector(grid_size=5, latency=1):
-    """Two-input coincidence detector — the paper's marquee node capability
+    """Two-input coincidence detector - the paper's marquee node capability
     lifted to a circuit: output pulses iff BOTH inputs pulse at the same tick.
     Trials mix simultaneous pairs (fire), pulses staggered by 1-2 ticks (must
-    NOT fire — the async coincidence window is what enforces this physically),
+    NOT fire - the async coincidence window is what enforces this physically),
     and lone single-channel pulses (must not fire)."""
     T = 20
     A, B = (0, 1), (0, 3)
@@ -651,7 +679,7 @@ def coincidence_detector(grid_size=5, latency=1):
 
 def one_shot(grid_size=5, width=3, latency=3):
     """One-shot / monostable: each input pulse triggers a fixed `width`-tick
-    burst at the output, which must then self-terminate — a loop that loads
+    burst at the output, which must then self-terminate - a loop that loads
     itself AND cuts itself off (delayed self-inhibition). Hold windows are
     phase-tolerant (a ringing burst counts); the silence after must be real.
     One unscored tick after each burst tolerates the turn-off transient."""
@@ -679,7 +707,7 @@ def one_shot(grid_size=5, width=3, latency=3):
 
 def pair_detector(grid_size=5, gap=2, latency=3):
     """Double-pulse detector: output fires iff two input pulses arrive exactly
-    `gap` ticks apart (out at second pulse + latency) — a delay line feeding a
+    `gap` ticks apart (out at second pulse + latency) - a delay line feeding a
     coincidence node, timing used as computation. Wrong gaps and lone pulses
     must stay silent."""
     T = 22
@@ -711,7 +739,7 @@ def pair_detector(grid_size=5, gap=2, latency=3):
         'single edge. Only correctly spaced pairs may produce output.'))
 
 
-# ── more complex temporal functions (point-event targets; Nervous + LUT) ────────
+# -- more complex temporal functions (point-event targets; Nervous + LUT) --------
 # Built straight from spike_target: each is a handful of (input_spikes,
 # output_spikes) cases, so the behaviour is transparent and easy to tweak. Cases
 # mix positive and negative examples at varied timings so a net can't pass by
@@ -719,7 +747,7 @@ def pair_detector(grid_size=5, gap=2, latency=3):
 # spurious output edges.
 
 def temporal_xor(grid_size=5, latency=1):
-    """Temporal XOR — the complement of coincidence: fire iff EXACTLY ONE of the
+    """Temporal XOR - the complement of coincidence: fire iff EXACTLY ONE of the
     two inputs pulses on a tick (both-or-neither -> silent). Needs each input to
     excite the output while the pair mutually inhibits."""
     T = 22
@@ -740,7 +768,7 @@ def temporal_xor(grid_size=5, latency=1):
 def ordered_sequence(grid_size=5, gap=3, latency=1):
     """Ordered two-input sequence detector: fire only when A pulses and THEN B
     pulses exactly `gap` ticks later (B-before-A, wrong gaps and lone pulses stay
-    silent). Order matters — a delay line on A must meet B at a coincidence node,
+    silent). Order matters - a delay line on A must meet B at a coincidence node,
     so the reverse order misses."""
     T = 24
     return spike_target('Sequence A->B (gap %d)' % gap, [
@@ -761,7 +789,7 @@ def ordered_sequence(grid_size=5, gap=3, latency=1):
 def veto_gate(grid_size=5, latency=1):
     """Inhibited echo: output echoes input A after `latency` ticks UNLESS input B
     pulses on the same tick, which vetoes that echo. The inhibitory routing used
-    as a real gate — 'pass A, but B can suppress it'."""
+    as a real gate - 'pass A, but B can suppress it'."""
     T = 22
     return spike_target('Veto gate (B blocks A)', [
         ({0: [3, 9, 15],  1: []},        [3 + latency, 9 + latency, 15 + latency]),
@@ -779,7 +807,7 @@ def veto_gate(grid_size=5, latency=1):
 def burst_generator(grid_size=5, n=3, spacing=2, latency=1):
     """Fan-out / burst: a single input kick produces a fixed BURST of `n` evenly
     spaced output spikes, then silence until the next kick. One edge in, several
-    edges out — a delay-line tap or a short re-triggerable ring."""
+    edges out - a delay-line tap or a short re-triggerable ring."""
     T = 22
     def burst(k):
         return [k + latency + i * spacing for i in range(n)]
@@ -798,7 +826,7 @@ def burst_generator(grid_size=5, n=3, spacing=2, latency=1):
 
 def divide_by_3(grid_size=5, latency=1):
     """Divide-by-3 counter: the output fires on every THIRD input pulse and stays
-    silent on the other two — a modulo-3 counter, harder than the toggle (÷2)
+    silent on the other two - a modulo-3 counter, harder than the toggle (/2)
     because it needs two bits of state, not one."""
     T = 26
     def every3(pulses):
@@ -812,10 +840,168 @@ def divide_by_3(grid_size=5, latency=1):
         'the modulo-3 count rather than memorize one schedule.'))
 
 
-# ── registry: one entry per function, best-measuring style (metric shootout) ───
+def coincident_temporal_target(target, name=None, gap=None, latency=1,
+                               schedules=3, tail=None):
+    """Turn a static truth table into a COINCIDENT-EDGE temporal target.
+
+    This is the event-timed twin of `periodic_combinational_target`, and the
+    difference between them is the whole point:
+
+    * the periodic wrapper gives every row its own widely-spaced window, several
+      grid-widths long, so the circuit settles before it is read. That measures
+      combinational logic on a substrate that happens to signal with pulses.
+    * this wrapper packs every row into ONE trial at half that spacing, and
+      scores exact edge correspondence rather than a settled level. A circuit
+      only passes if it also RECOVERS between rows, so lingering state, a stuck
+      output, or a slowly ringing path all cost score even when the logic
+      itself is right.
+
+    Encoding follows the hand-built `Coincidence (2-in)` / `Temporal XOR (2-in)`
+    pair already in this module: an input bit of 1 is one pulse at the row's
+    tick, a 0 is silence, and each output bit of 1 is one expected edge
+    `latency` later. Row order is permuted per schedule so a fixed output rhythm
+    cannot pass.
+
+    A case-valid strobe lane is added under exactly the rule
+    `periodic_combinational_target` uses. It is needed more sharply here: with
+    no strobe the all-zero row delivers NO input events at all, and these
+    substrates are quiescent, so a row that must fire would be physically
+    unrepresentable and a row that must stay silent could not be distinguished
+    from a circuit that simply never fires.
+    """
+    cases = list(getattr(target, 'cases', ()) or ())
+    if not cases:
+        raise ValueError('%s has no truth table to convert'
+                         % getattr(target, 'name', target))
+    data_inputs = target.n_inputs
+    roles = [terminal.role for terminal in target.outputs]
+    n_outputs = len(roles)
+    zero_outputs = next(
+        (output_bits for input_bits, output_bits in cases
+         if not any(input_bits)), (0,) * n_outputs)
+    has_strobe = (any(zero_outputs)
+                  or _zero_row_holds_sole_negative(
+                      cases, zero_outputs, n_outputs))
+    n_inputs = data_inputs + int(has_strobe)
+
+    span = max(n_inputs, n_outputs, 2)
+    grid_size = max(5, 2 * span + 1)
+    # The gap has a hard physical floor: a response still crossing the body when
+    # the next row lands cannot be attributed to either row, so a gap shorter
+    # than the settling transient makes the target unsolvable rather than hard.
+    # `periodic_combinational_target` puts that transient at roughly 2 grid
+    # widths and leaves 4 for safety. Sit at the 2G diameter: half the periodic
+    # spacing, so rows really do crowd each other and a circuit has to recover
+    # between them, but not so tight that recovery is physically impossible.
+    if gap is None:
+        gap = max(4, 2 * grid_size)
+    if tail is None:
+        tail = gap
+
+    # Present enough NEGATIVE evidence that a blanket responder cannot score
+    # well. Event scoring is one-to-one F1, so a circuit that simply fires on
+    # every row earns precision equal to the fraction of asserted output bits.
+    # On a table like OR or NAND that fraction is 3/4, which is F1 0.857 - high
+    # enough to look like a solution. Repeating the quietest rows until at most
+    # half of all (row, output) slots are asserted drops that to about 0.67.
+    # This weights rows only by their own output bits; no circuit is consulted.
+    #
+    # Without a strobe a row whose inputs are all 0 delivers no edge at all, so
+    # the circuit never physically sees it and it cannot be scored. Drop it
+    # rather than counting a phantom presentation in the balance. When such a
+    # row carries real evidence, has_strobe is already True and it stays.
+    visible = [row for row, (input_bits, _out) in enumerate(cases)
+               if has_strobe or any(input_bits)]
+    asserted = {row: sum(1 for bit in cases[row][1] if bit) for row in visible}
+    weights = {row: 1 for row in visible}
+    # Bounded: where the quietest row still asserts a bit (a full adder's
+    # rows all do), the ratio only creeps toward 0.5 and chasing it exactly
+    # would multiply trial length several-fold for a fraction of a point. Stop
+    # at twice the row count; the residual imbalance is far below the level a
+    # blanket responder needs to look convincing.
+    while len(weights) and sum(weights.values()) < 2 * len(visible):
+        total_slots = n_outputs * sum(weights.values())
+        filled = sum(asserted[row] * weight for row, weight in weights.items())
+        if filled * 2 <= total_slots:
+            break
+        quietest = min(visible, key=lambda row: asserted[row])
+        weights[quietest] += 1
+
+    ordered = [row for row in visible for _ in range(weights[row])]
+    schedule_orders = []
+    for index in range(max(1, int(schedules))):
+        # Deterministic, seed-free permutations: rotate then reverse alternate
+        # schedules. Reproducible across processes, unlike random.shuffle.
+        rotated = ordered[index:] + ordered[:index]
+        schedule_orders.append(rotated if index % 2 == 0 else rotated[::-1])
+
+    T = latency + gap * len(ordered) + tail
+    spike_cases = []
+    for order in schedule_orders:
+        pulses = {index: [] for index in range(n_inputs)}
+        events = {role: [] for role in roles}
+        for slot, row in enumerate(order):
+            tick = latency + slot * gap
+            input_bits, output_bits = cases[row]
+            for lane, bit in enumerate(input_bits):
+                if bit:
+                    pulses[lane].append(tick)
+            if has_strobe:
+                pulses[data_inputs].append(tick)
+            for index, role in enumerate(roles):
+                if output_bits[index]:
+                    events[role].append(tick + latency)
+        spike_cases.append((pulses, events))
+
+    ys = [min(grid_size - 1, 1 + 2 * index) for index in range(n_outputs)]
+    outputs = [(role, (grid_size - 1, y)) for role, y in zip(roles, ys)]
+    base = getattr(target, 'name', 'target')
+    strobe_note = (
+        ' A case-valid strobe lane pulses on every row, because the all-zero '
+        'row carries evidence that silence alone cannot express.'
+        if has_strobe else '')
+    return spike_target(
+        name or ('%s (temporal)' % base),
+        spike_cases, T=T, n_inputs=n_inputs, latency=latency,
+        grid_size=grid_size, outputs=outputs,
+        description=describe_target(
+            'Compute %s from coincident input edges, emitting one output edge '
+            'per asserted bit.' % base,
+            'All %d row presentations share one trial, %d seconds apart, under '
+            '%d row orders, so the circuit must settle and recover between rows '
+            'rather than hold one answer. Quiet rows repeat where a table is '
+            'lopsided, so firing on everything cannot score well.%s'
+            % (len(ordered), gap, len(schedule_orders), strobe_note)))
+
+
+def register_temporal_logic_targets():
+    """Add a coincident-edge temporal twin for every combinational table.
+
+    Idempotent, and safe to call from either import order. The truth tables
+    live in ``substrates.snn.targets``, which imports this package back through
+    ``nervous.contracts`` - so whichever module is imported FIRST reaches the
+    other while it is still half-built. Registering from both ends, and giving
+    up quietly when the other side is not ready, keeps either order working.
+
+    Returns True when the twins are registered.
+    """
+    try:
+        from substrates.snn.targets import TARGETS as _COMBINATIONAL
+    except ImportError:
+        # snn.targets is mid-import; it calls us again once TARGETS exists.
+        return False
+    for target in _COMBINATIONAL.values():
+        entry = coincident_temporal_target(target)
+        # setdefault so a hand-built or oracle-backed entry always wins a name
+        # clash: these are derived twins, not replacements.
+        TEMPORAL_TARGETS.setdefault(entry.name, entry)
+    return True
+
+
+# -- registry: one entry per function, best-measuring style (metric shootout) ---
 # Judged on HELD-OUT schedules (fresh random timings), oracle-trained circuits
 # generalise far better for most input-driven functions (echo hand-trained:
-# held-out 0.55 vs oracle 1.00; latch 0.74 vs 0.93) — so those use the oracle
+# held-out 0.55 vs oracle 1.00; latch 0.74 vs 0.93) - so those use the oracle
 # spec. Coincidence measured BETTER hand-built (held-out f1 0.94 vs 0.68), so it
 # stays hand-built. Oscillator / Pattern are autonomous behaviours (no
 # input->output relation to sample) and stay hand-built by necessity.
@@ -851,7 +1037,7 @@ ORACLE_KEY_TO_SPEC = {
     'Period doubler (2x)':   'Period doubler (oracle)',
     'Period tripler (3x)':   'Period tripler (oracle)',
     'Period halver (1/2x)':  'Period halver (oracle)',
-    'Temporal sum (ΔA + ΔB)': 'Temporal sum (oracle)',
+    'Temporal sum (deltaA + deltaB)': 'Temporal sum (oracle)',
     'Pair detector (gap 2)': 'Pair detector (oracle)',
     'Pair detection gap (2x pulse width)': 'Pair gap 2x width (oracle)',
     'Period stepper':        'Period stepper (oracle)',
@@ -870,6 +1056,10 @@ LEGACY_ORACLE_KEY_TO_SPEC = {
     # it (see oracle.one_shot_oracle). Checkpoints saved under the old 5-second
     # name still certify against the current spec.
     'One-shot (5 seconds)': 'One-shot (oracle)',
+    # This target was displayed with Greek capital delta until the source tree
+    # was made pure ASCII. Written as an escape so the name still MATCHES what
+    # older checkpoints stored while this file stays ASCII-only.
+    'Temporal sum (\u0394A + \u0394B)': 'Temporal sum (oracle)',
 }
 
 
@@ -881,3 +1071,10 @@ def _register_oracle_targets():
         TEMPORAL_TARGETS[key] = dataclasses.replace(t, name=key)
 
 _register_oracle_targets()
+
+# Registered last so a hand-built or oracle-backed entry always wins a name
+# clash. `Coincidence (2-in)`, `Temporal XOR (2-in)` and `Veto gate` stay the
+# measured-best versions of temporal AND / XOR / veto; the derived twins give
+# every other truth table the same treatment. This call is a no-op when
+# snn.targets is the module currently mid-import - it calls back when ready.
+register_temporal_logic_targets()

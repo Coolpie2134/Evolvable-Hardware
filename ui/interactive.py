@@ -1,25 +1,25 @@
 """
-interactive.py — an "Interactive / Test" tab for the Evolvable-Hardware GUI.
+interactive.py - an "Interactive / Test" tab for the Evolvable-Hardware GUI.
 
 After a circuit is evolved (or loaded), this lets you drive its inputs and watch
 the response. All four backends share Step / Run / Reset controls, while each
 uses the input and time representation appropriate to its physics:
 
-  * SNN      — LIF playback: static truth tables use Boolean source toggles and
+  * SNN      - LIF playback: static truth tables use Boolean source toggles and
                a 20 ms view; temporal targets load their scored trials into an
                editable seconds-based pulse timeline and run the recurrent LIF
                graph for the target horizon. Both show membrane charge, a spike
                raster, and fitted-output voltage traces.
-  * Nervous  — ASYNCHRONOUS continuous-time playback: place input pulses on a
+  * Nervous  - ASYNCHRONOUS continuous-time playback: place input pulses on a
                clickable timeline, then Step / Run in real (possibly sub-tick)
                time and watch pulses propagate with their actual delays, loops
                latch, and oscillators run. It uses the paper-faithful PulseSim,
                the same asynchronous event engine used by Nervous evolution.
-  * FNV      — continuous-time playback over FunctionalSim: evolved source pads,
+  * FNV      - continuous-time playback over FunctionalSim: evolved source pads,
                fixed physical component types, directed honeycomb wires, and
                globally fitted non-invasive output probes. Temporal trials and
                static logic settling windows are identical to fitness.
-  * LUT      — the SAME timeline and continuous-time playback, driving the
+  * LUT      - the SAME timeline and continuous-time playback, driving the
                asynchronous level-logic engine (AsyncLutSim, the same one LUT
                evolution scores with): watch the cells' four directional
                lookup outputs propagate with their real gate delay, levels
@@ -134,13 +134,13 @@ class InteractiveTab:
     def __init__(self, parent, get_circuit):
         self.parent      = parent
         self.get_circuit = get_circuit         # () -> dict | None
-        self._inputs     = []                  # list of (label, BooleanVar) — SNN only
+        self._inputs     = []                  # list of (label, BooleanVar) - SNN only
         self._circuit    = None                # current loaded circuit context
         self._state      = {}                  # nervous activity map
         self._running    = False
         self._build_ui()
 
-    # ── UI ──────────────────────────────────────────────────────────────────────
+    # -- UI ----------------------------------------------------------------------
 
     def _build_ui(self):
         top = ttk.Frame(self.parent, padding=(6, 4))
@@ -176,12 +176,12 @@ class InteractiveTab:
         ax.text(0.5, 0.5, msg, ha='center', va='center', fontsize=11, color='#888')
         self.canvas.draw_idle()
 
-    # ── load a circuit ────────────────────────────────────────────────────────────
+    # -- load a circuit ------------------------------------------------------------
 
     def sync(self):
         c = self.get_circuit()
         if not c or c.get('genome') is None:
-            self._status.set('No solution yet — Run or Load Saved first.')
+            self._status.set('No solution yet - Run or Load Saved first.')
             return
         self._stop()
         self._circuit = c
@@ -288,7 +288,7 @@ class InteractiveTab:
             self._playback_controls(
                 '   (click the timeline to place input pulses; Step/Run in real time)')
             self._reset()
-        else:                                              # SNN — LIF playback
+        else:                                              # SNN - LIF playback
             from substrates.nervous.io_placement import flat_inputs, input_groups
             if self._temporal_snn:
                 prep = prepare_snn_temporal(
@@ -297,7 +297,7 @@ class InteractiveTab:
                     self._placeholder(
                         'The temporal SNN did not grow a complete I/O circuit.')
                     self._status.set(
-                        'Temporal SNN incomplete — no playback is available.')
+                        'Temporal SNN incomplete - no playback is available.')
                     return
                 (self._grid, self._neurons, self._synapses,
                  self._in_pos, self._out_pos) = prep[:5]
@@ -371,12 +371,12 @@ class InteractiveTab:
             placement = (
                 'dedicated source/sink terminals'
                 if strategy == 'terminal_nodes' else 'evolved placement')
-            note = ('   [I/O binding: %s — %s; %d input%s on '
+            note = ('   [I/O binding: %s - %s; %d input%s on '
                     '%d site%s]'
                     % (strategy, placement, len(groups),
                        '' if len(groups) == 1 else 's',
                        sites, '' if sites == 1 else 's'))
-        self._status.set('Loaded %s [%s] — drive the inputs.%s'
+        self._status.set('Loaded %s [%s] - drive the inputs.%s'
                          % (target.name, backend, note))
 
     def _playback_controls(self, hint):
@@ -406,7 +406,7 @@ class InteractiveTab:
             on_change=self._snn_schedule_changed, default_width=1.0)
         self._editor.set_pulses(self._case_pulses(target, 0))
 
-    # ── nervous + FNV + LUT: continuous-time playback ─────────────────────────────
+    # -- nervous + FNV + LUT: continuous-time playback -----------------------------
 
     def _setup_async(self, target):
         labels = [chr(65 + i) if i < 26 else 'i%d' % i
@@ -463,7 +463,7 @@ class InteractiveTab:
                 self._grid, self._in_pos, self._out_pos.values(),
                 horizon=horizon,
                 max_events=getattr(target, 'max_events', 2048))
-        else:                                  # LUT — same player, level engine
+        else:                                  # LUT - same player, level engine
             self._player = LutPlayer(
                 self._grid, horizon=horizon,
                 config=getattr(target, 'lut_config', None),
@@ -576,7 +576,7 @@ class InteractiveTab:
         from substrates.nervous.io_placement import flat_inputs
         if self._backend == 'nervous':
             # capacitor-style playback: nodes charge while pulsing and fade
-            # after the pulse ends (display only — physics stays binary)
+            # after the pulse ends (display only - physics stays binary)
             activity = (charge_levels(self._player.sim, self._player.cursor)
                         or self._player.activity())
             draw_hex_net(self._axg, self._grid, target.grid_size,
@@ -643,7 +643,7 @@ class InteractiveTab:
 
     def _draw_width_strip(self, axw):
         """Second output view: the LEVEL waveform under the edge strip, each
-        pulse drawn as a bar labelled with its physical width — so
+        pulse drawn as a bar labelled with its physical width - so
         width-semantics targets (width sum, odd selector, doubler) can be read
         directly instead of inferred from edge spacing."""
         target = self._circuit['target']
@@ -662,7 +662,7 @@ class InteractiveTab:
                                 facecolors='#7cb8f2' if open_ended else '#1a6fd0',
                                 edgecolors='#0d4a94', linewidth=0.6)
                 width = end - start
-                label = ('%.2g…' % width) if open_ended else ('%.2g' % width)
+                label = ('%.2g...' % width) if open_ended else ('%.2g' % width)
                 if width >= len(label) * char_span:
                     axw.text((start + end) / 2, k, label, ha='center',
                              va='center', fontsize=7, color='white')
@@ -694,11 +694,11 @@ class InteractiveTab:
         if not self._circuit:
             return
         if self._backend == 'snn':
-            self._snn_prepare()         # inputs changed → recompute the LIF run
+            self._snn_prepare()         # inputs changed -> recompute the LIF run
             self._cursor = 0
             self._draw()
 
-    # ── playback (SNN LIF / nervous + LUT async) ──────────────────────────────────
+    # -- playback (SNN LIF / nervous + LUT async) ----------------------------------
 
     def _reset(self):
         self._stop()
@@ -756,7 +756,7 @@ class InteractiveTab:
             self._editor.disconnect()
             self._editor = None
 
-    # ── SNN LIF playback (membrane charge → spikes over 20 ms) ─────────────────────
+    # -- SNN LIF playback (membrane charge -> spikes over 20 ms) ---------------------
 
     def _snn_prepare(self):
         """Run the LIF sim for the current input bits and cache the full trace.
@@ -898,7 +898,7 @@ class InteractiveTab:
             vmax = max(vmax, float(n.vth) * 1.25)
         ax.set_xlim(0, self._snn_times[-1] + DT)
         ax.set_ylim(-0.04, vmax)
-        ax.set_title('output membrane V  (— fire threshold)', fontsize=9)
+        ax.set_title('output membrane V  (- fire threshold)', fontsize=9)
         ax.set_xlabel(
             'seconds' if self._temporal_snn else 'ms', fontsize=8)
         ax.tick_params(labelsize=7)
@@ -915,6 +915,6 @@ class InteractiveTab:
                 values = self._snn_spikes.get(n.id, [])
                 nsp = len(values) if cursor is None else sum(
                     when <= cursor + 1e-9 for when in values)
-                parts.append('%s→%s' % ((n.out_role or 'out'),
+                parts.append('%s->%s' % ((n.out_role or 'out'),
                                         'FIRES(1)' if nsp else 'silent(0)'))
         return '   '.join(parts) if parts else '(no output)'

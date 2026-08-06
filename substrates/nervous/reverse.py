@@ -1,5 +1,5 @@
 """
-substrates/nervous/reverse.py — best-effort INVERSE of grow_nervous (network -> genome).
+substrates/nervous/reverse.py - best-effort INVERSE of grow_nervous (network -> genome).
 
 Growth (ontogeny) is many-to-one and not analytically invertible, so a hand-
 edited working grid usually has no genome behind it. This module reconstructs
@@ -9,11 +9,11 @@ that do not disturb the reproduced states permitted (the caller's contract).
 The growth engine is a *deterministic function of the local context*: a cell's
 next state depends only on (L, R, D neighbours, self), looked up by minimum
 Hamming distance (see nervous.py). Making the target a mere fixed point is not
-enough — the growth TRAJECTORY from the bare seeds rarely lands on it. The
+enough - the growth TRAJECTORY from the bare seeds rarely lands on it. The
 reconstruction runs in three stages:
 
   1. MONOTONE REPLAY (_collect_contexts). Replay a development with the target
-     as an oracle — mirroring grow's parallel frontier + Hayflick telomere gate,
+     as an oracle - mirroring grow's parallel frontier + Hayflick telomere gate,
      but pinning every cell at its target state the instant it is born. Log only
      the contexts that actually occur: a GROWTH gene (self_in=0 -> s) at each
      birth context and a HOLD gene (self_in=s -> s) at each running context. The
@@ -28,12 +28,12 @@ reconstruction runs in three stages:
   2. BOUNDARY SEAL (_boundary_seals). The genes above are position-blind, so
      they also fire at frontier positions OUTSIDE the target. Pin a suppressor
      (self_in=0 -> 0) at the mature target's exterior contexts to stop growth
-     spilling over — the dominant source of extra cells.
+     spilling over - the dominant source of extra cells.
 
   3. CLOSED-LOOP REPAIR. Actually grow both candidate genomes and compare to the
      target. Real growth diverges from the ideal replay (extras perturb
      neighbourhoods, cascading), so pin an exact PATCH gene at the OBSERVED grown
-     context of every wrong/missing cell — forcing it correct even amid the
+     context of every wrong/missing cell - forcing it correct even amid the
      divergence a forward replay cannot foresee. Patches are prepended (they win
      the min-Hamming tie at distance 0); repair each trajectory independently,
      then keep the better verified genome.
@@ -69,7 +69,7 @@ def _ctx(grid, x, y):
 
 def _collect_contexts(grid, seeds, L):
     """Replay a MONOTONE development with the target grid as an oracle and record
-    exactly the contexts that occur — nothing invented.
+    exactly the contexts that occur - nothing invented.
 
     This mirrors grow_nervous's own step (parallel frontier division, Hayflick
     telomere gating) but pins every cell at its TARGET state the instant it is
@@ -236,7 +236,7 @@ def _hop_distances(cells, seeds):
 def _boundary_seals(grid, seeds, wanted_births):
     """Contexts of the empty cells just OUTSIDE the mature target. Adding a
     suppressor (self_in=0 -> 0) at each stops the promiscuous, position-blind
-    growth genes from spilling past the target boundary — the dominant source of
+    growth genes from spilling past the target boundary - the dominant source of
     extra cells. A boundary context that must ALSO birth a real cell somewhere is
     skipped (it can't be both grown and sealed); the closed-loop repair, whose
     growth patches are prepended and win at Hamming distance 0, overrides a seal
@@ -384,7 +384,7 @@ def grid_to_genome_nervous(grid, seeds, telomere_cap=MAX_TELOMERE,
         report.update(matched=0, target=len(grid), extra=0, missing=len(grid),
                       conflicts=[], seed_mismatch=[], unreachable=list(grid),
                       radius=0, telomere=1, exact=False, grown={},
-                      note='no seeds/inputs — mark at least one input (the growth '
+                      note='no seeds/inputs - mark at least one input (the growth '
                            'seed) before reversing.')
         return Genome(chromosomes=[Chromosome(genes=[HexGene()], telomere=1)]), report
 

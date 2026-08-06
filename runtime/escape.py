@@ -1,5 +1,5 @@
 """
-runtime/escape.py — mechanisms for getting a stalled run out of a local minimum.
+runtime/escape.py - mechanisms for getting a stalled run out of a local minimum.
 
 Everything here is backend-neutral and lives in ONE module on purpose. The
 project has two GA drive paths (``substrates/*/ga.py::evolve_*`` for headless
@@ -17,9 +17,9 @@ changing the fitness contract or the 1.0 boundary.
       Score the organism at several points along its DEVELOPMENT rather than
       only as a finished adult. A genome whose stage-6 body half-works but
       whose stage-12 body is broken currently scores zero and dies with no
-      gradient to climb; its juvenile scores become extra ε-lexicase cases and
+      gradient to climb; its juvenile scores become extra epsilon-lexicase cases and
       a selection-only tie-break, so it now has somewhere to climb from. The
-      REPORTED fitness is still the adult score — a run that reads 1.0 still
+      REPORTED fitness is still the adult score - a run that reads 1.0 still
       means the grown circuit works.
 
   CROWDING (restricted tournament replacement)
@@ -35,12 +35,12 @@ changing the fitness contract or the 1.0 boundary.
   SELF-ADAPTIVE MUTATION
       Each individual carries its own mutation rate, inherited with a
       log-normal nudge. A stuck lineage heats up on its own while a lineage
-      that is still improving stays cool — per-lineage, unlike the global SOS
+      that is still improving stays cool - per-lineage, unlike the global SOS
       reheat in runtime/mutation.py, which is a population-wide sledgehammer.
 
   REBIRTH
       On a stall, re-seed part of the population from a DIVERSE SET of archived
-      ancestors (not the single best one — that walks the same path again) at
+      ancestors (not the single best one - that walks the same path again) at
       an elevated mutation rate, deliberately backtracking to an earlier branch
       point to leave it in a different direction.
 
@@ -64,7 +64,7 @@ changing the fitness contract or the 1.0 boundary.
       spikes; preferring the broader basin among equally-correct circuits both
       smooths the landscape and generalises better.
 
-Plus one fix to selection that is not a mechanism of its own: ε-lexicase can
+Plus one fix to selection that is not a mechanism of its own: epsilon-lexicase can
 now stream a random SUBSET of cases per generation (downsampling), which is
 also what "rotate the stimulus set" amounts to once the cases are resampled
 every generation.
@@ -83,7 +83,7 @@ DEFAULT_LIFESPAN_CHECKPOINTS = 3
 DEFAULT_CROWDING_WINDOW = 16
 # Half the population crowded, half generationally replaced. Measured: a full
 # (1.0) crowded population produced ZERO mean-fitness decreases in 9 of 9 runs
-# across three targets and three seeds — monotone by construction, and the
+# across three targets and three seeds - monotone by construction, and the
 # exploratory churn the rest of the plateau machinery depends on was gone.
 DEFAULT_CROWDING_FRACTION = 0.5
 DEFAULT_ADAPTIVE_TAU = 0.25
@@ -307,36 +307,36 @@ class EscapeConfig:
     Defaults disable every mechanism. ``dataclasses.asdict`` serialises this
     inside :class:`runtime.config.GAConfig`, and unknown/absent keys fall back
     to the defaults, so a checkpoint written before this module existed loads
-    as "all mechanisms off" — which is exactly what it was run under.
+    as "all mechanisms off" - which is exactly what it was run under.
     """
 
-    # ── lifespan (ontogeny checkpoint) scoring ──
+    # -- lifespan (ontogeny checkpoint) scoring --
     lifespan_scoring: bool = False
     #: developmental snapshots scored in ADDITION to the adult body.
     lifespan_checkpoints: int = DEFAULT_LIFESPAN_CHECKPOINTS
 
-    # ── restricted tournament replacement ──
+    # -- restricted tournament replacement --
     crowding: bool = False
     #: population members sampled to find the offspring's nearest incumbent.
     crowding_window: int = DEFAULT_CROWDING_WINDOW
     #: share of the next population held as a crowded RESERVE. RTR is monotone
-    #: by construction — an incumbent is only ever replaced by something that
-    #: ranks at least as well — so at 1.0 the whole population can never move
+    #: by construction - an incumbent is only ever replaced by something that
+    #: ranks at least as well - so at 1.0 the whole population can never move
     #: downhill and the mean rises without fluctuation. That is niche
     #: PRESERVATION, and it is the opposite of what crossing a valley needs.
     #: Below 1.0 the remaining slots keep this project's pre-solve generational
     #: churn, subject to the bounded contract-elite reserve.
     crowding_fraction: float = DEFAULT_CROWDING_FRACTION
 
-    # ── neutral drift ──
+    # -- neutral drift --
     neutral_drift: bool = False
 
-    # ── self-adaptive per-individual mutation rate ──
+    # -- self-adaptive per-individual mutation rate --
     self_adaptive_mutation: bool = False
     #: log-normal learning rate for the inherited mutation rate.
     adaptive_tau: float = DEFAULT_ADAPTIVE_TAU
 
-    # ── rebirth ──
+    # -- rebirth --
     rebirth: bool = False
     #: flat generations before a rebirth fires.
     rebirth_patience: int = DEFAULT_REBIRTH_PATIENCE
@@ -351,31 +351,31 @@ class EscapeConfig:
     #: archive ring-buffer length.
     archive_size: int = DEFAULT_ARCHIVE_SIZE
 
-    # ── fitness-blind stepping-stone lineages ──
+    # -- fitness-blind stepping-stone lineages --
     lineage_walk: bool = False
     #: share of population slots that take one mutation-only step per
     #: generation without behavioral selection. Their score is still measured
     #: normally and a useful walker is admitted to the ordinary breeding pool.
     lineage_walk_fraction: float = DEFAULT_LINEAGE_WALK_FRACTION
 
-    # ── robustness second objective ──
+    # -- robustness second objective --
     robustness: bool = False
-    #: fractional physics perturbation (0.15 = ±15% on delay/width).
+    #: fractional physics perturbation (0.15 = +/-15% on delay/width).
     robustness_jitter: float = DEFAULT_ROBUSTNESS_JITTER
     #: jittered physics variants scored per genome.
     robustness_samples: int = DEFAULT_ROBUSTNESS_SAMPLES
 
-    # ── island model ──
+    # -- island model --
     #: split the population into demes that breed separately. They share ONE
     #: objective and differ only in SEARCH DYNAMICS (mutation rate, selection
-    #: pressure). Islands that differ by objective — one per test case — were
+    #: pressure). Islands that differ by objective - one per test case - were
     #: tried in this project and failed: they specialise into mutually
     #: incompatible optima and every migrant is a hybrid that fails on both
     #: sides. Same landscape, different walkers, is the version that works.
     islands: bool = False
     #: number of demes.
     island_count: int = DEFAULT_ISLAND_COUNT
-    #: generations between migrations. Rare migration is the point — frequent
+    #: generations between migrations. Rare migration is the point - frequent
     #: migration is just one population with extra bookkeeping.
     island_migration_interval: int = DEFAULT_ISLAND_MIGRATION_INTERVAL
     #: emigrants sent per island per migration.
@@ -385,7 +385,7 @@ class EscapeConfig:
     #: cold islands exploit while hot ones explore, at the same time.
     island_rate_spread: float = DEFAULT_ISLAND_RATE_SPREAD
 
-    # ── ε-lexicase downsampling ──
+    # -- epsilon-lexicase downsampling --
     #: fraction of cases streamed per generation. 1.0 = every case (default).
     lexicase_downsample: float = 1.0
 
@@ -471,7 +471,7 @@ class EscapeConfig:
         """One short line naming the active mechanisms (for the GUI/status)."""
         active = []
         if self.lifespan_scoring:
-            active.append('lifespan×%d' % self.lifespan_checkpoints)
+            active.append('lifespan x%d' % self.lifespan_checkpoints)
         if self.crowding:
             active.append('crowding/%d@%.0f%%'
                           % (self.crowding_window,
@@ -486,10 +486,10 @@ class EscapeConfig:
             active.append('lineage-walk@%.0f%%'
                           % (self.lineage_walk_fraction * 100))
         if self.robustness:
-            active.append('robustness±%d%%'
+            active.append('robustness+/-%d%%'
                           % round(self.robustness_jitter * 100))
         if self.islands:
-            active.append('islands×%d/%dgen'
+            active.append('islandsx%d/%dgen'
                           % (self.island_count,
                              self.island_migration_interval))
         if self.lexicase_downsample < 1.0:
@@ -509,7 +509,7 @@ class EscapeConfig:
 OFF = EscapeConfig()
 
 
-# ── genome distance (backend-neutral) ─────────────────────────────────────────
+# -- genome distance (backend-neutral) -----------------------------------------
 
 def _gene_values(gene):
     """Every integer allele of one gene, in a stable order.
@@ -534,7 +534,7 @@ def _gene_values(gene):
 def genome_descriptor(genome):
     """A flat numeric fingerprint of a genome's heritable content.
 
-    Only used for CROWDING DISTANCE and for picking diverse rebirth ancestors —
+    Only used for CROWDING DISTANCE and for picking diverse rebirth ancestors -
     never for fitness, never for the evaluation cache (which has its own exact
     per-backend signature). Approximate is fine here; cheap and backend-neutral
     is what matters.
@@ -563,7 +563,7 @@ def genome_distance(a, b):
 
     Positional mismatches over the shared prefix plus the length difference,
     divided by the longer length. Genomes here are variable-length, so length
-    difference genuinely is distance — a 6-gene genome is not "the same as" a
+    difference genuinely is distance - a 6-gene genome is not "the same as" a
     24-gene one that happens to agree on its first six.
     """
     if a is b:
@@ -576,7 +576,7 @@ def genome_distance(a, b):
     return (mismatches + abs(n - m)) / float(max(n, m))
 
 
-# ── self-adaptive mutation rate ───────────────────────────────────────────────
+# -- self-adaptive mutation rate -----------------------------------------------
 
 def mutation_rate_of(genome, default):
     """This individual's own mutation rate, or the run's rate if it has none."""
@@ -596,7 +596,7 @@ def inherit_mutation_rate(child, parent_a, parent_b, config, base, limit):
     """Give ``child`` a mutation rate descended from its parents.
 
     The classic log-normal self-adaptation rule: take the parental rate and
-    multiply by exp(tau * N(0,1)). Selection then acts on the rate indirectly —
+    multiply by exp(tau * N(0,1)). Selection then acts on the rate indirectly -
     lineages whose rate is producing useful offspring keep it, and a stuck
     lineage random-walks upward because only its higher-rate descendants ever
     find anything.
@@ -614,10 +614,10 @@ def seed_mutation_rate(genome, base, limit):
         genome, float(base) * math.exp(random.gauss(0.0, 0.5)), limit)
 
 
-# ── ε-lexicase downsampling ───────────────────────────────────────────────────
+# -- epsilon-lexicase downsampling ---------------------------------------------------
 
 def lexicase_case_subset(n_cases, config):
-    """Case indices ε-lexicase should stream THIS generation, or None for all.
+    """Case indices epsilon-lexicase should stream THIS generation, or None for all.
 
     Downsampling is not a shortcut: at equal evaluation budget it buys several
     times more generations for the same selection quality, and resampling the
@@ -632,7 +632,7 @@ def lexicase_case_subset(n_cases, config):
     return tuple(sorted(random.sample(range(n_cases), keep)))
 
 
-# ── robustness ────────────────────────────────────────────────────────────────
+# -- robustness ----------------------------------------------------------------
 
 def jitter_physics(config, escape):
     """Deterministic jittered variants of a run's physics config.
@@ -640,7 +640,7 @@ def jitter_physics(config, escape):
     Determinism matters more than it looks: the fitness cache is keyed on the
     GENOME alone, so a genome must score the same every time it is evaluated.
     Random jitter would poison the cache with whichever draw happened first.
-    The variants below are therefore a fixed, alternating ± ladder.
+    The variants below are therefore a fixed, alternating +/- ladder.
     """
     if config is None or not escape.robustness:
         return ()
@@ -671,7 +671,7 @@ def jitter_physics(config, escape):
         except (ValueError, TypeError):
             # A jitter that violates the config's own coupling constraints
             # (e.g. the analog step/threshold band) is skipped rather than
-            # crashing the run — a smaller margin is still a valid probe.
+            # crashing the run - a smaller margin is still a valid probe.
             continue
     return tuple(variants)
 
@@ -680,7 +680,7 @@ def robustness_blend(best_fitness):
     """How far the case aggregator has annealed from mean toward worst-case.
 
     Worst-case (min) aggregation is what stops "perfect on three cases, dead on
-    the fourth" from ranking well — but it is brutally flat early, when every
+    the fourth" from ranking well - but it is brutally flat early, when every
     genome fails something and every min is zero. So start at the mean, and
     slide to the min as the run approaches a solution, where coverage is
     exactly the thing that still needs enforcing.
@@ -697,7 +697,7 @@ def aggregate_robustness(case_scores, blend):
     return (1.0 - blend) * mean + blend * min(values)
 
 
-# ── the per-run state both drivers own ────────────────────────────────────────
+# -- the per-run state both drivers own ----------------------------------------
 
 class EscapeState:
     """Mutable per-run state for the escape mechanisms.
@@ -750,7 +750,7 @@ class EscapeState:
                 setattr(clone, name, getattr(genome, name))
         return clone
 
-    # ── champion / archive ──
+    # -- champion / archive --
 
     def accepts(self, new_rank, old_rank):
         """Should ``new_rank`` replace the incumbent?
@@ -800,7 +800,7 @@ class EscapeState:
             chosen.append(far)
         return chosen
 
-    # ── rebirth ──
+    # -- rebirth --
 
     def should_rebirth(self, stagnation, best_fitness):
         if not self.config.rebirth or self._mutate is None:
@@ -814,7 +814,7 @@ class EscapeState:
         """Rebuild part of the population from diverse ancestors.
 
         Returns ``(population, fitnesses, cases, info)`` where the rebuilt
-        slots carry ``None`` fitness — the caller must re-evaluate them. The
+        slots carry ``None`` fitness - the caller must re-evaluate them. The
         current elites are kept: rebirth is a backtrack, not an extinction.
         """
         cfg = self.config
@@ -891,7 +891,7 @@ class EscapeState:
 
         Precedence, highest first:
 
-          solved      terminal (mu + lambda) consolidation — unchanged: once a
+          solved      terminal (mu + lambda) consolidation - unchanged: once a
                       perfect circuit exists, evaluated parents and offspring
                       compete so the population mean can converge to 1.
           crowding    restricted tournament replacement.
@@ -1005,7 +1005,7 @@ class EscapeState:
             return True
         return False
 
-    # ── islands ──
+    # -- islands --
 
     def breed(self, generation, population, fitnesses, cases, rate, step):
         """Breed one generation, as one pool or as separate demes.
@@ -1016,7 +1016,7 @@ class EscapeState:
 
         With islands on, the population is cut into contiguous demes that breed
         SEPARATELY, each at its own mutation rate. They share one objective and
-        differ only in search dynamics — per-case islands were tried here and
+        differ only in search dynamics - per-case islands were tried here and
         failed, because demes with different objectives specialise into
         incompatible optima and every migrant is a hybrid that fails on both
         sides. Same landscape, different walkers.
@@ -1024,7 +1024,7 @@ class EscapeState:
         Migration is rare by design: frequent migration is one population with
         extra bookkeeping. Every ``island_migration_interval`` generations each
         deme sends copies of its best ``island_migrants`` to the next deme,
-        replacing that deme's worst — a ring topology, so a discovery diffuses
+        replacing that deme's worst - a ring topology, so a discovery diffuses
         gradually instead of sweeping every deme at once.
         """
         self._pending_migration = False
@@ -1178,7 +1178,7 @@ class EscapeState:
         if self._cooldown > 0:
             self._cooldown -= 1
 
-    # ── robustness ──
+    # -- robustness --
 
     def apply_robustness_blend(self, population, best_fitness):
         """Turn each genome's robust case vector into its ranked scalar.
@@ -1197,7 +1197,7 @@ class EscapeState:
                 aggregate_robustness(cases, self.robust_blend)
                 if cases is not None else 0.0)
 
-    # ── survivor selection ──
+    # -- survivor selection --
 
     def survivor_selection(self, parents, parent_fitnesses, parent_cases,
                            offspring, offspring_fitnesses, offspring_cases):
@@ -1215,7 +1215,7 @@ class EscapeState:
         rises. Applied to the WHOLE population that is measurable and stark:
         zero mean-fitness decreases in 9 of 9 measured runs, against 24-31 in
         60 generations for the ordinary loop. That is what niche preservation
-        costs, and on its own it is the wrong shape for escaping a basin — a
+        costs, and on its own it is the wrong shape for escaping a basin - a
         population that can never move downhill cannot cross a valley.
 
         So only ``crowding_fraction`` of the next population is crowded. The
@@ -1287,7 +1287,7 @@ class EscapeState:
                              if parent_cases is not None else None)
         return pop, fits, cases
 
-    # ── reporting ──
+    # -- reporting --
 
     def stats(self):
         """Live escape telemetry for the GUI."""
@@ -1313,7 +1313,7 @@ def build_escape_state(backend, ga_config, chromosome_count=None,
 
     THE single construction point. Both drive paths call this rather than
     assembling their own clone/mutate/rank closures, because those closures are
-    exactly where the two paths would otherwise diverge — a rebirth that
+    exactly where the two paths would otherwise diverge - a rebirth that
     mutates under different operators on the app than in the benchmarks would
     be almost impossible to spot from the outside.
     """

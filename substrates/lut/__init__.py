@@ -1,11 +1,11 @@
 """
-substrates/lut — boolean-logic lookup (LUT) backend: the paper's Architecture 2
-(Edwards EH'02 §5-7).
+substrates/lut - boolean-logic lookup (LUT) backend: the paper's Architecture 2
+(Edwards EH'02 sections 5-7).
 
 A square cellular array where each cell holds four directional 16-bit lookup
 tables over its four neighbours' binary outputs. The dynamics are ASYNCHRONOUS level logic
 (substrates.lut.pulse.AsyncLutSim): each cell is a logic element with a fixed
-propagation delay, simulated event-driven in continuous time — the same
+propagation delay, simulated event-driven in continuous time - the same
 physical footing as the nervous net. The synchronous latched engine
 (lut.LutSim) is retained as the reference its lattice behaviour quantises to.
 Growth is the associative-memory ontogeny with 16-bit gene fields (Fig. 10),

@@ -1,5 +1,5 @@
 """
-substrates/nervous/certification.py — turn a "solved" fitness into a defensible verdict.
+substrates/nervous/certification.py - turn a "solved" fitness into a defensible verdict.
 
 A training fitness near 1.0 is not a claim: temporal targets can be gamed by a
 circuit that memorised the training schedules' exact timing, or by a leaky ring
@@ -8,7 +8,7 @@ credibility gate is generalisation to FRESH stimulus. This module re-samples new
 schedules from a target's reference oracle, scores the winner with its TRAINING
 readout and alignment frozen (no re-fit on validation), and classifies the gap:
 
-    CERTIFIED  held-out >= threshold          (generalises — a real circuit)
+    CERTIFIED  held-out >= threshold          (generalises - a real circuit)
     OVERFIT    trains >= threshold but the train->held-out drop is large
                (memorised timing)
     BELOW      trains and generalises but under the bar (not solved at this budget)
@@ -67,7 +67,7 @@ def oracle_spec_for(target):
 # built (setattr'd pulse_config / lut_config). Fresh spec-built holdout targets
 # start WITHOUT it, so without carrying it forward a champion evolved under a
 # non-default node-timing model (pulse_delay / paper_analog) would be certified
-# under the default uniform physics — every such run would read as OVERFIT. Copy
+# under the default uniform physics - every such run would read as OVERFIT. Copy
 # it onto each spec target so fit + holdout run under the SAME physics as training.
 _PHYSICS_ATTRS = (
     'pulse_config', 'lut_config', '_fnv_families',
@@ -136,7 +136,7 @@ def certify(genome, target, train=None, backend='nervous',
 
     Returns a dict: {target, train, holdouts, holdout (mean), verdict}. For a
     target with no oracle reference the verdict is UNCERTIFIED and no held-out
-    scoring is attempted. `train` is the training fitness (passed in — this does
+    scoring is attempted. `train` is the training fitness (passed in - this does
     not re-evolve); when omitted it is left None and only held-out is reported.
     """
     from .oracle import holdout_score

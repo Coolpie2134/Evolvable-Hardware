@@ -1,5 +1,5 @@
 """
-tools/make_scoring_golden.py — regenerate the retired numerical score snapshot.
+tools/make_scoring_golden.py - regenerate the retired numerical score snapshot.
 
 ``tests/fixtures/scoring_golden.json`` is a numerical snapshot of a synthetic
 bundle battery. It is retained for manual comparison and migration analysis
@@ -127,7 +127,7 @@ def main():
                 })
         print('done %-42s %s' % (name, relation))
 
-    # ── float-time coverage/retention scorer goldens ─────────────────────────
+    # -- float-time coverage/retention scorer goldens -------------------------
     ring = [7.0 + 2.0 * k for k in range(29)]              # sustained ring to 63
     decayed = [7.0 + 2.0 * k for k in range(7)]            # dies at ~19
     dense = [float(t) for t in range(65)]

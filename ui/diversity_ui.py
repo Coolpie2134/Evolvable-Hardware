@@ -1,5 +1,5 @@
 """
-diversity_ui.py — the "Diversity" tab: what variety survives in an evaluated
+diversity_ui.py - the "Diversity" tab: what variety survives in an evaluated
 population, whether or not it solved the target.
 
 The Evolution chart's spread series (population fitness sigma) is identically
@@ -49,12 +49,12 @@ class DiversityTab:
         self._after_id = None
         self._build_ui()
 
-    # ── UI ───────────────────────────────────────────────────────────────────
+    # -- UI -------------------------------------------------------------------
 
     def _build_ui(self):
         top = ttk.Frame(self.parent, padding=(6, 4))
         top.pack(fill='x')
-        self._load_btn = ttk.Button(top, text='Load population…',
+        self._load_btn = ttk.Button(top, text='Load population...',
                                     command=self.choose_population)
         self._load_btn.pack(side='left')
         self._run_btn = ttk.Button(top, text='Analyse', command=self.analyse)
@@ -92,7 +92,7 @@ class DiversityTab:
         panel = ttk.LabelFrame(body, text='Report', padding=6)
         panel.pack(side='right', fill='both', padx=(0, 6), pady=6)
         # The report is an ALIGNED table, so it must not word-wrap (wrap='none')
-        # — which means it needs a horizontal scrollbar too, or long lines are
+        # - which means it needs a horizontal scrollbar too, or long lines are
         # simply cut off. ScrolledText only supplies the vertical one, hence the
         # explicit grid of Text + both scrollbars.
         grid = ttk.Frame(panel)
@@ -128,13 +128,13 @@ class DiversityTab:
         self._text.insert('end', text)
         self._text.config(state='disabled')
 
-    # ── population selection ─────────────────────────────────────────────────
+    # -- population selection -------------------------------------------------
 
     def notify_population(self, path):
         """The app calls this when a run writes a fresh population file."""
         if path and os.path.exists(path):
             self._path = path
-            self._status.set('Population ready: %s — press Analyse.'
+            self._status.set('Population ready: %s - press Analyse.'
                              % os.path.basename(path))
 
     def _resolve_path(self):
@@ -157,10 +157,10 @@ class DiversityTab:
             filetypes=[('Population checkpoint', '*.json'), ('All files', '*.*')])
         if path:
             self._path = path
-            self._status.set('Loaded %s — press Analyse.'
+            self._status.set('Loaded %s - press Analyse.'
                              % os.path.basename(path))
 
-    # ── analysis ─────────────────────────────────────────────────────────────
+    # -- analysis -------------------------------------------------------------
 
     def analyse(self):
         if self._worker is not None:
@@ -169,7 +169,7 @@ class DiversityTab:
         if path is None:
             self._status.set('No population file found. Run the GA '
                              '(it writes results/latest_population.json), or '
-                             'use Load population…')
+                             'use Load population...')
             return
         try:
             limit = max(1, int(self._limit_var.get()))
@@ -184,7 +184,7 @@ class DiversityTab:
         self._run_btn.config(state='disabled')
         self._load_btn.config(state='disabled')
         self._stop_btn.config(state='normal')
-        self._status.set('Analysing %s …' % os.path.basename(path))
+        self._status.set('Analysing %s ...' % os.path.basename(path))
         self._worker = threading.Thread(
             target=self._work, daemon=True,
             args=(path, limit, samples, bool(self._robust_var.get())))
@@ -193,7 +193,7 @@ class DiversityTab:
 
     def stop(self):
         self._stop.set()
-        self._status.set('Stopping after the current genome…')
+        self._status.set('Stopping after the current genome...')
         self._stop_btn.config(state='disabled')
 
     def _work(self, path, limit, samples, want_robustness):
@@ -288,7 +288,7 @@ class DiversityTab:
                     info = getattr(self, '_population_info', None)
                     self._set_text(('%s\n\n%s' % (info, text)) if info else text)
                     self._draw(report, None)
-                    self._status.set('%s — %d genomes, backend %s'
+                    self._status.set('%s - %d genomes, backend %s'
                                      % (name, n, backend))
                 elif kind == 'cancelled':
                     self._status.set('Stopped.')
@@ -328,7 +328,7 @@ class DiversityTab:
         self._load_btn.config(state='normal')
         self._stop_btn.config(state='disabled')
 
-    # ── plots ────────────────────────────────────────────────────────────────
+    # -- plots ----------------------------------------------------------------
 
     def _pie(self, ax, stats):
         """One level as a composition pie: every wedge is ONE cluster, sized by
@@ -336,7 +336,7 @@ class DiversityTab:
         finely divided; one solid disc = monoculture.
 
         Deliberately no pooling of the small tail: merging 18 singletons into a
-        single 72% slice draws exactly the picture the data denies — it reads
+        single 72% slice draws exactly the picture the data denies - it reads
         as a dominant cluster when the truth is maximal fragmentation. Thin
         wedges are honest, so every cluster keeps its own.
         """
@@ -367,7 +367,7 @@ class DiversityTab:
                      fontsize=8.5, linespacing=1.25)
 
     def _draw(self, report, robustness):
-        """Four composition pies — one per level — showing what share of the
+        """Four composition pies - one per level - showing what share of the
         population each distinct class accounts for. The robustness histogram
         joins them on the right when it was sampled."""
         self._fig.clf()

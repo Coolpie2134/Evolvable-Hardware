@@ -1,13 +1,13 @@
 """
-runtime/parallel.py — one saturated, cancellation-aware population map.
+runtime/parallel.py - one saturated, cancellation-aware population map.
 
 `ProcessPoolExecutor.map` and hand-rolled chunk loops both stall on a straggler:
 the caller waits for a whole batch before the next one is submitted, so a single
 slow genome idles every other worker until the batch's barrier clears. Nervous
 evaluation has a ~6x per-genome tail (a big grown net next to many small ones),
 so that barrier wasted a large fraction of wall-clock. `map_ordered` submits the
-whole population at once and harvests results as they finish — the pool stays
-full — while still checking the stop signal between completions, so a run stays
+whole population at once and harvests results as they finish - the pool stays
+full - while still checking the stop signal between completions, so a run stays
 responsive to cancellation without paying the barrier.
 """
 from __future__ import annotations

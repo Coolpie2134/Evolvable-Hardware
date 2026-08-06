@@ -1,5 +1,5 @@
 """
-substrates/lut/playback.py — continuous-time playback of a grown LUT array: the LUT
+substrates/lut/playback.py - continuous-time playback of a grown LUT array: the LUT
 twin of substrates.nervous.playback.NervousPlayer, driving the asynchronous level-logic
 engine (substrates.lut.pulse.AsyncLutSim) from the same clickable pulse timeline.
 
@@ -48,6 +48,6 @@ class LutPlayer(AsyncPlayer):
                            external_inputs=self.external_inputs)
 
     def nibbles(self):
-        """{cell: 4-bit N/S/E/W nibble} at the cursor — the emission map the
+        """{cell: 4-bit N/S/E/W nibble} at the cursor - the emission map the
         LUT wedge view draws (Fig. 14 red/green)."""
         return self.sim.out

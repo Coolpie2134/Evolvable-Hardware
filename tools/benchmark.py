@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-tools/benchmark.py — headless solvability benchmark, driven through the GUI's
+tools/benchmark.py - headless solvability benchmark, driven through the GUI's
 own evolution worker.
 
 WHY THIS EXISTS, AND WHY IT USES runtime/controller.py
 ------------------------------------------------------
 The project has two GA drive paths: each backend's standalone
 ``substrates/*/ga.py::evolve_*`` and ``runtime/controller.py``, which is what
-the desktop application actually runs. They have drifted before — a mechanism
+the desktop application actually runs. They have drifted before - a mechanism
 lands in one, and the benchmarks measure the other (tools/benchmark_contracts.py
 drives the standalone path). This tool deliberately drives the CONTROLLER, so a
 benchmark number is a claim about the evolution the application performs, and
@@ -18,7 +18,7 @@ WHAT IT MEASURES
 CERTIFIED solve rate: the fraction of seeds whose champion both reached a
 training fitness of 1.0 and passed ``substrates.nervous.certification.certify``
 on FRESH held-out stimulus. A training-only "solve" is recorded but is never
-counted as solvable — held-out certification exists precisely because a high
+counted as solvable - held-out certification exists precisely because a high
 training fitness can be memorised timing.
 
 Cells are classified from the controller's own certification verdict:
@@ -26,13 +26,13 @@ Cells are classified from the controller's own certification verdict:
     CERTIFIED     trained to 1.0 and generalises            (counted solvable)
     OVERFIT       trained to 1.0, held-out collapsed        (not solvable)
     UNCERTIFIED   trained to 1.0, target has no oracle      (not counted; the
-                  claim is unverifiable, not false — reported separately)
+                  claim is unverifiable, not false - reported separately)
     BELOW         did not reach the bar at this budget      (not solvable)
 
 OUTPUT
 ------
 The terminal shows the plan, generation progress, per-seed result, and final
-targets × architectures table. A local JSON record is rewritten atomically
+targets x architectures table. A local JSON record is rewritten atomically
 after every seed so an interrupted sweep can resume; a local Markdown copy of
 the final table is written beside it. The script performs no version-control,
 network, or remote-publication operations.
@@ -123,7 +123,7 @@ VERDICT_SYMBOL = {
 }
 
 
-# ───────────────────────────── target selection ─────────────────────────────
+# ----------------------------- target selection -----------------------------
 
 def all_targets():
     """Every registered target, combinational and temporal (GUI _all_targets)."""
@@ -190,6 +190,14 @@ def resolve_target_names(requested, backend, node_model):
                             if name in TEMPORAL_TARGETS)
         elif key == 'combinational':
             selected.extend(name for name in available if name in TARGETS)
+        elif key == 'logic-temporal':
+            # The coincident-edge twins of the truth tables. They are genuine
+            # temporal targets, so `temporal` already includes them; this picks
+            # out just the derived set, or lets a sweep exclude it by asking for
+            # the other categories instead.
+            selected.extend(name for name in available
+                            if name.endswith('(temporal)')
+                            and name in TEMPORAL_TARGETS)
         elif key in lowered:
             selected.append(lowered[key])
         elif key in registry:
@@ -214,7 +222,7 @@ def effective_target(target, high, graded):
         target, high=(target.high if high is None else high), graded=graded)
 
 
-# ───────────────────────────── configuration ────────────────────────────────
+# ----------------------------- configuration --------------------------------
 
 def build_escape_config(args):
     return EscapeConfig(
@@ -373,7 +381,7 @@ def cell_seed(base, backend, target_name, index):
     return int(base) + index * 1_000_003 + int.from_bytes(digest[:4], 'big') % 1_000_000
 
 
-# ────────────────────────────── one evolution ───────────────────────────────
+# ------------------------------ one evolution -------------------------------
 
 def classify_seed(best_fit, certification, backend, error):
     """Map one run onto the report's categories (see the module docstring)."""
@@ -384,7 +392,7 @@ def classify_seed(best_fit, certification, backend, error):
         # No certification attempted. SNN has no controller-side oracle replay,
         # so it can never be certified; on a certifying backend a missing
         # verdict on a solved run means certify() itself failed, which is an
-        # unverified claim — not a pass.
+        # unverified claim - not a pass.
         if not solved or backend not in CERTIFYING_BACKENDS:
             return 'none'
         return 'uncertified'
@@ -494,7 +502,7 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
     }
 
 
-# ────────────────────────────── result store ────────────────────────────────
+# ------------------------------ result store --------------------------------
 
 def replace_atomic(source, destination):
     """Replace despite the brief OneDrive/antivirus sharing locks this repo
@@ -550,14 +558,43 @@ def summarise_cell(cell):
     cell['holdout_mean'] = (round(sum(holdouts) / len(holdouts), 6)
                             if holdouts else None)
     cell['elapsed_s'] = round(sum(seed['elapsed_s'] for seed in seeds), 2)
+    cell['solve_gens'] = sorted(
+        seed['first_solved_gen'] for seed in seeds
+        if seed.get('first_solved_gen') is not None)
     return cell
 
 
-# ─────────────────────────────── reporting ──────────────────────────────────
+#: A first solve landing this far into the budget counts as "late". Used only
+#: to caveat a rate, never to change one.
+LATE_SOLVE_FRACTION = 0.6
+
+
+def budget_caveat(cell, budget):
+    """Say whether a cell's certified rate is limited by ``--gens``.
+
+    Returns 'truncated', 'no-solves', or None. This reads recorded solve
+    generations only; it never re-runs or re-scores anything.
+    """
+    gens = cell.get('solve_gens') or []
+    unsolved = cell['n'] - len(gens)
+    if not gens:
+        # Nothing solved, so there is no solve-time distribution to argue
+        # from. Such a cell bounds nothing: it cannot separate "unreachable"
+        # from "needs more than this budget", and that is the exact reading
+        # that turns a short probe into a false structural conclusion.
+        return 'no-solves' if cell['n'] else None
+    if unsolved and gens[-1] >= LATE_SOLVE_FRACTION * float(budget):
+        # Seeds were still solving for the first time near the cutoff while
+        # others had not solved at all: the rate is a lower bound.
+        return 'truncated'
+    return None
+
+
+# ------------------------------- reporting ----------------------------------
 
 def _cell_label(cell):
     if cell is None:
-        return '·'
+        return '-'
     if cell.get('counts', {}).get('error'):
         return '!! err'
     dominant = max(cell['counts'], key=lambda key: cell['counts'][key]) \
@@ -579,7 +616,7 @@ def render_markdown(document):
     lines = []
     lines.append('# Solvability benchmark')
     lines.append('')
-    lines.append('Generated %s  ·  local driver `%s`'
+    lines.append('Generated %s  -  local driver `%s`'
                  % (document['generated_utc'], config['driver']))
     run = config['run']
     lines.append('')
@@ -642,12 +679,58 @@ def render_markdown(document):
                         trained, seeds_total, len(rows),
                         _duration(elapsed)))
 
+    # Budget caveats. A certified rate is only meaningful next to the budget it
+    # was measured at: a target still solving for the first time near the
+    # cutoff has a rate that is a lower bound, and a target that never solved
+    # has no rate at all. Without this, a short probe reads as a structural
+    # verdict.
+    budget = run['generations']
+    truncated = [(backend, target)
+                 for target in targets for backend in backends
+                 if cells.get((backend, target)) is not None
+                 and budget_caveat(cells[(backend, target)],
+                                   budget) == 'truncated']
+    unsolved = [(backend, target)
+                for target in targets for backend in backends
+                if cells.get((backend, target)) is not None
+                and budget_caveat(cells[(backend, target)],
+                                  budget) == 'no-solves']
+    if truncated or unsolved:
+        lines.append('')
+        lines.append('### Budget caveats')
+        lines.append('')
+    if truncated:
+        lines.append(
+            'These cells were **still producing first-time solves near the '
+            '%d-generation cutoff** while other seeds had not solved at all. '
+            'Their certified rate is a lower bound - raising `--gens` is '
+            'expected to raise it:' % budget)
+        lines.append('')
+        for backend, target in truncated:
+            gens = cells[(backend, target)]['solve_gens']
+            lines.append('- `%s` / %s - solves at generations %s'
+                         % (backend, target,
+                            ', '.join(str(value) for value in gens)))
+        lines.append('')
+    if unsolved:
+        lines.append(
+            'These cells recorded **no solve at all**, so this run bounds '
+            'nothing: at a %d-generation budget it cannot distinguish '
+            '"unreachable on this substrate" from "needs a longer run". Do '
+            'not read them as a structural limit without re-running past '
+            'the target\'s known solve-generation spread:' % budget)
+        lines.append('')
+        for backend, target in unsolved:
+            lines.append('- `%s` / %s - 0/%d solved'
+                         % (backend, target, cells[(backend, target)]['n']))
+        lines.append('')
+
     lines.append('')
     lines.append('## Cell detail')
     lines.append('')
     lines.append('| Backend | Target | Certified | Best (max) | Best (mean) | '
-                 'Held-out (mean) | Verdicts |')
-    lines.append('| --- | --- | --- | --- | --- | --- | --- |')
+                 'Held-out (mean) | Solve gen (min/med/max) | Verdicts |')
+    lines.append('| --- | --- | --- | --- | --- | --- | --- | --- |')
     for target in targets:
         for backend in backends:
             cell = cells.get((backend, target))
@@ -656,12 +739,17 @@ def render_markdown(document):
             verdicts = ', '.join(
                 '%s x%d' % (name, count)
                 for name, count in sorted(cell['counts'].items()))
+            solve_gens = cell.get('solve_gens') or []
             lines.append(
-                '| %s | %s | %d/%d | %.3f | %.3f | %s | %s |'
+                '| %s | %s | %d/%d | %.3f | %.3f | %s | %s | %s |'
                 % (backend, target, cell['certified'], cell['n'],
                    cell['best_max'], cell['best_mean'],
                    ('%.3f' % cell['holdout_mean']
-                    if cell['holdout_mean'] is not None else '—'),
+                    if cell['holdout_mean'] is not None else '-'),
+                   ('%d/%d/%d' % (solve_gens[0],
+                                  solve_gens[len(solve_gens) // 2],
+                                  solve_gens[-1])
+                    if solve_gens else '-'),
                    verdicts))
 
     skipped = document.get('skipped') or []
@@ -670,7 +758,7 @@ def render_markdown(document):
         lines.append('## Skipped (unsupported)')
         lines.append('')
         lines.append('Excluded by the target\'s own `supported_backends` / '
-                     '`supported_models` declaration — physically unattainable '
+                     '`supported_models` declaration - physically unattainable '
                      'here, not a search failure.')
         lines.append('')
         for entry in skipped:
@@ -685,7 +773,7 @@ def render_markdown(document):
         lines.append('')
         for backend, target, error in errors:
             first = error.strip().splitlines()[-1] if error.strip() else '?'
-            lines.append('* `%s` / %s — %s' % (backend, target, first))
+            lines.append('* `%s` / %s - %s' % (backend, target, first))
     lines.append('')
     return '\n'.join(lines)
 
@@ -699,7 +787,7 @@ def _duration(seconds):
     return '%dh %02dm' % (seconds // 3600, (seconds % 3600) // 60)
 
 
-# ──────────────────────────────── the sweep ─────────────────────────────────
+# -------------------------------- the sweep ---------------------------------
 
 def run_sweep(args, architectures):
     config = config_record(args, architectures)
@@ -724,7 +812,7 @@ def run_sweep(args, architectures):
         for cell in previous.get('cells', []):
             done[(cell['backend'], cell['target'])] = cell
         document['cells'] = list(previous['cells'])
-        print('resuming %s — %d cell(s) already recorded'
+        print('resuming %s - %d cell(s) already recorded'
               % (args.out, len(done)), flush=True)
 
     plan = []
@@ -742,15 +830,15 @@ def run_sweep(args, architectures):
                        if name.lower() not in excluded)
     for backend, name in skipped:
         # A declared supported_backends/supported_models restriction, not a
-        # search failure — say so instead of charting a physically unattainable
+        # search failure - say so instead of charting a physically unattainable
         # cell as an evolution that could not solve it.
-        print('skipping %-8s %s — unsupported by this backend/node model'
+        print('skipping %-8s %s - unsupported by this backend/node model'
               % (backend, name), flush=True)
     document['skipped'] = [{'backend': backend, 'target': name}
                            for backend, name in skipped]
 
     if not plan:
-        raise SystemExit('nothing to run — the target selection is empty')
+        raise SystemExit('nothing to run - the target selection is empty')
 
     total_cells = len(plan)
     print('%d cell(s) x %d seed(s) = %d run(s) of %d generations'
@@ -778,7 +866,7 @@ def run_sweep(args, architectures):
                 done[(backend, name)] = cell
             for seed_index in range(len(cell['seeds']), args.seeds):
                 seed = cell_seed(args.seed_base, backend, name, seed_index)
-                print('[%d/%d] %-8s %-34s seed %d/%d (%d) …'
+                print('[%d/%d] %-8s %-34s seed %d/%d (%d) ...'
                       % (index, total_cells, backend, name, seed_index + 1,
                          args.seeds, seed), flush=True)
                 result = run_one(backend, name, target, args, seed,
@@ -791,7 +879,7 @@ def run_sweep(args, architectures):
                 print('        -> %-11s best %.3f  held-out %s  %s'
                       % (result['category'], result['best'],
                          ('%.3f' % result['holdout']
-                          if result['holdout'] is not None else '—'),
+                          if result['holdout'] is not None else '-'),
                          _duration(result['elapsed_s'])), flush=True)
     finally:
         if args.snapshot_dir is None:
@@ -800,7 +888,7 @@ def run_sweep(args, architectures):
     return document
 
 
-# ──────────────────────────────── the CLI ───────────────────────────────────
+# -------------------------------- the CLI -----------------------------------
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -829,7 +917,10 @@ def build_parser():
                               ', '.join(ARCHITECTURE_SETS)))
     what.add_argument('--targets', default='temporal',
                       help='comma-separated target names and/or the keywords '
-                           'all, temporal, combinational (default: temporal)')
+                           'all, temporal, combinational, logic-temporal '
+                           '(the coincident-edge twins of the truth tables, '
+                           'which `temporal` also includes) '
+                           '(default: temporal)')
     what.add_argument('--exclude', default='',
                       help='comma-separated target names to skip')
     what.add_argument('--seeds', type=int, default=3,

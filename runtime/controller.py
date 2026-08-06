@@ -141,7 +141,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         if config.ga.io_placement != 'fixed':
             raise ValueError(
                 'retired Nervous I/O placement: %r. The nervous substrate now '
-                'uses one native mechanism — an evolved input layout of source '
+                'uses one native mechanism - an evolved input layout of source '
                 'pads plus whole-organism fitted output probes. The tag_rank, '
                 'wiring_chromosome, spatial_chromosome and terminal_nodes '
                 'compatibility strategies remain only where supported by SNN '
@@ -452,7 +452,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # the SNN backend running at a fixed mutation rate with no plateau
         # response at all.
         # The SNN breeder takes no ga_config, so the escape configuration and
-        # the mutation cap are handed to it explicitly — otherwise self-adaptive
+        # the mutation cap are handed to it explicitly - otherwise self-adaptive
         # mutation would silently do nothing on this backend.
         step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_snn(
             p, f, chromosome_count=chromosome_count,
@@ -503,7 +503,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         messages.put(('phase', phase, try_i, generation, len(genomes)))
 
         def progress(done, total):
-            # Coarse progress: ~20 updates/generation, not one per genome — the
+            # Coarse progress: ~20 updates/generation, not one per genome - the
             # display only shows a count, so keep queue traffic near the old
             # per-chunk cadence.
             if done == total or done % max(1, total // 20) == 0:
@@ -603,6 +603,24 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                         and stagnation >= STRESS_PATIENCE):
                     rescue = plateau_rescue_fn(
                         champion, min(48, max(1, pop // 2)))
+                elif run_fit >= 1.0 and consolidate_fn is not None:
+                    # Terminal consolidation exists so perfect circuits can
+                    # ACCUMULATE and the mean can converge to 1. It could not:
+                    # every offspring is mutated, mutation almost always breaks
+                    # a solution, so the population sat at exactly ONE perfect
+                    # member forever while the mean pinned to whatever the rest
+                    # scored. Elites are deliberately never copied, which stops
+                    # premature convergence BEFORE a solve; afterwards there is
+                    # nothing left to converge away from.
+                    #
+                    # Re-enter the solved genomes as unmutated children through
+                    # the same channel plateau rescue uses (those are cloned,
+                    # not mutated). Capped at a quarter of the population so the
+                    # remaining offspring keep exploring.
+                    rescue = [
+                        genome
+                        for genome, fitness in zip(parents, parent_fitnesses)
+                        if fitness >= SOLVER_VALID][:max(1, pop // 4)]
                 # One pool, or separate demes at their own mutation rates when
                 # islands are on. Shared with the headless driver.
                 offspring = escape_state.breed(
@@ -664,7 +682,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     # chosen above, so re-check it here. Skipping this let a
                     # reborn genome that beat the champion sit in the reported
                     # population for a generation while the reported best still
-                    # showed the old value — the one way this loop could print a
+                    # showed the old value - the one way this loop could print a
                     # best below its own mean.
                     ri = max(range(pop),
                              key=lambda index: rank_fn(
@@ -696,7 +714,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # backends whose target has a reference oracle, re-score the winner on
         # FRESH held-out schedules (readout/alignment frozen) and emit a verdict
         # so a memorised-timing / leaky solution is flagged rather than trusted.
-        # Advisory only — a failure here must never sink the run.
+        # Advisory only - a failure here must never sink the run.
         if (backend in ('nervous', 'lut', 'fnv') and best_genome is not None
                 and not stop_event.is_set()):
             try:

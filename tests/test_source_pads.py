@@ -1,5 +1,5 @@
 """
-tests/test_source_pads.py — evolved input pads as external source terminals.
+tests/test_source_pads.py - evolved input pads as external source terminals.
 
 An input pad is an EXTERNAL SOURCE TERMINAL: internal activity can never raise
 it, retrigger it, or alter its level; only its assigned external injection may
@@ -7,7 +7,7 @@ drive it. Its outgoing connections are untouched, so the pulse it receives still
 propagates into the organism.
 
 The rule is MEMBERSHIP, not state id. A cell is a source because it is in the
-resolved input-pad set, never because it happens to express a particular state —
+resolved input-pad set, never because it happens to express a particular state -
 otherwise an ordinary evolved body cell expressing that state would silently
 become an externally driven terminal in the middle of the organism.
 """
@@ -39,7 +39,7 @@ def _buffer_towards(direction):
     raise AssertionError('no buffer state for %r' % direction)
 
 
-# ── single tile: the feedback-path proof ──────────────────────────────────────
+# -- single tile: the feedback-path proof --------------------------------------
 
 def test_internal_feedback_cannot_raise_a_source_pad_single_tile():
     """A neighbour wired straight back INTO the pad must never raise it.
@@ -99,7 +99,7 @@ def test_repeated_external_pulses_each_raise_the_pad():
     assert len(sim.pulse_intervals[pad]) == 3
 
 
-# ── membership, not state id ──────────────────────────────────────────────────
+# -- membership, not state id --------------------------------------------------
 
 def test_an_ordinary_cell_expressing_the_terminal_state_is_not_a_source():
     """The bug this guards: state 16 must not confer terminal semantics."""
@@ -131,7 +131,7 @@ def test_terminal_sets_come_from_the_pad_set_and_are_empty_for_fixed_inputs():
     legacy = random_hex_genome(2)
     assert terminal_node_sets(
         target, list(target.inputs), {}, genome=legacy) == (set(), set())
-    # and with no genome at all — the historical call shape
+    # and with no genome at all - the historical call shape
     assert terminal_node_sets(target, list(target.inputs), {}) == (set(), set())
 
 
@@ -183,7 +183,7 @@ def test_interactive_reuses_the_scorer_prepared_layout_probes_and_physics():
     raise AssertionError('no layout genome produced a playable circuit')
 
 
-# ── tri3: channel level ───────────────────────────────────────────────────────
+# -- tri3: channel level -------------------------------------------------------
 
 def test_tri3_source_tile_has_no_incoming_edges_and_still_drives():
     """A tri input tile collapses to one source-only IN sub-node.
@@ -218,7 +218,7 @@ def test_tri3_only_the_named_tiles_become_sources():
     assert len(info['tile_nodes'][pad]) == 1
 
 
-# ── growth, survival and translation ──────────────────────────────────────────
+# -- growth, survival and translation ------------------------------------------
 
 def _analog_target(name='Coincidence (2-in)'):
     target = dataclasses.replace(TEMPORAL_TARGETS[name])
@@ -294,7 +294,7 @@ def test_an_invalid_layout_makes_the_phenotype_unbindable():
 
 
 def test_translation_equivalent_layouts_develop_equivalently():
-    """The anchor is a gauge — but only for PARITY-PRESERVING translations.
+    """The anchor is a gauge - but only for PARITY-PRESERVING translations.
 
     ``hex_dirs`` reads L/R/D in the node's own orientation frame, and that frame
     flips with ``(x + y) % 2`` (the paper's context rotation). A shift with an
@@ -336,7 +336,7 @@ def test_an_odd_translation_is_a_different_organism_not_the_same_one_moved():
     assert differs, 'odd shifts must be able to change the organism'
 
 
-# ── training and held-out use identical pads ─────────────────────────────────
+# -- training and held-out use identical pads ---------------------------------
 
 def test_certification_reuses_the_exact_fitted_pads():
     from substrates.nervous.evaluation import fit_readout
@@ -380,7 +380,7 @@ def test_a_fixed_input_genome_keeps_its_legacy_injection_behaviour():
     raise AssertionError('no fixed-input genome produced a fitted readout')
 
 
-# ── nothing is switched on yet ────────────────────────────────────────────────
+# -- nothing is switched on yet ------------------------------------------------
 
 def test_both_drivers_create_layout_genomes():
     """The LAST Stage 2 action, once every path above is wired."""

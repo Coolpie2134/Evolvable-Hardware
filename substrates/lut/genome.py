@@ -1,7 +1,7 @@
 """
-substrates/lut/genome.py — genome for the boolean-logic lookup (LUT) array.
+substrates/lut/genome.py - genome for the boolean-logic lookup (LUT) array.
 
-Paper Architecture 2 (Edwards EH'02 §5-6; sim6 reference): each cell of a
+Paper Architecture 2 (Edwards EH'02 sections 5-6; sim6 reference): each cell of a
 square, 4-neighbour grid holds four 16-bit lookup tables (one per output
 direction). The associative-memory gene is Fig. 10 verbatim: a context of five
 16-bit LUT states (the four neighbours' facing LUTs + the cell's own LUT for
@@ -109,7 +109,7 @@ class LutGene:
 
 @dataclass
 class Chromosome:
-    """`telomere`: growth clock — the chromosome's growth rules (self_in == 0)
+    """`telomere`: growth clock - the chromosome's growth rules (self_in == 0)
     only apply while iteration < telomere (sim6's set_limit caps exactly those
     genes); maintenance rules never expire. Evolvable, so the genome bounds its
     own size on the unbounded field."""
@@ -274,7 +274,7 @@ def lut_exterior_inputs(genome: Genome, grid, n_inputs: int):
 
 
 def random_lut_gene(function_families=None) -> LutGene:
-    # self_in == 0 makes a GROWTH rule — the only kind that can bring a dead
+    # self_in == 0 makes a GROWTH rule - the only kind that can bring a dead
     # direction to life under the sim6 empty-cell guard, and the kind expired
     # by telomeres. With uniform 16-bit self_in the chance of one is ~1/65536,
     # so random genomes must be seeded with them explicitly (sim6's

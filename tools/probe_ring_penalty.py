@@ -1,13 +1,13 @@
 """
-tools/probe_ring_penalty.py — can a PHYSICALLY HONEST ring score 1.0?
+tools/probe_ring_penalty.py - can a PHYSICALLY HONEST ring score 1.0?
 
 The nervous net stores a bit as a pulse circulating a loop. Such a ring cannot
 stop faster than its own circulation period: when a reset arrives, the pulse
 already in flight completes its lap and lands AFTER the commanded transition.
 That trailing pulse is correct behaviour, not a fault.
 
-This probe builds exactly that circuit for every state-contract target — the
-ideal solution a human would draw, including the unavoidable trailing pulse —
+This probe builds exactly that circuit for every state-contract target - the
+ideal solution a human would draw, including the unavoidable trailing pulse -
 sweeps plausible ring periods, and reports any target where it fails to score
 1.0. A failure means the SCORER is punishing a correct circuit, which is the
 same family of fault as the degenerate scorers in tools/probe_trivial_baselines
@@ -37,7 +37,7 @@ DEFAULT_PERIODS = (2.0, 3.0, 4.0, 5.0, 6.0)
 
 
 def state_targets():
-    """Targets judged by held logical state — where a ring's stop time matters."""
+    """Targets judged by held logical state - where a ring's stop time matters."""
     out = []
     for name, target in sorted(TEMPORAL_TARGETS.items()):
         if not getattr(target, 'temporal', False):
@@ -57,7 +57,7 @@ def honest_ring(target, role, trial, period, width, trailing=True):
 
     During each commanded ACTIVE epoch a pulse circulates every ``period``.
     When the epoch ends, the pulse already in flight lands one period after the
-    last emission — inside the newly-quiet window. A real loop cannot avoid
+    last emission - inside the newly-quiet window. A real loop cannot avoid
     this, so an honest probe must include it.
     """
     intervals = []

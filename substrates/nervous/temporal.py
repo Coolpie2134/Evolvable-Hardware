@@ -1,5 +1,5 @@
 """
-substrates/nervous/temporal.py — the temporal evaluation HARNESS over the pulse engine:
+substrates/nervous/temporal.py - the temporal evaluation HARNESS over the pulse engine:
 running trials, placing outputs, and preparing score bundles.
 
 The nervous net is a temporal system: a pulse injected by an input circulates
@@ -15,7 +15,7 @@ Core (shared by interactive playback and temporal scoring):
     score_temporal(genome, ttarget)                 -> behavioural fitness [0,1]
     loop_profile(grid, routing, in_pos, out_pos)    -> feedback-loop stats
 
-All scoring MATH lives in substrates/nervous/scoring.py — the single scoring contract
+All scoring MATH lives in substrates/nervous/scoring.py - the single scoring contract
 (relation registry, matchers, alignment discipline, report body). This module
 re-exports every scorer name for the historical `from substrates.nervous.temporal import`
 path; new code should import from substrates.nervous.scoring directly.
@@ -42,7 +42,7 @@ from .targets import (OutputTerminal, Trial, TemporalTarget,  # noqa: F401
                       TEMPORAL_TARGETS,
                       sr_latch, toggle_ff, oscillator, echo)
 
-# ── scoring re-exports ───────────────────────────────────────────────────────
+# -- scoring re-exports -------------------------------------------------------
 # All scoring math lives in substrates/nervous/scoring.py (the single scoring contract:
 # relation registry, matchers, alignment discipline, report body). The names
 # are re-exported here because every historical consumer imports them from
@@ -72,12 +72,12 @@ from .scoring import (                                          # noqa: F401
 from .contracts import behavior_contract_lines
 
 
-# ── dynamics (asynchronous pulse engine, sampled per tick) ──────────────────────
+# -- dynamics (asynchronous pulse engine, sampled per tick) ----------------------
 # The actual dynamics are event-driven edge-triggered pulses (see pulse.py).
 # Playback samples once per tick; event-semantic scoring reads raw timestamps.
 
 def input_cone(grid, routing, in_pos):
-    """The cells whose value can be influenced by an input — everything forward-
+    """The cells whose value can be influenced by an input - everything forward-
     reachable from the resolved source pads or compatibility attachments in the
     signal graph. On the nervous net there is no spontaneous activity, so every
     cell OUTSIDE this cone is silent for all time; simulating only the cone is
@@ -141,8 +141,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
     `delays` ({cell: delay}) drives width-preserving transport, which derives
     each output width from its input.
     `arch='tri3'` runs the three-circuit-per-tile substrate on TriSim, which
-    presents the same tile-keyed surface so the rest of this function — stimulus
-    injection, sampling, event capture — is architecture-agnostic.
+    presents the same tile-keyed surface so the rest of this function - stimulus
+    injection, sampling, event capture - is architecture-agnostic.
     """
     if arch == 'tri3':
         from .tritile import TriSim
@@ -180,7 +180,7 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
     traces = {role: [] for role in out_pos}
     for t in range(T):
         # sample past the end of the input streams (padding), so a circuit that
-        # responds at a DELAY is still observed — its late events fall in
+        # responds at a DELAY is still observed - its late events fall in
         # [len(streams), T) instead of off the end (see _obs_len).
         sample_time = (t + 0.5) * TICK
         sim.advance_to(sample_time)
@@ -264,7 +264,7 @@ def _sample_intervals(intervals, ticks):
 # The declared coordinate is a label on the target, not a property of the
 # organism, so restricting to its neighbourhood asks "did you deliver the answer
 # HERE" when the honest question is "where does this organism actually produce
-# each answer" — a genome computing the right thing four cells too far away was
+# each answer" - a genome computing the right thing four cells too far away was
 # scored as though it had computed nothing.
 #
 # The inflation worry was the right thing to check, and it was checked rather
@@ -278,8 +278,8 @@ def _sample_intervals(intervals, ticks):
 #
 # No OVERFIT verdicts, and a train->held-out gap of 0.018 and 0.000. Circuits
 # selected this way generalise, so the extra candidates are finding real
-# mechanisms rather than lucky cells. The other half of the original worry —
-# that the chosen cell JITTERS between genomes and roughens the gradient — has
+# mechanisms rather than lucky cells. The other half of the original worry -
+# that the chosen cell JITTERS between genomes and roughens the gradient - has
 # a non-mutating diagnostic in tools/probe_gradient_jitter.py; no full-bank
 # result is claimed here yet.
 #
@@ -504,8 +504,8 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
 
 def prepare_net(genome, ttarget):
     """Grow + interpret a genome for a temporal target, placing outputs by
-    trace match. Returns (grid, routing, in_pos, out_pos, traces) — where
-    traces[role][i] is the chosen cell's trace in trial i — or None if the net
+    trace match. Returns (grid, routing, in_pos, out_pos, traces) - where
+    traces[role][i] is the chosen cell's trace in trial i - or None if the net
     is unusable (too small, no candidate output cells, or an input seed dead).
 
     Current genomes grow from ``input_layout`` and fit global probes. Legacy
@@ -608,9 +608,9 @@ def score_temporal_plastic(genome, ttarget, samples=8, seed=0, step=None,
 
     The function itself does not mutate ``genome``. ``return_settings=True``
     reports the locally improved vector so the GA can copy it into a breeder and
-    make the adjustment heritable. Returns ``(best_score, best_cases)`` — or
+    make the adjustment heritable. Returns ``(best_score, best_cases)`` - or
     ``(best_score, best_cases, {'state_delays': vector|None})`` when settings are
-    requested — or None if the target does not use supported fixed binding.
+    requested - or None if the target does not use supported fixed binding.
     """
     import math as _math
     import random as _random
@@ -693,7 +693,7 @@ def score_temporal_plastic(genome, ttarget, samples=8, seed=0, step=None,
 
 def temporal_report(ttarget, genome=None):
     """Human-readable explanation of a temporal target for the GUI: what the
-    circuit must do, its stimulus tests, and — when a genome is given — the
+    circuit must do, its stimulus tests, and - when a genome is given - the
     evolved net's actual behaviour with a score for each test. The report body
     is the shared scoring.score_report_lines; only growth/prep is
     nervous-specific here."""
@@ -714,7 +714,7 @@ def temporal_report(ttarget, genome=None):
             return '\n'.join(lines + [''] + behavior_contract_lines(ttarget) + pre + [
                 '', '(circuit incomplete - grew too little or inputs dead)'])
     if genome is not None and prep is None:
-        lines += ['', '(circuit incomplete — grew too little or inputs dead)']
+        lines += ['', '(circuit incomplete - grew too little or inputs dead)']
     traces = prep[4] if prep is not None else None
     out_pos = prep[3] if prep is not None else None
     _, body = score_report_lines(ttarget, traces, out_pos,
@@ -726,7 +726,7 @@ def temporal_report(ttarget, genome=None):
     return '\n'.join(lines)
 
 
-# ── feedback-loop analysis (for the GA's loop-aware shaping) ────────────────────
+# -- feedback-loop analysis (for the GA's loop-aware shaping) --------------------
 
 def signal_graph(grid, routing):
     """Directed signal graph as {node: set(readers)}: u -> v iff node v's
@@ -775,8 +775,8 @@ def cycle_nodes(edges):
 
 def loop_profile(grid, routing, in_pos, out_pos):
     """Feedback-loop stats of a grown net:
-        n_cycle    — nodes on any directed cycle
-        n_relevant — cycle nodes both writable from an input and driving an output
+        n_cycle    - nodes on any directed cycle
+        n_relevant - cycle nodes both writable from an input and driving an output
     A latch is exactly a relevant cycle: inputs can set/clear the circulating
     value and the output can read it."""
     edges = signal_graph(grid, routing)
@@ -792,7 +792,7 @@ def loop_profile(grid, routing, in_pos, out_pos):
     return {'n_cycle': len(cyc), 'n_relevant': len(cyc & from_in & to_out)}
 
 
-# ── structural topology (selection tie-break, target-agnostic) ─────────────────
+# -- structural topology (selection tie-break, target-agnostic) -----------------
 
 def nervous_topology(grid, routing, in_pos, arch='single'):
     """Measure this organism's EFFECTIVE routing as a directed graph.
@@ -800,9 +800,9 @@ def nervous_topology(grid, routing, in_pos, arch='single'):
     The graph is the physical wiring the engine will actually run, not the
     genome and not the target:
 
-    * single tile — one output net per cell, so an edge ``u -> v`` exists iff
+    * single tile - one output net per cell, so an edge ``u -> v`` exists iff
       v's routing reads neighbour u (excitatory or inhibitory);
-    * tri3 — the CHANNEL/sub-node graph from ``interpret_tri``. Measuring tri
+    * tri3 - the CHANNEL/sub-node graph from ``interpret_tri``. Measuring tri
       at tile level would fuse three electrically separate circuits into one
       node and invent paths and loops that no signal can take.
 

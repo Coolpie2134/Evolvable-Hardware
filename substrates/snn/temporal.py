@@ -248,7 +248,7 @@ def snn_temporal_report(target, genome=None, arch=None):
     prep = None if genome is None else prepare_snn_temporal(
         genome, target, arch)
     if genome is not None and prep is None:
-        lines += ["", "(circuit incomplete — grew too little or inputs dead)"]
+        lines += ["", "(circuit incomplete - grew too little or inputs dead)"]
     traces = prep[5] if prep is not None else None
     out_pos = prep[4] if prep is not None else None
     _score, body = score_report_lines(target, traces, out_pos)

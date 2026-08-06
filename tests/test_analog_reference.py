@@ -1,17 +1,17 @@
 """
-tests/test_analog_reference.py — validate the analog engine against an
+tests/test_analog_reference.py - validate the analog engine against an
 INDEPENDENT circuit reference (the reference plan's point 6).
 
 substrates/nervous/analog.py is event-driven and solves the node's leak recovery and its
 threshold crossings ANALYTICALLY (no time step). This suite cross-checks that
-analytical engine against a naive fixed-Δt numerical integration of the same
-physical node — a completely separate implementation — over the sweeps the plan
+analytical engine against a naive fixed-deltat numerical integration of the same
+physical node - a completely separate implementation - over the sweeps the plan
 calls for: E1/E2 separation, repeated/dense pulses, output width vs the leak,
-and recovery after firing. Agreement to a few Δt confirms the fast engine is a
+and recovery after firing. Agreement to a few deltat confirms the fast engine is a
 faithful solution of the circuit ODE, not a re-encoding of the same shortcuts.
 
-(A transistor-level SPICE deck would be the ultimate reference; this Δt
-integrator is the portable stand-in — it needs no external simulator and pins
+(A transistor-level SPICE deck would be the ultimate reference; this deltat
+integrator is the portable stand-in - it needs no external simulator and pins
 the same emergent quantities.)
 
 Run under pytest, or standalone:  py tests/test_analog_reference.py
@@ -36,7 +36,7 @@ def integrate_reference(terminal_edges, cfg, horizon, dt=2e-4):
     """
     rest, thr, step = cfg.rest, cfg.threshold, cfg.step
     tau, hyst, delay = cfg.tau_leak, cfg.hysteresis, cfg.delay_prop
-    # bucket edge step-counts by Δt index
+    # bucket edge step-counts by deltat index
     steps = {}
     for (t, n) in terminal_edges:
         k = int(round(t / dt))
@@ -128,7 +128,7 @@ def test_coincidence_separation_sweep_matches_reference():
                 gap, engine_fired, ref_fired)
 
 
-# ── standalone runner ────────────────────────────────────────────────────────────
+# -- standalone runner ------------------------------------------------------------
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

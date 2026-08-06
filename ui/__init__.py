@@ -1,5 +1,5 @@
 """
-ui — Tk/matplotlib front-ends for the evolvable-hardware backends.
+ui - Tk/matplotlib front-ends for the evolvable-hardware backends.
 
 Grouped here so the project root holds only packages and entry points, not a
 pile of loose GUI scripts. Launch a front-end as a module from the project

@@ -1,14 +1,14 @@
 """
-substrates/lut/lut.py — square LUT array, faithful to sim6 (the reference) and the
+substrates/lut/lut.py - square LUT array, faithful to sim6 (the reference) and the
 paper's Architecture 2 (automaton_arrays.pdf: "square array, 4 neighbours,
 4 lookup tables per cell, each 16 states").
 
-Each live cell holds FOUR 16-bit lookup tables — one per output direction
+Each live cell holds FOUR 16-bit lookup tables - one per output direction
 (N, S, E, W). A cell's grown state is therefore the tuple (Ln, Ls, Le, Lw).
 
 Growth (associative-memory ontogeny, sim6 build_step): each output direction's
 LUT is looked up separately, with the neighbour context ROTATED so the output
-direction is "front" — this is the context rotation that lets one gene express
+direction is "front" - this is the context rotation that lets one gene express
 all four directions. The context for direction d is
     (front, back, right, left, self_d)
 = the LUTs the four neighbours present toward this cell, reordered relative to
@@ -93,7 +93,7 @@ def _lookup_vec(garr, front, back, right, left, self_lut, iteration):
 
     sim6-faithful size limits: a chromosome's growth rules (self_in == 0) only
     apply while iteration < its telomere, and a dead direction (self_lut == 0)
-    can only be brought to life by a growth rule — so expansion provably stops
+    can only be brought to life by a growth rule - so expansion provably stops
     once every telomere has expired, and maintenance settles the attractor."""
     return _lookup_vec_idx(garr, front, back, right, left, self_lut, iteration)[0]
 
@@ -103,7 +103,7 @@ def _lookup_vec_idx(garr, front, back, right, left, self_lut, iteration):
     major), or -1 when no gene shaped the output (all-zero context, or only
     expired growth rules remained). The empty-cell guard still returns the
     winner's index: that gene WON the argmin and its identity caused the 0, so
-    it counts as expressed — removing it would change the argmin (not neutral).
+    it counts as expressed - removing it would change the argmin (not neutral).
     Used for expression tracking / neutral compaction; see substrates.lut.ga."""
     An, As, Ae, Aw, Ain, Aout, Agrow, Atel = garr
     if An.shape[0] == 0:
@@ -137,7 +137,7 @@ def _lookup(genome, front, back, right, left, self_lut, iteration):
 
 def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None,
                seed_state=None, terminal_kinds=None):
-    # expand the frontier: every empty 4-neighbour of a live cell — the field
+    # expand the frontier: every empty 4-neighbour of a live cell - the field
     # is unbounded; telomeres + the empty-cell guard bound the organism.
     # `counts` (list per flat gene, chromosome-major) tallies gene EXPRESSION
     # when tracking (see grow_lut_tracked); None = the zero-overhead fast path.
@@ -192,7 +192,7 @@ def _grow_step(genome, garr, grid, seeds, iteration, cache, counts=None,
             (le, je) = look(e, w, s, n, st[2]); (lw, jw) = look(w, e, n, s, st[3])
             # count EVERY argmin winner, even for a cell that stays dead: that
             # gene's identity is what produced the 0, so removing it could change
-            # the argmin and bring the cell to life — it is NOT neutral to drop.
+            # the argmin and bring the cell to life - it is NOT neutral to drop.
             for j in (jn, js, je, jw):
                 if counts is not None and j >= 0:
                     counts[j] += 1
@@ -244,7 +244,7 @@ def grow_lut_tracked(genome, seeds, grid_size, iters):
     """Grow exactly like grow_lut, but also return a per-gene EXPRESSION count
     (chromosome-major, one entry per gene) tallying how many cell-directions each
     gene builds across the whole developmental trajectory. A gene with count 0
-    won no growth lookup and so is phenotype-neutral — see substrates.lut.ga.compact.
+    won no growth lookup and so is phenotype-neutral - see substrates.lut.ga.compact.
     Returns (grid, counts)."""
     garr = _genome_lut_arrays(genome)
     counts = [0] * garr[0].shape[0]
@@ -263,7 +263,7 @@ def grow_lut_tracked(genome, seeds, grid_size, iters):
 
 def cell_io_tags(genome, grid):
     """Map each live cell to its CELL TYPES: the distinct nonzero 16-bit
-    direction LUTs it carries — the cell's actual hardware content, exactly
+    direction LUTs it carries - the cell's actual hardware content, exactly
     what the Designer/Growth views display. A LUT cell holds four directional
     tables, so it may be several types at once; a port whose desired number
     equals ANY of them binds here. The ``genome`` parameter is kept for the
@@ -298,9 +298,9 @@ def grow_lut_snapshots(genome, seeds, grid_size, iters):
     return snaps
 
 
-# ── synchronous latched dynamics (sim6 step_network) ────────────────────────────
+# -- synchronous latched dynamics (sim6 step_network) ----------------------------
 # NOTE: this engine is now the REFERENCE, not the production dynamics. Scoring,
-# playback and the Designer all run substrates.lut.pulse.AsyncLutSim — the asynchronous
+# playback and the Designer all run substrates.lut.pulse.AsyncLutSim - the asynchronous
 # continuous-time engine whose tick-lattice behaviour this one quantises to
 # (verified bit-identical in tests/test_lut_synchrony.py). LutSim is kept as the
 # sim6-faithful clocked baseline that equivalence is audited against.
@@ -308,9 +308,9 @@ def grow_lut_snapshots(genome, seeds, grid_size, iters):
 class LutSim:
     """Synchronous simulation of a grown LUT array, VECTORISED with numpy.
 
-    The dynamics are a pure array update — each cell's next 4-bit output is a
+    The dynamics are a pure array update - each cell's next 4-bit output is a
     lookup in its four LUTs at the 4-bit index formed from its neighbours'
-    facing bits — so the whole grid advances in one set of numpy ops instead of
+    facing bits - so the whole grid advances in one set of numpy ops instead of
     a per-cell Python loop with four dict lookups each (that loop was ~85% of
     LUT evaluation time; dense biomorph organisms are 500-900 cells). Behaviour
     is identical: same nibble layout (N=8 S=4 E=2 W=1), same wired-OR input
@@ -320,7 +320,7 @@ class LutSim:
     {cell: 0/1}; ``sim.out`` is the {cell: nibble} map; ``sim.ever`` marks cells
     that have ever emitted. ``sim.run_bits(streams, in_pos, T)`` is a fast bulk
     runner (T ticks with no per-tick dict) returning a [T, ncells] bit matrix
-    for scoring — see substrates.lut.ga.place_outputs_by_trace.
+    for scoring - see substrates.lut.ga.place_outputs_by_trace.
     """
 
     def __init__(self, grid, _unused=None, input_nodes=None,

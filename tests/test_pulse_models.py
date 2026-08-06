@@ -1,15 +1,15 @@
 """
-tests/test_pulse_models.py — the nervous-net node-timing models.
+tests/test_pulse_models.py - the nervous-net node-timing models.
 
 The paper's node regenerates ONE fixed pulse width after ONE fixed delay, so an
 input pulse's LENGTH is discarded past the first node (see the discussion in
 substrates/nervous/pulse.py). One variant restores width as a usable degree of freedom:
 
-  * 'uniform'       — the paper (fixed width + delay). Must be BYTE-IDENTICAL
+  * 'uniform'       - the paper (fixed width + delay). Must be BYTE-IDENTICAL
                       to the engine before these variants existed, whether or
                       not a config is passed. The "keep the architecture the
                       same" leg.
-  * 'pulse_delay'   — historical API identifier for width-preserving transport:
+  * 'pulse_delay'   - historical API identifier for width-preserving transport:
                       both pulse edges move by the same evolved node delay, so
                       [t,t+w) becomes [t+d_node,t+d_node+w).
 
@@ -126,7 +126,7 @@ def test_combinational_targets_receive_no_memory_loop_bonus():
     assert cases == (0.75,)
 
 
-# ── a hand-built 2-cell buffer chain A -> B ──────────────────────────────────────
+# -- a hand-built 2-cell buffer chain A -> B --------------------------------------
 
 def _buffer_pair():
     a = (0, 0)
@@ -181,7 +181,7 @@ def _inhibited_buffer():
     return grid, routing, source, inhibitor, v
 
 
-# ── V1: uniform is unchanged ─────────────────────────────────────────────────────
+# -- V1: uniform is unchanged -----------------------------------------------------
 
 def test_uniform_is_the_legacy_default():
     """Default config is the legacy 'uniform' abstraction; a buffer fires once at delay=1,
@@ -203,7 +203,7 @@ def test_uniform_is_the_legacy_default():
 
 
 
-# ── V3: evolved-delay width preservation (legacy id: pulse_delay) ─────────────
+# -- V3: evolved-delay width preservation (legacy id: pulse_delay) -------------
 
 def test_pulse_delay_neutral_delay_preserves_width():
     """A neutral delay vector uses PulseConfig.delay and preserves width."""
@@ -380,7 +380,7 @@ def test_odd_selector_passes_odd_indexed_pulses_with_their_widths():
 
 def test_odd_selector_rejects_fixed_dead_time_filters():
     """REGRESSION: the original odd-selector banks accepted a parity-free
-    refractory filter — one fixed dead time (D ~= 4.1) reproduced every
+    refractory filter - one fixed dead time (D ~= 4.1) reproduced every
     schedule and scored a perfect 1.0 without counting anything. The
     adversarial gap banks must hold every fixed dead time (start- OR
     end-referenced, swept finely) below the 0.90 certification bar, on the
@@ -700,7 +700,7 @@ def test_pulse_delay_rejects_invalid_injected_intervals():
             raise AssertionError('invalid pulse accepted: %r' % ((start, width),))
 
 
-# ── cross-model comparability guards ─────────────────────────────────────────────
+# -- cross-model comparability guards ---------------------------------------------
 
 
 def test_ga_config_timing_toggles_default_to_model_pairing():
@@ -792,7 +792,7 @@ def test_fixed_delay_ablation_never_grows_a_delay_vector():
 
 def test_waveform_targets_declare_width_preserving_model():
     """Waveform contracts need input-dependent output durations, which only
-    width-preserving transport can emit — they declare supported_models so a
+    width-preserving transport can emit - they declare supported_models so a
     'uniform' run is filtered out instead of silently capping
     below 1.0. Event/trace targets stay open to every model."""
     for name in ('Pulse width sum (A+B)', 'Odd pulse selector'):
@@ -866,7 +866,7 @@ def test_gui_categories_group_combinational_and_pulse_width_targets():
     assert restored.category == 'Pulse width & duration'
 
 
-# ── standalone runner ────────────────────────────────────────────────────────────
+# -- standalone runner ------------------------------------------------------------
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

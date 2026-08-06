@@ -52,10 +52,10 @@ def _grown(genome, target):
             target, iop.io_strategy(target), genome))
 
 
-# ── default-path invariance ─────────────────────────────────────────────────────
+# -- default-path invariance -----------------------------------------------------
 
 def test_default_random_gene_draws_only_its_own_fields():
-    """A random gene must NOT consume extra RNG for I/O metadata — otherwise
+    """A random gene must NOT consume extra RNG for I/O metadata - otherwise
     every seeded run and golden reproduction would diverge. Bodies carry no I/O
     numbers at all now; the tag field defaults to 0 without a draw.
 
@@ -89,7 +89,7 @@ def test_random_genes_only_ever_hold_canonical_states():
         gene = random_hex_gene()
         for field in ('ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'):
             assert getattr(gene, field) in allowed
-    # terminal_nodes binding keeps 16/17 — there they are real, distinct I/O
+    # terminal_nodes binding keeps 16/17 - there they are real, distinct I/O
     # node types rather than aliases of dead / buffer-D.
     for _ in range(400):
         gene = random_hex_gene(terminals=True)
@@ -105,7 +105,7 @@ def test_default_genome_has_no_tags_or_wiring():
 
 def test_wiring_genome_leaves_body_genes_untagged():
     """Only the WIRING chromosome's genes carry port-map numbers; body genes
-    stay at tag 0 — the phenotype's cell types are the binding alphabet."""
+    stay at tag 0 - the phenotype's cell types are the binding alphabet."""
     g = _tagged_genome(7, wiring=True)
     body = [gene for c in g.chromosomes if not c.wiring for gene in c.genes]
     wiring = [gene for c in g.chromosomes if c.wiring for gene in c.genes]
@@ -172,7 +172,7 @@ def test_terminal_nodes_single_output_contract_has_exactly_one_sink():
 
 def test_terminal_states_are_seeded_and_mutate_as_a_body_gene_allele():
     # Nervous terminal identity is the GROWN STATE (16 = input, 17 = output), so
-    # seeding and mutation express it through ``self_out`` — not the io_kind tag.
+    # seeding and mutation express it through ``self_out`` - not the io_kind tag.
     random.seed(321)
     genome = random_hex_genome(
         n_chroms=2, terminal_nodes=True, n_inputs=2, n_outputs=1)
@@ -270,7 +270,7 @@ def test_terminal_bindings_are_not_fixed_across_genome_seeds():
 
     nv_bindings = []
     # Seeds are chosen for GROWING a bindable body, not for any property of the
-    # binding itself — a random genome is under no obligation to grow enough
+    # binding itself - a random genome is under no obligation to grow enough
     # terminals, and roughly half do not.
     for seed in (1, 2):
         random.seed(seed)
@@ -312,7 +312,7 @@ def test_default_mutation_stream_is_unchanged_by_evolve_io_flag():
     assert genome_signature(a) == genome_signature(b)
 
 
-# ── per-cell types (the binding alphabet IS the phenotype) ──────────────────────
+# -- per-cell types (the binding alphabet IS the phenotype) ----------------------
 
 def test_cell_tags_are_the_grid_states():
     g = _tagged_genome(7)
@@ -320,7 +320,7 @@ def test_cell_tags_are_the_grid_states():
     grid = _grown(g, tgt)
     tags = iop.cell_tags(g, grid)
     assert set(tags) == set(grid)
-    # a cell's type is literally its settled state — the Designer node type
+    # a cell's type is literally its settled state - the Designer node type
     assert all(tags[pos] == int(state) for pos, state in grid.items())
 
 
@@ -330,7 +330,7 @@ def test_a_grown_organism_expresses_several_distinct_cell_types():
     assert len(set(iop.cell_tags(g, grid).values())) >= 3
 
 
-# ── Method A: tag_rank (node-type rank) ─────────────────────────────────────────
+# -- Method A: tag_rank (node-type rank) -----------------------------------------
 
 def _genome_expressing_values(target, min_values, wiring=False, seeds=range(1, 80)):
     """Scan RNG seeds for a genome whose center-grown body expresses at least
@@ -369,11 +369,11 @@ def test_tag_rank_is_deterministic():
     assert iop.bind_io(g, grid, tgt) == iop.bind_io(g, grid, tgt)
 
 
-# ── Method B: wiring_chromosome ─────────────────────────────────────────────────────
+# -- Method B: wiring_chromosome -----------------------------------------------------
 
 def _force_wiring_desires(genome, values):
     """Overwrite the wiring chromosome's gene tags (the per-port desired CELL
-    TYPES), in order, with fresh gene copies. Harmless to the grown body — the
+    TYPES), in order, with fresh gene copies. Harmless to the grown body - the
     tag field has no effect on growth, only on I/O binding."""
     wiring = iop.wiring_chromosome(genome)
     genes = []
@@ -406,7 +406,7 @@ def test_wiring_chromosome_gene_i_maps_port_i_exact_match_only():
 
 def test_wiring_chromosome_unexpressed_desire_is_unbindable():
     """LOCK AND KEY: if any port desires a cell TYPE the grown body does not
-    contain, the organism has no I/O at all and scores 0 — random genomes
+    contain, the organism has no I/O at all and scores 0 - random genomes
     cannot wire themselves up by accident. Force the port map to desire type 7
     while the body expresses other types."""
     tgt = with_io_placement(coincidence_detector(), 'wiring_chromosome')
@@ -537,7 +537,7 @@ def test_binding_progress_grades_incomplete_maps_without_faking_fitness():
 
 
 def test_wiring_chromosome_too_short_is_unbindable():
-    """A port map with fewer genes than ports leaves ports unmapped — no
+    """A port map with fewer genes than ports leaves ports unmapped - no
     wrapping, the organism is unbindable."""
     g = _tagged_genome(7, wiring=True)
     tgt = with_io_placement(coincidence_detector(), 'wiring_chromosome')
@@ -570,7 +570,7 @@ def test_wiring_chromosome_has_no_implicit_body_fallback():
     assert iop.bind_io(g, _grown(g, tgt), tgt) is None
 
 
-# ── Method C: spatial_chromosome ───────────────────────────────────────────────
+# -- Method C: spatial_chromosome -----------------------------------------------
 
 def _spatial_genome(n_ports=3):
     return random_hex_genome(
@@ -823,7 +823,7 @@ def test_spatial_genome_factory_reserves_three_random_anchor_genes_all_backends(
             for value in (gene.tag, gene.io_selector))
 
 
-# ── organisms without enough numbers are unbindable (no I/O by accident) ────────
+# -- organisms without enough numbers are unbindable (no I/O by accident) --------
 
 def test_too_few_physical_cells_is_unbindable_under_tag_rank():
     # Node types may repeat; tag_rank needs one exclusive physical site per port.
@@ -835,7 +835,7 @@ def test_too_few_physical_cells_is_unbindable_under_tag_rank():
     assert score_temporal(g, tgt) == 0.0
 
 
-# ── leak-free validation (fit/freeze reuse the evolved binding) ─────────────────
+# -- leak-free validation (fit/freeze reuse the evolved binding) -----------------
 
 def _bindable_genome(strat, base, seeds=range(1, 120)):
     """Scan seeds for a genome that prepare_net can actually bind under the
@@ -877,7 +877,7 @@ def test_fixed_fit_readout_leaves_inputs_empty():
         assert fitted.input_positions(tgt) == list(tgt.inputs)
 
 
-# ── evolvability ─────────────────────────────────────────────────────────────────
+# -- evolvability -----------------------------------------------------------------
 
 def test_nervous_evolve_io_no_longer_mutates_mapping_alleles():
     """Retired for nervous: the port-map alleles are inert there now.
@@ -992,7 +992,7 @@ def test_signature_separates_genomes_that_differ_only_in_port_map():
     assert genome_signature(g) == genome_signature(legacy)
 
 
-# ── LUT backend ──────────────────────────────────────────────────────────────────
+# -- LUT backend ------------------------------------------------------------------
 
 def _lut_genome(seed, wiring=False):
     from substrates.lut.genome import random_lut_genome
@@ -1014,7 +1014,7 @@ def test_lut_default_random_gene_is_byte_identical():
 
 
 def test_lut_cell_io_tags_are_the_direction_luts():
-    """A LUT cell's TYPES are its nonzero directional tables — a cell may be
+    """A LUT cell's TYPES are its nonzero directional tables - a cell may be
     several types at once, and a port binds if its desired type matches ANY."""
     from substrates.lut.lut import grow_lut, cell_io_tags
     g = _lut_genome(5)
@@ -1108,7 +1108,7 @@ def test_seed_io_metadata_seeds_the_port_map_from_body_types():
     assert all(gene.io_selector == 0 for gene in wiring.genes)
 
 
-# ── SNN backend ──────────────────────────────────────────────────────────────────
+# -- SNN backend ------------------------------------------------------------------
 
 def _snn_genome(seed, wiring=False):
     from substrates.snn.genome import random_genome
@@ -1203,7 +1203,7 @@ def test_snn_evolve_io_gates_port_map_mutations():
     assert changed, "SNN evolve_io never changed a mapping allele"
 
 
-# ── nervous combinational path ───────────────────────────────────────────────────
+# -- nervous combinational path ---------------------------------------------------
 
 def test_nervous_combinational_honors_strategy():
     from substrates.nervous.nervous import (interpret_nervous, _resolve_io_binding,
@@ -1222,7 +1222,7 @@ def test_nervous_combinational_honors_strategy():
     setattr(t, 'io_placement', 'fixed')
 
 
-# ── checkpoint round-trip ────────────────────────────────────────────────────────
+# -- checkpoint round-trip --------------------------------------------------------
 
 def test_checkpoint_roundtrips_tags_and_wiring_all_backends():
     from runtime.checkpoint import genome_to_dict, genome_from_dict
@@ -1240,7 +1240,7 @@ def test_checkpoint_roundtrips_tags_and_wiring_all_backends():
         assert any(c.wiring for c in restored.chromosomes), backend
 
 
-# ── center-seeded growth under evolvable strategies ─────────────────────────────
+# -- center-seeded growth under evolvable strategies -----------------------------
 
 def test_checkpoint_migrates_retired_multisite_limits_to_one():
     from runtime.checkpoint import genome_to_dict, genome_from_dict
@@ -1325,8 +1325,8 @@ def test_random_genomes_rarely_score_under_the_wiring_lock():
     """The regression behind the exact-match gate: with near-total immigration
     the per-generation best is essentially the best of a RANDOM sample, and it
     stayed constantly high because binding never actually failed. Under the
-    cell-type lock, most random genomes fail to bind at all — their port map
-    desires cell TYPES the grown body doesn't contain — so best-of-random
+    cell-type lock, most random genomes fail to bind at all - their port map
+    desires cell TYPES the grown body doesn't contain - so best-of-random
     collapses toward 0."""
     tgt = with_io_placement(coincidence_detector(), 'wiring_chromosome')
     random.seed(2024)

@@ -1,9 +1,9 @@
 """
-tests/test_topology.py — structural selection and the gradient-jitter audit.
+tests/test_topology.py - structural selection and the gradient-jitter audit.
 
 Topology is the FINAL ranking tier: it prefers organisms with more usable
 hardware, and it must be blind to the task. The safety argument is entirely
-positional — `viability > fitness > robustness > juvenile > topology` — so a
+positional - `viability > fitness > robustness > juvenile > topology` - so a
 structurally rich wrong answer can never outrank a correct one.
 
 Also pinned here: the audit invariants from the gradient-jitter probe, and the
@@ -27,7 +27,7 @@ from substrates.nervous.targets import TEMPORAL_TARGETS            # noqa: E402
 from substrates.topology import EMPTY, Topology, measure           # noqa: E402
 
 
-# ── the aggregation ───────────────────────────────────────────────────────────
+# -- the aggregation -----------------------------------------------------------
 
 def test_every_count_earns_log1p_credit_with_diminishing_returns():
     assert Topology().score == 0.0
@@ -36,7 +36,7 @@ def test_every_count_earns_log1p_credit_with_diminishing_returns():
     hundred = Topology(reachable_nodes=100).score
     assert one < ten < hundred                       # more always helps
     # Diminishing returns means each ADDITIONAL node is worth less than the
-    # one before it — not that a ten-fold jump is worth less than the previous
+    # one before it - not that a ten-fold jump is worth less than the previous
     # ten-fold jump, which is false for any increasing function.
     first = Topology(reachable_nodes=2).score - one
     later = hundred - Topology(reachable_nodes=99).score
@@ -66,7 +66,7 @@ def test_the_fnv_and_nervous_aggregation_formulas_cannot_drift():
     assert shared.score == functional.score
 
 
-# ── what counts, and what does not ────────────────────────────────────────────
+# -- what counts, and what does not --------------------------------------------
 
 def test_unreachable_structure_earns_nothing():
     """A perfect ring in a corner no input can write to is not hardware."""
@@ -105,7 +105,7 @@ def test_loop_rank_counts_independent_cycles():
                    sources=[(0, 0)]).loop_rank == 2
 
 
-# ── tri3 must be measured at channel level ────────────────────────────────────
+# -- tri3 must be measured at channel level ------------------------------------
 
 def test_tri3_channels_in_one_tile_do_not_invent_a_loop():
     """Three electrically separate circuits share a tile coordinate.
@@ -148,7 +148,7 @@ def test_nervous_tri3_topology_uses_subnodes():
     raise AssertionError('no tri3 organism grew large enough')
 
 
-# ── ranking ───────────────────────────────────────────────────────────────────
+# -- ranking -------------------------------------------------------------------
 
 def test_topology_is_the_last_tier_and_never_outranks_fitness():
     rich, poor = random_hex_genome(2), random_hex_genome(2)
@@ -201,7 +201,7 @@ def test_topology_is_blind_to_the_target():
     assert len(scores) == 1
 
 
-# ── the gradient-jitter audit ─────────────────────────────────────────────────
+# -- the gradient-jitter audit -------------------------------------------------
 
 def test_evaluation_is_exactly_deterministic():
     """The audit's precondition: without this every number it prints is noise."""
@@ -220,7 +220,7 @@ def test_refitting_a_probe_does_not_lose_score():
     """Refitting picks the globally best assignment, so it cannot score BELOW a
     single frozen choice by more than the placement/contract objective gap.
 
-    A systematic loss here would mean the assignment is choosing badly — the one
+    A systematic loss here would mean the assignment is choosing badly - the one
     outcome that would make refitting incoherent rather than merely noisy.
     """
     sys.path.insert(0, os.path.join(

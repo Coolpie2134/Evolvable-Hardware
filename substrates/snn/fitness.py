@@ -23,7 +23,7 @@ def score(neurons, synapses, target: Target, in_pos=None) -> float:
     circuit gets right, for any registered Target.
 
     ``in_pos`` overrides the driven input positions (the evolvable io_placement
-    binding — must match the ``input_pos`` the grid was interpreted with);
+    binding - must match the ``input_pos`` the grid was interpreted with);
     None keeps the target's seed pads. Each entry may itself be a group of
     attachment cells: the logical input drives every member neuron, and a
     neuron shared by several inputs receives the strongest drive (wired-OR).
@@ -63,7 +63,7 @@ def score(neurons, synapses, target: Target, in_pos=None) -> float:
                 level = (target.high - base) if comp else base
                 for iid in ids:
                     # a neuron serving several logical inputs takes the
-                    # strongest drive — the wired-OR of the held levels
+                    # strongest drive - the wired-OR of the held levels
                     currents[iid] = max(currents.get(iid, 0.0), level)
             sims[comp] = simulate(neurons, synapses, currents)
         row = []

@@ -1,5 +1,5 @@
 """
-substrates/nervous/genome.py — genome native to the hexagonal nervous net.
+substrates/nervous/genome.py - genome native to the hexagonal nervous net.
 
 Fully self-contained: the nervous net shares *no* code with substrates.snn. The SNN's
 Gene has four neighbour fields (N/S/E/W) and forbids self_out==0; the hex node
@@ -13,9 +13,9 @@ unrouted cell), so it gets its own gene and its own container types:
 
 This mirrors the paper's associative-memory gene exactly: a context (the states
 of the neighbouring cells + the cell's own state) mapped to a new state, chosen
-by minimum Hamming distance. There is no per-gene time field — the paper's genes
+by minimum Hamming distance. There is no per-gene time field - the paper's genes
 are timeless. Growth is bounded biologically instead of by the paper's "artificial
-methods" (§7): each chromosome carries a telomere (a Hayflick division limit) so
+methods" (section 7): each chromosome carries a telomere (a Hayflick division limit) so
 the organism halts its own growth (see Chromosome + substrates/nervous/nervous.py).
 
 The genetic operators (mutation, crossover, selection) live in substrates/nervous/ga.py.
@@ -35,10 +35,10 @@ MAX_CHROMS   = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20        # longest evolvable growth phase (iterations)
 MAX_ROUTING_PATCHES = 16  # heritable mature-cell routing overrides
 
-# ── tile architectures ─────────────────────────────────────────────────────────
-# 'single' — the legacy engine: ONE Fig. 3 circuit per tile (5-bit state, one
+# -- tile architectures ---------------------------------------------------------
+# 'single' - the legacy engine: ONE Fig. 3 circuit per tile (5-bit state, one
 #            output net that every listening neighbour reads).
-# 'tri3'   — the paper's tile layout: THREE independent Fig. 3 circuits per
+# 'tri3'   - the paper's tile layout: THREE independent Fig. 3 circuits per
 #            tile, one per output direction (L/R/D). The 15-bit state packs
 #            three 5-bit channel configurations (chan L | chan R << 5 |
 #            chan D << 10), each indexing ROUTING_HEX exactly as a
@@ -48,13 +48,13 @@ MAX_ROUTING_PATCHES = 16  # heritable mature-cell routing overrides
 #            without it. tritile.widen_legacy_state migrates old states.)
 #            Because the channels occupy disjoint bit fields, Hamming context
 #            matching and single-bit mutation both act on one channel at a
-#            time — the genome exposes three independently mutable 5-bit
+#            time - the genome exposes three independently mutable 5-bit
 #            channels, not one flat 32768-way categorical value.
 TILE_ARCHS     = ('single', 'tri3')
 TRI_STATE_MAX  = 32768   # 15-bit tri-tile state; 0 = all three channels off (dead)
 ARCH_STATE_MAX = {'single': MAX_STATE, 'tri3': TRI_STATE_MAX}
 # Random tri genes keep the single-circuit death probability (1/32), not the
-# raw alphabet's 1/32768 — otherwise pruning states are essentially unreachable
+# raw alphabet's 1/32768 - otherwise pruning states are essentially unreachable
 # in random immigrants (the LUT genome seeds its zero rules explicitly for the
 # same reason).
 _TRI_DEATH_P   = 1.0 / 32.0
@@ -66,7 +66,7 @@ class HexGene:
     ctx_r:    int = 0
     ctx_d:    int = 0
     self_in:  int = 0
-    self_out: int = 0        # 0 = off / dead (native — no shift needed)
+    self_out: int = 0        # 0 = off / dead (native - no shift needed)
     # Heritable developmental node identity. 0 = ordinary body cell,
     # 1 = source-only input terminal, 2 = sink-only output terminal.
     io_kind:  int = 0
@@ -84,15 +84,15 @@ class HexGene:
 
 @dataclass
 class Chromosome:
-    """`telomere` is a HAYFLICK LIMIT — the number of times a lineage may still
+    """`telomere` is a HAYFLICK LIMIT - the number of times a lineage may still
     divide, not a global clock. The germline / seed cells start with telomere
     length L (see `germline_telomere`); every time a cell divides (births a live
     frontier cell) the daughter inherits its parent's telomere MINUS ONE. When a
     cell's telomere reaches 0 it is senescent: it stays alive and keeps its
     function (maintenance rules always apply), but it can no longer divide, so no
     new cell is born beyond it. Growth therefore halts on its own at radius L
-    from the seeds — the telomere alone bounds the organism's SIZE (replacing the
-    old grid_size clip) and its growth DURATION (≤ L rings, replacing the old
+    from the seeds - the telomere alone bounds the organism's SIZE (replacing the
+    old grid_size clip) and its growth DURATION (<= L rings, replacing the old
     fixed iteration cap). Telomere length is evolvable, so the genome itself
     decides how large it grows on the unbounded field."""
     genes: List[HexGene] = field(default_factory=list)
@@ -154,7 +154,7 @@ def nervous_input_positions(genome, fallback) -> tuple:
     declared pads. An evolved layout that is malformed, the wrong length,
     self-colliding, or not anchored at the origin returns NO pads, which makes
     the phenotype unbindable. That is deliberate: repairing an invalid layout
-    during evaluation — clamping, relocating, deduplicating — would score a
+    during evaluation - clamping, relocating, deduplicating - would score a
     genome for a body it does not encode, and would hide the very mutations
     that produced the invalid layout from selection.
     """
@@ -177,7 +177,7 @@ def nervous_input_positions(genome, fallback) -> tuple:
 def germline_telomere(genome) -> int:
     """The organism's germline telomere length L: the longest division program
     across its chromosomes. Seed cells start here; growth reaches radius L. A
-    genome with no chromosomes cannot divide (L falls back to 1 — seeds only)."""
+    genome with no chromosomes cannot divide (L falls back to 1 - seeds only)."""
     body = [c for c in genome.chromosomes if not getattr(c, 'wiring', False)]
     return max((getattr(c, 'telomere', 1) for c in body), default=1)
 
@@ -221,8 +221,8 @@ class Genome:
     # input order. ``None`` marks a fixed-input genome that reads its pads from
     # the target instead.
     #
-    # Position in this tuple IS the logical identity of the input — pad 0 is
-    # input 0 — so no per-pad numeric parameter is needed or wanted. Input 0 is
+    # Position in this tuple IS the logical identity of the input - pad 0 is
+    # input 0 - so no per-pad numeric parameter is needed or wanted. Input 0 is
     # pinned to the origin purely as a coordinate gauge: translating a whole
     # organism changes nothing behaviourally, so letting it drift would add a
     # dimension of pure neutral wandering. Every genuine RELATIVE placement is
@@ -231,7 +231,7 @@ class Genome:
     # This replaces the grown input-terminal strategies. A grown terminal has a
     # cliff: a genome that fails to express one required terminal gets no
     # meaningful evaluation at all. Discrete pads always preserve the required
-    # pad count, so the placement neighbourhood is smooth and local — one pad,
+    # pad count, so the placement neighbourhood is smooth and local - one pad,
     # one honeycomb edge.
     input_layout: tuple = None
 
@@ -269,7 +269,7 @@ def random_hex_gene(arch='single', tag_range=0, terminals=False) -> HexGene:
     # self_in == 0 makes a GROWTH rule: it matches empty cells and is the only
     # kind that can bring an empty cell to life under the sim6 empty-cell guard
     # (division is further gated by the parent's Hayflick telomere). Random
-    # genomes need a healthy share of them or nothing ever grows — sim6 gets this
+    # genomes need a healthy share of them or nothing ever grows - sim6 gets this
     # for free because table_create manufactures a gene for every empty-cell
     # context it meets.
     #
@@ -289,7 +289,7 @@ def random_hex_gene(arch='single', tag_range=0, terminals=False) -> HexGene:
     # Context fields are canonical too: they are Hamming-match ANCHORS against
     # real cell states, and a cell can now only ever hold a canonical state, so
     # an alias anchor could never sit at distance 0 from the circuit it is
-    # trying to name — a silent handicap on half the drawn contexts.
+    # trying to name - a silent handicap on half the drawn contexts.
     return HexGene(
         ctx_l    = _canonical_draw(terminals),
         ctx_r    = _canonical_draw(terminals),

@@ -1,11 +1,11 @@
 """
-tools/divergence_screen.py — which targets can tell the node models apart?
+tools/divergence_screen.py - which targets can tell the node models apart?
 
 The nervous node models differ in ONE thing: where a node's output pulse width
 comes from (a global constant, or the incoming pulse). Delay is identical in
 both. So on a target whose stimulus is all base-width pulses and whose circuits
 never overlap pulses on a multi-input node, the models can produce *literally
-the same behaviour* — evolving on it compares nothing, at full compute cost.
+the same behaviour* - evolving on it compares nothing, at full compute cost.
 
 This screen finds out empirically, with NO evolution: score the same random
 genomes under each model and count how often the score differs. Cheap (a few

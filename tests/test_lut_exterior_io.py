@@ -4,8 +4,6 @@ from __future__ import annotations
 import dataclasses
 import random
 
-import pytest
-
 from runtime.checkpoint import genome_from_dict, genome_to_dict
 from runtime.config import GAConfig, RunConfig
 from substrates.lut import ga as lut_ga
@@ -167,5 +165,9 @@ def test_lut_io_mode_round_trips_and_rejects_unknown_values():
     config = RunConfig(ga=GAConfig(lut_io_mode='exterior_edges'))
     restored = RunConfig.from_dict(dataclasses.asdict(config))
     assert restored.ga.lut_io_mode == 'exterior_edges'
-    with pytest.raises(ValueError, match='lut_io_mode'):
+    try:
         GAConfig(lut_io_mode='inside_out')
+    except ValueError as exc:
+        assert 'lut_io_mode' in str(exc)
+    else:
+        raise AssertionError('unknown lut_io_mode must raise ValueError')

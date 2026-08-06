@@ -6,7 +6,7 @@ from typing import List
 from runtime.limits import MAX_CHROMOSOME_COUNT
 
 MAX_ITER     = 12        # legacy per-gene time cap (kept only for pickle compat)
-GRID_SIZE    = 9         # field size — a generous OUTER bound; the telomere is
+GRID_SIZE    = 9         # field size - a generous OUTER bound; the telomere is
                          # now the real limiter and normally halts growth first
 MAX_STATE    = 16
 MAX_GENES    = 24
@@ -34,7 +34,7 @@ class Gene:
 class Chromosome:
     """`telomere` is a HAYFLICK division limit, mirroring substrates/nervous: seed cells start
     with the germline length L, and each division hands the daughter one less. A
-    cell at telomere 0 is senescent — still alive and functional, but it can no
+    cell at telomere 0 is senescent - still alive and functional, but it can no
     longer birth a neighbour, so growth self-limits at radius L from the seeds
     (replacing the old fixed iteration cap). Telomere length is evolvable, so the
     genome decides how large it grows; the GRID_SIZE walls are just an outer
@@ -56,7 +56,7 @@ class Genome:
 
 def germline_telomere(genome) -> int:
     """The organism's germline telomere L: the longest division program across
-    its chromosomes (seed cells start here). No chromosomes → 1 (seeds only)."""
+    its chromosomes (seed cells start here). No chromosomes -> 1 (seeds only)."""
     body = [c for c in genome.chromosomes if not getattr(c, 'wiring', False)]
     return max((getattr(c, 'telomere', 1) for c in body), default=1)
 

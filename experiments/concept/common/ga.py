@@ -13,7 +13,7 @@ this module shares them.
 import random
 import functools
 
-# ── Rebuild flags (which parts of state to regenerate between runs) ──
+# -- Rebuild flags (which parts of state to regenerate between runs) --
 GEN_POP   = 1    # regenerate population
 GEN_START = 2    # regenerate starting (seed) state
 GEN_CHEM  = 4    # regenerate chemistry map
@@ -34,11 +34,11 @@ def do_one_generation(population, evaluate_fn, fitness_scale,
     Parameters
     ----------
     population    : list of Individual
-    evaluate_fn   : callable(organism) — sets organism.fitness in place
-    fitness_scale : int  — fitness is raised to this power for selection
-    ancestor_fn   : optional callable(org1, org2) → bool
+    evaluate_fn   : callable(organism) - sets organism.fitness in place
+    fitness_scale : int  - fitness is raised to this power for selection
+    ancestor_fn   : optional callable(org1, org2) -> bool
                     if provided, used to avoid incestuous pairings
-    mutate_fn     : optional callable(org) — used as fallback when
+    mutate_fn     : optional callable(org) - used as fallback when
                     ancestor avoidance cannot find a valid pair
 
     Returns
@@ -48,7 +48,7 @@ def do_one_generation(population, evaluate_fn, fitness_scale,
     """
     popsize = len(population)
 
-    # ── evaluate ──
+    # -- evaluate --
     totalfit = 0
     for org in population:
         evaluate_fn(org)
@@ -65,7 +65,7 @@ def do_one_generation(population, evaluate_fn, fitness_scale,
         py = [population[(i + 1) % popsize] for i in pairs]
         return px, py
 
-    # ── fitness-proportional mating slot allocation ──
+    # -- fitness-proportional mating slot allocation --
     pairings_x = [None] * popsize
     pairings_y = [None] * popsize
     residual   = 0

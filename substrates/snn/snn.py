@@ -59,7 +59,7 @@ def interpret_grid(grid, n_outputs=1, target=None, arch=None,
     inputs and outputs). Otherwise the legacy 2-seed, sum/carry heuristic is used
     (controlled by n_outputs) so existing callers keep working unchanged.
 
-    `input_pos` / `output_pos` override the port binding — the evolvable
+    `input_pos` / `output_pos` override the port binding - the evolvable
     io_placement path (substrates/nervous/io_placement.py) passes the genome's tag-chosen
     cells here: `input_pos` is the ordered list of driven cells, `output_pos` is
     {role: (x, y)}. None keeps the target/legacy layout unchanged.

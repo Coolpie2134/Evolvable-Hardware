@@ -1,5 +1,5 @@
 """
-tests/run_tests.py — run the whole test suite with bare Python (no pytest needed).
+tests/run_tests.py - run the whole test suite with bare Python (no pytest needed).
 
     py tests/run_tests.py
 
@@ -70,7 +70,16 @@ def main():
     total = passed = 0
     failures = []
     for fname in files:
-        module = _load(os.path.join(HERE, fname))
+        # A module that cannot even import is one failure, not a dead sweep:
+        # the remaining files still have to report.
+        try:
+            module = _load(os.path.join(HERE, fname))
+        except Exception as e:                     # noqa: BLE001
+            total += 1
+            print("\n%s  (failed to import)" % fname)
+            print("  ERROR  %s: %s" % (type(e).__name__, e))
+            failures.append("%s\n%s" % (fname, traceback.format_exc()))
+            continue
         tests = [v for k, v in sorted(vars(module).items())
                  if k.startswith('test_') and callable(v)]
         print("\n%s  (%d tests)" % (fname, len(tests)))

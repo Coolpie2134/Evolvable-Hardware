@@ -1,20 +1,20 @@
 """
-substrates/nervous/oracle.py — targets defined by a reference model, not hand-picked traces.
+substrates/nervous/oracle.py - targets defined by a reference model, not hand-picked traces.
 
 Hand-writing "input pulses at ticks 3,5 -> output at tick 8" bakes OUR timing
 into the goal, and a circuit can plateau not because it fails the function but
 because our chosen timing fights its internal phase (an evolved SR latch with a
-period-2 loop resets fine on even ticks and misses odd ones — the timing was
+period-2 loop resets fine on even ticks and misses odd ones - the timing was
 adversarial, not the latch broken).
 
 An oracle target instead specifies the goal as:
-    * an ORACLE — a tiny reference state machine  oracle(in_bits, state) ->
+    * an ORACLE - a tiny reference state machine  oracle(in_bits, state) ->
       (out_bits, new_state)  that defines the intended input->output relation;
     * a STIMULUS GENERATOR that samples random input schedules.
 Many schedules are sampled; the oracle labels each; the circuit is scored on
 reproducing the RELATION across all of them (with the usual response-latency
 grace + phase-tolerant holds). Solving means implementing the function, not
-memorising a timing — and `holdout_score` re-samples fresh schedules to certify
+memorising a timing - and `holdout_score` re-samples fresh schedules to certify
 it generalises.
 
 Autonomous behaviours (oscillator, free-running pattern) are not input-driven
@@ -32,7 +32,7 @@ from .contracts import (cadence_step_contract, event_contract,
                         interval_contract, state_contract)
 
 
-# ── reference oracles (in_bits, state) -> (out_bits, new_state) ──────────────────
+# -- reference oracles (in_bits, state) -> (out_bits, new_state) ------------------
 
 def orc_sr_latch(inb, st):
     q = st or 0
@@ -81,11 +81,11 @@ def make_pair(gap):
 def make_gated_oscillator():
     """Run/stop memory: input A (START) injects a pulse into a period-2 loop so
     the output oscillates; input B (STOP) is an inhibitory input that drains it.
-    This is the paper's core memory image made input-driven — "a pulse circulates
-    a loop of buffers until stopped by an inhibitory input" (§3). Period 2 is even,
+    This is the paper's core memory image made input-driven - "a pulse circulates
+    a loop of buffers until stopped by an inhibitory input" (section 3). Period 2 is even,
     so the bipartite honeycomb reaches it on the cheap one-pulse route; the LUT
     recurrent CA holds the same two-state cycle. START fixes the phase, so the
-    ordinary latency-invariant F1 scores it — no special mode needed. STOP wins a
+    ordinary latency-invariant F1 scores it - no special mode needed. STOP wins a
     tie so a simultaneous START/STOP leaves it drained, matching an inhibitory
     veto overriding excitation on the same tick."""
     def f(inb, st):
@@ -103,7 +103,7 @@ def make_gated_oscillator():
 
 def make_resettable_toggle():
     """T flip-flop with an asynchronous clear: input A flips the stored bit, input
-    B forces it to 0. A toggle loop guarded by an inhibitory reset line — memory
+    B forces it to 0. A toggle loop guarded by an inhibitory reset line - memory
     plus a veto, both primitives the substrate already has. B wins a tie so a
     simultaneous flip+clear clears."""
     def f(inb, st):
@@ -119,12 +119,12 @@ def make_resettable_toggle():
 def make_pulse_doubler():
     """Pulse-width doubler: an input pulse held for x ticks produces an output
     pulse held for 2x ticks (starting with the input). The circuit must MEASURE
-    the input's duration, not just respond to its edge — a fixed delay-line
+    the input's duration, not just respond to its edge - a fixed delay-line
     cheat (out = in OR delay_k(in), width x+k) only doubles the single width
     x = k, so the trial bank mixes several widths to force real measurement.
 
     As a state machine: while the input is high, output high and bank one tick
-    of 'debt'; after it falls, keep the output high until the debt is repaid —
+    of 'debt'; after it falls, keep the output high until the debt is repaid -
     x during + x after = 2x total, contiguous. A pulse arriving during the tail
     merges (output stays high, debt accumulates), conserving total output = 2 x
     total input ticks."""
@@ -140,7 +140,7 @@ def make_pulse_doubler():
 
 def orc_period_doubler(inb, st):
     """Divide-by-2 over edges: emit on the 1st, 3rd, 5th, ... input pulse, so a
-    periodic input train of period p yields a periodic output of period 2p —
+    periodic input train of period p yields a periodic output of period 2p -
     the output "doubles the period" (halves the rate). Edge-native: the input
     information is inter-edge INTERVALS, exactly what an asynchronous substrate
     computes with (a held level would be one edge and carry no period at all)."""
@@ -195,17 +195,17 @@ def make_a_batch_parity_query():
 
 
 def make_c_element():
-    """Muller C-element in transition signalling — a 2-input rendezvous / join.
+    """Muller C-element in transition signalling - a 2-input rendezvous / join.
 
     Emit an output event only once BOTH inputs have produced an edge, in EITHER
     order, then rearm and wait for the next pair. A lone edge on one input must
     NOT emit; the element has to REMEMBER that the first input arrived while it
-    waits for the second — so this is a stored-state element, the asynchronous
+    waits for the second - so this is a stored-state element, the asynchronous
     handshake keystone (the C-element is what joins the two rails of a
     micropipeline). The stored state is which inputs have arrived this round.
 
-    (The textbook level-mode C-element — output high while both inputs are high,
-    holding on disagreement — is not a natural fit for an edge-coincidence
+    (The textbook level-mode C-element - output high while both inputs are high,
+    holding on disagreement - is not a natural fit for an edge-coincidence
     substrate that has no level-AND; transition signalling is the faithful
     encoding and is the same device in event form.)"""
     def f(inb, st):
@@ -340,13 +340,13 @@ def make_period_stepper(base=2, step=2, max_period=6):
     return f
 
 
-# ── stimulus generation ─────────────────────────────────────────────────────────
+# -- stimulus generation ---------------------------------------------------------
 
 def sample_streams(rng, T, n_inputs, min_gap=4, jitter=4, align_prob=0.0,
                    global_gap=False):
     """A list[T] of random input-bit tuples. Each input gets a sparse pulse
     train (gap >= min_gap, random jitter). `align_prob` occasionally fires all
-    inputs on the SAME tick — needed so coincidence/pair targets see positive
+    inputs on the SAME tick - needed so coincidence/pair targets see positive
     cases instead of almost-always-0."""
     ons = [set() for _ in range(n_inputs)]
     if global_gap:
@@ -386,12 +386,12 @@ def sample_streams(rng, T, n_inputs, min_gap=4, jitter=4, align_prob=0.0,
 
 
 def label_trace(oracle, streams, T, latency):
-    """Run the oracle over a stream and shift its output right by `latency` — the
-    circuit's (deterministic, path-length) propagation delay — so the expected
+    """Run the oracle over a stream and shift its output right by `latency` - the
+    circuit's (deterministic, path-length) propagation delay - so the expected
     trace lines up with when a correct circuit actually responds. The first
     `latency` ticks are startup grace (unscored). No transition masking: that
     would swallow short pulses; the scorer's own phase-tolerant hold rule gives
-    the ±1 slack that level-holds need, and pulse relations have a fixed delay
+    the +/-1 slack that level-holds need, and pulse relations have a fixed delay
     the circuit matches exactly."""
     raw, st = [], None
     for t in range(T):
@@ -400,7 +400,7 @@ def label_trace(oracle, streams, T, latency):
     return [None] * latency + raw[:max(0, T - latency)]
 
 
-# ── target builder ──────────────────────────────────────────────────────────────
+# -- target builder --------------------------------------------------------------
 
 def oracle_target(name, oracle, inputs, output_role, T=24, n_trials=12,
                   seed=20260702, latency=2, min_gap=5, jitter=4, align_prob=0.0,
@@ -457,7 +457,7 @@ def _event_bank_target(name, oracle, inputs, pulse_banks, T, latency,
 # rises: at zero clearance the models disagree (the legacy engine emits a new
 # edge at a touch, width-preserving transport unions touching drives into one
 # waveform), and any overlap merges two labelled stimulus events into ONE
-# physical edge — unreachable expected output in every model.
+# physical edge - unreachable expected output in every model.
 _WIDTH_CLEARANCE = 0.5
 
 
@@ -515,7 +515,7 @@ def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None,
     ``physics_from`` is the training target carrying the run's physics config
     (pulse/lut); it is copied onto the freshly built spec targets so validation
     runs under the SAME node-timing model as training (else a non-default model
-    would be scored under the default uniform physics — see certification.py)."""
+    would be scored under the default uniform physics - see certification.py)."""
     from .evaluation import fit_readout, score_frozen
     from .certification import carry_physics
 
@@ -532,7 +532,7 @@ def holdout_score(genome, spec, backend='nervous', seed=999, fitted=None,
     return score_frozen(genome, build(seed=seed), fitted)
 
 
-# ── preset oracle targets (input-driven relations) ──────────────────────────────
+# -- preset oracle targets (input-driven relations) ------------------------------
 
 def sr_latch_oracle(seed=20260702):
     # min_gap 10 with the default jitter put EVERY hold interval in the band
@@ -554,7 +554,7 @@ def sr_latch_oracle(seed=20260702):
         'Input A sets one stored bit; input B resets it; otherwise Q retains its '
         'previous state.',
         'Twelve seeded random schedules spanning a wide range of hold durations, '
-        'plus explicit never-set, short-hold, long-hold and Set→Reset→Set tests, '
+        'plus explicit never-set, short-hold, long-hold and Set->Reset->Set tests, '
         'exercise storage, clearing, and reloading.'))
     # Persistence guardrails: silence without Set, a Set->Reset->Set trial that
     # requires the same circuit to store, clear, and store again, and a pair
@@ -774,7 +774,7 @@ def gated_oscillator_oracle(seed=20260702):
     # must NOT fall through to the default state contract: this target's active
     # epochs are single ticks of a period-2 cadence, every one of them shorter
     # than a legal circulation gap, so a state contract drops all of them and
-    # scores the case on its quiet epochs alone — under which silence, a single
+    # scores the case on its quiet epochs alone - under which silence, a single
     # pulse and a correct oscillator are indistinguishable at 1.0.
     return oracle_target('Gated oscillator (oracle)', make_gated_oscillator(),
                          [(0, 1), (0, 3)], 'Q',
@@ -1068,14 +1068,14 @@ def a_batch_parity_query_oracle(seed=20260716):
 def period_doubler_oracle(seed=20260702, periods=(2, 3, 4)):
     """Period-doubler trials: periodic input trains of MIXED periods p, each
     expecting an output train of period 2p (every 2nd input edge). Mixing
-    periods is the anti-cheat — a free-running oscillator or any fixed-cadence
-    responder fits at most one input rate — and the silent guard trial kills
+    periods is the anti-cheat - a free-running oscillator or any fixed-cadence
+    responder fits at most one input rate - and the silent guard trial kills
     oscillators outright (no input => no output). Phases vary per trial so a
     phase-locked fake can't memorise tick positions.
 
     Period 1 is deliberately EXCLUDED: a pulse every tick wired-OR merges into
     one held level (one edge), physically indistinguishable from constant
-    input on both substrates — it carries no period."""
+    input on both substrates - it carries no period."""
     T, latency, rng = 30, 1, random.Random(seed)
     trials = []
 
@@ -1180,7 +1180,7 @@ def period_halver_oracle(seed=20260702, periods=(4, 6, 8)):
 
 
 def temporal_sum_oracle(seed=20260702):
-    """Encode ΔA + ΔB as the interval between two output events.
+    """Encode deltaA + deltaB as the interval between two output events.
 
     Each positive trial supplies exactly two A events and two B events. Once
     both input intervals are complete, Q emits a start event and a finish event
@@ -1217,8 +1217,8 @@ def temporal_sum_oracle(seed=20260702):
         [OutputTerminal('Q', (2, 2))], T, trials,
         grid_size=5, iters=30,
         description=describe_target(
-            'Measure the interval ΔA between two A events and ΔB between two B '
-            'events, then emit two Q events separated by ΔA + ΔB seconds.',
+            'Measure the interval deltaA between two A events and deltaB between two B '
+            'events, then emit two Q events separated by deltaA + deltaB seconds.',
             'Nine seeded schedules vary both intervals and lane ordering. '
             'A-only, B-only, incomplete, and silent guards forbid direct '
             'connections and fixed bursts.'),
@@ -1281,7 +1281,7 @@ def c_element_oracle(seed=20260702):
             'Transition-signalling Muller C-element (2-input rendezvous/join): '
             'emit Q once BOTH inputs have produced an edge, in either order, '
             'then rearm. Remembering the first arrival while waiting for the '
-            'second is the stored state — the asynchronous handshake keystone.',
+            'second is the stored state - the asynchronous handshake keystone.',
             'Ten seeded mixed schedules each contain A-first, B-first, '
             'simultaneous, repeated-first, incomplete, and re-arm cases. A-only, '
             'B-only, and silent guards forbid single-input echoes, wired OR, and '

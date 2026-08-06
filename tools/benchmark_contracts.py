@@ -87,7 +87,7 @@ def _effective_target(substrate, target):
     every combinational target in the periodic asynchronous encoding before
     handing it to the GA (see AsyncApp._targets_for_backend). Benchmarking the
     raw table instead measured a path the product does not use, and understated
-    those rows badly — under an identical budget AND and OR reach 1.0 through
+    those rows badly - under an identical budget AND and OR reach 1.0 through
     the wrapper and stall at 0.83 without it.
     """
     if substrate == 'snn' or getattr(target, 'temporal', False):

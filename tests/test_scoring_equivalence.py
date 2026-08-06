@@ -77,7 +77,7 @@ def test_logic_contract_rejects_constant_shortcuts():
 
 def test_lopsided_logic_gate_gives_a_constant_no_edge():
     # The degeneracy the old flat-mean aggregation hid: AND is 1 in only one of
-    # four rows, so always-0 used to score 0.75 — a do-nothing circuit looked
+    # four rows, so always-0 used to score 0.75 - a do-nothing circuit looked
     # three-quarters solved. Balanced per-output aggregation pins any constant
     # to 0.5 (chance) regardless of how lopsided the truth table is, so the
     # gradient points at the function, not at the majority output value.
@@ -91,7 +91,7 @@ def test_lopsided_logic_gate_gives_a_constant_no_edge():
 
 
 def test_logic_contract_rewards_partial_correctness_monotonically():
-    # Fixing one more row must never lower the score — evolution needs the
+    # Fixing one more row must never lower the score - evolution needs the
     # gradient. AND: rows sorted so the single expected-1 row is corrected last.
     target = gate_target('AND')
     expected = [out[0] for _, out in target.cases]
@@ -576,7 +576,7 @@ def test_no_target_carries_a_hand_written_scoring_description():
 
     Targets used to embed a 'Scoring:' paragraph chosen when the target was
     written. After the contract rewrite the GUI printed that stale prose
-    directly above the contract that actually scored — two descriptions, one of
+    directly above the contract that actually scored - two descriptions, one of
     them wrong. describe_target() now emits Goal/Tests only.
     """
     for name, target in TEMPORAL_TARGETS.items():

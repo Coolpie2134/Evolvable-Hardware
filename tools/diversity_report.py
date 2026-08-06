@@ -1,5 +1,5 @@
 """
-tools/diversity_report.py — characterise an evaluated population.
+tools/diversity_report.py - characterise an evaluated population.
 
 Fitness spread is zero once everyone solves, so this reports structure instead:
 the four-level collapse funnel (substrates/nervous/diversity.py) and, optionally, the

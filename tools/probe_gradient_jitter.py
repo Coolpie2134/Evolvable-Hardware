@@ -1,17 +1,17 @@
 """
-tools/probe_gradient_jitter.py — is the fitness gradient rough because the
+tools/probe_gradient_jitter.py - is the fitness gradient rough because the
 ORGANISM changed, or merely because the output PROBE moved?
 
 Whole-organism fitted probes answered one half of the old OUT_RADIUS objection
-(lucky far-off cells inflating fitness — refuted by held-out certification). The
+(lucky far-off cells inflating fitness - refuted by held-out certification). The
 other half was never measured: that the selected probe JITTERS between similar
 genomes and roughens the gradient.
 
 Those are different defects with different fixes, and they are separable. For
 each parent genome this probe scores every one-step mutant TWICE:
 
-    frozen   — the mutant is read at the PARENT's probe cells;
-    refitted — the mutant chooses its own probes over the whole organism.
+    frozen   - the mutant is read at the PARENT's probe cells;
+    refitted - the mutant chooses its own probes over the whole organism.
 
 Then:
 
@@ -122,7 +122,7 @@ def audit(parents=6, mutants=12, verbose=False, seed=20260728):
         genome = _layout_genome(target, arch)
         scores = {evaluate_nv_full(genome, target)[0] for _ in range(4)}
         assert len(scores) == 1, (name, arch, scores)
-    print('  ok — repeated evaluation is exact\n')
+    print('  ok - repeated evaluation is exact\n')
 
     header = ('%-22s %-7s %7s %9s %9s %8s %8s'
               % ('target', 'arch', 'n', 'rugged', 'jitter', 'churn', 'invalid'))
@@ -207,17 +207,17 @@ def audit(parents=6, mutants=12, verbose=False, seed=20260728):
     # Both look identical here. The sign does separate a third case: refitting
     # that ACTIVELY LOSES score is incoherent and would be a real defect.
     # Whether the rescues are honest was settled elsewhere, by held-out
-    # certification — no OVERFIT verdicts, held-out within 0.02 of train.
+    # certification - no OVERFIT verdicts, held-out within 0.02 of train.
     if damaged > 0.05 * max(1, len(signed)):
         print('VERDICT: refitting sometimes SCORES WORSE than the frozen probe.')
-        print('  That is incoherent — the global assignment should dominate one')
+        print('  That is incoherent - the global assignment should dominate one')
         print('  fixed choice. Investigate before anything else.')
     elif ratio < 0.5:
         print('VERDICT: developmental ruggedness dominates. The landscape is')
         print('  hard; refitting is not what makes it hard.')
     else:
         print('VERDICT: the probe moves often, and refitting almost always')
-        print('  RAISES the score — it is rescuing mutants whose output moved,')
+        print('  RAISES the score - it is rescuing mutants whose output moved,')
         print('  not randomising them. Combined with the certification result')
         print('  (no OVERFIT, held-out within 0.02 of train) these are honest')
         print('  rescues, so this is NOT evidence for proximity bias or')

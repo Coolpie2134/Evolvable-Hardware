@@ -1,5 +1,5 @@
 """
-tests/test_oracle_logic.py — the reference state machines that DEFINE the
+tests/test_oracle_logic.py - the reference state machines that DEFINE the
 input-driven temporal targets. These are the ground truth every evolved circuit
 is scored against, so a change to one silently redefines the goal; pin them.
 
@@ -167,7 +167,7 @@ def test_binary_truth_tables_become_phase_locked_periodic_targets():
 def test_multi_output_gate_cannot_coast_on_the_easy_output():
     """A half adder has an easy output (carry = AND) and a hard one (sum = XOR).
     A plain mean over outputs let a circuit solve only the carry and blanket the
-    sum for (1.0 + 0.5)/2 = 0.75 — a comfortable plateau with no gradient toward
+    sum for (1.0 + 0.5)/2 = 0.75 - a comfortable plateau with no gradient toward
     the hard bit. Mean-AND-worst aggregation must (a) penalise that solve well
     below 0.75, (b) make the WEAK output dominate, and (c) still award 1.0 only
     when BOTH outputs are perfect."""
@@ -180,7 +180,7 @@ def test_multi_output_gate_cannot_coast_on_the_easy_output():
     assert len(roles) == 2
 
     def score(strong_only=None):
-        """strong_only=None → both outputs follow truth; else that role follows
+        """strong_only=None -> both outputs follow truth; else that role follows
         truth and the other blankets (fires in every case window)."""
         data, events = {}, {}
         for role in roles:
@@ -210,7 +210,7 @@ def test_multi_output_gate_cannot_coast_on_the_easy_output():
     # 0.75 mean, toward the ~0.625 the mean-AND-worst blend gives.
     assert carry_only < 0.70 and sum_only < 0.70
     # (b) the score is dragged toward the weak (blanketed, ~0.5) output, not the
-    # perfect one — i.e. the hard output carries the weight.
+    # perfect one - i.e. the hard output carries the weight.
     assert carry_only < 0.5 + 0.5 * (1.0 - 0.5)         # < midpoint of 0.5..1.0
 
 
@@ -249,8 +249,8 @@ def test_lopsided_truth_tables_do_not_reward_indiscriminate_firing():
         return trial.expected_events.get(role, ())
 
     # EVERY combinational target, not a hand-picked few. This list used to name
-    # NAND/NOR/XNOR/Majority-3 only, and OR — whose sole 0 is the dropped
-    # all-zero row — scored a perfect 1.0 for blanket firing underneath it.
+    # NAND/NOR/XNOR/Majority-3 only, and OR - whose sole 0 is the dropped
+    # all-zero row - scored a perfect 1.0 for blanket firing underneath it.
     from substrates.snn.targets import TARGETS
 
     checked = 0
@@ -302,7 +302,7 @@ def test_all_zero_rows_are_presented_even_when_their_level_is_redundant():
     """OR's sole 0 sits on the all-zero row, which silence cannot present.
 
     Without a strobe every PRESENTED OR window expects 1, level balancing has
-    one group to average, and a constant output scores a flawless 1.0 — OR
+    one group to average, and a constant output scores a flawless 1.0 - OR
     "solved" that way in the contract benchmark. The strobe rule is therefore
     not 'the zero row must fire' but 'presenting the zero row changes what is
     measurable', and a low zero row can be just as load-bearing as a high one.
@@ -392,7 +392,7 @@ def test_period_doubler_bank_mixes_periods():
     """The registry bank must mix MULTIPLE input periods (a fixed free-running
     cadence fits only one) and include a silent guard trial (kills oscillators).
     Period 1 must NOT appear: a pulse every tick wired-OR merges into one held
-    level — physically it carries no period."""
+    level - physically it carries no period."""
     t = TEMPORAL_TARGETS['Period doubler (2x)']
     assert _is_event_target(t)
     periods, silent = set(), 0
@@ -465,7 +465,7 @@ def test_period_halver_measures_then_emits_at_half_period():
 
 
 def test_temporal_sum_encodes_delta_a_plus_delta_b():
-    name = 'Temporal sum (ΔA + ΔB)'
+    name = 'Temporal sum (deltaA + deltaB)'
     target = TEMPORAL_TARGETS[name]
     assert _is_event_target(target) and target.n_inputs == 2
     sums, positive, guards = set(), 0, 0
@@ -495,7 +495,7 @@ def test_new_interval_targets_reject_direct_wires_and_fixed_oscillators():
     names = (
         'Period tripler (3x)',
         'Period halver (1/2x)',
-        'Temporal sum (ΔA + ΔB)',
+        'Temporal sum (deltaA + deltaB)',
     )
     for name in names:
         target = TEMPORAL_TARGETS[name]
@@ -682,7 +682,7 @@ def test_stimuli_actually_present_the_clause_that_needs_memory():
             after = [r for r in resets if r > at]
             holds.append((after[0] if after else latch.T) - at)
     assert holds and max(holds) >= 3 * min(holds), (
-        'hold durations span only %d..%d — a fixed-length burst fits them all'
+        'hold durations span only %d..%d - a fixed-length burst fits them all'
         % (min(holds), max(holds)))
 
     # Collision serializer: the queue must actually back up, and every token
@@ -693,12 +693,12 @@ def test_stimuli_actually_present_the_clause_that_needs_memory():
     events = sum(1 for trial in serializer.trials
                  for value in trial.expected['Q'] if value == 1)
     assert tokens == events, (
-        '%d tokens in but %d events out — the horizon is dropping tokens'
+        '%d tokens in but %d events out - the horizon is dropping tokens'
         % (tokens, events))
     ticks = sum(len({t for t, row in enumerate(trial.streams) if any(row)})
                 for trial in serializer.trials)
     assert tokens >= 1.35 * ticks, (
-        'only %.2f tokens per input tick — too few collisions to punish a '
+        'only %.2f tokens per input tick - too few collisions to punish a '
         'wired-OR' % (tokens / ticks))
 
 
@@ -758,7 +758,7 @@ def test_one_shot_hold_outlasts_a_single_pulse():
     scorer but not the next one. Under the current state contract an active
     window is credited when its longest silence is within
     allowed_gap = 2*(delay + pulse width) = 4, and a lone pulse at the centre of
-    a d-tick window leaves silences of (d - 1)/2 — so d must exceed 9 or an echo
+    a d-tick window leaves silences of (d - 1)/2 - so d must exceed 9 or an echo
     scores 1.000 again. Pin the property, not the number.
     """
     from substrates.nervous import pulse
@@ -806,7 +806,7 @@ def test_one_shot_hold_outlasts_a_single_pulse():
     for offset in (1, 2, len(target.trials) // 2, 8):
         echo = score(lambda fires, trial, d=offset: [f + d for f in fires])
         assert echo < 0.95, (
-            'a bare echo at offset %d scores %.4f — one-shot is degenerate again'
+            'a bare echo at offset %d scores %.4f - one-shot is degenerate again'
             % (offset, echo))
 
 
@@ -874,3 +874,148 @@ def _main():
 
 if __name__ == '__main__':
     raise SystemExit(_main())
+
+
+# -- coincident-edge temporal twins of the combinational tables ----------------
+# These are DERIVED from the truth tables, so a change to the builder silently
+# redefines fifteen goals at once. Pin the encoding, not one hand-written case.
+
+def _temporal_twins():
+    from substrates.nervous.targets import TEMPORAL_TARGETS as registry
+    return {name: target for name, target in registry.items()
+            if name.endswith('(temporal)')}
+
+
+def test_every_combinational_table_has_a_temporal_twin():
+    from substrates.snn.targets import TARGETS
+    twins = _temporal_twins()
+    assert len(twins) == len(TARGETS)
+    for base in TARGETS:
+        assert '%s (temporal)' % base in twins
+
+
+def test_temporal_twin_events_reproduce_the_truth_table():
+    """Every presented row must expect exactly the row's asserted output bits."""
+    from substrates.snn.targets import TARGETS
+    for base, combinational in TARGETS.items():
+        target = _temporal_twins()['%s (temporal)' % base]
+        table = {tuple(i): tuple(o) for i, o in combinational.cases}
+        data = combinational.n_inputs
+        strobed = target.n_inputs > data
+        roles = [terminal.role for terminal in target.outputs]
+        for trial in target.trials:
+            fired = {role: {int(t) for t in trial.expected_events[role]}
+                     for role in roles}
+            for tick, bits in enumerate(trial.streams):
+                if not any(bits):
+                    continue
+                if strobed and not bits[data]:
+                    continue
+                expected = table[tuple(bits[:data])]
+                for index, role in enumerate(roles):
+                    assert ((tick + 1) in fired[role]) == bool(expected[index]), (
+                        '%s: row %s role %s' % (base, bits[:data], role))
+
+
+def test_temporal_twin_strobes_exactly_when_the_zero_row_carries_evidence():
+    from substrates.snn.targets import TARGETS
+    for base, combinational in TARGETS.items():
+        target = _temporal_twins()['%s (temporal)' % base]
+        extra = target.n_inputs - combinational.n_inputs
+        assert extra in (0, 1)
+        zero = next((o for i, o in combinational.cases if not any(i)),
+                    (0,) * len(combinational.outputs))
+        # A zero row that must FIRE is unrepresentable without the strobe:
+        # silence cannot carry it on a quiescent substrate.
+        if any(zero):
+            assert extra == 1, base
+
+
+def test_temporal_twin_keeps_blanket_firing_well_below_a_solve():
+    """A circuit that fires on every presentation must not look like a solver."""
+    for name, target in _temporal_twins().items():
+        for trial in target.trials:
+            presented = sum(1 for bits in trial.streams if any(bits))
+            slots = presented * len(target.outputs)
+            asserted = sum(len(v) for v in trial.expected_events.values())
+            # One-to-one event F1 for a blanket responder is 2f/(1+f).
+            fraction = asserted / float(slots)
+            assert 2 * fraction / (1 + fraction) < 0.8, (
+                '%s: blanket firing scores too well' % name)
+
+
+def test_temporal_twin_row_orders_differ_so_a_fixed_rhythm_cannot_pass():
+    """Rows land on the same tick grid, so the ORDER is what must vary."""
+    for name, target in _temporal_twins().items():
+        patterns = {tuple(tuple(bits) for bits in trial.streams if any(bits))
+                    for trial in target.trials}
+        assert len(patterns) > 1, name
+
+
+def test_temporal_twins_are_deterministic_across_rebuilds():
+    from substrates.nervous.targets import coincident_temporal_target
+    from substrates.snn.targets import TARGETS
+    for base, combinational in TARGETS.items():
+        a = coincident_temporal_target(combinational)
+        b = coincident_temporal_target(combinational)
+        assert a.T == b.T and len(a.trials) == len(b.trials), base
+        for left, right in zip(a.trials, b.trials):
+            assert left.streams == right.streams, base
+            assert left.expected_events == right.expected_events, base
+
+
+def test_multi_output_spike_target_scores_each_role_separately():
+    from substrates.nervous.targets import spike_target
+    target = spike_target(
+        'two-role probe',
+        [({0: [3]}, {'X': [4], 'Y': []}),
+         ({0: [9]}, {'X': [], 'Y': [10]})],
+        T=14, n_inputs=1,
+        outputs=[('X', (4, 1)), ('Y', (4, 3))])
+    assert [t.role for t in target.outputs] == ['X', 'Y']
+    # A role omitted from a case is silent-and-scored, not unscored: firing
+    # there has to cost something.
+    assert target.trials[0].expected_events['Y'] == []
+    assert target.trials[0].expected['Y'][10] == 0
+    assert target.trials[1].expected_events['Y'] == [10.0]
+
+
+def test_multi_output_spike_target_rejects_an_unknown_role():
+    from substrates.nervous.targets import spike_target
+    try:
+        spike_target('bad', [({0: [1]}, {'Nope': [2]})], T=6, n_inputs=1,
+                     outputs=[('X', (2, 2))])
+    except ValueError as exc:
+        assert 'Nope' in str(exc)
+    else:
+        raise AssertionError('unknown output role must raise')
+
+
+def test_temporal_twins_register_under_either_import_order():
+    """The twins are derived from snn.targets, which imports this package back.
+
+    Whichever module is imported first reaches the other half-built, so the
+    registration runs from both ends. A regression here does not show up in the
+    normal suite - it only bites a tool that imports snn.targets first, which is
+    exactly how it escaped once already. Use subprocesses so each order starts
+    from a clean interpreter.
+    """
+    import subprocess
+    count = ('sum(1 for n in T if n.endswith("(temporal)"))')
+    orders = {
+        'snn first': (
+            'import substrates.snn.targets;'
+            'from substrates.nervous.targets import TEMPORAL_TARGETS as T;'
+            'print(%s)' % count),
+        'nervous first': (
+            'from substrates.nervous.targets import TEMPORAL_TARGETS as T;'
+            'import substrates.snn.targets;'
+            'print(%s)' % count),
+    }
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for label, program in orders.items():
+        done = subprocess.run([sys.executable, '-c', program], cwd=root,
+                              capture_output=True, text=True)
+        assert done.returncode == 0, '%s: %s' % (label, done.stderr[-400:])
+        assert int(done.stdout.strip()) == 15, (
+            '%s registered %s twins' % (label, done.stdout.strip()))

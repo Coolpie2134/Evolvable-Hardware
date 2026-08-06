@@ -1,5 +1,5 @@
 """
-substrates/topology.py — target-agnostic computational structure.
+substrates/topology.py - target-agnostic computational structure.
 
 Selection needs a final tie-break that prefers organisms with more usable
 hardware, and it must be blind to the task: no truth table, expected trace,
@@ -17,7 +17,7 @@ The measurements, all counted only over hardware REACHABLE FROM THE SOURCE PADS:
 
     reachable_nodes     non-input nodes an input can actually drive
     reachable_edges     directed wires between reachable nodes
-    integrating_nodes   nodes reachable from two or more logical inputs —
+    integrating_nodes   nodes reachable from two or more logical inputs -
                         where information can combine at all
     cyclic_nodes        nodes inside a directed cycle
     loop_rank           independent cycles (cyclomatic, per component)
@@ -28,7 +28,7 @@ a corner no input can write to; it is not computational hardware, and crediting
 it would reward bulk over connection.
 
 Each count is aggregated with ``log1p`` so more connectivity and more feedback
-always help, with diminishing returns — the first loop is worth far more than
+always help, with diminishing returns - the first loop is worth far more than
 the twentieth, and no organism can win on size alone.
 """
 from __future__ import annotations
@@ -140,7 +140,7 @@ def measure(edges, sources, nodes=None):
     """Aggregate one substrate's EFFECTIVE wiring into a :class:`Topology`.
 
     ``edges`` is an iterable of ``(source, destination)`` physical connections
-    already resolved by the substrate — for tri3 that means channel/sub-node
+    already resolved by the substrate - for tri3 that means channel/sub-node
     keys, so three electrically separate circuits inside one tile cannot create
     a path or a loop through each other. ``sources`` are the resolved input
     pads; they have outgoing edges but no incoming effective edges, so a pad can

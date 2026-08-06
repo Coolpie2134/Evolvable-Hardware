@@ -1,11 +1,11 @@
 """
-substrates/nervous/tritile.py — the paper's THREE-circuit tile topology (Architecture 1).
+substrates/nervous/tritile.py - the paper's THREE-circuit tile topology (Architecture 1).
 
 Edwards EH'02 Fig. 2: "each node contains three nervous network circuits. Each
 circuit receives inputs from three directions (left, right, and down) and sends
 outputs to the same three directions." The legacy engine (pulse.py + the
 single-circuit interpretation in nervous.py) collapses that to ONE circuit and
-ONE output net per tile, which every listening neighbour reads — so a tile can
+ONE output net per tile, which every listening neighbour reads - so a tile can
 only broadcast a single state. This module implements the real tile: three
 independently-configured Fig. 3 circuits per tile, one per output direction.
 
@@ -21,7 +21,7 @@ its pre-resolved-``sources`` hook:
 Each sub-node selects E1/E2/I1 among the tile's THREE incoming directional
 signals (the paper's 16 useful routing combinations, ROUTING table). The signal
 arriving on P's input direction ``e`` is the output of the neighbour Q =
-hex_dirs(P)[e] whose own output points back at P — i.e. sub-node
+hex_dirs(P)[e] whose own output points back at P - i.e. sub-node
 (Q, back_dir(P,e)). An input terminal tile presents its external drive on all
 directions through a single (P,'IN') node.
 
@@ -46,7 +46,7 @@ from .hexgrid import hex_dirs, ROUTING_HEX
 # extension with no place in a paper-faithful tile. That faithfulness had a
 # measured cost: under pure AND a lone circulating pulse only survives a node
 # whose channel happens to be a buffer, so a sustained ring needs every tile
-# around the loop to hold the right buffer on the right channel — and tri tiles
+# around the loop to hold the right buffer on the right channel - and tri tiles
 # consequently could not hold a ring at all (Oscillator and Pattern scored ~0
 # while input-driven targets scored at or above the single-tile arch). OR
 # restores the cheap re-fire path that makes circulating-pulse memory reachable.
@@ -84,7 +84,7 @@ def widen_legacy_state(state):
     """Re-lay a pre-OR 12-bit tri state into the 15-bit layout.
 
     The three channel configs are carried across unchanged, and every legacy
-    config is 0-15 — the AND half of ROUTING_HEX — so a widened genome grows the
+    config is 0-15 - the AND half of ROUTING_HEX - so a widened genome grows the
     same grid and simulates identically. Without this an old checkpoint's packed
     bits would be re-cut at the new field boundaries and silently decode as
     different channels.
@@ -111,11 +111,11 @@ def interpret_tri(grid, inputs):
 
     ``grid`` = {tile: 15-bit state}; ``inputs`` = iterable of input-terminal tile
     positions. Returns a dict with:
-        nodes      — set of sub-node keys (x, y, d) with d in L/R/D or 'IN'
-        routing    — {node: (e1, e2, i1, 'and')} (informational dirs + op)
-        sources    — {node: (s1, s2, si)} pre-resolved feeder sub-nodes
-        tile_nodes — {tile: [sub-node keys that represent its output]}
-        in_nodes   — {input tile: (tile[0], tile[1], 'IN')}
+        nodes      - set of sub-node keys (x, y, d) with d in L/R/D or 'IN'
+        routing    - {node: (e1, e2, i1, 'and')} (informational dirs + op)
+        sources    - {node: (s1, s2, si)} pre-resolved feeder sub-nodes
+        tile_nodes - {tile: [sub-node keys that represent its output]}
+        in_nodes   - {input tile: (tile[0], tile[1], 'IN')}
     Off channels (config 0) and channels whose neighbour tile is absent produce
     a dead sub-node (no sources), exactly as an off/edge direction does in the
     single-circuit engine.
@@ -289,7 +289,7 @@ class TriSim:
                 for tile, keys in self._tile_nodes.items()}
 
     def expanded_signal_graph(self):
-        """{node: set(readers)} over sub-nodes — for tri loop_profile."""
+        """{node: set(readers)} over sub-nodes - for tri loop_profile."""
         edges = {n: set() for n in self._sim.grid}
         for v, (s1, s2, si) in self._sim.src.items():
             for u in (s1, s2, si):

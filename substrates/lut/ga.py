@@ -1,9 +1,9 @@
 """
-substrates/lut/ga.py — scoring and GA for the LUT array.
+substrates/lut/ga.py - scoring and GA for the LUT array.
 
 Problem definitions and executable behavior contracts are shared with the rest
 of the project; only the substrate-to-observation adapter differs. Selection uses the same recipe as the
-nervous GA — elites + random immigrants + tournament, NO early stop at 1.0 —
+nervous GA - elites + random immigrants + tournament, NO early stop at 1.0 -
 but WITHOUT the parsimony tie-break: seeds are dense sim6-style ontogeny
 biomorphs (rich morphology), and parsimony pruned them back to sparse diamonds.
 """
@@ -39,7 +39,7 @@ from .pulse import AsyncLutSim
 
 def clone_genome(genome):
     """Fast structural copy (shared, never-in-place-mutated gene objects; fresh
-    structure) — an identical-behaviour, ~10x cheaper replacement for
+    structure) - an identical-behaviour, ~10x cheaper replacement for
     copy.deepcopy on the reproduction hot path. See substrates.nervous.ga.clone_genome."""
     clone = Genome(
         chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
@@ -106,7 +106,7 @@ FITNESS_CACHE_MAX = 200_000  # cap the fitness cache on very long runs
 
 # LUT temporal search has the same flat recurrent landscapes as the nervous
 # net; reheat after a plateau instead of cooling indefinitely.
-# ── running trials / placing outputs (trace-matched, as in nv) ──────────────────
+# -- running trials / placing outputs (trace-matched, as in nv) ------------------
 # Native LUT I/O follows the NV/FNV probe rule: every mature non-source cell is
 # eligible, behaviorally identical candidates are compressed, and all output
 # roles are assigned together to distinct non-invasive probes.
@@ -139,7 +139,7 @@ def _run_lut_trials(grid, in_pos, ttarget, watch_cells,
     samples), the continuous leading-edge trains of the ``watch_cells`` per
     trial, and whether any run blew its event budget. A trial that carries a
     physical ``input_events`` schedule is injected at its real (possibly
-    sub-tick) times — the LUT backend no longer quantises such targets.
+    sub-tick) times - the LUT backend no longer quantises such targets.
 
     ``in_pos`` may carry per-input attachment groups (evolvable binding): each
     logical input's stimulus is replicated onto every attachment cell; a cell
@@ -196,16 +196,16 @@ def place_outputs_by_trace(grid, in_pos, ttarget, source_nodes=None,
 
     The dynamics are the asynchronous engine (substrates.lut.pulse.AsyncLutSim):
     trace/persistence modes score the mid-tick sample matrix (a column slice
-    per candidate cell — no per-tick dicts), while event/cadence modes read
+    per candidate cell - no per-tick dicts), while event/cadence modes read
     the wires' raw continuous leading-edge timestamps, exactly as the nervous
     backend does."""
     from substrates.nervous.io_placement import flat_inputs
     in_set = set(flat_inputs(in_pos))
     out_pos = {t.role: None for t in ttarget.outputs}
     traces  = TemporalTraces()
-    # LUT holds a level (a latch), it does not ring like the nervous net — so a
+    # LUT holds a level (a latch), it does not ring like the nervous net - so a
     # commanded HOLD must be genuinely high on every tick, not satisfied by a
-    # sparse 2-3 tick burst under the nervous net's ±1 ring tolerance. Mark these
+    # sparse 2-3 tick burst under the nervous net's +/-1 ring tolerance. Mark these
     # traces strict (hold_tol=0) so scoring + placement demand the full hold.
     traces.hold_tol = 0
     if len(grid) <= len(in_set.intersection(grid)):
@@ -314,9 +314,9 @@ def trace_fixed_outputs(grid, in_pos, out_pos, ttarget, source_nodes=None):
 def prepare_lut(genome, ttarget):
     """Grow + place a genome for a temporal target.
 
-    Returns ``(grid, out_pos, traces, in_pos)`` — ``in_pos`` is the driven input
+    Returns ``(grid, out_pos, traces, in_pos)`` - ``in_pos`` is the driven input
     sites (native evolved internal pads, native exterior drivers, legacy target
-    pads, or compatibility tag-selected cells) — or None if unusable.
+    pads, or compatibility tag-selected cells) - or None if unusable.
 
     Native internal layouts and compatibility spatial genomes nucleate from
     heritable input coordinates. Exterior mode and the tag/type compatibility
@@ -343,7 +343,7 @@ def prepare_lut(genome, ttarget):
 
 def prepare_lut_grid(genome, ttarget, grid, strategy=None,
                      record_progress=True):
-    """``prepare_lut`` for an already-grown body — the LUT twin of
+    """``prepare_lut`` for an already-grown body - the LUT twin of
     ``substrates.nervous.temporal.prepare_net_grid``. Lifespan scoring
     interprets developmental snapshots through this, so juvenile and adult
     bodies share one code path. ``record_progress`` is false for juveniles: the
@@ -421,11 +421,11 @@ def score_lut_temporal(genome, ttarget):
 
 def _place_outputs_combinational(grid, target, in_pos=None, source_nodes=None,
                                  external_inputs=None):
-    """{role: cell|None} — where each combinational output is read.
+    """{role: cell|None} - where each combinational output is read.
 
     Prefers the FITTED placement the scorer uses (the cell that best computes
-    each role, see _fit_combinational_outputs) so every view — growth tab,
-    interactive playback, truth-table report — reads the same cell that decides
+    each role, see _fit_combinational_outputs) so every view - growth tab,
+    interactive playback, truth-table report - reads the same cell that decides
     fitness. Falls back to nearest-cell proximity when there is no truth table
     to fit against or the fit cannot fill every role."""
     from substrates.nervous.io_placement import flat_inputs
@@ -456,8 +456,8 @@ def _place_outputs_combinational(grid, target, in_pos=None, source_nodes=None,
 
 # The LUT array is a SYNCHRONOUS RECURRENT cellular automaton: every cell both
 # reads and drives all four neighbours, so with inputs held it generally does NOT
-# come to rest — it oscillates or goes chaotic ("most circuits produce immediate
-# sustained activity ... chaotic behavior", paper §6). Reading a combinational
+# come to rest - it oscillates or goes chaotic ("most circuits produce immediate
+# sustained activity ... chaotic behavior", paper section 6). Reading a combinational
 # answer at one fixed tick therefore samples a single phase of that oscillation
 # and rewards phase-luck, not computation. A real combinational result requires
 # the output to reach a FIXED POINT: hold the same value over a settling window.
@@ -465,7 +465,7 @@ def _place_outputs_combinational(grid, target, in_pos=None, source_nodes=None,
 # An output that never settles is not simply discarded, though. The array is a
 # deterministic finite machine, so a held input drives every output into a
 # repeating cycle; the honest read of a cycling output is the DUTY CYCLE over one
-# period — the fraction of the period it sits high. A fixed point is the period-1
+# period - the fraction of the period it sits high. A fixed point is the period-1
 # case (duty 0.0 or 1.0), so the two live on one continuous scale. Scoring feeds
 # that duty as a confidence to the contract, which turns it into "fraction of the
 # period the output is correct": a circuit right nine-tenths of its cycle scores
@@ -482,13 +482,13 @@ def _steady_duty(seq):
     ``seq`` is the recorded output-bit tail. For each candidate period ``p`` the
     periodicity is measured back from the end (how long ``seq[i] == seq[i-p]``
     keeps holding); ``p`` is accepted only if that periodic suffix covers a solid
-    stretch — at least half the tail and several whole periods — so a chaotic run
+    stretch - at least half the tail and several whole periods - so a chaotic run
     cannot fluke a short period from its last few equal samples (the earlier
     version checked only ``2p`` samples and so declared any tail ending in three
     equal bits 'settled', crediting oscillators as solved). The duty is the mean
     over the periodic suffix's whole periods; a fixed point is ``p == 1`` and
     returns exactly 0.0/1.0. A tail with no such period falls back to its whole
-    mean — a chaotic output lands near 0.5 and earns only chance credit, which is
+    mean - a chaotic output lands near 0.5 and earns only chance credit, which is
     correct: it is not computing a stable function."""
     n = len(seq)
     if n == 0:
@@ -541,7 +541,7 @@ def _steady_duties(matrix):
 # Combinational inputs are presented as PULSES, not a level held from t=0. Each
 # trial gives the active inputs a common rising edge after a random delay (so the
 # case's onset is one clean coincident edge) and a random per-line hold width,
-# and several such trials are averaged — the array must compute the function
+# and several such trials are averaged - the array must compute the function
 # robustly across arrival times and hold durations rather than exploiting one
 # fixed, clean, power-on-aligned presentation. Widths sit above a settling floor
 # so the output can reach a fixed point WHILE the whole pattern is held, and the
@@ -581,11 +581,11 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
                      watch_groups=(), source_nodes=None,
                      external_inputs=None):
     """Average, over the schedule's pulse trials, each live non-input cell's
-    steady duty read during the held window — {cell: mean duty}.
+    steady duty read during the held window - {cell: mean duty}.
 
     The active inputs (bits set in ``in_bits``) rise together at each trial's
     delay and hold for their per-line widths; the duty is measured over
-    ``[delay + lead, delay + min active width]`` — the full pattern present and
+    ``[delay + lead, delay + min active width]`` - the full pattern present and
     settled. The all-zero case has no pulses, so it reads a fixed lead..measure
     window of the array's no-input response (the function's value there). Uses
     the vectorised ``run_bits`` matrix so the whole-grid read is not per-tick
@@ -628,7 +628,7 @@ def _all_cell_duties(grid, target, in_bits, schedule, in_pos=None,
         else:
             lo, hi = delay + lead, delay + lead + measure
         # One stream lane per ATTACHMENT CELL: lane k carries logical input
-        # lanes[k]'s bit — a shared cell wired-ORs in the sim's injection.
+        # lanes[k]'s bit - a shared cell wired-ORs in the sim's injection.
         streams = [tuple((1 if (in_bits[lanes[k]]
                                 and delay <= t < delay + widths[lanes[k]])
                           else 0)
@@ -756,7 +756,7 @@ def _all_case_duties(grid, target, case_inputs, schedule, in_pos=None,
 
 def _balanced_match(duties, expected):
     """Balanced per-level match of one cell's per-case duty to an expected bit
-    vector — the single-output form of the contract's logic aggregation, used
+    vector - the single-output form of the contract's logic aggregation, used
     only to RANK candidate output cells (the reported fitness comes from
     score_contract on the chosen cells)."""
     groups = {0: [], 1: []}
@@ -814,7 +814,7 @@ def score_lut_combinational_full(genome, target):
     its period it is correct.
 
     Under an evolvable io_placement strategy the driven input cells AND the read
-    output cells come from the genome's tags instead (no duty-fitting search —
+    output cells come from the genome's tags instead (no duty-fitting search -
     the binding is heritable, not fitted). Spatial input anchors also serve as
     germline positions; other evolvable modes nucleate from one neutral centre."""
     from substrates.nervous.scoring import contract_case_count
@@ -1042,7 +1042,7 @@ def lut_truth_table(genome, target):
     lines = ['Target: %s   [LUT array]' % target.name,
              'Circuit: %d live cells  (square array, four 16-bit LUTs/cell,'
              % len(grid),
-             '          asynchronous level logic — paper Architecture 2)']
+             '          asynchronous level logic - paper Architecture 2)']
     from substrates.nervous.io_placement import output_groups
     groups = output_groups(out_pos)
     for term in target.outputs:
@@ -1052,10 +1052,10 @@ def lut_truth_table(genome, target):
             ('wired-OR at %s' % ', '.join(map(str, cells)))
             if cells else '(not found)'))
     if not cases:
-        lines += ['', '(circuit incomplete — grew too little or outputs missing)']
+        lines += ['', '(circuit incomplete - grew too little or outputs missing)']
         return '\n'.join(lines)
     lines += ['', 'Inputs held; each output settles to a fixed point (full',
-              "credit) or cycles — then it scores the fraction of its period it",
+              "credit) or cycles - then it scores the fraction of its period it",
               "is correct. Cell shows expected / actual, actual = settled bit,",
               "or ~NN% duty when still oscillating.", '']
     in_hdr  = ' '.join('i%d' % i for i in range(len(target.inputs)))
@@ -1092,7 +1092,7 @@ def lut_truth_table(genome, target):
 
 
 def evaluate_lut_full(genome, target):
-    """(scalar fitness, per-case vector) — cases are the units ε-lexicase
+    """(scalar fitness, per-case vector) - cases are the units epsilon-lexicase
     streams over. Static truth tables retain one case per row/output check.
 
     Under LIFESPAN SCORING the vector is extended by one entry per
@@ -1200,7 +1200,7 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
     return [r[0] for r in out], [r[1] for r in out]
 
 
-# ── genetic operators ────────────────────────────────────────────────────────────
+# -- genetic operators ------------------------------------------------------------
 
 def _poisson(lam):
     L = math.exp(-lam); k, p = 0, 1.0
@@ -1310,7 +1310,7 @@ def _force_nonparent_tweak(genome, parent, function_families=None):
 def _tweak_gene(gene, function_families=None):
     """Soft mutation: usually flip 1-3 bits of one 16-bit field (a nearby
     boolean function), sometimes replace the field entirely. self_in has an
-    extra chance of snapping to 0 — growth rules must stay reachable."""
+    extra chance of snapping to 0 - growth rules must stay reachable."""
     g   = copy.copy(gene)
     fld = random.choice(_GENE_FIELDS)
     if fld == 'self_out' and not unrestricted_only(function_families):
@@ -1336,7 +1336,7 @@ def _mutate_io_tag(genome, io_placement=None):
 _MUT_OPS     = ["tweak", "duplicate", "add_gene", "del_gene",
                 "add_chrom", "del_chrom", "split", "telomere"]
 # I/O alleles mutate separately when an evolvable placement strategy is active.
-# (evolve_io) — off by default, so the ordinary mutation stream is unchanged.
+# (evolve_io) - off by default, so the ordinary mutation stream is unchanged.
 _MUT_WEIGHTS = [0.32, 0.14, 0.14, 0.11, 0.05, 0.05, 0.11, 0.08]
 IO_MUTATION_PROB = 0.20
 
@@ -1567,16 +1567,16 @@ def n_genes(genome):
     return sum(len(c.genes) for c in genome.chromosomes)
 
 
-# ── neutral compaction (gene expression) ─────────────────────────────────────────
-# A dense ontogeny genome carries genes that win NO growth lookup — they are
+# -- neutral compaction (gene expression) -----------------------------------------
+# A dense ontogeny genome carries genes that win NO growth lookup - they are
 # unexpressed, and (proven) removing a never-winning gene cannot change any argmin,
 # so the grown organism is bit-identical and the fitness is unchanged. Compaction
 # drops exactly those: the threshold is zero expression (a neutrality boundary, not
 # a tuned cutoff), leaving the genome's functional core with behaviour untouched.
 # Biologically: pseudogene loss. NB measured only a modest shrink on fresh ontogeny
-# seeds (~7-14% unexpressed — the density is mostly FUNCTIONAL morphology, not junk),
+# seeds (~7-14% unexpressed - the density is mostly FUNCTIONAL morphology, not junk),
 # so this is a human-facing cleanup for inspecting/refining an evolved genome
-# (the Designer), NOT an evolution driver — it did not improve solving in tests.
+# (the Designer), NOT an evolution driver - it did not improve solving in tests.
 def compact_genome(genome, seeds, grid_size=7, iters=30):
     """Return a copy of `genome` with all never-expressed genes removed (neutral:
     same grown organism, same fitness). `seeds` must be the SAME seeds the genome
@@ -1619,8 +1619,8 @@ def compact_genome(genome, seeds, grid_size=7, iters=30):
             else tuple(int(value) for value in genome.edge_input_layout)))
 
 
-# ── ontogeny seeding is THE seed path (see substrates/lut/ontogeny.py) ──────────────────
-# Sparse random genomes grow near-uniform DIAMONDS — the "uninteresting" LUTs.
+# -- ontogeny seeding is THE seed path (see substrates/lut/ontogeny.py) ------------------
+# Sparse random genomes grow near-uniform DIAMONDS - the "uninteresting" LUTs.
 # Richness tracks gene density (sim6's table_create invents a gene per unseen
 # context), so the population/immigrants are seeded with sim6-style biomorph
 # genomes, and the smaller-genome parsimony tie-break is dropped: it pruned the
@@ -1632,7 +1632,7 @@ ONTOGENY_CAP  = 350               # max genes kept from an ontogeny biomorph
 
 # Growing one sim6 ontogeny seed is expensive (measured ~0.3 s: up to 60
 # biomorph growths per accepted genome), and make_seed_genome is called for
-# EVERY immigrant EVERY generation — that alone was a large share of ontogeny
+# EVERY immigrant EVERY generation - that alone was a large share of ontogeny
 # mode's ~50x slowdown. So the factory grows only the first _ONTO_POOL_SIZE
 # genomes per chromosome count and caches them; later calls return a mutated
 # variant of a random pool member (still fresh genetic material, ~free).
@@ -1642,7 +1642,7 @@ _ONTO_POOL_SIZE = 24
 
 def make_seed_genome(n_chroms=2):
     """The population/immigrant factory: a dense sim6-style biomorph genome
-    (the rich-morphology seeds — see the ONTOGENY_CAP note above)."""
+    (the rich-morphology seeds - see the ONTOGENY_CAP note above)."""
     from .ontogeny import random_ontogeny_genome
     pool = _ONTO_POOL.setdefault(n_chroms, [])
     if len(pool) < _ONTO_POOL_SIZE:
@@ -1653,7 +1653,7 @@ def make_seed_genome(n_chroms=2):
 
 
 def _tiebreak(genome):
-    """Tie-break term for equal fitness: NEUTRAL — the smaller-genome parsimony
+    """Tie-break term for equal fitness: NEUTRAL - the smaller-genome parsimony
     pressure was what pruned dense ontogeny genomes back to sparse diamonds
     (re-diamonding). Size is bounded by ONTOGENY_CAP + telomeres instead."""
     return 0
@@ -1675,7 +1675,7 @@ def rank_key(genome, fitness):
 
 
 def _gene_cap():
-    """Per-chromosome gene cap for add/duplicate mutations — sized for dense
+    """Per-chromosome gene cap for add/duplicate mutations - sized for dense
     ontogeny genomes (MAX_GENES was the sparse random path's tight cap)."""
     return ONTOGENY_CAP
 
@@ -1879,8 +1879,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     evolve_io=False, io_placement=None, archive_parent=None,
                     stagnation=0, rescue_candidates=None, escape=None,
                     mutation_limit=None, function_families=None):
-    """One generation of a steady, exploratory GA — elitism + immigrants +
-    recombination/mutation, parents via ε-lexicase when per-case vectors are
+    """One generation of a steady, exploratory GA - elitism + immigrants +
+    recombination/mutation, parents via epsilon-lexicase when per-case vectors are
     available (temporal targets), else tournament. Elites are breeders only;
     this operator always returns an entirely new generation. `mean_mutations`
     overrides the mutation rate for this generation (used by the annealing
@@ -2143,7 +2143,7 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
         # seeded run is only reproducible when it happens to run first. The
         # first call into a fresh process grows 24 seed genomes and caches
         # them; every later call draws its whole population from that cache
-        # instead — masters grown under a PREVIOUS target's RNG stream. Same
+        # instead - masters grown under a PREVIOUS target's RNG stream. Same
         # seed, same config, different answer depending on what ran before:
         # LUT AND scored 1.000 run first and 0.750 run after Half adder, which
         # silently contaminated rows 2..46 of every multi-target sweep.
@@ -2347,7 +2347,7 @@ def diversify(seeds, target, pop_size, valid=0.999, rounds=25, batch=None,
     return pool[:pop_size]
 
 
-# ── GUI report ───────────────────────────────────────────────────────────────────
+# -- GUI report -------------------------------------------------------------------
 
 def lut_report(ttarget, genome=None):
     """Temporal-target report for the LUT model. The report body is the shared
@@ -2369,7 +2369,7 @@ def lut_report(ttarget, genome=None):
             return '\n'.join(lines + [''] + behavior_contract_lines(ttarget) + pre + [
                 '', '(circuit incomplete - grew too little or inputs dead)'])
     if genome is not None and prep is None:
-        lines += ['', '(circuit incomplete — grew too little or inputs dead)']
+        lines += ['', '(circuit incomplete - grew too little or inputs dead)']
     traces = prep[2] if prep is not None else None
     out_pos = prep[1] if prep is not None else None
     _, body = score_report_lines(ttarget, traces, out_pos,

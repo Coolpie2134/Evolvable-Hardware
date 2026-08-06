@@ -1,14 +1,14 @@
 """
-tools/evolvable_io.py — retained A/B experiment for legacy I/O bindings.
+tools/evolvable_io.py - retained A/B experiment for legacy I/O bindings.
 
 Current Nervous application runs use evolved coordinate pads plus global fitted
 probes and do not expose these strategies. This controlled direct-driver
 experiment compares the older fixed target-pad baseline against the four
 historical binding representations:
 
-  * terminal_nodes — body rules express one-way input/output terminal identity.
-  * tag_rank       — attach ports to distinct highest-priority cells in order.
-  * wiring_chromosome — chromosome three maps each port to a node type and one
+  * terminal_nodes - body rules express one-way input/output terminal identity.
+  * tag_rank       - attach ports to distinct highest-priority cells in order.
+  * wiring_chromosome - chromosome three maps each port to a node type and one
                      ordinal instance in a stable shuffled list of matches.
   * spatial_chromosome: chromosome three maps each port to a normalised x/y
                      anchor. Inputs are developmental seeds; outputs claim the
@@ -17,7 +17,7 @@ historical binding representations:
 Everything else is held constant (same target, grid, contract, seeds, gens, pop),
 so the only variable is HOW ports attach to cells. For each strategy we run a
 seeded evolution and report train fitness plus HELD-OUT certification when the
-target has a reference oracle (fresh stimulus the circuit never trained on) —
+target has a reference oracle (fresh stimulus the circuit never trained on) -
 the honest test of whether an evolved binding generalises or just memorised.
 
     py tools/evolvable_io.py                     # default: a few quick targets
@@ -73,8 +73,8 @@ def _binding_summary(genome, target):
 def _held_out(genome, target_name, target):
     """Mean held-out fitness over fresh oracle seeds, or None if not applicable.
 
-    The evolved binding — output cells, alignment, AND the tag-chosen input cells
-    — is fitted ONCE on the strategy target, then frozen while score_frozen scores
+    The evolved binding - output cells, alignment, AND the tag-chosen input cells
+    - is fitted ONCE on the strategy target, then frozen while score_frozen scores
     fresh validation stimulus. This is what proves an evolved binding generalises
     rather than memorising one schedule."""
     spec_name = ORACLE_KEY_TO_SPEC.get(target_name)

@@ -1,5 +1,5 @@
 """
-tests/test_lut_synchrony.py — metamorphic "no hidden clock" audit for the LUT
+tests/test_lut_synchrony.py - metamorphic "no hidden clock" audit for the LUT
 array's asynchronous engine (substrates.lut.pulse.AsyncLutSim), plus the lattice
 quantization contract against the synchronous reference engine.
 
@@ -7,26 +7,26 @@ The nervous net earned its "genuinely asynchronous" claim through the
 metamorphic relations in tests/test_synchrony.py. Moving the LUT substrate to
 the same footing demands the same audit, adapted to LUT physics:
 
-  * QUANTIZATION — with delay == TICK and stimuli on the integer tick lattice,
+  * QUANTIZATION - with delay == TICK and stimuli on the integer tick lattice,
     the asynchronous engine reproduces the synchronous latched engine
     (lut.LutSim) bit for bit, including spontaneous power-on activity: the old
     engine is the quantization of the new one.
-  * TRANSLATION — shifting all inputs by an arbitrary (sub-tick) delta shifts
+  * TRANSLATION - shifting all inputs by an arbitrary (sub-tick) delta shifts
     all output edges by exactly that delta. LUT arrays are usually
-    spontaneously active (which breaks translation by construction — the
+    spontaneously active (which breaks translation by construction - the
     power-on transient is anchored at t = 0), so this uses a quiescent AND
     terminating organism: eastward shift-register lines (E-table 0xFF00,
     index-0 bit clear), whose event trains end well before the horizon.
-  * SCALE — scaling the schedule AND the gate delay by k scales every output
+  * SCALE - scaling the schedule AND the gate delay by k scales every output
     edge by k. No absolute timescale is baked in.
-  * DETERMINISM / EVENT-ORDER INDEPENDENCE — identical stimulus gives
+  * DETERMINISM / EVENT-ORDER INDEPENDENCE - identical stimulus gives
     byte-identical edges regardless of injection submission order.
-  * INERTIAL FILTERING — an input blip shorter than the gate delay does not
+  * INERTIAL FILTERING - an input blip shorter than the gate delay does not
     propagate: a real gate's output node cannot follow it. This is the LUT
     analogue of the nervous node's refractory hysteresis, and exactly the
     behaviour a clocked engine cannot express (it would either quantise the
     blip away or stretch it to a full tick).
-  * SPONTANEITY IS HONEST — a lookup table with its index-0 bit set fires at
+  * SPONTANEITY IS HONEST - a lookup table with its index-0 bit set fires at
     power-on with no input, at t = 0.0 exactly (real LUT physics, the one
     deliberate contrast with the nervous net's quiescence invariant).
 
@@ -48,11 +48,11 @@ TOL = 1e-9
 SEEDS = ((0, 0), (2, 0))
 
 
-# ── fixtures ─────────────────────────────────────────────────────────────────────
+# -- fixtures ---------------------------------------------------------------------
 
 def _relay_patch():
     """A quiescent organism: a 3-wide bar of the paper's relay cells (0xFFFE
-    per direction — high for any live neighbour input, index-0 bit clear, so
+    per direction - high for any live neighbour input, index-0 bit clear, so
     no self-starting). NB once excited it sustains a parity blink forever
     (the square lattice is bipartite), so it fits quiescence checks but not
     horizon-sensitive event-count comparisons."""
@@ -68,7 +68,7 @@ def _shift_lines():
     """A quiescent, TERMINATING organism: two parallel eastward shift-register
     lines. A pulse injected at a west end marches east one gate delay per cell
     and falls off the far end, so every event train is finite and ends well
-    before the test horizon — exact event-count comparisons can't be broken by
+    before the test horizon - exact event-count comparisons can't be broken by
     the horizon boundary (the same trick as the nervous audit's 'terminating'
     fixture)."""
     return {(x, y): _SHIFT for x in range(8) for y in range(2)}
@@ -126,14 +126,14 @@ def test_lut_terminal_output_is_observable_sink_only():
 _SCHED = [((0, 1), 1.0, 1.0), ((0, 1), 5.0, 1.0), ((0, 0), 3.0, 1.0)]
 
 
-# ── tests ────────────────────────────────────────────────────────────────────────
+# -- tests ------------------------------------------------------------------------
 
 def test_lattice_quantization_of_sync_engine():
     """delay == TICK + integer stimuli => bit-identical to LutSim, spontaneous
     power-on activity included (random LUT organisms nearly always have it).
     Both engine paths are audited: the vectorised lattice fast path AND the
     general event loop (forced by clearing the pristine flag) must agree with
-    the synchronous reference — and with each other, edge times included."""
+    the synchronous reference - and with each other, edge times included."""
     random.seed(11)
     checked = 0
     while checked < 12:
@@ -160,7 +160,7 @@ def test_lattice_quantization_of_sync_engine():
 
 def test_translation_invariance_subtick():
     """Shifting every input by a sub-tick delta shifts every output edge by
-    exactly that delta — the engine has no tick grid to snap to."""
+    exactly that delta - the engine has no tick grid to snap to."""
     grid = _shift_lines()
     base = _run_events(grid, _SCHED, 40.0)
     assert sum(len(v) for v in base.values()) >= 4, "shift lines stayed silent"
@@ -174,7 +174,7 @@ def test_translation_invariance_subtick():
 
 def test_scale_covariance():
     """Scaling the schedule and the gate delay by k scales every output edge
-    time by k — no absolute timescale is baked into the engine."""
+    time by k - no absolute timescale is baked into the engine."""
     grid = _shift_lines()
     base = _run_events(grid, _SCHED, 40.0)
     for k in (2.0, 0.5, 3.7, 0.25):
@@ -214,7 +214,7 @@ def test_inertial_blip_filtering():
 
 
 def test_spontaneous_power_on_is_honest():
-    """A table with its index-0 bit set fires with no input at exactly t=0 —
+    """A table with its index-0 bit set fires with no input at exactly t=0 -
     real LUT physics, deliberately unlike the quiescent nervous net."""
     grid = {(0, 0): (0xFFFF, 0, 0, 0)}          # index-0 bit set on N
     sim = AsyncLutSim(grid)
@@ -227,7 +227,7 @@ def test_spontaneous_power_on_is_honest():
 
 
 def test_lut_player_matches_direct_run():
-    """The GUI playback path (substrates.lut.playback.LutPlayer — the LUT twin of
+    """The GUI playback path (substrates.lut.playback.LutPlayer - the LUT twin of
     NervousPlayer, driven from the same pulse timeline) reproduces a direct
     engine run exactly: same edges whether the schedule is played through the
     dt-stepped cursor or injected and advanced in one go."""
@@ -302,7 +302,7 @@ def test_pulse_intervals_log_pairs_rises_with_falls():
         assert lattice.pulse_intervals[(x, 0)] == event.pulse_intervals[(x, 0)]
 
 
-# ── standalone runner (pytest not required) ──────────────────────────────────────
+# -- standalone runner (pytest not required) --------------------------------------
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
@@ -324,7 +324,7 @@ if __name__ == '__main__':
     raise SystemExit(_main())
 
 
-# ── combinational settling and graded (duty-cycle) credit ───────────────────────
+# -- combinational settling and graded (duty-cycle) credit -----------------------
 # A held input drives a deterministic finite array into a repeating cycle. A
 # fixed point solves the combinational case; a cycling output earns partial
 # credit equal to the fraction of its period it is correct, so evolution has a
@@ -343,14 +343,14 @@ def test_steady_duty_is_exact_for_fixed_points_and_phase_invariant():
 def test_steady_duty_refuses_to_call_a_chaotic_output_settled():
     """The bug that silently faked every LUT combinational result: the detector
     checked only 2p samples, so any tail ending in a few equal bits was declared
-    a fixed point — a chaotic oscillator whose last bits were 000 scored a clean
+    a fixed point - a chaotic oscillator whose last bits were 000 scored a clean
     0.0 (perfectly correct for an expected-0 case), and evolution 'solved' gates
     it was only oscillating on. A chaotic tail must instead fall back to its mean
     and earn only chance-level credit."""
     from substrates.lut.ga import _steady_duty
     chaotic_low_tail = [0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0]
     chaotic_high_tail = [0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1]
-    # neither collapses to an exact 0.0/1.0 — they sit near their true mean.
+    # neither collapses to an exact 0.0/1.0 - they sit near their true mean.
     assert 0.2 < _steady_duty(chaotic_low_tail) < 0.8
     assert 0.2 < _steady_duty(chaotic_high_tail) < 0.8
     for seq in (chaotic_low_tail, chaotic_high_tail):
@@ -359,7 +359,7 @@ def test_steady_duty_refuses_to_call_a_chaotic_output_settled():
 
 def test_cycling_output_earns_fraction_of_period_credit():
     """A period-2 output scored against a wanted bit yields 0.5, not 0 (cliff)
-    and not 1 (phase-luck) — the fraction of the period it is correct."""
+    and not 1 (phase-luck) - the fraction of the period it is correct."""
     from substrates.nervous.scoring import score_contract
     from substrates.snn.targets import gate_target
     target = gate_target('AND')                        # 4 cases, output 'out'
@@ -395,7 +395,7 @@ def test_lut_combinational_gives_graded_not_cliff_credit():
 def test_combinational_output_is_placed_by_function_not_proximity():
     """The scorer reads each output at the cell that best computes it, not the
     cell nearest an arbitrary terminal. A grown array that contains a computing
-    cell must therefore score it — proximity placement threw those cells away
+    cell must therefore score it - proximity placement threw those cells away
     (measured: it capped random-genome AND best at ~0.68 while a functional read
     reached ~0.93), which is why LUTs 'could not' do combinational logic."""
     import random
@@ -436,7 +436,7 @@ def test_lut_solves_basic_gates_when_evolved():
     """The headline: LUTs are lookup tables, so they should compute small
     combinational functions. Inputs are now presented as a randomised PULSE
     battery (aligned rising edges, random widths/delays, several trials
-    averaged), so a clean 1.0 is genuinely harder — a gate must settle correctly
+    averaged), so a clean 1.0 is genuinely harder - a gate must settle correctly
     regardless of when inputs arrive against the array's ongoing power-on
     activity. The honest bar is therefore 'well above the constant-output
     ceiling', not a perfect score: 0.5 is chance and 0.75 is a lopsided-gate
@@ -455,7 +455,7 @@ def test_lut_solves_basic_gates_when_evolved():
     assert best >= 0.85, 'OR stayed near the constant ceiling: %.4f' % best
 
     # Real computation: the fitted output's per-case duty must track the truth
-    # table — high on the expected-1 rows, low on the expected-0 row — not a
+    # table - high on the expected-1 rows, low on the expected-0 row - not a
     # constant that merely rides the lopsided table.
     grid = grow_lut(champ, seeds=tuple(target.inputs),
                     grid_size=target.grid_size, iters=target.iters)

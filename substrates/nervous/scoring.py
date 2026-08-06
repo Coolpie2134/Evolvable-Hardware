@@ -17,7 +17,7 @@ from . import pulse as pulse_engine
 from .contracts import behavior_contract_lines
 
 
-# ── the relation registry (single source of truth for mode semantics) ────────
+# -- the relation registry (single source of truth for mode semantics) --------
 
 def needs_samples(target):
     """Whether any declared restriction consumes per-tick samples."""
@@ -63,16 +63,16 @@ class TemporalTraces(dict):
         self._transition_result = None
 
 
-# ── temporal scoring ───────────────────────────────────────────────────────────
+# -- temporal scoring -----------------------------------------------------------
 # The expected trace decomposes into WINDOWS: maximal runs of a constant
 # expected level (settle gaps of None separate them). Scoring is per-window,
 # then balanced across the two levels, so every behavioural phase (off before
-# set, hold after set, off after reset, ...) carries equal weight — a long hold
+# set, hold after set, off after reset, ...) carries equal weight - a long hold
 # can't drown out a missed reset, and a constant output caps at 0.5.
 #
 # A "store 1" window is scored PHASE-TOLERANTLY: nervous-net memory holds a bit
-# as a pulse *circulating* in a loop, which reads as a ripple (e.g. 1010…) at
-# any single cell — the honeycomb has no triangles, so you can't OR the phases
+# as a pulse *circulating* in a loop, which reads as a ripple (e.g. 1010...) at
+# any single cell - the honeycomb has no triangles, so you can't OR the phases
 # back into a steady DC level. What matters is that the cell is *actively
 # ringing* with no long silent gap, so a store-1 window scores by activity
 # coverage (each tick counts if it or an immediate neighbour fires): a ripple
@@ -117,7 +117,7 @@ _expected_windows.cache_info = _expected_windows_cached.cache_info
 
 def _window_score(trace, lvl, ticks):
     """Score one constant-level window. lvl==0: fraction of silent ticks.
-    lvl==1: activity coverage — fraction of ticks that fire or sit next to a
+    lvl==1: activity coverage - fraction of ticks that fire or sit next to a
     firing tick OF THE SAME WINDOW (rewards sustained ringing, not a lone blip;
     echoes in the unscored settle gaps outside the window don't count)."""
     if lvl == 0:
@@ -144,24 +144,24 @@ def _role_trace_score(trace, exp):
     return sum(parts) / len(parts) if parts else 0.0
 
 
-# ── precision / recall scoring (the selection metric) ────────────────────────────
+# -- precision / recall scoring (the selection metric) ----------------------------
 # Rather than scoring the huge, easy mass of expected-0 ticks (which lets a
 # do-nothing output look good on rare-positive targets), score ONLY the highs:
-#   recall    = expected-1 ticks that the output actually hits — punishes silence
-#   precision = of the output's own pulses, the fraction that belong — punishes
+#   recall    = expected-1 ticks that the output actually hits - punishes silence
+#   precision = of the output's own pulses, the fraction that belong - punishes
 #               always-high / spurious firing
 # combined as their harmonic mean (F1). Two asymmetries make it fit this
-# substrate: recall allows ±1 COVERAGE (memory is a circulating pulse that rings
+# substrate: recall allows +/-1 COVERAGE (memory is a circulating pulse that rings
 # every other tick, so an expected-1 counts as hit if the cell fires on it or an
 # adjacent tick), while precision is EXACT (a pulse landing on an expected-0 tick
-# is a false positive) — without that, a dense oscillator target would let an
+# is a false positive) - without that, a dense oscillator target would let an
 # always-high output through. Unscored (settle) ticks count for neither.
 
 # Observe the output for longer than the expected window so a DELAYED circuit's
 # late events are actually seen (else a positive shift pushes them off the end and
-# they read as misses — the "delayed Q counted false" the user hit). The expected
+# they read as misses - the "delayed Q counted false" the user hit). The expected
 # trace stays length T; the trace is run to _obs_len. Crucially, recall still
-# counts ALL expected highs (never excludes any) — that is what stops a silent
+# counts ALL expected highs (never excludes any) - that is what stops a silent
 # output from escaping via a huge shift that would slide every high out of view.
 def _obs_len(ttarget):
     return 2 * ttarget.T
@@ -170,12 +170,12 @@ def _obs_len(ttarget):
 def _pr_counts(trace, exp, shift=0, tol=1):
     """Spike-event counts of an output trace vs an expected trace, under a latency
     `shift`: an expected event at tick e corresponds to an output event at e+shift
-    (shift=0 is the identity — the ordinary aligned scoring).
+    (shift=0 is the identity - the ordinary aligned scoring).
 
-    recall (±tol): each expected-1 is hit if the output fires within tol of e+shift
-      (the ±1 ring tolerance — a stored bit rings every other tick). ALL expected
+    recall (+/-tol): each expected-1 is hit if the output fires within tol of e+shift
+      (the +/-1 ring tolerance - a stored bit rings every other tick). ALL expected
       highs are in the denominator (none excluded), so silence can't be shifted
-      away — a delayed circuit is captured because the trace is observed past T.
+      away - a delayed circuit is captured because the trace is observed past T.
     precision (shift-consistent): a pulse at tick a is scored iff its shift-mapped
       position a-shift lands in the expected trace's scored region, and it's good
       iff exp[a-shift]==1. So spurious pulses always cost; pulses past the window
@@ -201,21 +201,21 @@ def _pr_score(trace, exp, shift=0, tol=1):
     """Per-trace F1 of the highs (see _pr_counts). Silent -> 0 when anything is
     expected; always-high -> low; a correct ringing/quiet output -> 1. `tol` is
     the recall coverage window: 1 for the nervous net (a stored bit RINGS 1010,
-    so ±1 counts it as held), 0 for the LUT array (a latch can hold a steady
-    level, so a hold must be genuinely high on every tick — a 2-3 tick burst is
+    so +/-1 counts it as held), 0 for the LUT array (a latch can hold a steady
+    level, so a hold must be genuinely high on every tick - a 2-3 tick burst is
     not a 5-tick hold)."""
     return _f1(*_pr_counts(trace, exp, shift, tol))
 
 
-# ── latency-invariant scoring ────────────────────────────────────────────────────
+# -- latency-invariant scoring ----------------------------------------------------
 # The ABSOLUTE input->output latency must NOT drive fitness: a circuit that
 # produces the right spike pattern at a consistent but different delay than the
 # target's arbitrarily-chosen one has captured the idea and should score the same.
-# So the score is taken at the single best latency SHIFT — one value shared across
+# So the score is taken at the single best latency SHIFT - one value shared across
 # every trial and role (a real circuit has one fixed propagation delay), found by
 # maximising the pooled F1. This frees the absolute delay while still requiring
 # CONSISTENT timing (one shift must fit all trials) and still penalising spurious
-# firing (precision is anchored to the output's scored region — see _pr_counts).
+# firing (precision is anchored to the output's scored region - see _pr_counts).
 # shift=0 is included, so the aligned score is a lower bound: nothing regresses.
 
 def _pooled_f1(traces, ttarget, shift, tol=1):
@@ -233,7 +233,7 @@ def _pooled_f1(traces, ttarget, shift, tol=1):
 def _cand_shifts(pairs, T, tol=1):
     """The only shifts worth trying: F1 is piecewise-constant in the shift and
     changes only where an output pulse aligns with an expected event, so the
-    maximum is attained at some (pulse_tick - expected_tick) offset (± the ring
+    maximum is attained at some (pulse_tick - expected_tick) offset (+/- the ring
     tolerance), plus 0. For sparse spike targets this is far fewer than the whole
     range; for dense ones it dedups to at most the range (2T-1) anyway."""
     # positive shifts may run to the observed trace length (delayed events live
@@ -275,7 +275,7 @@ def _best_shift(traces, ttarget, tol=1):
 
 def _placement_score(cell_traces, exps, ttarget, tol=1):
     """Best-shift pooled F1 for ONE candidate output cell (a single latency shift
-    over its own traces) — the per-cell ranking used when PLACING outputs. This
+    over its own traces) - the per-cell ranking used when PLACING outputs. This
     MUST be latency-invariant too: if placement ranked at a fixed alignment, which
     cell gets chosen would depend on the target's nominal latency, quietly
     reintroducing the timing-dependence the score removes (measured: it did).
@@ -294,7 +294,7 @@ def _placement_score(cell_traces, exps, ttarget, tol=1):
     return best
 
 
-# ── raw point-event scoring ───────────────────────────────────────────────────
+# -- raw point-event scoring ---------------------------------------------------
 
 def sampled_events(trace):
     """Leading-edge times recovered from a clocked/sample trace.
@@ -460,7 +460,7 @@ def event_score(traces, ttarget, shift=None):
         pairs, float(getattr(ttarget, 'event_tolerance', 0.5)), shift)
 
 
-# ── complete physical-waveform scoring ───────────────────────────────────────
+# -- complete physical-waveform scoring ---------------------------------------
 
 def _role_intervals(traces, role, trial_index):
     seqs = getattr(traces, 'intervals', {}).get(role, ())
@@ -573,7 +573,7 @@ def waveform_score(traces, ttarget, shift=None):
     return _waveform_at_shift(traces, ttarget, float(shift))
 
 
-# ── cadence semantics for autonomous oscillators/patterns ────────────────────
+# -- cadence semantics for autonomous oscillators/patterns --------------------
 
 def _input_edges(streams, input_index=0):
     return [float(t) for t, row in enumerate(streams)
@@ -698,7 +698,7 @@ def cadence_score(traces, ttarget, latency=None):
     return score, cases
 
 
-# ── semantic period-stepper scoring ───────────────────────────────────────────
+# -- semantic period-stepper scoring -------------------------------------------
 
 def _pulse_events(trace, lo, hi):
     """Leading edges of high runs in [lo, hi).  A LUT can hold a bit high for
@@ -725,7 +725,7 @@ def _stepper_epoch(trace, lo, hi, target):
     if not (getattr(target, 'stepper_min_period', 2)
             <= p <= getattr(target, 'stepper_max_period', 6)):
         return 0.0, None
-    # ±1 tick absorbs sampling/ringing phase without allowing a fundamentally
+    # +/-1 tick absorbs sampling/ringing phase without allowing a fundamentally
     # different cadence to masquerade as regular.
     regular = sum(1 for gap in gaps if abs(gap - p) <= 1) / len(gaps)
     dwell = hi - lo
@@ -735,7 +735,7 @@ def _stepper_epoch(trace, lo, hi, target):
 
 
 def _stepper_trial_score(trace, streams, target, shift):
-    """Score one command stream at a fixed causal input→output latency."""
+    """Score one command stream at a fixed causal input->output latency."""
     commands = [t for t, row in enumerate(streams)
                 if row and row[0] and (t == 0 or not streams[t - 1][0])]
     if not commands:
@@ -805,18 +805,18 @@ def period_stepper_score(traces, target, shift=None):
 
 
 # Selection metric. The fitness question is "did the network produce the correct
-# SPIKE EVENTS?", not "was the output level right at every tick?" — so the metric
+# SPIKE EVENTS?", not "was the output level right at every tick?" - so the metric
 # is the precision/recall (F1) of the output spikes above:
-#   recall    — expected spikes the output actually produced (missing ones cost)
-#   precision — of the spikes it produced, the fraction that were expected
+#   recall    - expected spikes the output actually produced (missing ones cost)
+#   precision - of the spikes it produced, the fraction that were expected
 #               (extra, unexpected spikes cost)
 # A do-nothing output recalls nothing, so it scores 0 the moment any spike is
-# expected — silence is no longer rewarded. A fire-constantly output has terrible
+# expected - silence is no longer rewarded. A fire-constantly output has terrible
 # precision. Only the correct spikes at the correct ticks (and nowhere else) reach
 # 1.0. The other two metrics are kept for diagnostics / experiments only:
-#   'balanced' — mean of pooled expected-0 / expected-1 window scores (this is the
+#   'balanced' - mean of pooled expected-0 / expected-1 window scores (this is the
 #                one that rewarded silence: a constant output scores 0.5)
-#   'blend'    — average of f1 and balanced (the former default; diluted f1 with
+#   'blend'    - average of f1 and balanced (the former default; diluted f1 with
 #                balanced's partial credit for doing nothing)
 METRIC = 'f1'
 
@@ -847,9 +847,9 @@ def _score_output_candidate(sampled, events, expected, role, target,
 def windowed_score(traces, ttarget, metric=None, shift=None, tol=None):
     """Selection fitness core, pooled globally over every (trial, role) under
     METRIC (or an explicit `metric`):
-      f1       — spike-event precision/recall (default; silent = 0, always-high low)
-      balanced — pooled expected-0 vs expected-1 window scores, averaged (diagnostic)
-      blend    — mean of the two (diagnostic)
+      f1       - spike-event precision/recall (default; silent = 0, always-high low)
+      balanced - pooled expected-0 vs expected-1 window scores, averaged (diagnostic)
+      blend    - mean of the two (diagnostic)
     The f1 score is LATENCY-INVARIANT: taken at the best global input->output shift
     (see _best_shift), so the absolute delay doesn't matter, only consistent timing
     and no spurious firing. `shift` skips the search (pass the value from
@@ -911,7 +911,7 @@ def _logic_contract_score(observations, target):
     expected-0 rows are averaged separately, then those two averages are
     meaned. Multiple outputs use mean-and-worst aggregation, so an easy output
     cannot hide a chance-level hard output.
-    A flat mean over every (case, output) cell — what this used to do — lets a
+    A flat mean over every (case, output) cell - what this used to do - lets a
     do-nothing constant win whenever the truth table is lopsided: outputting
     always-0 scored 0.75 on AND and 0.78 on the 2x2 multiplier, because those
     functions are mostly 0 and a silent circuit gets the mostly-0 mass for free.
@@ -978,10 +978,24 @@ def _combinational_windows(trial):
     return [(float(tick), float(tick + width)) for tick in onsets]
 
 
+def _window_confidence(fired, wanted):
+    """``_combinational_case_confidence`` once the two counts are known.
+
+    The counting is the expensive half: a caller with sorted event lists gets
+    both counts by binary search instead of rescanning every event for every
+    window. Kept separate so the arithmetic has exactly one definition.
+    """
+    if not wanted:
+        return min(1.0, float(fired))
+    if not fired:
+        return 0.0
+    return wanted / max(wanted, fired)
+
+
 def _combinational_case_confidence(observed, expected, start, end):
     """How strongly the output asserted in one case window, in [0, 1].
 
-    Membership in the window is the whole question — a truth-table row asks
+    Membership in the window is the whole question - a truth-table row asks
     WHETHER the output asserted for this input combination, not whether it did
     so at one exact second. Each row owns an isolated window several grid-widths
     long, so judging by occupancy absorbs any propagation delay shorter than a
@@ -991,11 +1005,7 @@ def _combinational_case_confidence(observed, expected, start, end):
     """
     fired = sum(1 for t in observed if start <= t < end)
     wanted = sum(1 for t in expected if start <= t < end)
-    if not wanted:
-        return min(1.0, float(fired))
-    if not fired:
-        return 0.0
-    return wanted / max(wanted, fired)
+    return _window_confidence(fired, wanted)
 
 
 def _combinational_event_score(traces, target, shift):
@@ -1023,11 +1033,22 @@ def _combinational_event_score(traces, target, shift):
         for role in trial.expected:
             observed = [t - shift for t in _role_events(traces, role, trial_index)]
             expected = list(trial.expected_events.get(role, ()))
+            # Count each window's events by binary search over sorted lists.
+            # The straightforward form rescanned BOTH lists for every window
+            # (three passes: the `any`, plus one per count), which is quadratic
+            # in windows x events and was the dominant cost of probe fitting -
+            # every candidate cell on an organism is scored this way, and LUT
+            # bodies expose hundreds of them.
+            observed.sort()
+            expected.sort()
             levels = {0: [], 1: []}
             for start, end in windows:
-                wanted = any(start <= t < end for t in expected)
-                confidence = _combinational_case_confidence(
-                    observed, expected, start, end)
+                fired = (bisect_left(observed, end)
+                         - bisect_left(observed, start))
+                wanted_count = (bisect_left(expected, end)
+                                - bisect_left(expected, start))
+                wanted = wanted_count > 0
+                confidence = _window_confidence(fired, wanted_count)
                 correctness = confidence if wanted else 1.0 - confidence
                 correctness = max(0.0, min(1.0, correctness))
                 levels[1 if wanted else 0].append(correctness)
@@ -1044,7 +1065,7 @@ def _combinational_event_score(traces, target, shift):
     # Aggregate the outputs with mean-AND-worst, not a plain mean. A plain mean
     # lets an easy output subsidise a hard one: a half adder whose carry (AND)
     # is trivial and whose sum (XOR) is hard scores (1.0 + 0.5)/2 = 0.75 for
-    # solving only the carry, and — worse — the gradient toward the hard output
+    # solving only the carry, and - worse - the gradient toward the hard output
     # is flat once the easy half is banked. Blending the worst output back in
     # (the same 0.5*(mean+worst) every other relation uses) makes the HARDEST
     # output drive roughly three-quarters of a two-output score, so selection
@@ -1054,7 +1075,7 @@ def _combinational_event_score(traces, target, shift):
     # An output-weighting sweep (mean vs mean_worst vs anneal-to-worst vs
     # hardness-weighted vs p-norm; 4 multi-output targets x 3 seeds, 40 gens)
     # confirmed the plain mean is the only real loser and the four non-degenerate
-    # policies are indistinguishable — identical per-target plateaus, none
+    # policies are indistinguishable - identical per-target plateaus, none
     # solved. So mean_worst wins on simplicity; the fancier schedules bought
     # nothing, and the plateaus are representational, not a weighting problem.
     if output_scores:
@@ -1071,7 +1092,7 @@ def _best_combinational_shift(traces, target):
     Each truth-table row owns an isolated window several grid-widths long, and
     correctness only asks which window an edge fell in. Any propagation delay
     shorter than a window is therefore absorbed for free, so fitting a global
-    offset cannot change the verdict except exactly at a window boundary —
+    offset cannot change the verdict except exactly at a window boundary -
     while costing a full rescoring per candidate alignment. Searching them
     made a Half-adder row roughly ten times slower for an identical score.
     """
@@ -1127,7 +1148,7 @@ def _bounded_state_score(traces, target, alignment):
 # Deliberately unused, and kept only to record why. It names the duty cycle of
 # the slowest ring the gap rule admits (one `width` pulse per `allowed_gap +
 # width` of period = 0.20 under default physics), and it is tempting to enforce
-# it as a coverage floor on active windows — _state_case_score's docstring even
+# it as a coverage floor on active windows - _state_case_score's docstring even
 # claims coverage is checked. It was tried and reverted. Two reasons it cannot
 # be: coverage is phase-DEPENDENT at window boundaries, because a window of
 # duration d fits floor(d/P) or ceil(d/P) pulses of the same ring depending on
@@ -1136,8 +1157,8 @@ def _bounded_state_score(traces, target, alignment):
 # outputs the gap rule legitimately admits, since a 12-tick window divided by a
 # period-5 slowest legal ring is only 2.4 pulses, so two pulses really is a
 # legal held bit there. A thin-but-legal ring and a short burst are genuinely
-# indistinguishable to this relation. Where that mattered — One-shot scoring
-# 1.000 for a delay line — the fault was the stimulus, not the scorer: see
+# indistinguishable to this relation. Where that mattered - One-shot scoring
+# 1.000 for a delay line - the fault was the stimulus, not the scorer: see
 # one_shot_oracle.
 STATE_RING_COVERAGE = 0.20
 STATE_QUIET_COVERAGE = 0.20
@@ -1174,7 +1195,7 @@ def _circulation_budget(intervals, windows, floor):
     """This circuit's silent-gap budget for one trial.
 
     ``floor`` is the smallest legal ring's lap time, ``2*(delay + width)``. A
-    LARGER loop is an equally legitimate memory — its lap is simply longer — so
+    LARGER loop is an equally legitimate memory - its lap is simply longer - so
     a circuit that DEMONSTRATES a longer, regular circulation is judged against
     its own lap rather than against the smallest ring that could exist. Without
     this, every ring of more than about two cells was scored as though it kept
@@ -1183,7 +1204,7 @@ def _circulation_budget(intervals, windows, floor):
     The demonstration is deliberately hard to fake, because a looser survival
     test is exactly how a dead circuit sneaks a pass:
 
-    * the pulses must lie inside COMMANDED-ACTIVE epochs — a ring cannot claim
+    * the pulses must lie inside COMMANDED-ACTIVE epochs - a ring cannot claim
       a lap out of the silence it was supposed to be keeping;
     * there must be at least two of them, i.e. one completed lap. A single
       pulse is an echo, not a circulation, and establishes no period at all;
@@ -1204,7 +1225,7 @@ def _circulation_budget(intervals, windows, floor):
 
     A free-running oscillator that fires regardless of input could satisfy all
     of that, but it then fires during the commanded-quiet windows too and loses
-    there — the quiet epochs remain the guard against non-storage.
+    there - the quiet epochs remain the guard against non-storage.
     """
     laps, longest_window = [], 0.0
     for start, end in windows:
@@ -1265,14 +1286,14 @@ def _state_case_score(traces, target, trial, role, trial_index, shift):
             # pulse already in flight completes its circuit and lands just
             # inside the newly-quiet window. That trailing pulse is correct
             # behaviour, so the leading edge of a quiet epoch is excused for
-            # exactly one lap — of THIS circuit's ring, measured from the
+            # exactly one lap - of THIS circuit's ring, measured from the
             # active epoch the pulse was launched in, not of the smallest ring
             # that could theoretically exist. A six-tick loop's last pulse
             # arrives six ticks late, and judging it against a four-tick budget
             # punishes it for being a bigger loop.
             #
             # Without this, an ideal ring was penalised on EVERY reset it
-            # performed, at every period — measured 0.38-0.77 across all four
+            # performed, at every period - measured 0.38-0.77 across all four
             # memory targets (tools/probe_ring_penalty.py). The grace is only
             # taken when a judgeable remainder survives it, so no quiet window
             # ever becomes unjudgeable and a stuck-on output cannot buy a free
@@ -1806,7 +1827,7 @@ def score_contract(observations, target, alignment=_REFIT_ALIGNMENT):
 
 def exact_tick_accuracy(traces, ttarget):
     """Plain fraction of scored ticks matched exactly (no phase tolerance).
-    Diagnostic only — a working circulating-pulse latch ripples, so this reads
+    Diagnostic only - a working circulating-pulse latch ripples, so this reads
     below 1.0 even when the memory is behaviourally correct."""
     correct = total = 0
     for ti, trial in enumerate(ttarget.trials):
@@ -1822,9 +1843,9 @@ def exact_tick_accuracy(traces, ttarget):
     return correct / total if total else 0.0
 
 
-# ── float-time coverage: the retention scorers (formerly substrates/nervous/robustness.py) ─────
+# -- float-time coverage: the retention scorers (formerly substrates/nervous/robustness.py) -----
 
-# ── predeclared scoring constants (a state-1 hold rings with period ~D+W) ────────
+# -- predeclared scoring constants (a state-1 hold rings with period ~D+W) --------
 # The nervous-net memory holds a bit as a pulse CIRCULATING (reads as ~50%-duty
 # ringing), and a 1->0 flip leaves a short decay tail before the ring is vetoed.
 # So we (a) drop a transition guard band, (b) exempt a leading decay/ramp window,
@@ -2011,7 +2032,7 @@ def _windows_worst(pulses, lo, hi, state):
 def score_retention(rise, intervals, offset):
     """Worst-window-worst-interval retention score (or None if unjudgeable).
     Unlike score_state_intervals (which checks a hold over one window), this
-    requires the commanded state to be sustained across the WHOLE interval — so a
+    requires the commanded state to be sustained across the WHOLE interval - so a
     finite ring burst that decays before the next command fails at the horizon
     where it dies."""
     W, D = pulse.WIDTH, pulse.DELAY
@@ -2066,7 +2087,7 @@ def score_retention_graded(rise, intervals, offset):
     return worst if scored else None
 
 
-# ── unified score report (one body; nv / LUT / Designer wrap it) ─────────────
+# -- unified score report (one body; nv / LUT / Designer wrap it) -------------
 # Formerly three near-identical implementations (temporal_report, lut_report,
 # designer._traces_report), each with its own copy of the mode branch. The
 # per-backend voice lives in a small notes dict; the structure lives here once.
@@ -2332,7 +2353,7 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
     return total, lines
 
 
-# ── fitted output probes: where does this organism produce each answer? ─────────
+# -- fitted output probes: where does this organism produce each answer? ---------
 # Outputs are NON-HERITABLE probes. The genome evolves the mechanism and the
 # input geometry; evaluation then asks where the grown organism actually
 # produces each answer, rather than demanding it deliver that answer to a
@@ -2368,7 +2389,7 @@ def best_distinct_assignment(
     """Choose distinct output cells under the contract's role aggregation.
 
     A role-by-role greedy choice can spend the only strong cell on an early
-    role and leave a later one with nothing — the greedy answer is not merely
+    role and leave a later one with nothing - the greedy answer is not merely
     suboptimal, it can be arbitrarily bad on exactly the multi-output targets
     that matter. By default this small bitmask dynamic program maximises the
     total role score. With ``balance_worst`` it instead maximises the same
@@ -2387,6 +2408,40 @@ def best_distinct_assignment(
         return {}
     if len(candidates) < len(roles):
         return None
+
+    # Only a role's best len(roles) cells can ever appear in an optimal
+    # assignment, so the rest are dropped before the dynamic program runs.
+    # Organisms expose hundreds of probes (measured: 482 candidates and 323
+    # thresholds per call on LUT, worst 745 x 527) and the DP re-runs once per
+    # threshold, so this is the difference between thousands of states and a
+    # handful.
+    #
+    # Why it is exact rather than a heuristic: keep, per role, the best
+    # len(roles) cells AND every cell tied with the last of them. Any cell
+    # outside that set scores STRICTLY less than every cell inside it. If an
+    # assignment gave role r an outside cell, then - since the set holds at
+    # least len(roles) cells and only len(roles) - 1 other roles are placed -
+    # some inside cell is free and strictly better, so swapping raises the
+    # total. No optimal assignment can use an outside cell, under a weakest-role
+    # floor or without one. Equal-total ties are therefore also settled among
+    # inside cells only, leaving the coordinate tie-break untouched.
+    width = len(roles)
+    if len(candidates) > width * width:
+        keep = set()
+        for role in roles:
+            table = scores.get(role) or {}
+            ranked = sorted(
+                candidates,
+                key=lambda cell, t=table: -float(t.get(cell, 0.0)))
+            if len(ranked) > width:
+                cutoff = float(table.get(ranked[width - 1], 0.0))
+                ranked = [cell for cell in ranked
+                          if float(table.get(cell, 0.0)) >= cutoff - 1e-12]
+            keep.update(ranked)
+        if len(keep) >= width:
+            # Preserve the caller's ordering: the DP walks candidates in order
+            # and equal-score ties must resolve the way they always have.
+            candidates = tuple(cell for cell in candidates if cell in keep)
 
     def assignment_key(assignment):
         sentinel = (float('inf'), float('inf'))

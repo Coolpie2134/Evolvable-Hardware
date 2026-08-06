@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-app.py — Evolvable Hardware: single-window GUI.
+app.py - Evolvable Hardware: single-window GUI.
 
 Self-contained merge of the former main.py (evolve + truth table),
 plot_growth.py (circuit-growth snapshots) and plot_ha.py (membrane-voltage
 traces), now generalised to any registered target function.
 
 Pick a target from the dropdown (logic gates, half/full adder, multi-bit adder)
-or build your own truth table with "Custom…". The GA evolves a grown SNN to
+or build your own truth table with "Custom...". The GA evolves a grown SNN to
 match it, across three tabs:
 
     Evolution        live fitness chart + truth table for the chosen target
@@ -96,7 +96,7 @@ V_RESET         = 0.0
 MAX_VOLT_CASES  = 8     # voltage tab caps rows for readability on big targets
 
 
-# ── target-aware analysis helpers ─────────────────────────────────────────────
+# -- target-aware analysis helpers ---------------------------------------------
 
 def _growth_seeds(target, genome=None):
     """Return the strategy's developmental origin for the SNN analysis path.
@@ -195,7 +195,7 @@ def build_truth_table(genome, target, arch):
 
     if any(not ids for ids in in_ids) or any(not ids for ids in out_ids):
         lines.append('')
-        lines.append('(circuit incomplete — some input/output neurons missing)')
+        lines.append('(circuit incomplete: some input/output neurons missing)')
         return '\n'.join(lines)
 
     in_hdr  = ' '.join('i%d' % i for i in range(len(target.inputs)))
@@ -239,16 +239,16 @@ def grid_to_rgba(grid, grid_size, seed_set, output_pos):
     for (x, y), state in grid.items():
         row, col = grid_size - 1 - y, x
         if (x, y) in seed_set:
-            img[row, col] = [0.9, 0.1, 0.1, 1.0]            # red — seed
+            img[row, col] = [0.9, 0.1, 0.1, 1.0]            # red - seed
         elif (x, y) in output_pos:
-            img[row, col] = [0.1, 0.8, 0.2, 1.0]            # green — output
+            img[row, col] = [0.1, 0.8, 0.2, 1.0]            # green - output
         else:
             excit = not bool((state >> 3) & 0x1)
             alpha = 0.35 + 0.55 * (state & 0x7) / 7.0
             if excit:
-                img[row, col] = [0.15, 0.35, 0.85, alpha]   # blue — excitatory
+                img[row, col] = [0.15, 0.35, 0.85, alpha]   # blue - excitatory
             else:
-                img[row, col] = [0.90, 0.50, 0.10, alpha]   # orange — inhibitory
+                img[row, col] = [0.90, 0.50, 0.10, alpha]   # orange - inhibitory
     return img
 
 
@@ -270,7 +270,7 @@ def build_genome_text(genome, fitness=None, binding=None):
     each port selected and where it attached."""
     chroms  = list(getattr(genome, 'chromosomes', []) or [])
     n_total = sum(len(c.genes) for c in chroms)
-    # I/O tags only matter (and are only shown) when some gene carries one —
+    # I/O tags only matter (and are only shown) when some gene carries one -
     # default genomes stay rendered exactly as before.
     show_iotags = any(
         getattr(c, 'wiring', False)
@@ -317,8 +317,8 @@ def build_genome_text(genome, fitness=None, binding=None):
         L.append('that circuit off; the phenotype tile disappears only when all three are off.')
     elif lutmode:
         L.append('Each 16-bit LUT is really a BOOLEAN FUNCTION of the four bits the cell')
-        L.append('receives from its neighbours — shown here minimised as out = f(N,S,E,W)')
-        L.append("(¬ = not, · = and, + = or).  'out' is the LUT this gene installs; a")
+        L.append('receives from its neighbours: shown here minimised as out = f(N,S,E,W)')
+        L.append("(NOT  = not, - = and, + = or).  'out' is the LUT this gene installs; a")
         L.append("growth gene is one whose own context is empty (self = dead), the only")
         L.append('kind that can bring a dead cell to life.  out = 0 means that direction')
         L.append('stays dead.  Raw hex is kept in brackets for reference.')
@@ -424,7 +424,7 @@ def _lut_gene_lines(gi, g, show_iotags=False):
     ]
 
 
-# ── custom truth-table dialog ─────────────────────────────────────────────────
+# -- custom truth-table dialog -------------------------------------------------
 
 class CustomTargetDialog(tk.Toplevel):
     """Build a Target from a hand-entered truth table."""
@@ -533,12 +533,12 @@ class CustomTargetDialog(tk.Toplevel):
         self.on_done(target)
 
 
-# ── main application ──────────────────────────────────────────────────────────
+# -- main application ----------------------------------------------------------
 
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('Evolvable Hardware — Edwards Indirect Encoding')
+        root.title('Evolvable Hardware: Edwards Indirect Encoding')
         self.q            = queue.Queue()
         self._worker      = None
         self._stop_event  = threading.Event()
@@ -569,7 +569,7 @@ class App:
         root.protocol('WM_DELETE_WINDOW', self.close)
         self._poll()
 
-    # ── UI construction ───────────────────────────────────────────────────────
+    # -- UI construction -------------------------------------------------------
 
     def _build_ui(self):
         ctrl = ttk.Frame(self.root, padding=(6, 4))
@@ -597,7 +597,7 @@ class App:
             command=self._on_target_change, target_width=31)
         self._target_picker.pack(side='left')
         self._target_cb = self._target_picker.target_cb
-        ttk.Button(ctrl, text='Custom…', command=self._open_custom).pack(side='left', padx=3)
+        ttk.Button(ctrl, text='Custom...', command=self._open_custom).pack(side='left', padx=3)
 
         ttk.Separator(ctrl, orient='vertical').pack(side='left', fill='y', padx=8)
 
@@ -646,7 +646,7 @@ class App:
                                            variable=self._graded_var)
         self._graded_chk.pack(side='left', padx=(10, 0))
 
-        # ── second row: model-specific parameters ──
+        # -- second row: model-specific parameters --
         ctrl2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         ctrl2.pack(fill='x', side='top')
 
@@ -663,7 +663,7 @@ class App:
                 store.append(e)                # so the widget can be enabled/disabled
             return v
 
-        # substrate group (SNN only — hidden for nervous nets)
+        # substrate group (SNN only - hidden for nervous nets)
         self._arch_frame = ttk.Frame(ctrl2)
         self._arch_frame.pack(side='left')
         ttk.Label(self._arch_frame, text='Substrate:').pack(side='left', padx=(2, 0))
@@ -674,7 +674,7 @@ class App:
         self._arch_sep = ttk.Separator(ctrl2, orient='vertical')
         self._arch_sep.pack(side='left', fill='y', padx=8)
 
-        # genome group. Grid / Iters were removed: growth is now self-limiting —
+        # genome group. Grid / Iters were removed: growth is now self-limiting -
         # the nervous telomere is a Hayflick bound, so neither a grid clip nor an
         # iteration cap governs it (grid_size survives only as each target's I/O
         # layout scale, taken from the target itself). Only the genome's
@@ -683,8 +683,8 @@ class App:
         self._layout_frame.pack(side='left')
         ttk.Label(self._layout_frame, text='Genome:').pack(side='left', padx=(2, 0))
         self._chroms_var = aentry(self._layout_frame, 'Chroms:', 2, width=4)
-        # Telomere ceiling: caps how far a chromosome's telomere — the organism's
-        # growth RADIUS — may drift via mutation (and bounds fresh-genome init).
+        # Telomere ceiling: caps how far a chromosome's telomere - the organism's
+        # growth RADIUS - may drift via mutation (and bounds fresh-genome init).
         # Eval cost tracks cell count ~ radius^2, so this is the lever for run
         # speed vs how big nets may grow. LUT organisms default to 8 because
         # their dense ontogeny otherwise fills hundreds of cells; nervous nets
@@ -702,7 +702,7 @@ class App:
         self._model_note.bind('<Configure>', lambda event: self._model_note.configure(
             wraplength=max(140, event.width - 8)), add='+')
 
-        # ── third row: GA + substrate-physics tuning (applied on Run) ──
+        # -- third row: GA + substrate-physics tuning (applied on Run) --
         from substrates.nervous.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
                                TOURNAMENT_K as _TK, MUT_DECAY as _AL)
         from runtime.mutation import DEFAULT_MUTATION_LIMIT as _ML
@@ -726,19 +726,19 @@ class App:
         # verbatim; after a terminal solve, evaluated parents may survive the
         # parent+offspring consolidation step. 0 = use the whole population.
         self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3, store=self._ga_entries)
-        # simulated-annealing decay: mutation rate *= α each generation (1 = off)
-        self._alpha_var = aentry(ga_frame, 'Anneal α:',       _AL, width=6, store=self._ga_entries)
-        # β controls plateau reheating: 0 disables it, 1 keeps the tuned
+        # simulated-annealing decay: mutation rate *= alpha each generation (1 = off)
+        self._alpha_var = aentry(ga_frame, 'Anneal alpha:',       _AL, width=6, store=self._ga_entries)
+        # beta controls plateau reheating: 0 disables it, 1 keeps the tuned
         # behavior, and larger values raise mutation faster during stagnation.
-        self._beta_var = aentry(ga_frame, 'Plateau β:', 1.0,
+        self._beta_var = aentry(ga_frame, 'Plateau beta:', 1.0,
                                 width=4, store=self._ga_entries)
         self._mutation_limit_var = aentry(
             ga_frame, 'Mutation cap:', _ML, width=4, store=self._ga_entries)
-        # ε-lexicase selection (Nervous/FNV/LUT contract cases): streams over the
+        # epsilon-lexicase selection (Nervous/FNV/LUT contract cases): streams over the
         # whole population instead of tournament, bypassing the elite pool so it
         # can actually act. Off = tournament (the tuned default).
         self._lexicase_var = tk.BooleanVar(value=False)
-        self._lexicase_chk = ttk.Checkbutton(ga_frame, text='ε-lexicase',
+        self._lexicase_chk = ttk.Checkbutton(ga_frame, text='epsilon-lexicase',
                                               variable=self._lexicase_var)
         self._lexicase_chk.pack(side='left', padx=(6, 0))
         self._ga_entries.append(self._lexicase_chk)
@@ -762,7 +762,7 @@ class App:
         # New NV runs expose only the current coherent substrate profiles.
         # ONE profile: the paper's three-circuit tile on the paper's Fig. 1
         # analog node. The single-tile and digital tri-circuit engines are
-        # retired from new runs — measured worse on score, on solve rate, and
+        # retired from new runs - measured worse on score, on solve rate, and
         # decisively on held-out certification (see runtime/config.py). They
         # remain in the codebase only as reference implementations for the
         # timing-model audits.
@@ -906,7 +906,7 @@ class App:
             text='(OFF is always available)', foreground='#777777').pack(
                 side='left', padx=(4, 0))
 
-        # ── fourth row: local-minimum escape mechanisms (runtime/escape.py) ──
+        # -- fourth row: local-minimum escape mechanisms (runtime/escape.py) --
         # EscapeConfig, new sessions, and Reset remain all-off. Every mechanism
         # applies to all four backends and both GA drive paths.
         from runtime.escape import EscapeConfig as _EC
@@ -938,7 +938,7 @@ class App:
         ttk.Label(esc2, text='          ').pack(side='left', padx=(2, 0))
         self._escape_entries = []
         # Lifespan scoring and the robustness objective are measured through the
-        # temporal scoring contract, and ε-lexicase needs per-case vectors —
+        # temporal scoring contract, and epsilon-lexicase needs per-case vectors -
         # none of which the SNN backend has. Those widgets are collected here so
         # _reconfigure_for_backend can disable exactly them rather than making
         # the whole row look inapplicable.
@@ -959,11 +959,12 @@ class App:
         # reported fitness is still the adult score.
         self._lifespan_var = echeck(
             'Lifespan',
-            'Score the circuit at several developmental stages, not only as a '
-            'grown adult.\nJuvenile scores become extra lexicase cases and a '
-            'selection tie-break, so a genome whose\nhalf-grown body partly '
-            'works has somewhere to climb from. Reported fitness is still\nthe '
-            'ADULT score. Costs roughly one extra evaluation per stage.',
+            'Scores the circuit at several points during growth, not only '
+            'once fully grown.\nThose partial scores become extra test cases '
+            'and a tie-break, so a genome whose\nhalf-grown circuit already '
+            'works a bit has somewhere to climb from.\nThe reported fitness '
+            'is still the fully grown score.\nCosts about one extra '
+            'evaluation per stage.',
             store=self._escape_async_only)
         self._lifespan_stages_var = aentry(
             ctrl4, 'stages:', _ED.lifespan_checkpoints, width=3,
@@ -972,17 +973,17 @@ class App:
         # Restricted tournament replacement.
         self._crowding_var = echeck(
             'Crowding',
-            'Restricted tournament replacement: each offspring competes '
-            'against the most\ngenetically SIMILAR member of a random window, '
-            'not a random one. Niches survive,\nbecause a specialist is only '
-            'displaced by a better version of itself.\n\nRTR is MONOTONE: '
-            'nothing in the crowded reserve is ever replaced by something '
-            'worse,\nso that share of the population can only rise. "reserve" '
-            'is how much of the population\nis crowded; the rest keeps ordinary '
-            'generational replacement, which is where the\nexploratory churn '
-            'lives. At 1.00 the mean rises smoothly and never dips — niche\n'
-            'preservation, but a population that cannot move downhill cannot '
-            'cross a valley.')
+            'Restricted tournament replacement. Each offspring competes '
+            'against the most\ngenetically similar member of a random window '
+            'rather than a random member.\nThat keeps specialists alive, '
+            'since one can only be displaced by a better\nversion of itself.'
+            '\n\nNothing in the crowded reserve is ever replaced by something '
+            'worse, so that\nshare of the population can only improve. '
+            '"reserve" sets how much of the\npopulation is crowded; the rest '
+            'keeps ordinary generational replacement, which\nis where the '
+            'exploratory turnover happens.\n\nAt 1.00 the mean rises smoothly '
+            'and never dips. That preserves niches, but a\npopulation that '
+            'cannot move downhill also cannot cross a valley.')
         self._crowding_window_var = aentry(
             ctrl4, 'window:', _ED.crowding_window, width=3,
             store=self._escape_entries)
@@ -991,25 +992,25 @@ class App:
             store=self._escape_entries)
         self._drift_var = echeck(
             'Neutral drift',
-            'Accept equal-ranked challengers instead of demanding strict '
-            'improvement.\nDrifting across a plateau’s neutral network is how '
-            'this substrate finds new\nphenotypes; strict > freezes the '
-            'archived champion in place.')
+            'Accepts equal-ranked challengers instead of requiring strict '
+            'improvement.\nDrifting sideways across a plateau is how this '
+            'substrate reaches new circuits.\nRequiring strict improvement '
+            'freezes the archived best in place.')
         self._adaptive_mut_var = echeck(
             'Self-adaptive mutation',
             'Each individual carries its own mutation rate, inherited with a '
             'log-normal nudge.\nA stuck lineage heats up on its own while an '
-            'improving lineage stays cool —\nper-lineage, unlike the '
-            'population-wide plateau reheat (β).')
+            'improving lineage stays cool.\nThis acts per lineage, unlike the '
+            'population-wide plateau reheat (beta).')
         # Second sub-row from here on (echeck/aentry both resolve ctrl4 at call
         # time, so rebinding it moves the remaining widgets).
         ctrl4 = esc2
         self._rebirth_var = echeck(
             'Rebirth',
-            'On a stall, rebuild part of the population from a DIVERSE SET of '
-            'archived ancestors\nat an elevated mutation rate — deliberately '
-            'backtracking to an earlier branch point\nto leave it in a '
-            'different direction. Current elites are kept.')
+            'On a stall, rebuilds part of the population from a spread of '
+            'archived ancestors\nat a raised mutation rate. The idea is to '
+            'back up to an earlier branch point\nand leave it in a different '
+            'direction. Current elites are kept.')
         self._rebirth_patience_var = aentry(
             ctrl4, 'stall:', _ED.rebirth_patience, width=4,
             store=self._escape_entries)
@@ -1018,11 +1019,11 @@ class App:
             store=self._escape_entries)
         self._robust_var = echeck(
             'Robustness',
-            'Second objective: re-score under jittered physics, aggregated by '
-            'WORST case and\nranked strictly BELOW correctness, so it can never '
-            'trade against a correct answer.\nAmong equally correct circuits it '
-            'prefers the broader basin. Costs one extra\nevaluation per jitter '
-            'sample.',
+            'A second objective. Re-scores the circuit under jittered '
+            'physics, takes the\nworst case, and ranks it strictly below '
+            'correctness so it can never be traded\nagainst a correct answer. '
+            'Among equally correct circuits it prefers the one\nthat tolerates '
+            'more variation. Costs one extra evaluation per jitter sample.',
             store=self._escape_async_only)
         self._robust_jitter_var = aentry(
             ctrl4, 'jitter:', _ED.robustness_jitter, width=4,
@@ -1030,15 +1031,16 @@ class App:
         self._escape_async_only.append(self._escape_entries[-1])
         self._islands_var = echeck(
             'Islands',
-            'Split the population into demes that breed SEPARATELY, each at '
-            'its own mutation rate —\ncold demes exploit while hot demes '
-            'explore, at the same time, instead of one\npopulation annealing '
-            'between the two. Rare ring migration carries a discovery\n'
-            'gradually rather than letting it sweep every deme at once.\n\n'
-            'The demes share ONE objective and differ only in search dynamics. '
-            'Islands that\ndiffer by OBJECTIVE — one per test case — were tried '
-            'in this project and failed:\nthey specialise into incompatible '
-            'optima and every migrant is a hybrid that\nfails on both sides.')
+            'Splits the population into groups that breed separately, each at '
+            'its own\nmutation rate. Cold groups exploit while hot groups '
+            'explore, at the same time,\ninstead of one population annealing '
+            'between the two. Rare ring migration lets a\ndiscovery spread '
+            'gradually rather than sweeping every group at once.\n\n'
+            'The groups share one objective and differ only in how they '
+            'search. Splitting\nthem by objective instead, one group per test '
+            'case, was tried in this project\nand failed: they specialise into '
+            'incompatible optima, and every migrant is a\nhybrid that fails on '
+            'both sides.')
         self._island_count_var = aentry(
             ctrl4, 'demes:', _ED.island_count, width=3,
             store=self._escape_entries)
@@ -1050,11 +1052,11 @@ class App:
             store=self._escape_entries)
         self._escape_async_only.append(self._escape_entries[-1])
         _Tip(self._escape_entries[-1],
-             'Fraction of cases ε-lexicase streams each generation (1 = all).\n'
-             'Downsampling buys several times more generations at the same '
-             'selection quality,\nand because the sample is redrawn every '
-             'generation it is also what "rotate the\nstimulus set" amounts to '
-             'here. Only acts when ε-lexicase is selected.')
+             'Fraction of test cases epsilon-lexicase uses each generation '
+             '(1 = all of them).\nSampling fewer buys several times more '
+             'generations at the same selection\nquality. The sample is '
+             'redrawn every generation, so this also serves as a\nrotating '
+             'stimulus set. Only has an effect when epsilon-lexicase is selected.')
         # A genuine valley needs a lineage that is allowed to be worse for more
         # than one generation. Keep this on its own row: unlike neutral drift
         # and high-rate rebirth, its guarantee is easy to state precisely.
@@ -1062,13 +1064,14 @@ class App:
         ttk.Label(esc3, text='          ').pack(side='left', padx=(2, 0))
         self._lineage_walk_var = echeck(
             'Lineage walk',
-            'Reserve a small cohort for FITNESS-BLIND, mutation-only random '
-            'walks. Each walker\ndescends from its own previous state, so a '
-            'temporarily worse intermediate survives\nlong enough to mutate '
-            'again. A walker that improves is copied into the ordinary '
-            'breeding\npool. This is target-blind and uses no extra '
-            'evaluations; it spends the selected share\nof existing '
-            'population slots on true multi-generation valley crossing.')
+            'Reserves a small group for mutation-only random walks that '
+            'ignore fitness.\nEach walker descends from its own previous '
+            'state, so an intermediate that is\ntemporarily worse survives '
+            'long enough to mutate again. Any walker that\nimproves is copied '
+            'back into the ordinary breeding pool.\n\nThis knows nothing '
+            'about the task and adds no extra evaluations. It spends the\n'
+            'selected share of existing population slots on crossing valleys '
+            'that take\nmore than one generation to cross.')
         self._lineage_fraction_var = aentry(
             ctrl4, 'share:', _ED.lineage_walk_fraction, width=4,
             store=self._escape_entries)
@@ -1104,7 +1107,7 @@ class App:
                                      get_circuit=self.current_circuit)
         # Population diversity: only meaningful for the asynchronous backends
         # (it grows and probes circuits), so it is hidden for SNN alongside the
-        # Designer. Analysis is opt-in — it is far too slow to run on every
+        # Designer. Analysis is opt-in - it is far too slow to run on every
         # redraw.
         self._diversity_frame = self._add_tab(nb, 'Diversity')
         # Updated after each run: unsuccessful/stopped runs point at their full
@@ -1118,7 +1121,7 @@ class App:
             mono=self._mono)
 
         self._status = tk.StringVar(
-            value='Ready — pick a model and target, set parameters, click Run (or Load Saved).')
+            value='Ready: pick a model and target, set parameters, click Run (or Load Saved).')
         self._status_label = ttk.Label(
             self.root, textvariable=self._status, anchor='w',
             relief='sunken', padding=(6, 2), wraplength=1000, justify='left')
@@ -1197,9 +1200,9 @@ class App:
                         '(Vth/Syn/Input) and Graded do not apply.'
                         % (tile_note, physics_note))
             else:
-                note = ('LUT array — SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
+                note = ('LUT array: SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
                         '4 directional 16-bit lookup tables per cell, asynchronous level logic '
-                        '(paper Architecture 2 / sim6). Recurrent & dynamical — TEMPORAL '
+                        '(paper Architecture 2 / sim6). Recurrent & dynamical: TEMPORAL '
                         'targets only (it cannot settle to combinational logic). '
                         'Substrate/Graded do not apply.')
             if backend == 'fnv':
@@ -1215,7 +1218,7 @@ class App:
             self._arch_frame.pack(side='left', before=self._layout_frame)
             self._arch_sep.pack(side='left', fill='y', padx=8, before=self._layout_frame)
             self._graded_chk.state(['!disabled'])
-            self._model_note.config(text='SNN — leaky integrate-and-fire neurons.')
+            self._model_note.config(text='SNN: leaky integrate-and-fire neurons.')
             self._set_tab_label(self._volt_tab, 'Voltage Traces')
         # pulse-physics knobs apply only to the nervous net's pulse engine.
         # Re-pack relative to the always-present I/O-binding frame (the
@@ -1246,7 +1249,7 @@ class App:
                 self._lut_function_row.pack_forget()
         # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
         # feeds the nervous, FNV and LUT GAs; SNN uses its own fixed constants
-        # and ignores them — so disable the whole row for SNN rather than let it look
+        # and ignores them - so disable the whole row for SNN rather than let it look
         # as if it applies.
         if hasattr(self, '_ga_entries'):
             st = 'disabled' if backend == 'snn' else 'normal'
@@ -1259,7 +1262,7 @@ class App:
         # self-adaptive mutation / rebirth) work on all four backends. Lifespan
         # scoring, the robustness objective and lexicase downsampling all read
         # the temporal scoring contract's per-case vectors, which SNN has none
-        # of — disable exactly those and leave the rest live.
+        # of - disable exactly those and leave the rest live.
         if hasattr(self, '_escape_async_only'):
             st = 'disabled' if backend in ('snn', 'fnv') else 'normal'
             if backend == 'fnv':
@@ -1272,7 +1275,7 @@ class App:
                 except tk.TclError:
                     pass
         # the Designer edits grown hardware, which only the two asynchronous
-        # substrates have — hide its tab for SNN runs, and keep its
+        # substrates have - hide its tab for SNN runs, and keep its
         # architecture in lockstep with the Model selector otherwise
         if hasattr(self, '_designer'):
             try:
@@ -1416,7 +1419,7 @@ class App:
         self._mean_line, = self._fit_ax.plot([], [], 'r--', lw=1.0, label='Mean', alpha=0.7)
         self._std_line, = self._fit_ax.plot(
             [], [], color='#e67e22', linestyle=':', lw=1.2,
-            label='Population fitness σ', alpha=0.9)
+            label='Population fitness sigma', alpha=0.9)
         self._mut_ax = self._fit_ax.twinx()
         self._mut_ax.set_ylabel('Effective mutation rate', color='#7d3c98')
         self._mut_ax.tick_params(axis='y', labelcolor='#7d3c98', labelsize=8)
@@ -1425,7 +1428,7 @@ class App:
             [], [], color='#7d3c98', lw=1.0, alpha=0.8,
             label='Effective mutation')
         self._mutation_text = self._fit_ax.text(
-            0.99, 0.02, 'Mutation: —', transform=self._fit_ax.transAxes,
+            0.99, 0.02, 'Mutation: -', transform=self._fit_ax.transAxes,
             ha='right', va='bottom', fontsize=8, color='#7d3c98',
             bbox=dict(facecolor='white', edgecolor='#7d3c98', alpha=0.75,
                       boxstyle='round,pad=0.2'))
@@ -1500,7 +1503,7 @@ class App:
         ax.axis('off')
         canvas.draw_idle()
 
-    # ── target selection ──────────────────────────────────────────────────────
+    # -- target selection ------------------------------------------------------
 
     def _all_targets(self):
         d = dict(TARGETS)
@@ -1528,7 +1531,7 @@ class App:
         else:
             d = self._all_targets()
         # model-restricted targets (supported_models) are physically
-        # unattainable under other node-timing models — a waveform contract
+        # unattainable under other node-timing models - a waveform contract
         # needs width-preserving transport, so hide it rather than let a
         # 'uniform' run silently cap below 1.0. The node model only exists on
         # the nervous backend; elsewhere the restriction does not apply.
@@ -1582,7 +1585,7 @@ class App:
                 'fnv': 'continuous-time Functional NV Net',
                 'snn': 'continuous-time recurrent SNN',
             }[self._backend()]
-            self._status.set('Target: %s — %s; %d input%s, %d output%s, %d test seconds. '
+            self._status.set('Target: %s, %s; %d input%s, %d output%s, %d test seconds. '
                              'See Evolution for its executable contract and Interactive for playback.'
                              % (self.target.name, model, self.target.n_inputs,
                                 '' if self.target.n_inputs == 1 else 's',
@@ -1596,14 +1599,14 @@ class App:
                     (n_cases, '' if n_cases == 1 else 's'),
                     '', '(run the GA or Load Saved to inspect a circuit)']
         self._set_tt('\n'.join(preview), title='Behavior Contract')
-        self._status.set('Target: %s — %d inputs, %d outputs, %d truth-table tests%s' % (
+        self._status.set('Target: %s, %d inputs, %d outputs, %d truth-table tests%s' % (
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
-            '   (large — evolution will be slow)' if n_cases > 32 else ''))
+            '   (large: evolution will be slow)' if n_cases > 32 else ''))
 
     def _effective_target(self, high, graded):
         """Apply the GUI's high/graded knobs to the selected target. Growth is no
         longer grid/iters-bounded (the nervous telomere is self-limiting), so the
-        target keeps its own I/O layout — grid_size/iters are left untouched."""
+        target keeps its own I/O layout: grid_size/iters are left untouched."""
         if getattr(self.target, 'temporal', False):
             # temporal targets have fixed close I/O and no high/graded fields
             return dataclasses.replace(self.target)
@@ -1639,7 +1642,7 @@ class App:
             self._refresh_target_list()
 
     def _reset_escape(self):
-        """Return every escape mechanism to off — the pre-escape behaviour."""
+        """Return every escape mechanism to off: the pre-escape behaviour."""
         d = self._escape_defaults
         self._lifespan_var.set(d['lifespan'])
         self._lifespan_stages_var.set(str(d['stages']))
@@ -1813,7 +1816,7 @@ class App:
         """The I/O binding strategy ('fixed' when the control is absent).
 
         The descriptive labels shown for the substrates with one native I/O
-        mechanism are not strategies, so they resolve to 'fixed' — those runs
+        mechanism are not strategies, so they resolve to 'fixed': those runs
         carry an evolved input layout on the genome instead.
         """
         if not hasattr(self, '_io_placement_var'):
@@ -1924,17 +1927,17 @@ class App:
         self._on_target_change()
         backend = self._backend()
         if backend == 'nervous':
-            self._status.set('Model: Nervous net — coincidence + inhibition + loops; '
+            self._status.set('Model: Nervous net, coincidence + inhibition + loops; '
                              'best with small grids and close I/O.')
         elif backend == 'fnv':
             self._status.set(
                 'Model: Functional NV Net - fixed physical functions on '
                 'directed honeycomb wires; select whole component families.')
         elif backend == 'lut':
-            self._status.set('Model: LUT array — square grid, 4 neighbours, four 16-bit '
+            self._status.set('Model: LUT array, square grid, 4 neighbours, four 16-bit '
                              'lookup tables per cell, asynchronous level logic (sim6 / Arch 2).')
         else:
-            self._status.set('Model: SNN — leaky integrate-and-fire neurons.')
+            self._status.set('Model: SNN, leaky integrate-and-fire neurons.')
 
     def _read_arch(self):
         """Parse the substrate fields -> (Arch, input_high, ok)."""
@@ -1977,7 +1980,7 @@ class App:
         self._target_picker.set_targets(self._targets_for_backend(self._backend()))
         self._target_picker.select(target.name, notify=True)
 
-    # ── GA control ────────────────────────────────────────────────────────────
+    # -- GA control ------------------------------------------------------------
 
     def _start_ga(self):
         selected = self._targets_for_backend(self._backend()).get(
@@ -1995,7 +1998,7 @@ class App:
             if pop < 2 or gens < 1 or tries < 1:
                 raise ValueError
         except ValueError:
-            self._status.set('Invalid parameters — Pop>=2, Gens>=1, Tries>=1 (integers).')
+            self._status.set('Invalid parameters: Pop>=2, Gens>=1, Tries>=1 (integers).')
             return
 
         seed_txt = self._seed_var.get().strip().lower()
@@ -2006,7 +2009,7 @@ class App:
             try:
                 base_seed = int(seed_txt)
             except ValueError:
-                self._status.set("Invalid seed — use an integer or 'random'.")
+                self._status.set("Invalid seed: use an integer or 'random'.")
                 return
         self._active_seed = base_seed
         # show the actual seed in the field so it's visible and replayable
@@ -2015,7 +2018,7 @@ class App:
 
         arch, high, ok = self._read_arch()
         if not ok:
-            self._status.set('Invalid substrate — Syn weight>0, Input I>0, 0<=Vth min<=Vth max.')
+            self._status.set('Invalid substrate: Syn weight>0, Input I>0, 0<=Vth min<=Vth max.')
             return
 
         try:
@@ -2023,7 +2026,7 @@ class App:
             if not 1 <= n_chroms <= MAX_CHROMS:
                 raise ValueError
         except ValueError:
-            self._status.set('Invalid genome — Chroms must be an integer from '
+            self._status.set('Invalid genome: Chroms must be an integer from '
                              '1 to %d.' % MAX_CHROMS)
             return
         if (self._selected_io_placement() in (
@@ -2036,8 +2039,8 @@ class App:
 
         run_config = self._read_run_config(chromosome_count=n_chroms)
         if run_config is None:
-            self._status.set('Invalid tuning — Mutations>=0, 0<=Immigrants<1, '
-                             'Tournament>=1, Elites>=0, 0<α<=1, 0<=β<=10, '
+            self._status.set('Invalid tuning: Mutations>=0, 0<=Immigrants<1, '
+                             'Tournament>=1, Elites>=0, 0<alpha<=1, 0<=beta<=10, '
                              'Mutation cap>=1, '
                              'Workers=1-%d, '
                              'Max telomere>=2, '
@@ -2089,11 +2092,11 @@ class App:
         self._std_line.set_data([], [])
         self._genbest_line.set_data([], [])
         self._mutation_line.set_data([], [])
-        self._mutation_text.set_text('Mutation: —')
+        self._mutation_text.set_text('Mutation: -')
         self._fit_ax.set_xlim(0, max(gens * tries, 10) + 1)
-        self._fit_ax.set_title('Fitness vs Generation — %s' % self.target.name, fontsize=10)
+        self._fit_ax.set_title('Fitness vs Generation: %s' % self.target.name, fontsize=10)
         self._fit_canvas.draw_idle()
-        self._set_tt('Evolving %s …\n' % self.target.name)
+        self._set_tt('Evolving %s ...\n' % self.target.name)
 
         self._run_btn.config(state='disabled')
         self._pause_btn.config(state='normal', text='Pause')
@@ -2121,7 +2124,7 @@ class App:
                          (backend, run_config.ga.tile_arch,
                           run_config.pulse.model))
                         if backend == 'nervous' else backend)
-        self._status.set('Evolving %s [%s] …  pop=%d  gens=%d  tries=%d  seed=%d%s' %
+        self._status.set('Evolving %s [%s] ...  pop=%d  gens=%d  tries=%d  seed=%d%s' %
                          (self.target.name, backend_note, pop, gens, tries, base_seed,
                           '  [graded]' if self._graded_var.get() else ''))
 
@@ -2139,7 +2142,7 @@ class App:
                     recombination_enabled=enabled))
             state = 'ON' if enabled else 'OFF'
             self._status.set(
-                'Recombination %s — applies to the next offspring generation.'
+                'Recombination %s: applies to the next offspring generation.'
                 % state)
 
     def _toggle_pause(self):
@@ -2151,13 +2154,13 @@ class App:
             self._pause_btn.config(text='Pause')
             self._recombination_chk.config(state='disabled')
             self._work_phase = 'Resuming evolution'
-            self._status.set(self._work_phase + '…')
+            self._status.set(self._work_phase + '...')
         else:
             self._pause_event.set()
             self._pause_btn.config(text='Resume')
             self._recombination_chk.config(state='normal')
-            self._work_phase = 'Pause requested — finishing current evaluation batch'
-            self._status.set(self._work_phase + '…')
+            self._work_phase = 'Pause requested: finishing current evaluation batch'
+            self._status.set(self._work_phase + '...')
 
     def _stop_ga(self):
         self._stop_requested = True
@@ -2166,12 +2169,12 @@ class App:
         self._pause_btn.config(state='disabled', text='Pause')
         self._stop_btn.config(state='disabled')
         self._work_phase = 'Stopping after the current evaluation batch'
-        self._status.set(self._work_phase + '…')
+        self._status.set(self._work_phase + '...')
 
     def _load_saved(self):
         path = CKPT if os.path.exists(CKPT) else LEGACY_CKPT
         if not os.path.exists(path):
-            self._status.set('No saved genome at %s — run the GA first.' % CKPT)
+            self._status.set('No saved genome at %s: run the GA first.' % CKPT)
             return
         try:
             state = load_checkpoint(path)
@@ -2180,15 +2183,15 @@ class App:
             return
         if state.get('hand_built') and state.get('best_genome') is None:
             # a Designer phenotype with no genome: the main tabs all regrow from
-            # DNA, so there is nothing to show here — open it in the Designer.
-            self._status.set('Hand-built design (no genome) — open it in the '
-                             'Designer tab (Load design…).')
+            # DNA, so there is nothing to show here - open it in the Designer.
+            self._status.set('Hand-built design (no genome): open it in the '
+                             'Designer tab (Load design...).')
             return
         loaded_genome = state['best_genome']
         actual_chroms = len(getattr(loaded_genome, 'chromosomes', []) or [])
         if not 1 <= actual_chroms <= MAX_CHROMS:
             self._status.set(
-                'Saved genome has %d chromosomes; this build supports 1–%d.' %
+                'Saved genome has %d chromosomes; this build supports 1-%d.' %
                 (actual_chroms, MAX_CHROMS))
             return
         loaded_config = state.get('run_config') or RunConfig()
@@ -2203,13 +2206,13 @@ class App:
         actual_tile_arch = getattr(loaded_genome, 'arch', 'single')
         chrom_warn = ''
         if configured_chroms is not None and configured_chroms != actual_chroms:
-            chrom_warn = ('   — saved Chroms=%d disagreed with the genome; '
+            chrom_warn = ('  : saved Chroms=%d disagreed with the genome; '
                           'using its actual count %d' %
                           (configured_chroms, actual_chroms))
         arch_warn = ''
         if (loaded_backend == 'nervous'
                 and loaded_config.ga.tile_arch != actual_tile_arch):
-            arch_warn = ('   — saved tile setting disagreed with the genome; '
+            arch_warn = ('  : saved tile setting disagreed with the genome; '
                          'using %s' % actual_tile_arch)
         normalized_config = dataclasses.replace(
             loaded_config, ga=dataclasses.replace(
@@ -2220,7 +2223,7 @@ class App:
         self.best_genome  = loaded_genome
         self.best_fitness = state['best_fitness']
         # a Designer design with a genome AND hand edits: the main app regrows
-        # from DNA, so it cannot reproduce the exact hand-edited grid — flag it
+        # from DNA, so it cannot reproduce the exact hand-edited grid - flag it
         # so the user knows to open it in the Designer for the precise circuit.
         hand_edited = bool(state.get('hand_built') and state.get('grid_edited'))
         saved_target = state.get('target')
@@ -2284,7 +2287,7 @@ class App:
             # being displayed is not the one a fresh Run would use.
             profile_label = 'Analog tri-circuit (3-output, paper Fig. 1 node)'
             if loaded_backend == 'nervous':
-                profile_warn = ('   — this checkpoint was saved under a '
+                profile_warn = ('  : this checkpoint was saved under a '
                                 'RETIRED NV engine; the shown profile is '
                                 'the current one, not the saved one')
         self._nv_profile_var.set(profile_label)
@@ -2343,7 +2346,7 @@ class App:
         self._refresh_target_list()          # keep the backend filter (don't re-broaden;
                                              # LUT deliberately hides combinational targets)
         self._target_picker.select(saved_target.name)
-        warn = ('   — hand-edited design: this view is REGROWN from the genome; '
+        warn = ('  : hand-edited design: this view is REGROWN from the genome; '
                 'open the Designer tab to see the exact edited circuit'
                 if hand_edited else '')
         self._status.set('Loaded %s  fitness=%.4f  syn_w=%.2f%s' %
@@ -2353,7 +2356,7 @@ class App:
         self._update_all(self.best_genome, self.best_fitness)
         self._save_btn.config(state='normal')
 
-    # ── queue polling ─────────────────────────────────────────────────────────
+    # -- queue polling ---------------------------------------------------------
 
     def _redraw_fit_chart(self, max_pts=2000):
         """Push fitness and effective mutation history to the chart. The full
@@ -2395,7 +2398,7 @@ class App:
         self._fit_canvas.draw_idle()
 
     def _poll(self):
-        last_gen = None                        # newest 'gen' this poll — redraw ONCE
+        last_gen = None                        # newest 'gen' this poll - redraw ONCE
         finished = False
         try:
             while True:
@@ -2425,14 +2428,14 @@ class App:
                     self._work_phase = ('Paused between generations' if paused
                                         else 'Resuming evolution')
                     state = 'ON' if self._recombination_event.is_set() else 'OFF'
-                    self._status.set('%s — recombination %s.' %
+                    self._status.set('%s: recombination %s.' %
                                      (self._work_phase, state))
                 elif kind == 'diverse':
                     _, n_unique, valid = msg
                     self._n_unique_solvers = n_unique
                     self._diversity_population_path = SOLVER_POP
-                    self._status.set('Diversifying — built %d genotypically UNIQUE '
-                                     'solvers (each ≥ %.3f) → results/solver_generation.json'
+                    self._status.set('Diversifying: built %d genotypically UNIQUE '
+                                     'solvers (each >= %.3f) -> results/solver_generation.json'
                                      % (n_unique, valid))
                     # point the Diversity tab at the population just written;
                     # analysis stays opt-in (it grows every genome)
@@ -2567,7 +2570,7 @@ class App:
                         self._status.set('GA stopped on error: %s  (controls re-enabled)'
                                          % self._ga_error)
                     else:
-                        saved = ('  saved → %s' % CKPT) if genome else ''
+                        saved = ('  saved -> %s' % CKPT) if genome else ''
                         nu = getattr(self, '_n_unique_solvers', 0)
                         div = ('  |  %d valid solvers' % nu) if nu else ''
                         cert = getattr(self, '_certification', None)
@@ -2580,7 +2583,7 @@ class App:
                         pv = ('  |  diversity population NOT saved: %s'
                               % population_error if population_error else '')
                         outcome = 'Stopped' if getattr(self, '_stop_requested', False) else 'Done'
-                        self._status.set('%s — %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s%s%s' %
+                        self._status.set('%s: %s fitness=%.4f  seed=%d (type it in Seed to replay)%s%s%s%s%s' %
                                          (outcome, self.target.name, fit,
                                           getattr(self, '_active_seed', 0),
                                           saved, div, cv, sv, pv))
@@ -2591,7 +2594,7 @@ class App:
         if last_gen is not None and not finished:
             (try_n, gen, best_f, mean_f, offspring_best,
              mutation_rate, fitness_std) = last_gen
-            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  offspring-best=%.4f  mean=%.4f  σ=%.4f  mutation=%.3f' %
+            self._status.set('%s  seed=%d  try=%d  gen=%d  best=%.4f  offspring-best=%.4f  mean=%.4f  sigma=%.4f  mutation=%.3f' %
                              (self.target.name, getattr(self, '_active_seed', 0),
                               try_n, gen, best_f, offspring_best, mean_f,
                               fitness_std, mutation_rate))
@@ -2602,7 +2605,7 @@ class App:
             elapsed = time.monotonic() - getattr(self, '_run_started', time.monotonic())
             phase = getattr(self, '_work_phase', 'Working')
             detail = getattr(self, '_phase_detail', '')
-            self._status.set('%s… %s  elapsed %s' %
+            self._status.set('%s... %s  elapsed %s' %
                              (phase, detail, self._format_elapsed(elapsed)))
         if self.root.winfo_exists():
             self._poll_job = self.root.after(60, self._poll)
@@ -2633,7 +2636,7 @@ class App:
         ui_compat.cancel_after_callbacks(self.root)
         self.root.destroy()
 
-    # ── display updates ───────────────────────────────────────────────────────
+    # -- display updates -------------------------------------------------------
 
     def _seed_tag(self):
         s = getattr(self, '_active_seed', None)
@@ -2722,7 +2725,7 @@ class App:
 
         self._growth_fig.clf()
         self._growth_fig.suptitle(
-            '%s — Circuit Growth   (fitness=%.4f)%s' % (target.name, fitness, self._seed_tag()),
+            '%s: Circuit Growth   (fitness=%.4f)%s' % (target.name, fitness, self._seed_tag()),
             fontsize=10, fontweight='bold', y=0.995)
         axes = self._growth_fig.subplots(
             nrows, ncols, squeeze=False,
@@ -2827,7 +2830,7 @@ class App:
             return
         fig = self._growth_fig
         fig.clf()
-        fig.suptitle('%s — hex nervous-net growth   (fitness=%.4f)%s'
+        fig.suptitle('%s: hex nervous-net growth   (fitness=%.4f)%s'
                      % (target.name, fitness, self._seed_tag()),
                      fontsize=10, fontweight='bold', y=0.995)
         gs    = target.grid_size
@@ -2882,7 +2885,7 @@ class App:
             else [p for p in resolved_inputs if p in final])
         try:
             # Under an evolvable io_placement strategy the genome's tags choose
-            # the ports — mark the SAME cells the scorer drives/reads.
+            # the ports - mark the SAME cells the scorer drives/reads.
             from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
             bound = None
             if (not exterior and not evolved_layout
@@ -2911,12 +2914,12 @@ class App:
             out_pos = {}
         fig = self._growth_fig
         fig.clf()
-        fig.suptitle('%s — LUT array growth   (fitness=%.4f)%s'
+        fig.suptitle('%s: LUT array growth   (fitness=%.4f)%s'
                      % (target.name, fitness, self._seed_tag()),
                      fontsize=10, fontweight='bold', y=0.995)
         n = len(snaps)
         # The distinct lookup tables actually present in the mature organism,
-        # most common first — shown below as REAL truth tables (green=1/white=0)
+        # most common first - shown below as REAL truth tables (green=1/white=0)
         # so the raw table content is visible, not just the wedge-colour hash.
         from collections import Counter
         from substrates.lut import lut_sop
@@ -2925,7 +2928,7 @@ class App:
         luts   = [v for v, _ in counts.most_common(8)]
         # Two STRUCTURED sections (a single uniform grid scattered the LUT tables
         # among the growth snapshots): growth stages + legend on top, the
-        # distinct-LUT gallery in its own grid below — each section self-contained
+        # distinct-LUT gallery in its own grid below - each section self-contained
         # so the tables no longer land in arbitrary leftover cells.
         snap_cells = n + 1                          # growth snapshots + one legend cell
         snap_cols  = min(6, max(2, snap_cells))
@@ -2953,29 +2956,29 @@ class App:
             mpatches.Patch(facecolor='#7ec8e3', edgecolor='#c3ccd6',
                            label='Cell = 4 directional LUTs'),
             mpatches.Patch(facecolor='#e0b0ff', edgecolor='#c3ccd6',
-                           label='wedge colour = that LUT’s state'),
+                           label="wedge colour = that LUT's state"),
             mpatches.Patch(facecolor=(0.95, 0.96, 0.97), edgecolor='#c3ccd6',
                            label='Dead direction (LUT = 0)'),
             mpatches.Patch(facecolor='#1ea64a', edgecolor='#b9c2cc',
                            label='tables below: green=1, white=0'),
         ]
         leg.legend(handles=patches, loc='center', fontsize=7, frameon=False,
-                   title='LUT array — growth stages above,\ndistinct lookup tables below (Fig. 13)',
+                   title='LUT array: growth stages above,\ndistinct lookup tables below (Fig. 13)',
                    title_fontsize=7.5)
         if luts:
             gs_lut = gs[1].subgridspec(lut_rows, lut_cols, hspace=0.6, wspace=0.2)
             for k, v in enumerate(luts):
                 sop = lut_sop(v)
                 if len(sop) > 16:
-                    sop = sop[:15] + '…'
+                    sop = sop[:15] + '...'
                 ax = fig.add_subplot(gs_lut[k // lut_cols, k % lut_cols])
                 draw_lut_table(ax, v, swatch=_lut_color(v),
-                               title='LUT %04X  ×%d\n%s' % (v, counts[v], sop))
+                               title='LUT %04X  x%d\n%s' % (v, counts[v], sop))
         self._growth_canvas.draw_idle()
 
     def _draw_lut_dynamics(self, genome):
         """Activity tab for a temporal LUT target: the paper's Fig. 14 'motion
-        picture' as a filmstrip — the array's OUTPUT BITS (green=1 / red=0 per
+        picture' as a filmstrip, the array's OUTPUT BITS (green=1 / red=0 per
         direction) at a spread of seconds through the first trial, so the running
         dynamics that ARE the LUT's computation are visible over time."""
         target = self._disp_target
@@ -2988,7 +2991,7 @@ class App:
             grid, out_pos, _traces, bound_in = prepared
         except Exception:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
-                                   '(LUT: circuit incomplete — grew too little)')
+                                   '(LUT: circuit incomplete, grew too little)')
             return
         trial   = target.trials[0]
         from substrates.nervous.io_placement import (
@@ -3037,7 +3040,7 @@ class App:
         k    = min(8, len(frames))
         idxs = [round(i * (len(frames) - 1) / max(1, k - 1)) for i in range(k)]
         self._volt_fig.clf()
-        self._volt_fig.suptitle('%s — LUT output dynamics over seconds  '
+        self._volt_fig.suptitle('%s: LUT output dynamics over seconds  '
                                 '(green=1 / red=0, Fig. 14)%s'
                                 % (target.name, self._seed_tag()),
                                 fontsize=10, fontweight='bold', y=0.99)
@@ -3072,7 +3075,7 @@ class App:
             return
         if not cases:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
-                                   '(LUT: circuit incomplete — inputs/outputs missing)')
+                                   '(LUT: circuit incomplete, inputs/outputs missing)')
             return
         from substrates.lut import (
             lut_exterior_inputs, lut_io_mode)
@@ -3091,7 +3094,7 @@ class App:
         self._volt_fig.clf()
         extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
                 '  (first %d of %d)' % (MAX_VOLT_CASES, len(target.cases))
-        self._volt_fig.suptitle('%s — LUT array response per case%s%s'
+        self._volt_fig.suptitle('%s: LUT array response per case%s%s'
                                 % (target.name, extra, self._seed_tag()),
                                 fontsize=10, fontweight='bold', y=0.99)
         axes = self._volt_fig.subplots(1, len(cases), squeeze=False)[0]
@@ -3125,7 +3128,7 @@ class App:
         if getattr(target, 'temporal', False):
             self._draw_placeholder(
                 self._volt_fig, self._volt_canvas,
-                'Temporal recurrent SNN — the fitted event/state traces are '
+                'Temporal recurrent SNN: the fitted event/state traces are '
                 'listed in the Contract Score panel; use Interactive to load '
                 'or edit a complete trial timeline.')
             return
@@ -3154,7 +3157,7 @@ class App:
                 out_neurons.append(members)
         except Exception:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
-                                   '(circuit incomplete — no I/O neurons to trace)')
+                                   '(circuit incomplete: no I/O neurons to trace)')
             return
 
         cases   = target.cases[:MAX_VOLT_CASES]
@@ -3167,7 +3170,7 @@ class App:
         self._volt_fig.clf()
         extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
                 '  (first %d of %d cases)' % (MAX_VOLT_CASES, len(target.cases))
-        self._volt_fig.suptitle('%s — Membrane Voltages%s%s' % (target.name, extra, self._seed_tag()),
+        self._volt_fig.suptitle('%s: Membrane Voltages%s%s' % (target.name, extra, self._seed_tag()),
                                 fontsize=10, fontweight='bold', y=0.99)
         gspec = gridspec.GridSpec(n_rows, n_cols, figure=self._volt_fig,
                                   hspace=0.6, wspace=0.35,
@@ -3273,7 +3276,7 @@ class App:
         target = self._disp_target
         if getattr(target, 'temporal', False):
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
-                                   'Temporal target — drive it over time in the Interactive tab '
+                                   'Temporal target: drive it over time in the Interactive tab '
                                    '(Step / Run).')
             return
         try:
@@ -3284,7 +3287,7 @@ class App:
             return
         if not cases:
             self._draw_placeholder(self._volt_fig, self._volt_canvas,
-                                   '(nervous: circuit incomplete — inputs/outputs missing)')
+                                   '(nervous: circuit incomplete, inputs/outputs missing)')
             return
 
         gs      = target.grid_size
@@ -3294,7 +3297,7 @@ class App:
         self._volt_fig.clf()
         extra = '' if len(target.cases) <= MAX_VOLT_CASES else \
                 '  (first %d of %d)' % (MAX_VOLT_CASES, len(target.cases))
-        self._volt_fig.suptitle('%s — hex nervous-net activity per case%s%s'
+        self._volt_fig.suptitle('%s: hex nervous-net activity per case%s%s'
                                 % (target.name, extra, self._seed_tag()),
                                 fontsize=10, fontweight='bold', y=0.99)
         axes = self._volt_fig.subplots(1, len(cases), squeeze=False)[0]
@@ -3313,7 +3316,7 @@ class App:
                                color='green' if all_ok else 'red', fontsize=7)
         self._volt_canvas.draw_idle()
 
-    # ── genome viewer ─────────────────────────────────────────────────────────
+    # -- genome viewer ---------------------------------------------------------
 
     # one colour per cell-state (categorical, so equal states read the same)
     _STATE_CMAP = plt.cm.tab20
@@ -3382,12 +3385,12 @@ class App:
         ax.add_patch(FancyArrowPatch((ox + 3.1, oy + 1.45), (ox + 4.05, oy + 1.45),
                      arrowstyle='-|>', mutation_scale=11, color='#445', lw=1.4, zorder=2))
         chip(ox + 4.2, oy + 0.85, gene.self_out, sz=1.25, fs=11)
-        # growth-limit badge (top-right of card) — SNN genes only; the hex gene
+        # growth-limit badge (top-right of card) - SNN genes only; the hex gene
         # has no per-gene iteration limit (paper-faithful associative memory)
         if hasattr(gene, 'limit'):
             ax.text(ox + 5.85, oy - 0.18, 'it<=%d' % gene.limit, ha='right', va='top',
                     fontsize=6.5, color='#888', zorder=3)
-        # I/O-binding tag badge (bottom-right) — only when the gene carries one,
+        # I/O-binding tag badge (bottom-right) - only when the gene carries one,
         # so default genomes draw exactly as before
         if getattr(gene, 'tag', 0):
             ax.text(ox + 5.85, oy + 3.05, 'io:%d' % gene.tag, ha='right', va='top',
@@ -3433,7 +3436,7 @@ class App:
             self._draw_placeholder(fig, self._genome_canvas, '(empty genome)')
             return
         n_total = sum(len(c.genes) for c in chroms)
-        title = 'Genome  —  %d chromosome%s,  %d genes' % (
+        title = 'Genome :  %d chromosome%s,  %d genes' % (
             len(chroms), '' if len(chroms) == 1 else 's', n_total)
         if fitness is not None:
             title += '   (fitness = %.4f)' % fitness
@@ -3444,7 +3447,7 @@ class App:
         lutmode = g0 is not None and hasattr(g0, 'ctx_n')
         CARD_CAP = 24
         # A dense LUT genome (hundreds of ontogeny genes) can't be shown as one
-        # card per gene — they overlap into noise. Show its VOCABULARY instead:
+        # card per gene - they overlap into noise. Show its VOCABULARY instead:
         # the distinct output lookup tables it installs, most-common first, the
         # way the Growth tab summarises the grown organism.
         if lutmode and n_total > CARD_CAP:
@@ -3469,11 +3472,11 @@ class App:
         for ci, chrom in enumerate(chroms):
             tel = getattr(chrom, 'telomere', None)
             is_wiring = getattr(chrom, 'wiring', False)
-            ax.text(0.0, y, "Chromosome %s   ·   tag %d   ·   split %s%s   ·   %d genes%s"
+            ax.text(0.0, y, "Chromosome %s   -   tag %d   -   split %s%s   -   %d genes%s"
                     % (chr(ord('a') + ci), chrom.tag, _split_display(chrom),
-                       ('   ·   telomere %d' % tel) if tel is not None else '',
+                       ('   -   telomere %d' % tel) if tel is not None else '',
                        len(chrom.genes),
-                       '   ·   WIRING (I/O port map)' if is_wiring else ''),
+                       '   -   WIRING (I/O port map)' if is_wiring else ''),
                     fontsize=9.5, fontweight='bold',
                     color='#a03070' if is_wiring else '#334', va='bottom')
             y += 1.0
@@ -3487,12 +3490,12 @@ class App:
                                 y + (drawn_here // per_row) * CH, gene)
                 drawn += 1
                 drawn_here += 1
-            # advance by the rows actually drawn, not the full gene count — the
+            # advance by the rows actually drawn, not the full gene count - the
             # old code stretched the axis by hundreds of unused rows on a capped
             # genome, which (with aspect='equal') crushed the cards into overlap.
             y += (math.ceil(drawn_here / per_row) if drawn_here else 1) * CH + 0.7
             if truncated:
-                ax.text(0.0, y, '…  %d more genes not shown (see the genome .txt export)'
+                ax.text(0.0, y, '...  %d more genes not shown (see the genome .txt export)'
                         % (n_total - drawn), fontsize=9, color='#a00', va='bottom')
                 y += 1.0
                 break
@@ -3536,7 +3539,7 @@ class App:
     def _draw_genome_lut_summary(self, fig, chroms, n_total, title):
         """Faithful per-CHROMOSOME view of a dense LUT genome: one row per
         chromosome showing its stats + the most-common output lookup tables IT
-        installs (its own 'vocabulary'), as real truth grids with ×counts + SOP.
+        installs (its own 'vocabulary'), as real truth grids with xcounts + SOP.
         Shows the genome's structure (which chromosome carries which LUTs) rather
         than a global merge or an unreadable wall of one card per gene."""
         from collections import Counter
@@ -3567,23 +3570,23 @@ class App:
                     w, cnt = top[k]
                     sop = lut_sop(w)
                     if len(sop) > 14:
-                        sop = sop[:13] + '…'
+                        sop = sop[:13] + '...'
                     draw_lut_table(ax, w, swatch=_lut_color(w),
-                                   title='%04X ×%d\n%s' % (w, cnt, sop))
+                                   title='%04X x%d\n%s' % (w, cnt, sop))
                 else:
                     ax.set_visible(False)
         if len(chroms) > len(shown):
             fig.text(0.5, 0.005,
-                     '…  %d more chromosomes — full detail in the genome .txt export'
+                     '...  %d more chromosomes: full detail in the genome .txt export'
                      % (len(chroms) - len(shown)),
                      ha='center', fontsize=8, color='#a00')
         fig.tight_layout(rect=[0, 0.02, 1, 0.95])
 
-    # ── save PNGs ─────────────────────────────────────────────────────────────
+    # -- save PNGs -------------------------------------------------------------
 
     def _save_pngs(self):
         if self.best_genome is None:
-            self._status.set('No genome loaded — nothing to save.')
+            self._status.set('No genome loaded: nothing to save.')
             return
         os.makedirs(RESULTS_DIR, exist_ok=True)
         safe = ''.join(c if c.isalnum() else '_' for c in self._disp_target.name)
@@ -3601,10 +3604,10 @@ class App:
                 f.write('seed = %d\n\n' % seed)
             f.write(build_genome_text(self.best_genome, self.best_fitness,
                                       binding=self._io_binding_text(self.best_genome)))
-        self._status.set('Saved growth / voltage / genome (png + txt) (%s) → results/' % ts)
+        self._status.set('Saved growth / voltage / genome (png + txt) (%s) -> results/' % ts)
 
 
-# ── entry point ───────────────────────────────────────────────────────────────
+# -- entry point ---------------------------------------------------------------
 
 def main():
     multiprocessing.freeze_support()

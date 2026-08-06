@@ -1,5 +1,5 @@
 """
-tests/test_diversity.py — the evaluated-population diversity contract
+tests/test_diversity.py - the evaluated-population diversity contract
 (substrates/nervous/diversity.py).
 
 Fitness spread is identically zero once everyone solves, so these levels are
@@ -33,11 +33,11 @@ def _target(name='Coincidence (2-in)', model='pulse_delay'):
     return target, config
 
 
-# ── cluster maths ────────────────────────────────────────────────────────────
+# -- cluster maths ------------------------------------------------------------
 
 def test_cluster_stats_separate_count_from_shape():
     """Distinct count alone cannot tell an even spread from a monoculture with
-    a long tail — that is what largest_share and effective diversity are for."""
+    a long tail - that is what largest_share and effective diversity are for."""
     even = dv.cluster_stats('exact', ['a', 'b', 'c', 'd'])
     assert even.distinct == 4 and even.total == 4
     assert even.largest == 1 and abs(even.effective - 4.0) < 1e-9
@@ -55,7 +55,7 @@ def test_cluster_stats_report_unmeasured_instead_of_dropping():
     assert stats.unmeasured == 2
 
 
-# ── what each genotype level must / must not distinguish ─────────────────────
+# -- what each genotype level must / must not distinguish ---------------------
 
 def test_functional_signature_ignores_tags_and_splits():
     """Tags and split points steer future crossover but do not touch THIS
@@ -171,7 +171,7 @@ def test_tri3_functional_signature_ignores_timing_vectors():
             == dv.functional_signature(other, 'nervous', config))
 
 
-# ── phenotype ────────────────────────────────────────────────────────────────
+# -- phenotype ----------------------------------------------------------------
 
 def test_phenotype_signature_is_stable_and_grid_sensitive():
     target, config = _target()
@@ -192,7 +192,7 @@ def test_phenotype_signature_is_stable_and_grid_sensitive():
 
 def test_phenotype_separates_identical_grids_with_different_delays():
     """Under the legacy profile two genomes can grow the same state grid while
-    carrying different per-node delays — physically different circuits."""
+    carrying different per-node delays - physically different circuits."""
     target, config = _target()
     random.seed(5)
     genome = random_hex_genome(2)
@@ -208,7 +208,7 @@ def test_phenotype_separates_identical_grids_with_different_delays():
     assert other != base                        # but not the same circuit
 
 
-# ── probe bank + behaviour ───────────────────────────────────────────────────
+# -- probe bank + behaviour ---------------------------------------------------
 
 def test_probe_bank_is_frozen_and_off_spec():
     target, _ = _target()
@@ -245,7 +245,7 @@ def test_behavior_signature_is_deterministic_and_quantised():
                 assert all(isinstance(t, int) for t in train)
 
 
-# ── funnel + robustness plumbing ─────────────────────────────────────────────
+# -- funnel + robustness plumbing ---------------------------------------------
 
 def test_funnel_is_monotone_and_reports_every_level():
     """Each step down the ladder can only merge clusters, never split them."""
@@ -271,7 +271,7 @@ def test_funnel_is_monotone_and_reports_every_level():
     assert 'probe bank v%d' % dv.PROBE_VERSION in text
     assert 'seed %d' % dv.PROBE_SEED in text
 
-    # the report defines its terms and reports measurements — and does NOT
+    # the report defines its terms and reports measurements - and does NOT
     # editorialise about them
     full = dv.format_report(report, population=8, target_name='X')
     assert 'DEFINITIONS' in full and 'GROUP SIZE DISTRIBUTION' in full

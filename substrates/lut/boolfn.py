@@ -1,18 +1,18 @@
 """
-substrates/lut/boolfn.py — make a 16-bit LUT understandable as boolean logic.
+substrates/lut/boolfn.py - make a 16-bit LUT understandable as boolean logic.
 
 Each live LUT cell holds four 16-bit lookup tables (Ln, Ls, Le, Lw). A single
 16-bit table is not an opaque number: it is a boolean function of the FOUR bits
 the cell receives from its neighbours. The dynamics (lut.py `LutSim.step`) build
-a 4-bit index from those neighbour bits — weight 1 = the bit from the NORTH
-neighbour, 2 = SOUTH, 4 = EAST, 8 = WEST — and the LUT's output bit is
+a 4-bit index from those neighbour bits - weight 1 = the bit from the NORTH
+neighbour, 2 = SOUTH, 4 = EAST, 8 = WEST - and the LUT's output bit is
 `(lut >> index) & 1`. So the table is exactly the truth table of
 
         out = f(N, S, E, W)
 
 over the neighbour inputs N/S/E/W. This module turns the raw 16-bit word into
-that function: a minimised sum-of-products expression (Quine–McCluskey), a short
-human summary, and a raw truth string — so the genome and its lookup tables read
+that function: a minimised sum-of-products expression (Quine-McCluskey), a short
+human summary, and a raw truth string - so the genome and its lookup tables read
 as logic instead of hex.
 """
 from __future__ import annotations
@@ -20,8 +20,8 @@ from __future__ import annotations
 # Neighbour-input variables in LUT-index bit order (see LutSim.step):
 #   bit0 = from N, bit1 = from S, bit2 = from E, bit3 = from W.
 INPUT_NAMES = ('N', 'S', 'E', 'W')
-_NOT = '¬'      # ¬  (Latin-1 / cp1252 safe, so saved genome files are fine)
-_AND = '·'      # ·
+_NOT = 'NOT '      # NOT   (Latin-1 / cp1252 safe, so saved genome files are fine)
+_AND = '-'      # -
 _OR  = ' + '
 
 
@@ -35,7 +35,7 @@ def popcount(lut):
     return bin(lut & 0xFFFF).count('1')
 
 
-# ── Quine–McCluskey minimisation (only 4 variables — tiny and exact) ────────────
+# -- Quine-McCluskey minimisation (only 4 variables - tiny and exact) ------------
 
 def _prime_implicants(ones):
     """Prime implicants of the ON-set `ones`, each as (value, dashmask) where a
@@ -103,8 +103,8 @@ def _fmt_implicant(pi, names):
 
 def lut_sop(lut, names=INPUT_NAMES):
     """Minimised sum-of-products for the LUT as a function of the neighbour
-    inputs, e.g. ``¬N·E + S``. Constants collapse to ``'0'`` / ``'1'``. Verified
-    exact — falls back to the raw minterm SOP if minimisation ever disagrees."""
+    inputs, e.g. ``NOT N-E + S``. Constants collapse to ``'0'`` / ``'1'``. Verified
+    exact - falls back to the raw minterm SOP if minimisation ever disagrees."""
     lut &= 0xFFFF
     ones = minterms(lut)
     if not ones:

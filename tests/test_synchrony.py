@@ -1,5 +1,5 @@
 """
-tests/test_synchrony.py — metamorphic "no hidden clock" audit for the nervous
+tests/test_synchrony.py - metamorphic "no hidden clock" audit for the nervous
 net's asynchronous pulse engine.
 
 The project's north-star claim is that the substrate is *genuinely asynchronous*
@@ -10,16 +10,16 @@ tests exercise the engine (substrates.nervous.pulse.PulseSim, driven through the
 float path in substrates.nervous.simulation) with metamorphic relations that a truly
 time-invariant system must satisfy and a tick-quantized one cannot:
 
-  * TRANSLATION — shifting all inputs by an arbitrary (sub-tick) delta shifts all
+  * TRANSLATION - shifting all inputs by an arbitrary (sub-tick) delta shifts all
     outputs by exactly that delta. This is the core clock-freedom test: a clocked
     engine quantizes a 0.37-unit shift to 0 or 1 tick and breaks the relation.
-  * SCALE — scaling the schedule AND the physical constants by k scales every
+  * SCALE - scaling the schedule AND the physical constants by k scales every
     output time by k. There is no absolute timescale baked into the engine.
-  * DETERMINISM — identical stimulus gives byte-identical output.
-  * EVENT-ORDER INDEPENDENCE — injecting the same pulses in a different submission
+  * DETERMINISM - identical stimulus gives byte-identical output.
+  * EVENT-ORDER INDEPENDENCE - injecting the same pulses in a different submission
     order gives identical output; concurrency is resolved by event time, not by
     the order work was queued.
-  * NO SPONTANEOUS ACTIVITY — with no input the array is inert (the paper's "all
+  * NO SPONTANEOUS ACTIVITY - with no input the array is inert (the paper's "all
     switches start at zero, which prevents any signals from propagating").
 
 Run under pytest, or standalone:  py tests/test_synchrony.py
@@ -39,12 +39,12 @@ SEEDS = ((0, 0), (2, 0))
 TOL = 1e-6
 
 
-# ── net fixtures (grown once, reused) ────────────────────────────────────────────
+# -- net fixtures (grown once, reused) --------------------------------------------
 
 def _grow_active(search_seed, terminating):
     """Grow a small random net that produces output activity. When `terminating`
     the output must die out well before the horizon (last event < 25) so a shift
-    or scale of a few units cannot clip an event at the horizon boundary — the
+    or scale of a few units cannot clip an event at the horizon boundary - the
     counts then match exactly. Returns (routing, in_pos, schedule)."""
     random.seed(search_seed)
     sched = [[(1.0, 1.0), (5.0, 1.0)], [(3.0, 1.0)]]
@@ -70,7 +70,7 @@ _TERMINATING = _grow_active(1, terminating=True)
 _OSCILLATING = _grow_active(1, terminating=False)
 
 
-# ── comparison helpers ───────────────────────────────────────────────────────────
+# -- comparison helpers -----------------------------------------------------------
 
 def _run_sched(net, sched, horizon, config=None):
     grid, routing, in_pos, _ = net
@@ -93,11 +93,11 @@ def _assert_affine(base, other, shift=0.0, k=1.0, tol=TOL):
                 "cell %r: expected %.9f, got %.9f" % (cell, k * x + shift, y))
 
 
-# ── tests ────────────────────────────────────────────────────────────────────────
+# -- tests ------------------------------------------------------------------------
 
 def test_translation_invariance_subtick():
     """Shifting every input by a sub-tick delta shifts every output by exactly
-    that delta — the engine has no tick grid to snap to."""
+    that delta - the engine has no tick grid to snap to."""
     net = _TERMINATING
     base = _run_sched(net, net[3], 60.0)
     for delta in (0.37, -0.13, 0.001, 1.0, 2.5, 3.14159):
@@ -108,7 +108,7 @@ def test_translation_invariance_subtick():
 
 def test_scale_covariance():
     """Scaling the schedule and the physical constants (delay/width/coincidence)
-    by k scales every output time by k — no absolute timescale is baked in."""
+    by k scales every output time by k - no absolute timescale is baked in."""
     net = _TERMINATING
     base = _run_sched(net, net[3], 60.0)
     for k in (2.0, 0.5, 3.7, 0.25):
@@ -127,7 +127,7 @@ def test_determinism():
 
 
 def test_no_spontaneous_activity():
-    """With no input the array stays inert — the no-spontaneous-activity
+    """With no input the array stays inert - the no-spontaneous-activity
     invariant that makes the nervous net (unlike the LUT array) quiescent."""
     grid, routing, in_pos, _ = _OSCILLATING
     empty = [[] for _ in in_pos]
@@ -178,7 +178,7 @@ def test_translation_on_oscillator_by_ordinal():
     assert fired >= 1, "oscillator produced no output to compare"
 
 
-# ── standalone runner (pytest not required) ──────────────────────────────────────
+# -- standalone runner (pytest not required) --------------------------------------
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

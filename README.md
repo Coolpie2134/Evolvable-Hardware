@@ -1,71 +1,145 @@
-# Evolvable Hardware — Logic Circuits via Grown Neural Substrates
+# Evolvable Hardware: Logic Circuits Grown Instead of Designed
 
-A research project implementing **Edwards indirect encoding** to evolve grown circuits, with four backends: spiking neural networks (SNN), hexagonal "nervous nets", the **Functional NV Net (FNV)**, and a square **LUT array** (the paper's Architecture 2 / `sim6`).
+This project evolves asynchronous logic circuits. The unusual part is that the
+thing being evolved is **not a netlist**. Each candidate carries a small set of
+growth rules; a circuit is grown from those rules on a regular lattice, and it
+is the grown circuit that gets simulated and scored. Following Andrew Edwards'
+*Evolvable Hardware* papers, this is called an **indirect encoding**.
+
+Four cell architectures are implemented: a spiking neuron array (SNN), a
+hexagonal "nervous net", the Functional NV Net (FNV), and a square lookup-table
+array (the papers' Architecture 2, ported from the `sim6` reference).
+
+## Vocabulary
+
+The search machinery borrows its terms from genetics, which can obscure what
+are ordinary engineering ideas. Translations used throughout this document:
+
+| Term used here | What it actually means |
+|---|---|
+| Genome | The heritable data for one candidate: a rule set, not a netlist |
+| Growth / development | Running the rules to produce an actual circuit on the lattice |
+| Phenotype | The grown circuit that results |
+| Fitness | A score in [0, 1] from simulating the grown circuit against a spec |
+| Mutation | A small random edit to the rule set |
+| Crossover / recombination | Building a child's rule set from two parents' |
+| Population / generation | The batch of candidates held at once, and one breed-and-score cycle |
+| Elites | The top-scoring candidates, reserved as parents |
+| Immigrants | Freshly randomized candidates injected each generation to restore variety |
+| Telomere | A division counter carried per lineage; it caps growth radius, so circuit size is set by the rules rather than by an external size limit |
+| Germline / seed cell | The lattice cell(s) growth starts from |
+| Behavior contract | A machine-readable spec of what the circuit must do, stored as data |
+| Certification | Re-testing a winning circuit on freshly generated stimuli it never saw while evolving, to separate real function from memorized timing |
+| Target | One task: a truth table, or a timing/memory behavior |
+
+One term is worth stating plainly because it drives much of the design. Parent
+selection on truth-table tasks uses **lexicase selection**: instead of ranking
+candidates by one averaged percentage, it takes the test cases in random order
+and repeatedly keeps only the candidates that are best on the current case.
+A circuit that nails one hard row survives even if its average is poor, which
+is what keeps partial solutions available to recombine.
 
 ## What's new
 
-- **Paper-faithful tri-circuit tile** (`substrates/nervous/tritile.py`): the nervous net can now run Edwards EH'02 Fig. 2 as written — **three independently configured circuits per tile**, one per L/R/D output direction (15-bit tile state: three 5-bit channels), instead of the legacy single broadcast circuit. One tile can route two signals to two outputs independently, which the single-circuit tile physically cannot.
-- **Analog node physics** (`substrates/nervous/analog.py`): an event-driven model of the paper's Fig. 1 circuit — capacitive input steps, Vbp leak toward Vdd, comparator with hysteresis. Coincidence window, output pulse width, dense-input stretch (paralyzability) and refractory recovery all **emerge from the same physical constants** instead of being independent knobs; validated against an independent numerical integrator.
-- **One current NV profile**: fresh nervous-net runs use **Analog tri-circuit** (the paper's three-output tile plus the paper-inspired analog node). The GUI keeps a single descriptive profile entry and exposes Vth, step, tau, and hysteresis in a dedicated row. The former **Legacy** single-tile and **Digital tri-circuit** configurations remain loadable reference engines for old checkpoints and controlled ablations, but `validate_new_nv_profile` rejects them for a fresh run.
-- **Executable behavior contracts** (`substrates/nervous/contracts.py`, `substrates/nervous/scoring.py`): every target declares the idea it must implement as data—truth-table correspondence, one-to-one timed events, phase-invariant logical state, complete pulse intervals, or cadence restrictions. SNN, nervous, FNV, and LUT simulators only adapt their physical output into observations; all fitness enters the single `score_contract(...)` evaluator. The seven target-selected scoring modes and separate retention dispatches are gone. State scoring uses maximum silent gap over continuous intervals, so translating the phase of the same circulating memory ring cannot change its score. The app's Evolution panel now renders the executable Contract v1 data before a run and its scored observations afterwards, while Interactive playback keeps a compact contract badge visible. Semantic anti-cheat tests replace the old equivalence golden.
-- **Case-aware truth-table search**: asynchronous combinational runs retain every
-  row/output correctness check and automatically use exact lexicase selection;
-  they do not ask one averaged percentage to choose parents. Continuous timing
-  checks keep MAD ε, while exact Boolean 0/1 checks use ε=0. Multi-output
-  aggregation blends the mean with the weakest output, and global output-probe
-  fitting optimizes that same objective, so solving an easy output cannot hide
-  a chance-level hard output or cause the fitter to install an inferior
-  readout. A scalar remains for plotting, stopping at exactly 1.0, and temporal
-  ranking, but combinational breeding is driven by the contract cases.
-- **Contract specialists survive and recombine**: before a solve, a rotating
-  40% environmental reserve carries distinct best-on-case behaviors across
-  generations, ordered by the cases the population currently finds hardest.
-  The remaining slots keep ordinary generational churn. Under lexicase,
-  crossover chooses its second parent by how well the pair's case envelope
-  fills the first parent's gaps, instead of making two unrelated draws that
-  often specialize on the same rows. Both rules consume only the target's
-  declared case vector and apply unchanged to logic, timing, memory, and
-  cadence contracts.
-- **FNV contract-class initialization**: when LOGIC is present in the selected
-  component bank, exhaustive combinational runs seed their first population
-  and immigrants from LOGIC plus available DELAY routing/fan-out components.
-  Mutation still uses the complete
-  selected bank, so delays, holds, normalizers and stateful components remain
-  reachable; temporal runs and explicitly logic-free banks are unchanged.
-- **FNV coherent multi-output selection**: the exact row/output cells remain
-  independently selectable, while FNV also exposes per-output balanced
-  accuracy, per-row joint correctness, and weakest-output accuracy to parent
-  and survivor selection. Reported fitness and certification are unchanged.
-  Crossover transplants complete labelled dependency cones instead of mixing
-  the fields of unrelated components; parents with matching input geometry can
-  combine whole multi-branch functions while local collisions displace only
-  the overlapping dependency subtree.
-- **FNV labelled construction genome**: fresh FNV runs no longer use the
-  homogeneous-medium nearest-context classifier. Every placement explicitly
-  names stable source/output-port labels, a fixed catalogue component, and a
-  branch-block label. Dependencies determine placement rather than list order;
-  a collision suppresses only the conflicting placement and leaves unrelated
-  branches intact. Mutation can extend or join live tips, alter a compatible
-  component, build short or long physical bridges, move/duplicate/delete a
-  whole branch block, or move an input pad. Crossover remaps stable IDs and
-  transplants a complete sink dependency cone when parent layouts match;
-  otherwise it re-anchors one compatible branch without moving the recipient's
-  co-adapted source pads. Fan-out
-  remains physicalâ€”only source pads and real two-output components create
-  multiple wires. Associative-v2 checkpoints still load under their original
-  interpreter, while new runs use constructive v3.
+- **Three-circuit tile** (`substrates/nervous/tritile.py`): the nervous net now
+  implements Edwards EH'02 Fig. 2 as drawn, with **three independently configured
+  circuits per tile**, one driving each of the L/R/D output directions (tile
+  state is 15 bits: three 5-bit channels). The older single-circuit tile
+  broadcast one result to all three outputs, so it physically could not route
+  two different signals to two different outputs. This one can.
+- **Analog node model** (`substrates/nervous/analog.py`): an event-driven model
+  of the Fig. 1 cell: capacitive input steps, Vbp leak toward Vdd, and a
+  comparator with hysteresis. The coincidence window, output pulse width,
+  stretching under dense input, and refractory recovery are no longer separate
+  tunable knobs; they all fall out of the same handful of device constants.
+  Checked against an independent numerical integrator.
+- **One current nervous-net configuration**: new runs use **Analog tri-circuit**
+  (the three-output tile plus the analog cell above). Vth, step, tau, and
+  hysteresis get their own GUI row. The older single-tile and all-digital
+  tri-circuit engines still load, for reading old saved runs and for controlled
+  comparisons, but `validate_new_nv_profile` refuses them for a fresh run.
+- **Specs stored as data** (`substrates/nervous/contracts.py`,
+  `substrates/nervous/scoring.py`): each task states what it requires in a
+  machine-readable form: match a truth table, match timed edges one-for-one,
+  hold a logical state regardless of phase, reproduce complete pulse intervals,
+  or maintain a commanded rate. Every backend converts its physical output into
+  observations, and a single `score_contract(...)` evaluator does all scoring.
+  This replaced seven separate per-task scoring modes. State is scored by the
+  longest silent gap across continuous intervals, so sliding the same
+  circulating pulse in phase cannot change its score.
+- **Truth tables scored row by row**: asynchronous combinational runs keep every
+  row/output check separate and select parents with lexicase rather than one
+  averaged percentage. Timing comparisons keep a tolerance derived from median
+  absolute deviation; exact Boolean checks use zero tolerance. Where a task has
+  several outputs, the reported score mixes the mean with the *weakest* output,
+  and the output-probe fitter optimizes that same quantity, so a solved easy
+  output cannot mask one performing at chance. A single number is still
+  reported for plotting and for stopping at exactly 1.0.
+- **Partial solutions survive to be recombined**: until something solves the
+  task, a rotating 40% of the population is reserved for candidates that are
+  each the current best on *some individual test case*, prioritized by the cases
+  the population is currently worst at. The rest of the slots turn over
+  normally. When lexicase is active, the second parent is chosen for covering
+  the first parent's weak cases, rather than drawing two parents independently
+  and often getting two specialists in the same rows.
+- **FNV starting components**: when logic gates are in the selected component
+  bank, exhaustive truth-table runs build their starting population from gates
+  plus the delay/fan-out routing parts. Mutation still draws on the complete
+  selected bank, so delays, holds, normalizers, and stateful parts stay
+  reachable. Timing tasks and deliberately gate-free banks are unaffected.
+- **FNV multi-output selection**: individual row/output cells remain separately
+  selectable, and selection additionally sees per-output balanced accuracy,
+  per-row all-outputs-correct, and weakest-output accuracy. Reported fitness and
+  certification are unchanged. Recombination now moves a complete upstream cone
+  (every component a chosen node depends on) rather than mixing fields of
+  unrelated components.
+- **FNV builds circuits by explicit reference**: new FNV runs no longer classify
+  a cell by nearest-matching neighbourhood context. Each gene names a permanent
+  component type, the specific output ports feeding it, and the connected run of
+  components it belongs to. Placement order follows those dependencies rather
+  than position in a list, so if two genes claim the same cell only the losing
+  gene and whatever depends on it go dormant; unrelated structure still builds.
+  Mutation can extend or join live wire ends, swap in a compatible component,
+  bridge across empty lattice, move/duplicate/delete a connected run, or move an
+  input pad. Fan-out stays physical: extra wires require an input pad or a real
+  two-output component, never an abstract split. Saved runs in the older format
+  still load under their original interpreter.
 
-## Background — grown, not designed
+## Background: grown, not designed
 
-Conventional *evolvable hardware* evolves a circuit by encoding it **directly**: the genome is a blueprint, one gene per wire or gate. That doesn't scale — the genome grows with the circuit, identical sub-structures must be rediscovered independently, and the fitness landscape is jagged because one bit-flip rewires one gate.
+The obvious way to evolve a circuit is to encode it **directly**: one gene per
+gate or wire, so the genome is a netlist. That approach has three well-known
+problems. The genome grows in proportion to the circuit. Repeated
+sub-structures have to be discovered separately every time they appear. And the
+search landscape is rough, because flipping one bit rewires exactly one gate.
 
-This project takes the **indirect** route from Edwards' *Evolvable Hardware* work: the genome encodes **growth rules**, not a circuit. A circuit is *grown* by a developmental process (ontogeny) from a handful of seed cells, the way a body is grown from DNA. Every cell carries the same genome; each consults it as an **associative memory** — "given the state of my neighbourhood, what do I become?" — so position and local context decide a cell's fate. This buys three things the direct encoding lacks:
+This project uses the **indirect** approach from Edwards' work: the genome holds
+**growth rules** instead of a circuit. Starting from a few seed cells, the rules
+are applied repeatedly until a circuit exists. Every cell holds the same rule
+set and consults it the same way. *Given the pattern of states around me, what
+do I become?* The lookup is by nearest match (minimum Hamming distance), so a
+cell's fate is decided by its local context, and one rule fires wherever that
+context occurs.
 
-- **Compact, scale-free genomes** — a fixed rule set grows an arbitrarily large organism, and a rule that builds one motif builds it everywhere.
-- **Evolvability** — small genome changes produce coherent, often-repeated structural changes (a rule tweak reshapes every copy of a motif at once), which smooths the search landscape.
-- **Self-limiting size** — growth halts on its own, at a boundary the genome dictates (here, an evolvable telomere / Hayflick limit), rather than at an arbitrary wall.
+Three consequences matter:
 
-The substrate is a regular lattice of reconfigurable cells. This repo implements four cell architectures — a spiking neuron, the two cellular-automaton architectures from the Edwards papers, and FNV's fixed-function component bank — and evolves both **combinational** logic (truth tables) and **temporal** circuits, where the answer is carried in the *timing* of events: memory that latches, oscillators, counters, delay lines and pattern generators.
+- **Genome size is decoupled from circuit size.** A fixed rule set can grow an
+  arbitrarily large structure, and a rule that builds one motif builds it
+  everywhere that motif's context appears.
+- **Edits are structural, not pointwise.** Changing one rule reshapes every copy
+  of the motif it builds at once, which makes the landscape smoother than
+  one-bit-one-gate encoding.
+- **Size is set from the inside.** Growth stops on its own at a radius the
+  genome specifies (the division counter described in the vocabulary table
+  above), rather than running into an external size cap.
+
+The substrate is a regular lattice of reconfigurable cells. Four cell
+architectures are implemented: a spiking neuron, the two cellular-automaton
+architectures from the Edwards papers, and FNV's bank of fixed-function
+components. Both kinds of task are evolved: **combinational** logic, scored
+against a truth table, and **timing-dependent** circuits, where the answer lives
+in *when* edges occur: latches, oscillators, counters, delay lines, and pattern
+generators.
 
 ## The four substrates at a glance
 
@@ -75,147 +149,277 @@ The substrate is a regular lattice of reconfigurable cells. This repo implements
 | Lattice | square grid | honeycomb, **degree 3** | honeycomb, **degree 3**, antiparallel wires | square grid, **degree 4** |
 | Cell function | leaky integrate-and-fire neuron | `(E1 op E2) AND NOT I1` routing node | one of 118 permanent routed component types | four directional 16-bit tables, optionally restricted to fixed gate banks |
 | Dynamics | **event-driven** continuous LIF | **asynchronous** edge-triggered pulses | **event-driven** fixed-function logic/state | **asynchronous** level logic |
-| Spontaneous activity? | **no** | **no** | **no** — every type is quiescent | arbitrary LUTs: **yes**; named gate banks: **no** |
+| Spontaneous activity? | **no** | **no** | **no**, every type is quiescent | arbitrary LUTs: **yes**; named gate banks: **no** |
 | Computes | combinational **+ temporal** | combinational **+ temporal** | combinational **+ temporal** | combinational **+ temporal** |
 
 ## What it does
 
-A genetic algorithm evolves a physical circuit. Nervous, SNN, and LUT use
-backend-specific developmental rules. FNV is the fixed-function control arm:
-its labelled dependency genome assembles routed components outward from evolved
-source pads. Four separate backends interpret and evaluate the resulting grid:
+A genetic algorithm evolves a physical circuit. The nervous net, SNN, and LUT
+backends each grow one from their own rule format. FNV is the control arm: it
+skips context-matched growth entirely and assembles fixed-function components
+outward from its input pads by explicit reference. Four backends interpret and
+score the resulting lattice:
 
-- **SNN** (`substrates/snn/`): a square grid of leaky integrate-and-fire (LIF) neurons. Static truth-table runs retain the original feed-forward interpretation; temporal runs opt into reciprocal physical adjacencies (`Arch.recurrent=True`) and drive exact continuous-time source edges through the same executable behavior contracts as the other backends. Contract seconds are explicitly converted to the LIF model's millisecond units (4.8 ms per contract second), so requested periods are compared to physically achievable feedback cycles rather than to a mismatched clock. That permits evolved oscillators, latches and counters without changing old combinational checkpoints. A deterministic event cap rejects runaway loops, and a constructive two-neuron feedback witness sustains activity after the input disappears and scores 1.000 on the real period-2 oscillator contract. Growth is **telomere-bounded** like the nervous net: each chromosome carries an evolvable Hayflick division limit, so a lineage stops dividing once its telomere is spent and the body self-limits at radius L from the seeds (replacing the old fixed iteration cap), and the GA's senescence/parsimony tie-break then shrinks that body — fewer genes, shorter telomere — toward the smallest circuit that still solves. (A generous `GRID_SIZE` remains as an outer wall so growth coordinates stay valid for the growth view and fixed I/O terminals; the telomere is the real limiter.) Its interactive view is a live LIF animation — see `ui/interactive.py`.
-- **Nervous net** (`substrates/nervous/`): a honeycomb array of nodes that fire when `(E1 op E2) AND NOT I1` — coincidence/veto detection over the paper's 16 routing states of Edwards EH'02 Fig. 3 (states 0–15: each one a buffer or an AND, optionally vetoed — the paper itself has **no disjunction**), plus 16 **OR twins** (states 16–31: the same wiring but `op = OR`, so the node fires on *either* excitatory input) added as a deliberate extension beyond the paper. The extra state bit is 0 for every legacy genome, so 0–15 grow and behave bit-identically; only the OR of two *different* lines is genuinely new (for a buffer or off state, OR and AND coincide, so those twins are benign aliases). Directions are read in each node's own orientation frame (the paper's context rotation — down-parity tiles are the 180°-rotated circuit), and inputs are **wired-OR injections** onto the input cell's net, like pulsing the physical perimeter wire — not level clamps. So **with no input the array is inert**, yet a pulse injected into a loop of buffers routed through an input cell circulates as delay-line memory "until stopped by application of an inhibitory input" (§3). Besides combinational targets it evolves **temporal circuits** — SR latches, toggle flip-flops, oscillators, delay lines, plus async-native ones where edge timing *is* the computation: a two-input coincidence detector, a one-shot/monostable (self-terminating burst via delayed self-inhibition), and a double-pulse pair detector (delay line + coincidence). Dynamics are the paper's **asynchronous edge-triggered pulses** (`substrates/nervous/pulse.py`): an event-driven simulation where a triggered node emits a fixed-width pulse after a fixed delay, coincidence requires both excitatory edges within a window, and inhibition vetoes at trigger time. Every wire's raw continuous leading-edge timestamps are retained for behavioral scoring; once-per-tick samples exist only for playback and legacy persistence windows, so sub-tick pulses are no longer discarded. Every element (identical tiled nodes, 5-bit routing SRAM — 4 bits in the paper, the extra bit selecting the AND/OR variant — genome as associative memory / CAM, delay / pulse-width / coincidence-window constants) maps directly onto the paper's hardware.
+- **SNN** (`substrates/snn/`): a square grid of leaky integrate-and-fire
+  neurons.
 
-  New nervous genomes use one native I/O architecture. They evolve one
-  collision-free relative honeycomb coordinate per logical input; input 0 is
-  anchored at `(0, 0)` only to remove whole-body translation, and every other
-  pad moves by one-edge mutations. These pads seed development and are
-  source-only at runtime, so feedback cannot reactivate them. Every mature
-  non-input tile is eligible as an output probe, and multi-output roles are
-  fitted together as a distinct-cell assignment. The evolved pads and fitted
-  probes are frozen for held-out certification. Legacy nervous checkpoints
-  without `input_layout` keep their target-declared pads.
+  Truth-table runs keep the original feed-forward reading. Timing runs instead
+  enable reciprocal adjacencies (`Arch.recurrent=True`) and feed exact
+  continuous-time input edges through the same specs as every other backend.
+  Spec times are in seconds and are converted explicitly into the LIF model's
+  milliseconds (4.8 ms per spec second), so a requested period is compared
+  against feedback loops the model can physically produce rather than against a
+  mismatched clock. That makes evolved oscillators, latches, and counters
+  possible without disturbing existing truth-table saves.
 
-- **Functional NV Net / FNV** (`substrates/fnv/`): a separate degree-3 honeycomb substrate whose cells are fixed physical functions rather than instances of the original NV pulse node. Every edge contains two independent antiparallel wires. A two-input component consumes two local directions and drives the third; a unary component has either one output direction or two identical output directions. The append-only catalogue contains 118 permanent type IDs: `EMPTY`; AND/OR/XOR and asymmetric VETO routes; fixed 1/2-tick delays; `NORMALIZER1/2`; `HOLD1/2`; Muller C-elements; rising-edge toggles; and enable-gated oscillators with fixed high/low times 1 or 2. Wider functions such as parity-3 and majority-3 must be assembled from those primitives. There is no free oscillator and no evolvable per-node parameter. Runs select whole component families only. Fresh genomes construct circuits from stable labelled physical branches instead of applying Edwards associative rules to a heterogeneous medium. Simulation is continuous-time and event-driven; all-zero power-on is a catalogue-wide invariant. Checkpoints store a SHA-256 catalogue hash so a type-ID remap cannot silently reinterpret saved hardware.
+  A deterministic cap on total events rejects runaway loops. A hand-built
+  two-neuron feedback circuit is included as a witness: it keeps firing after
+  its input stops and scores 1.000 on the period-2 oscillator spec, proving the
+  spec is satisfiable rather than merely unmet.
+
+  Circuit size is limited the same way as the nervous net. Each chromosome
+  carries a division counter, so a lineage stops dividing when it runs out and
+  the body settles at radius L from the seeds. Once a circuit solves the task,
+  a tie-break prefers smaller ones, trimming genes and shortening the counter
+  toward the smallest circuit that still works. (`GRID_SIZE` remains only as an
+  outer wall keeping coordinates valid for the growth view and fixed I/O
+  terminals; the division counter is what actually limits size.) The interactive
+  view animates membrane voltage and spikes live; see `ui/interactive.py`.
+- **Nervous net** (`substrates/nervous/`): a honeycomb array whose nodes fire on
+  `(E1 op E2) AND NOT I1`, which is coincidence detection with a veto input.
+
+  Each node's routing is one of 32 states. States 0-15 are the paper's (Edwards
+  EH'02 Fig. 3): each is a buffer or an AND, optionally vetoed. The paper has no
+  OR. States 16-31 are an addition here: identical wiring with `op = OR`, so
+  the node fires on *either* excitatory input. The extra state bit is 0 in every
+  older genome, so states 0-15 grow and behave bit-identically to before. Only
+  the OR of two *different* inputs is genuinely new; where the state is a buffer
+  or off, AND and OR coincide and the twin is a harmless alias.
+
+  Directions are read in each node's own orientation frame, so a rule builds
+  mirror-symmetric structure (the papers' context rotation; down-parity tiles
+  are the circuit rotated 180 deg).
+
+  Inputs are **wired-OR injections** onto the input cell's net, the equivalent
+  of pulsing a perimeter wire. They are not level clamps holding a value. Two things
+  follow. With no input, the array is completely inert. And a pulse injected
+  into a loop of buffers routed through an input cell keeps circulating, giving
+  delay-line memory that persists "until stopped by application of an inhibitory
+  input" (section 3).
+
+  Alongside truth tables it evolves timing circuits: SR latches, toggle
+  flip-flops, oscillators, and delay lines, plus ones where edge timing *is* the
+  computation: a two-input coincidence detector, a monostable that terminates
+  its own burst through delayed self-inhibition, and a double-pulse detector
+  built from a delay line and a coincidence node.
+
+  Dynamics are asynchronous and edge-triggered (`substrates/nervous/pulse.py`).
+  A triggered node emits a fixed-width pulse after a fixed delay, coincidence
+  requires both excitatory edges inside a window, and the veto input suppresses
+  at trigger time. Scoring uses the raw continuous edge timestamps; the
+  once-per-tick samples exist only for playback, so pulses shorter than a tick
+  are no longer thrown away.
+
+  Every element maps onto hardware in the papers: identical tiled nodes, 5 bits
+  of routing SRAM per node (4 in the paper, the extra bit selecting AND vs OR),
+  the genome as a content-addressed lookup, and fixed delay, pulse-width, and
+  coincidence-window constants.
+
+  Input and output placement is itself evolved. Each logical input gets one
+  honeycomb coordinate, and no two may collide. Input 0 is pinned at `(0, 0)`
+  purely to stop the whole circuit from drifting around the lattice; every other
+  pad moves one edge at a time under mutation. Pads seed growth and are
+  source-only once running, so feedback cannot re-drive them.
+
+  Outputs are not placed in advance. Any grown non-input tile may serve as an
+  output probe, and where a task has several outputs they are assigned together
+  so that each lands on a distinct cell. Pads and probes are then frozen before
+  certification, so the held-out test cannot quietly re-fit a better readout.
+  Older saves without an `input_layout` keep the pads their task declared.
+
+- **Functional NV Net / FNV** (`substrates/fnv/`): a separate degree-3 honeycomb
+  substrate whose cells are fixed physical functions rather than configurable
+  pulse nodes. Every edge carries two independent antiparallel wires.
+
+  A two-input component takes two of its three local directions and drives the
+  third; a one-input component drives either one direction or two identical
+  ones. The catalogue holds 118 permanent component types and is append-only:
+  `EMPTY`, AND/OR/XOR and asymmetric VETO routings, fixed 1- and 2-tick delays,
+  `NORMALIZER1/2`, `HOLD1/2`, Muller C-elements, rising-edge toggles, and
+  enable-gated oscillators with fixed high/low times of 1 or 2.
+
+  Anything wider, such as parity-3 or majority-3, has to be built from those parts.
+  There is no free-running oscillator and no per-component tunable parameter; a
+  run selects whole component families, nothing finer. Simulation is
+  continuous-time and event-driven, and every catalogue entry is quiescent at
+  power-on with all-zero inputs.
+
+  Saves record a SHA-256 hash of the catalogue, so renumbering a component type
+  can never silently reinterpret stored hardware as something else.
 
   The FNV control row includes a **Node number dictionary** that decodes every
   number drawn inside a component into its permanent name, family, routed
   inputs/outputs, and fixed timing. Code can use the catalogue-derived
   `NODE_TYPE_DICTIONARY` mapping for the same ID-to-name lookup.
 
-  Each placement gene names a permanent ID, fixed component type, stable input
-  port references, and branch-block ID. Its referenced ports must all face the
-  same empty honeycomb site. Genes resolve by dependency, not list position. If
-  two placements claim one cell, the earlier ready stable ID wins; only the
-  colliding placement and its dependent descendants become dormant. Other
-  branches still assemble. There is no target-shaped grid, desired-output
-  query, automatic route planner, or phenotype-to-genome translation. New FNV
-  genomes also evolve the source pads' **relative honeycomb positions**: input 0 is
-  fixed at `(0, 0)` only to remove meaningless whole-body translation, while
-  every other pad moves by local one-edge mutations and the whole layout is
-  inherited as one collision-free physical module. Named dependencies make a
-  pad move translate only branches rooted in that pad. Initial layouts are compact
-  so random populations do not begin as disconnected islands. These pads are
-  source-only during operation: neighbouring logic cannot reactivate them; only
-  the target's external input pulse can.
+  Each gene names a permanent gene ID, a fixed component type, the specific
+  output ports feeding its inputs, and which connected run of components it
+  belongs to. All the ports it references must face the same empty lattice site.
+  Genes are resolved in dependency order, not list order. If two genes claim one
+  cell, the one whose dependencies were satisfied first wins; the loser and
+  anything depending on it go dormant, while unrelated structure still builds.
 
-  Mutation extends or joins live physical tips, changes compatible fixed
-  components, constructs explicit DELAY-plus-LOGIC bridges across the empty
-  frontier, and reroutes, duplicates, or deletes complete connected branch
-  blocks. Plateau rescue samples bridge lengths across the available range and
-  may offer a bounded two-bridge cascade, so a neutral first route can be
-  extended without reading target answers. Transplantation remaps stable IDs;
-  matching-layout crossover inherits a complete dependency cone, with
-  different components at overlapping cells displaced locally. Abstract fan-out
-  does not exist: multiple branches require a source pad or a fixed component
-  with two output ports.
+  Nothing in this path consults the task: there is no target-shaped grid, no
+  query for a desired output, no automatic router, and no way to convert a
+  finished circuit back into a genome.
 
-  Outputs are fitted probes, not extra component parameters. Every mature
-  non-input component is eligible, regardless of distance from the target's
-  drawn terminal, and multi-output targets use a global distinct-cell
-  assignment that maximizes total contract score instead of greedily choosing
-  one role at a time. The fitted pads and probes are then frozen for held-out
-  certification. Old associative-v2 FNV checkpoints retain their original
-  interpreter and target-declared fixed pads when no input layout exists.
-  Reproducible small-budget comparisons live in
-  `tools/benchmark_fnv.py`, including an all-temporal survey and selectable
-  tournament/lexicase runs.
+  Input pad positions are evolved too, on the same terms as the nervous net:
+  input 0 pinned at `(0, 0)` to remove pointless whole-circuit translation,
+  others moving one edge at a time, the layout inherited as a single
+  collision-free unit. Because dependencies are named explicitly, moving a pad
+  translates only the structure rooted at that pad. Starting layouts are compact
+  so random populations do not begin as disconnected islands. Pads are
+  source-only while running: only the task's external input pulse drives them.
 
-  FNV deliberately has **no small-genome or short-telomere preference**.
-  Behavioral correctness dominates selection; FNV currently leaves the
-  optional robustness and juvenile-development tiers inactive. Exact fitness
-  ties are broken by a target-agnostic physical topology potential. The
-  mature directed wiring graph is traced outward from the source pads and
-  ranks uncapped counts of distinct input convergence, real multi-input
-  junctions, reachable feedback, reachable edges, and reachable nodes. This
-  deliberately supplies no small-body preference: longer connected routes can
-  survive as neutral stepping stones, while disconnected bulk and unreachable
-  loops score nothing. It retains computational stepping stones without recognizing any target-specific
-  Boolean or temporal behavior. Static reports separately show the circuit's
-  nonconstant truth-signature repertoire as diagnostic telemetry; it never
-  enters selection.
+  Mutation extends or joins live wire ends, swaps a compatible component,
+  bridges across empty lattice with an explicit delay-plus-gate chain, and
+  reroutes, duplicates, or deletes a whole connected run. When progress stalls,
+  the extra candidates offered include bridges sampled across the available
+  length range and a bounded two-bridge chain, so a first route that changes
+  nothing can still be extended later. None of this reads the task's answers.
+  Recombination between parents with matching pad layouts inherits a complete
+  upstream cone; components clashing at overlapping cells are displaced locally.
 
-- **LUT array** (`substrates/lut/`): the paper's **Architecture 2**, a faithful port of the `sim6` reference — a **square** grid where each cell wires to **4 neighbours** (N/S/E/W) and holds **four** directional 16-bit lookup tables (one per output; the `automaton_arrays` design specifies four lookup tables per cell, each with 16 states). Growth looks each direction's LUT up with the neighbour context **rotated** so the output direction is "front" (context rotation); dynamics are **asynchronous level logic** (`substrates/lut/pulse.py`): each cell is a logic element with a fixed propagation delay that re-indexes its four LUTs with the 4 bits its neighbours aim back at it whenever an input wire changes (inertial delay — sub-delay blips are filtered), simulated event-driven in continuous time. With delay = 1 tick and lattice stimuli this reproduces the `sim6` synchronous latched update bit for bit (the retained `lut.LutSim` is the audited quantization reference). The historical arbitrary-table mode can invert and therefore permits spontaneous activity (faithful to the paper's Fig. 14); the selectable named gate banks below are quiescent at all-zero input. Runs the same temporal and combinational targets.
+  Fan-out is strictly physical. Extra wires come from an input pad or a real
+  two-output component; there is no abstract split.
+
+  Outputs are fitted probes rather than component parameters. Any grown
+  non-input component is eligible no matter how far it sits from where the task
+  drew its terminal, and multi-output tasks solve one global assignment to
+  distinct cells rather than greedily filling one role at a time. Pads and
+  probes are frozen before certification. `tools/benchmark_fnv.py` holds
+  reproducible small-budget comparisons.
+
+  **FNV deliberately does not prefer smaller circuits.** Correct behavior
+  dominates selection. Exact ties are broken by a structural measure that never
+  inspects what the circuit computes: the wiring graph is traced outward from
+  the input pads and ranked by how many distinct inputs converge anywhere, how
+  many genuine multi-input junctions exist, and how much reachable feedback,
+  wiring, and cells there are. Because there is no size penalty, a long
+  connected route that currently does nothing can survive as a stepping stone,
+  while disconnected bulk and unreachable loops earn nothing. Reports separately
+  list the distinct non-constant truth signatures a circuit exhibits; that is
+  diagnostic only and never reaches selection.
+
+- **LUT array** (`substrates/lut/`): the papers' **Architecture 2**, ported from
+  the `sim6` reference. A square grid where each cell connects to its four N/S/E/W
+  neighbours and holds four directional 16-bit lookup tables, one per output
+  direction.
+
+  During growth, each direction's table is indexed with the neighbour pattern
+  rotated so that the output direction is "front". This is the same context rotation
+  the nervous net uses, which is what lets one rule build symmetric structure.
+
+  At run time the array is **asynchronous level logic** (`substrates/lut/pulse.py`).
+  Each cell behaves as a logic element with a fixed propagation delay: whenever
+  an input changes, it re-indexes its four tables using the four bits its
+  neighbours drive back at it. The delay is inertial, so glitches shorter than
+  the delay are filtered rather than propagated. Simulation is event-driven in
+  continuous time. Set the delay to one tick and drive it on the tick lattice
+  and it reproduces `sim6`'s synchronous latched update bit for bit. The
+  retained `lut.LutSim` is kept as the audited reference for exactly this check.
+
+  Arbitrary tables can invert, so that mode permits spontaneous activity, which
+  matches the papers' Fig. 14. The named gate banks below are all quiescent at
+  all-zero input. Runs the same truth-table and timing tasks as the others.
 
   A LUT run can select whole **function banks**: `ROUTING`, `AND`, `OR`,
   `XOR`, asymmetric `VETO`, `THRESHOLD`, `MUX`, and `UNRESTRICTED`
-  (“Arbitrary LUT” in the GUI). These are permanent physical 16-bit truth
+  ("Arbitrary LUT" in the GUI). These are permanent physical 16-bit truth
   tables, not evolvable parameters: the named catalogue contains all routed
   2/3/4-input AND/OR/XOR variants, all directed vetoes, majority/threshold
   variants, and all directional 2:1 mux variants. `OFF` is always available.
-  The selection constrains only executable directional outputs and the
-  developmental germline; the five 16-bit CAM recognition fields remain fully
-  expressive because they match developmental context rather than execute as
-  runtime gates. Initialization selects a family before a table, and mutation
-  usually moves to the nearest table within the current family, so larger
-  families do not dominate merely by containing more variants. Arbitrary LUT
-  alone is the default and preserves the previous all-65,536-table search
-  exactly; old checkpoints without the setting load in that mode.
+  Restricting the bank limits only what a cell can *execute* and what growth may
+  seed. The five 16-bit pattern-matching fields stay fully expressive, because
+  they match growth context rather than acting as gates at run time. Starting
+  genomes pick a family first and then a table within it, and mutation usually
+  moves to the nearest table in the current family, so a large family does not
+  win simply by containing more entries. Arbitrary LUT alone is the default and
+  reproduces the earlier all-65,536-table search exactly; saves predating the
+  setting load that way.
 
-  LUT runs offer two physical input architectures. **Internal source pads**
-  evolve one distinct square-lattice coordinate per logical input; the pads are
-  developmental germlines and source-only runtime terminals, matching NV/FNV.
-  **Exterior perimeter buses** instead grow from one neutral germline and use
-  every exposed outer face. Faces in stable cyclic order are assigned round
-  robin to logical inputs: one input owns the whole perimeter, two inputs form
-  A/B/A/B around it, and larger input sets repeat A/B/C/… in the same way. A
-  logical signal is fanned simultaneously to all taps of its bus. Every tap
-  remains outside the organism and feeds only the facing N/S/E/W LUT input, so
-  feedback can neither consume nor reactivate it; faces around enclosed holes
-  are excluded. This bus geometry is fixed rather than genetic, removing port
-  placement from the search while keeping the developed body evolvable.
-  Both modes use the same globally fitted, distinct, read-only output probes.
-  Checkpoints record the selected mode; obsolete point-layout fields from older
-  exterior checkpoints are preserved on round-trip but ignored. Training and
-  Interactive playback support both modes; the generic held-out
-  certification adapter has not yet been specialized for exterior
-  outside-to-facing-edge links, so exterior certification verdicts are not yet
-  an audited claim.
+  There are two input arrangements. **Internal source pads** evolve one distinct
+  coordinate per logical input, seeding growth and acting as source-only
+  terminals, matching the nervous net and FNV.
 
-  (The **hex** nervous array is the degree-3 case from the same `automaton_arrays` design — 3 neighbours and 3 LUTs of 8 states — drawn as a brick-wall; deliberately *not* the degree-6 triangular reading.)
+  **Exterior perimeter buses** instead grow from one neutral seed and tap every
+  exposed outer face. Faces are taken in stable cyclic order and assigned round
+  robin: one input owns the entire perimeter, two inputs alternate A/B/A/B,
+  and more inputs repeat A/B/C/... the same way. A logical signal drives all taps
+  of its bus simultaneously. Every tap stays outside the circuit and feeds only
+  the LUT input facing it, so feedback can neither consume nor re-drive it;
+  faces around enclosed holes are excluded. This geometry is fixed rather than
+  evolved, which takes port placement out of the search while leaving the grown
+  circuit free to evolve.
 
-- **Nervous-net substrate profile** (the **NV profile** display in the pulse-physics row; `runtime/config.py: NV_NEW_RUN_PROFILES`): a fresh nervous-net run uses **Analog tri-circuit** (`tri3` + `paper_analog`) — the paper's Fig. 2 tile with three independent 5-bit L/R/D channels (15 bits total) and the Fig. 1 analog node (`substrates/nervous/analog.py`). Capacitive down-steps, Vbp leak, and comparator hysteresis make coincidence, output width, and refractory **emergent**, so the Coinc control is disabled and Vth / step / tau / hysteresis have their own GUI row.
-  The former width-preserving single-tile engine (`single` + `pulse_delay`) and digital tri-circuit ablation (`tri3` + `uniform`) remain solely for old checkpoints, tests, and controlled comparisons; `validate_new_nv_profile` rejects them for fresh runs. The digital tri engine now understands the same 15-bit, OR-capable channel representation, while checkpoint migration widens its older 12-bit AND-only states exactly once. A further variant made emitted width a per-node-type genome vector; **width evolution has been removed from the substrate** — the genome no longer carries a width vector, and a checkpoint saved under it loads on the paper's fixed-width node instead. Timing models are audited in `tests/test_pulse_models.py`, the tri tile in `tests/test_tritile.py`, and the analog node against an independent Δt integrator in `tests/test_analog_reference.py`. Width-sensitive temporal targets now exercise useful relations rather than isolated node contracts: **Pulse width sum (A+B)** emits a Q interval whose duration is `width(A)+width(B)`, while **Odd pulse selector** passes the 1st/3rd/5th input pulses and preserves their individual widths. Both score complete output waveforms (`PulseSim.pulse_intervals`, real rises *and* falls), rather than treating pulses with equal leading edges as equivalent. A related mixed-width stateful family counts every physical pulse once regardless of its 0.5-to-2.25-second duration: **A-count parity queried by B** retains cumulative odd/even parity, **A-count multiple-of-3 queried by B** recognizes positive multiples of three, and **Odd A batch closed by B** reports parity since the preceding B and then clears it.
+  Both modes share the same globally fitted, distinct, read-only output probes,
+  and the selected mode is recorded in saves. Certification is the exception:
+  the frozen-replay adapter has not yet been specialized for the exterior
+  outside-to-facing-edge links, so exterior runs report UNCERTIFIED rather than
+  present a held-out number that has not been audited.
 
-The SNN and nervous backends share no code; FNV is independent of the nervous
-runtime and shares only target contracts plus honeycomb geometry, not node
-physics or genome types. Growth in the nervous and FNV models happens on an
-**unbounded field** and runs until it converges to a stable attractor. Size is
-bounded genetically rather than by a wall. Seed cells start with the genome's
-telomere length *L*; a daughter inherits one less, so the organism halts its own
-growth at radius *L*. Maintenance rules continue to act on existing cells:
-telomeres limit replication, not function.
+  (The hex nervous array is the degree-3 case of the same `automaton_arrays`
+  design, with 3 neighbours and 3 tables of 8 states, drawn as a brick wall.
+  Deliberately not the degree-6 triangular reading.)
 
-The GA never stops early at fitness 1.0. SNN applies a solved-only
-senescence/parsimony tie-break. Nervous and FNV deliberately do **not** prefer
-small genomes: their final tie-break favors input-reachable connectivity and
-feedback, while LUT has no size tie-break. Before a solution exists, most
-slots remain generational, while a bounded rotating reserve retains distinct
-best-on-case behaviors so a missing truth-table row or trial cannot be forgotten.
-After a solution appears, evaluated parent-plus-offspring survivor selection
-retains it while exploratory offspring continue to be tested.
+- **Nervous-net substrate profile** (the **NV profile** display in the pulse-physics row; `runtime/config.py: NV_NEW_RUN_PROFILES`): a fresh nervous-net run uses **Analog tri-circuit** (`tri3` + `paper_analog`), the paper's Fig. 2 tile with three independent 5-bit L/R/D channels (15 bits total) and the Fig. 1 analog node (`substrates/nervous/analog.py`). Capacitive down-steps, Vbp leak, and comparator hysteresis make coincidence, output width, and refractory **emergent**, so the Coinc control is disabled and Vth / step / tau / hysteresis have their own GUI row.
+  Two older engines remain, purely for loading old saves, running tests, and
+  making controlled comparisons: the width-preserving single-tile engine
+  (`single` + `pulse_delay`) and the all-digital tri-circuit engine
+  (`tri3` + `uniform`). `validate_new_nv_profile` refuses both for a fresh run.
+  The digital tri engine understands the same 15-bit OR-capable channel format,
+  and older 12-bit AND-only saves are widened exactly once on load.
+
+  One earlier variant let each node type evolve its own emitted pulse width.
+  **That has been removed.** The genome no longer carries a width vector, and a
+  save made under it now loads onto the fixed-width node instead. Timing models
+  are checked in `tests/test_pulse_models.py`, the three-circuit tile in
+  `tests/test_tritile.py`, and the analog cell against an independent deltat
+  integrator in `tests/test_analog_reference.py`.
+
+  Tasks that depend on pulse width now test useful relationships rather than
+  isolated node behavior. **Pulse width sum (A+B)** must emit an output interval
+  lasting `width(A) + width(B)`. **Odd pulse selector** must pass the 1st, 3rd,
+  and 5th input pulses while preserving each one's individual width. Both score
+  the complete output waveform, real rising *and* falling edges, so pulses
+  that merely share a leading edge are not treated as equivalent.
+
+  A related group requires counting pulses whose durations vary from 0.5 to 2.25
+  seconds, each counted exactly once regardless of length: **A-count parity
+  queried by B** holds running odd/even parity, **A-count multiple-of-3 queried
+  by B** recognizes positive multiples of three, and **Odd A batch closed by B**
+  reports the parity accumulated since the previous B and then clears it.
+
+The SNN and nervous backends share no code. FNV is independent of the nervous
+runtime and shares only the task specs and the honeycomb geometry, not the
+node physics, and not the genome format.
+
+Nervous and FNV grow on an **unbounded field**, iterating until the structure
+stops changing. Nothing external caps the size; the genome does. Seed cells
+start with a division counter *L*, each daughter inherits one less, and growth
+therefore halts by itself at radius *L*. The counter limits only division;
+rules that maintain existing cells keep acting normally.
+
+The GA never stops early on reaching a perfect score. SNN prefers smaller
+circuits, but only once the task is solved. Nervous and FNV deliberately do not:
+their final tie-break rewards connectivity and feedback reachable from the
+inputs. LUT has no size preference at all.
+
+Before anything solves the task, most population slots turn over normally while
+a bounded rotating reserve holds candidates that are each best on some specific
+test case, so a single unsolved truth-table row cannot be quietly forgotten.
+Once something does solve it, survivor selection over evaluated parents and
+offspring keeps it while exploratory offspring continue to be tried.
 
 ## How it works
 
@@ -232,77 +436,156 @@ targets retain their historical port count and schedule.
 
 When such a spatial-I/O LUT run plateaus, `substrates/lut/synthesis.py` can compile up to
 four data inputs and four outputs into a directional crossbar; the five-port
-comparator uses a two-stage strobe/zero-detector cascade. The phenotype is
-inverse-developed into a heritable genome, re-grown exactly, and scored by the
+comparator uses a two-stage strobe/zero-detector cascade. The resulting circuit is
+converted back into a heritable genome, re-grown exactly, and scored by the
 unchanged behavior contract. Verified witnesses reach 1.000 on Full adder,
 2-bit adder, MUX, Majority-3, Parity-3, decoder, comparator, and the 2x2
 multiplier within the default eight-step growth bound.
 
-- **Indirect encoding**: the genome is an associative memory of rules mapping neighbourhood context → output state, looked up by minimum Hamming distance. A nervous-net rule contains five state-valued fields (`L context`, `R context`, `D context`, `self in`, `self out`). They are 5-bit values (0–31) for the retired single-circuit architecture and 15-bit values (three independently packed 5-bit channels) for `tri3`.
-- **Context rotation** (nervous net): one scalar gene is evaluated independently for each of a tile's L/R/D core circuits. Its physical neighbour context is rotated so the circuit being updated is "front", letting the same rule grow symmetric structure ("right/left/down rotated to match topology", EH'02 Fig. 4).
-- **Hierarchical crossover**: multi-gene chromosomes exchange reciprocal suffixes at a real interior boundary; a one-gene chromosome exchanges a proper subset of that rule's active fields, so minimal genomes can still produce recombinant children. Parent choice prefers different rule content, and multi-edit mutation transactions finish with a protected non-parent allele so inverse edits cannot quietly cancel back to a clone
-- **Circuit ontogeny**: growth iterations expand the selected developmental germlines into a full circuit
-- **LIF simulation** (SNN): neurons communicate via synaptic currents; static output is read as spike/no-spike, while temporal runs retain continuous event times and expose unit-width spike intervals to the shared contract scorer
-- **Per-output encoding** (SNN): experimental targets may use complemented inputs and/or an inverted spike reading, but all bundled arithmetic carries are direct: input/output high means logic 1
-- **Pluggable targets**: a `Target` (`substrates/snn/targets.py`) is the single source of truth for logical input count, output roles, truth table, and display/legacy coordinates. Current Nervous, FNV, and LUT runs resolve physical inputs from the genome and fit physical output probes from behavior.
-- **Combinational target library** (`substrates/snn/targets.py`, run on **all four** models): logic gates, half/full/2-bit adders, plus the harder **2:1 MUX**, **Majority-3**, **Parity-3 (XOR3)**, **2-to-4 decoder**, **2-bit comparator** (GT/EQ/LT) and **2×2 multiplier** (4-bit product) — data routing, voting, wide parity, relational logic and arithmetic. Nervous and LUT encode every row as its own widely-spaced pulse window via `periodic_combinational_target(...)`. FNV instead uses its native level-gate semantics: each exhaustive row holds its input levels, resets the circuit, waits through a genotype-derived settling horizon, and reads the final level at globally fitted probes. This prevents harmless settling glitches from being scored as permanent logical highs while keeping every row/output as a separate exact lexicase case.
-- **Temporal target library** (`substrates/nervous/targets.py`, run on **SNN + Nervous + FNV + LUT** except where target metadata records a physical exclusion): eight hand-built banks cover oscillator, `Pattern (1000)`, coincidence, Temporal XOR, Sequence A→B, Veto, Burst ×3, and Divide-by-3. The registered oracle-backed set adds pulse-width sum, odd-pulse selection, three A-count query functions, SR latch, C-element, refractory filtering, A-first rendezvous, collision serialization, watchdog timeout, toggle, echo, a 12-second non-retriggerable one-shot, period doubling/tripling/halving, temporal interval sum, two pair detectors, period stepper, gated oscillator, and resettable toggle. Each target declares its own backend/model exclusions; unsupported combinations are hidden rather than scored against impossible physics. FNV feeds its physical events and intervals into these same contracts.
-- **Interval transformation targets**: **Period tripler (3×)** emits every third input edge, **Period halver (½×)** first measures a complete even input period and then inserts midpoint events, and **Temporal sum (ΔA + ΔB)** measures two intervals on each of two inputs and encodes their sum as the interval between two Q events. Their seeded banks mix periods/intervals and include silent, one-lane, and incomplete guards, preventing direct wires, fixed bursts, and free-running oscillators from solving them.
-- **Physical pair target** (Nervous + LUT — the asynchronous backends): **Pair detection gap (2x pulse width)** supplies explicit fractional-phase input pulses and emits Q only when consecutive leading edges are separated by exactly twice the supplied input-pulse width; wrong relative gaps, chains, isolated pulses, and silence are included.
+- **How a rule is looked up**: the genome is a set of rules mapping a
+  neighbourhood pattern to an output state, matched by *nearest* pattern
+  (minimum Hamming distance) rather than requiring an exact hit, so a finite
+  rule set covers every context a cell might encounter. A nervous-net rule holds
+  five state-valued fields: `L context`, `R context`, `D context`, `self in`,
+  `self out`. Each is 5 bits (0-31) on the retired single-circuit tile and 15
+  bits on `tri3`, where it packs three independent 5-bit channels.
+- **Context rotation** (nervous net): one rule is applied separately to each of
+  a tile's three L/R/D circuits, with the neighbour pattern rotated each time so
+  the circuit being updated always sits "front". This is what lets a single rule
+  grow mirror-symmetric structure (EH'02 Fig. 4).
+- **Recombination**: chromosomes with several genes swap matching tail segments
+  at a real interior boundary. A single-gene chromosome instead swaps a subset
+  of that one rule's active fields, so even minimal genomes can produce genuinely
+  mixed children rather than copies. Parents are picked to differ in rule
+  content, and a multi-edit mutation always ends on a value neither parent had,
+  so a pair of opposite edits cannot silently cancel back into a clone.
+- **Growth**: repeated rule application expands the seed cells into a full circuit.
+- **LIF simulation** (SNN): neurons drive each other through synaptic currents.
+  Truth-table runs read the output as spike / no spike; timing runs keep the
+  continuous event times and hand unit-width spike intervals to the shared scorer.
+- **Per-output conventions** (SNN): some experimental tasks use complemented
+  inputs or an inverted spike reading, but everything in the bundled arithmetic
+  set is direct: high means logic 1 on both input and output.
+- **Task definitions**: a `Target` (`substrates/snn/targets.py`) is the one place
+  that defines input count, output roles, and truth table. Nervous, FNV, and LUT
+  runs take their physical input positions from the genome and fit output probes
+  from measured behavior, so a task never dictates circuit geometry.
+- **Combinational target library** (`substrates/snn/targets.py`, run on **all four** models): logic gates, half/full/2-bit adders, plus the harder **2:1 MUX**, **Majority-3**, **Parity-3 (XOR3)**, **2-to-4 decoder**, **2-bit comparator** (GT/EQ/LT) and **2x2 multiplier** (4-bit product), covering data routing, voting, wide parity, relational logic and arithmetic. Nervous and LUT encode every row as its own widely-spaced pulse window via `periodic_combinational_target(...)`. FNV instead uses its native level-gate semantics: each exhaustive row holds its input levels, resets the circuit, waits out a settling time derived from the circuit itself, and reads the final level at globally fitted probes. This prevents harmless settling glitches from being scored as permanent logical highs while keeping every row/output as a separate exact lexicase case.
+- **Temporal target library** (`substrates/nervous/targets.py`, run on **SNN + Nervous + FNV + LUT** except where target metadata records a physical exclusion): eight hand-built banks cover oscillator, `Pattern (1000)`, coincidence, Temporal XOR, Sequence A->B, Veto, Burst x3, and Divide-by-3. The registered oracle-backed set adds pulse-width sum, odd-pulse selection, three A-count query functions, SR latch, C-element, refractory filtering, A-first rendezvous, collision serialization, watchdog timeout, toggle, echo, a 12-second non-retriggerable one-shot, period doubling/tripling/halving, temporal interval sum, two pair detectors, period stepper, gated oscillator, and resettable toggle. Each target declares its own backend/model exclusions; unsupported combinations are hidden rather than scored against impossible physics. FNV feeds its physical events and intervals into these same contracts.
+- **Coincident-edge temporal twins** (`coincident_temporal_target`): every
+  combinational truth table also appears as a `<name> (temporal)` entry, so each
+  function can be evolved either as settled logic or as edge timing. The
+  difference is what the trial looks like. The periodic combinational wrapper
+  gives each row its own widely-spaced window and lets the circuit settle before
+  reading it. The temporal twin packs every row into one trial a few seconds
+  apart and scores exact edge correspondence, so a circuit only passes if it
+  also recovers between rows: lingering state, a stuck output, or a slowly
+  ringing path all cost score even when the logic is right.
+
+  Two encoding rules follow from the substrate being quiescent. A row whose
+  inputs are all 0 delivers no edge at all, so it is dropped unless it carries
+  real evidence, in which case a case-valid strobe lane is added under the same
+  rule the combinational wrapper uses. And because one-to-one event scoring
+  rewards a blanket responder in proportion to how often the table asserts,
+  quiet rows are repeated on lopsided tables such as OR and NAND until firing on
+  everything scores below 0.7. `Coincidence (2-in)`, `Temporal XOR (2-in)` and
+  `Veto gate` remain the separate hand-built versions of temporal AND, XOR and
+  veto, and keep their names.
+- **Interval transformation targets**: **Period tripler (3x)** emits every third input edge, **Period halver (1/2x)** first measures a complete even input period and then inserts midpoint events, and **Temporal sum (deltaA + deltaB)** measures two intervals on each of two inputs and encodes their sum as the interval between two Q events. Their seeded banks mix periods/intervals and include silent, one-lane, and incomplete guards, preventing direct wires, fixed bursts, and free-running oscillators from solving them.
+- **Physical pair target** (Nervous + LUT, the asynchronous backends): **Pair detection gap (2x pulse width)** supplies explicit fractional-phase input pulses and emits Q only when consecutive leading edges are separated by exactly twice the supplied input-pulse width; wrong relative gaps, chains, isolated pulses, and silence are included.
 - **Temporal time units**: target names, descriptions, reports, and plots use seconds. Nervous events may occur at fractional seconds; one LUT gate delay is defined as one second.
-- **Temporal targets** (`substrates/nervous/targets.py`): scored on raw events, cadence invariants, or persistence traces as the behavior requires, across several shifted trials — so only genuine timing/memory passes, not a lucky delay chain
-- **Oracle targets** (`substrates/nervous/oracle.py`): rather than hand-picking input timings (which can be adversarial to a circuit's internal phase), a goal is specified as a *reference state machine* `oracle(inputs, state) -> (outputs, state)` plus a *stimulus generator*. Seeded schedules are labelled by the oracle; the circuit is scored on reproducing the input→output *relation*, and `holdout_score` re-samples fresh schedules to certify that it generalises rather than memorising timings. Exact-delay and interval targets disable free alignment where absolute timing is the behavior. Stateful banks include boundary, silence, re-arm, repeated-command, and long-horizon cases; for example, the period stepper must sustain cadences 2 → 4 → 6, and the watchdog mixes safe, exact-deadline, late, re-arm, and never-armed trials.
-- **Fitness for temporal targets** (`substrates/nervous/contracts.py`, `substrates/nervous/scoring.py`; `substrates/nervous/temporal.py` only runs trials and collects observations): the question is *"did the network implement the declared idea?"*, not *"did it copy an arbitrary trace?"*. A target owns a serializable `BehaviorContract` containing one or more reusable restrictions, and every backend passes normalized observations to `score_contract(...)` —
+- **Temporal targets** (`substrates/nervous/targets.py`): scored on raw events, cadence invariants, or persistence traces as the behavior requires, across several shifted trials, so only genuine timing or memory behavior passes rather than a lucky delay chain
+- **Oracle targets** (`substrates/nervous/oracle.py`): rather than hand-picking input timings (which can be adversarial to a circuit's internal phase), a goal is specified as a *reference state machine* `oracle(inputs, state) -> (outputs, state)` plus a *stimulus generator*. Seeded schedules are labelled by the oracle; the circuit is scored on reproducing the input->output *relation*, and `holdout_score` re-samples fresh schedules to certify that it generalises rather than memorising timings. Exact-delay and interval targets disable free alignment where absolute timing is the behavior. Stateful banks include boundary, silence, re-arm, repeated-command, and long-horizon cases; for example, the period stepper must sustain cadences 2 -> 4 -> 6, and the watchdog mixes safe, exact-deadline, late, re-arm, and never-armed trials.
+- **Scoring timing behavior** (`substrates/nervous/contracts.py`,
+  `substrates/nervous/scoring.py`; `substrates/nervous/temporal.py` only runs the
+  trials and collects observations): the question asked is *did this circuit
+  implement the required behavior?*, not *did it reproduce one particular
+  waveform?* Each task carries a spec listing one or more reusable requirements,
+  and every backend hands normalized observations to `score_contract(...)`:
   - *One-to-one timed events* (`event_correspondence`) pairs expected and produced continuous-time leading edges. Missing and spurious edges both cost. A target may fit one latency shared across every trial/output or require absolute timing, as Echo delay 3 does.
   - *Sustained and commanded cadence* (`sustained_cadence`, `commanded_cadence`) measures regular rhythm, event count, dwell coverage, silence outside active epochs, and command-induced rate changes without requiring an arbitrary absolute phase.
   - *Phase-invariant logical state* (`logical_state`) compiles the abstract expected state into active and quiet epochs. A nervous stored 1 may be a circulating pulse; the scorer measures its regular lap across commanded-active epochs (never below the smallest legal ring), uses that same lap for retention and transition timing, and grants one-lap stopping grace for the pulse already in flight when a reset arrives. Shifting an identical ring in phase or building a larger valid loop therefore cannot reduce fitness.
   - *Complete pulse intervals* (`pulse_intervals`) checks both rise and fall, so the right edge times with the wrong pulse widths cannot pass.
   - *Bounded persistent state* (`bounded_state`) expresses long-horizon hold, quiet, clear, reset influence, and reload cases through the same entry point used by ordinary targets.
-  - A deterministic per-run event cap rejects pathological oscillators before one genome monopolises evaluation. Event/cadence evaluation schedules input edges directly, skips `T × cells` display snapshots, reuses one input cone across every trial, and uses allocation-free sparse matching; sampled states are built only for playback and persistence targets.
+  - A deterministic per-run event cap rejects pathological oscillators before one genome monopolises evaluation. Event/cadence evaluation schedules input edges directly, skips `T x cells` display snapshots, reuses one input cone across every trial, and uses allocation-free sparse matching; sampled states are built only for playback and persistence targets.
   - *Trace-matched output placement*: Nervous, FNV, and LUT fit each output role over the whole mature organism. Multi-output roles are assigned globally to distinct cells, so an early role cannot greedily consume the only strong probe for a later one. SNN retains its own backend-specific readout placement.
   Multiple restrictions aggregate as half weighted mean plus half worst restriction: useful partial progress remains visible, but an easy restriction cannot hide a failed one, and fitness 1.0 requires every restriction to pass.
 - **Semantic period-stepper contract** (`commanded_cadence`): some behaviours have no single "correct" trace to match. A cadence controller must hold a regular output pulse rate and make it slower after each command. Every command-delimited dwell is checked for sustained regular cadence, and later dwells must have a strictly longer period. A fixed-rate oscillator scores **0** on the change term regardless of raw trace overlap.
-- **Describe a target as spike events** (`substrates.nervous.spike_target`): define a new temporal function directly from test cases — `spike_target(name, cases, T, n_inputs=…)` where each case is `(input_spikes, output_spikes)` (input ticks per input, expected output ticks). Pair it with `substrates.nervous.ga.diversify` to turn one solution into a whole generation of genotypically-unique valid solvers.
-- **Loop-aware GA** (`substrates/nervous/ga.py`, `substrates/topology.py`): a target-blind final ranking tier rewards directed hardware the source pads can actually reach — nodes, wires, multi-input convergence, cyclic nodes, independent loop rank, and distinct feedback regions; disconnected bulk and unreachable rings receive none. Nervous aggregates those counts with diminishing-return `log1p` credit. FNV keeps its separate physical extractor and uses the uncapped lexicographic construction potential described above. Behavioral fitness—and optional robustness/juvenile objectives where the backend implements them—always ranks above topology. Nervous also retains its older temporal-only loop shaping: below perfection, a writable/readable feedback loop can add at most 5% of the remaining score; periodic combinational wrappers do not receive that bonus.
-- **Search dynamics** (`substrates/nervous/ga.py`, `substrates/lut/ga.py`, `substrates/fnv/ga.py`): **stress-induced hypermutation** raises the mutation rate after 12 genuinely flat generations and relaxes on either scalar improvement or leximin progress in one organism's declared case vector. This avoids calling improved weakest-case coverage a stall merely because the plotted aggregate is unchanged. **Simulated-annealing mutation decay** multiplies the base rate by editable *Anneal α*. **Plateau β** controls the reheat slope: 0 disables it, 1 preserves the tuned behavior, and larger values raise mutation faster. SNN alone uses a solved-only senescence/parsimony tie-break; Nervous/FNV use topology and LUT intentionally has no small-genome preference.
-- **Evaluation performance**: GUI/controller runs use an explicit **Workers** limit (default `max(1, min(cores - 2, 8))`, allowed 1-16), reuse one persistent worker pool across generations, deduplicate identical genomes before submission, and keep a bounded fitness cache. Stop cancels queued work and drains running workers before another run can begin. Hot paths compile developmental lookups once: Nervous/SNN pack a complete context into one XOR + `bit_count`, constructive FNV resolves named dependencies once (legacy associative-v2 uses its categorical-distance matrix), and LUT retains its vectorized table engine. FNV also compiles phenotype wiring once and reuses it across output fitting, trials, cases, and topology. Acyclic stateless FNV truth tables use an exact bit-parallel settled evaluator; cycles and stateful components fall back to continuous-time events, and certification always replays physical dynamics. Ordinary Nervous evaluation grows once for both behavior and topology; LUT resets one compiled simulator between timing replicates and vectorizes steady-duty extraction; fitness-only SNN runs skip voltage-history recording. Nervous target-only expected windows are cached during global probe fitting, and an event overflow stops the remaining trials immediately because overflow already guarantees zero fitness. Structural cloning avoids recursive `deepcopy` while preserving each backend's mutation semantics. Representative local microbenchmarks for the earlier optimization pass improved FNV 2-bit evaluation by about 47%, FNV reproduction by 40%, Nervous selection evaluation by 52%, SNN evaluation by 18%, and LUT evaluation by 12%; these are implementation checks, not universal throughput guarantees.
-- **Nervous sampled-state fast path**: persistence targets still receive exactly the same half-tick logical samples, but fitness no longer constructs `T × cells` full-grid dictionaries. It reconstructs only candidate/output traces from the physical pulse intervals already emitted by the engine; equivalence tests cover uniform, paper-analog, and tri-circuit physics.
-- **Substrate topology** (both original lattices): the hex (degree-3) and square (degree-4) grids are **bipartite** — 2-colourable by `(x+y)` parity, hex girth 6 — so a single circulating pulse can only traverse an **even-length** loop, and its output period is therefore even. Odd output periods are *not* impossible, but they cost far more: a period-*p* output needs a length-*2p* loop carrying two evenly-spaced pulses (`output_period = loop_length / n_pulses`), a conjunction the GA path dips through lower fitness to reach and empirically never crosses. This is a real design constraint, not a bug: a period-2 target (toggle) solves trivially, and the **pattern generator** is deliberately set to an even period — `Pattern (1000)`, period 4, one pulse in a length-4 loop — which the cheap single-pulse route reaches directly. The earlier odd-period `Pattern (100)` was retired precisely because parity made it topologically out of reach (neither a bigger grid nor hundreds of generations moved it off ~0.76). Autonomous targets that must run on **both** original lattices are chosen with this in mind. FNV keeps the spatially bipartite honeycomb, but its separate one-/two-tick delays, holds, toggles, and gated oscillators add temporal state at vertices, so an even spatial loop is no longer restricted to one tick per edge; this is how FNV escapes the original timing bipartiteness without inventing nonphysical connections.
-- **LUT logic view** (`substrates/lut/boolfn.py`): every 16-bit lookup table is really a boolean function of the four neighbour input bits, so it is decoded to a minimised sum-of-products expression `out = f(N,S,E,W)` (verified exact over all 65 536 tables) — the genome reads as logic instead of hex, and the Growth tab shows the mature organism's distinct tables as actual 4×4 truth grids
-- **sim6 ontogeny** (`substrates/lut/ontogeny.py`): a faithful port of the reference `table_create` morphogenesis that *grows* a dense genome on the fly (inventing a gene per unseen context), reproducing sim6's varied biomorphs. Runs as a standalone shape-browser (`py -m substrates.lut.ontogeny`) and is **the** LUT seed path: every LUT population/immigrant genome (evolver and Designer alike) comes from `substrates.lut.ga.make_seed_genome` — a dense biomorph seed drawn from a cached pool so immigrants stay cheap — and the LUT GA drops the smaller-genome parsimony tie-break, which used to prune the rich shapes back to sparse uniform diamonds. (Diagnostic finding behind this: the "uninteresting" diamond growth was genome *sparsity*, not the growth engine.)
+- **Describe a target as spike events** (`substrates.nervous.spike_target`): define a new temporal function directly from test cases. `spike_target(name, cases, T, n_inputs=...)` takes cases where each case is `(input_spikes, output_spikes)` (input ticks per input, expected output ticks). Pair it with `substrates.nervous.ga.diversify` to turn one solution into a whole generation of genotypically-unique valid solvers.
+- **Structural tie-break** (`substrates/nervous/ga.py`, `substrates/topology.py`):
+  when two circuits score identically, the tie is broken by structure that the
+  input pads can actually reach: cells, wires, points where several inputs
+  converge, cells on cycles, the number of independent loops, and how many
+  separate feedback regions exist. Disconnected bulk and loops nothing can reach
+  count for zero. This measure never inspects what the circuit computes, so it
+  cannot smuggle in task-specific knowledge. Nervous applies diminishing returns
+  (`log1p`) to the counts; FNV uses its own extractor and ranks the terms in
+  strict order without caps. Correct behavior always outranks structure.
+  Nervous also keeps an older timing-only nudge: short of a perfect score, a
+  feedback loop that can be both written and read adds at most 5% of whatever
+  score remains.
+- **Search dynamics** (`substrates/nervous/ga.py`, `substrates/lut/ga.py`,
+  `substrates/fnv/ga.py`): if 12 generations pass with no real progress, the
+  mutation rate is raised until progress resumes. "Progress" counts either a
+  better overall score *or* improvement on the worst-performing test cases,
+  otherwise a run that is genuinely fixing its hardest case would be mistaken
+  for a stalled one just because the averaged number has not moved.
+  Independently, the base mutation rate decays each generation by **Anneal alpha**
+  (a simulated-annealing schedule: start hot, cool down). **Plateau beta** sets how
+  sharply the stall response raises the rate. 0 disables it, 1 is the tuned
+  default, larger is more aggressive.
+- **Evaluation performance**: GUI/controller runs use an explicit **Workers** limit (default `max(1, min(cores - 2, 8))`, allowed 1-16), reuse one persistent worker pool across generations, deduplicate identical genomes before submission, and keep a bounded fitness cache. Stop cancels queued work and drains running workers before another run can begin. Hot paths compile developmental lookups once: Nervous/SNN pack a complete context into one XOR + `bit_count`, constructive FNV resolves named dependencies once (legacy associative-v2 uses its categorical-distance matrix), and LUT retains its vectorized table engine. FNV also compiles the grown circuit's wiring once and reuses it across output fitting, trials, cases, and topology. Acyclic stateless FNV truth tables use an exact bit-parallel settled evaluator; cycles and stateful components fall back to continuous-time events, and certification always replays physical dynamics. Ordinary Nervous evaluation grows once for both behavior and topology; LUT resets one compiled simulator between timing replicates and vectorizes steady-duty extraction; fitness-only SNN runs skip voltage-history recording. Nervous target-only expected windows are cached during global probe fitting, and an event overflow stops the remaining trials immediately because overflow already guarantees zero fitness. Structural cloning avoids recursive `deepcopy` while preserving each backend's mutation semantics. Representative local microbenchmarks for the earlier optimization pass improved FNV 2-bit evaluation by about 47%, FNV reproduction by 40%, Nervous selection evaluation by 52%, SNN evaluation by 18%, and LUT evaluation by 12%; these are implementation checks, not universal throughput guarantees.
+- **Nervous sampled-state fast path**: persistence targets still receive exactly the same half-tick logical samples, but fitness no longer constructs `T x cells` full-grid dictionaries. It reconstructs only candidate/output traces from the physical pulse intervals already emitted by the engine; equivalence tests cover uniform, paper-analog, and tri-circuit physics.
+- **Substrate topology** (both original lattices): the hex (degree-3) and square (degree-4) grids are **bipartite** (2-colourable by `(x+y)` parity, hex girth 6), so a single circulating pulse can only traverse an **even-length** loop, and its output period is therefore even. Odd output periods are *not* impossible, but they cost far more: a period-*p* output needs a length-*2p* loop carrying two evenly-spaced pulses (`output_period = loop_length / n_pulses`), a conjunction the GA path dips through lower fitness to reach and empirically never crosses. This is a real design constraint, not a bug: a period-2 target (toggle) solves trivially, and the **pattern generator** is deliberately set to an even period: `Pattern (1000)`, period 4, one pulse in a length-4 loop, which the cheap single-pulse route reaches directly. The earlier odd-period `Pattern (100)` was retired precisely because parity made it topologically out of reach (neither a bigger grid nor hundreds of generations moved it off ~0.76). Autonomous targets that must run on **both** original lattices are chosen with this in mind. FNV keeps the spatially bipartite honeycomb, but its separate one-/two-tick delays, holds, toggles, and gated oscillators add temporal state at vertices, so an even spatial loop is no longer restricted to one tick per edge; this is how FNV escapes the original timing bipartiteness without inventing nonphysical connections.
+- **LUT logic view** (`substrates/lut/boolfn.py`): every 16-bit lookup table is really a boolean function of the four neighbour input bits, so it is decoded to a minimised sum-of-products expression `out = f(N,S,E,W)` (verified exact over all 65 536 tables), so the genome reads as logic instead of hex, and the Growth tab shows the mature organism's distinct tables as actual 4x4 truth grids
+- **LUT seed generation** (`substrates/lut/ontogeny.py`): a port of the reference
+  `table_create` growth routine, which builds a dense genome as it goes,
+  inventing a new rule whenever it meets a context it has not seen. This
+  reproduces the varied shapes the `sim6` reference produces. It runs standalone
+  as a shape browser (`py -m substrates.lut.ontogeny`) and is the *only* way LUT
+  genomes are created. Every starting genome and every injected newcomer, in
+  both the evolver and the Designer, comes from
+  `substrates.lut.ga.make_seed_genome`, drawn from a cached pool so newcomers
+  stay cheap. The LUT GA also has no preference for smaller genomes, which
+  previously pruned these rich shapes back into sparse uniform diamonds.
+  (The diagnosis behind that change: the dull diamond growth was caused by
+  genomes being too *sparse*, not by the growth engine.)
 
-### Plateau rescue for difficult targets
+### When progress stalls
 
-After 12 flat generations, nervous and LUT runs keep producing mutated
-descendants of the separately archived all-time champion. Independently, the
-baseline contract-elite reserve keeps a bounded set of complementary
-best-on-case behaviors available to breed.
-Spatial-I/O LUT runs also propose coordinated compact port motifs and nearby
-one-bit rules expressed at output cells. Every proposal is an ordinary
-heritable genome, grown normally and scored by the unchanged Behavior Contract;
-the rescue never inserts a hand-built phenotype or grants privileged fitness.
+After 12 generations without progress, nervous and LUT runs start generating
+extra mutated descendants of the separately archived all-time best circuit.
+Independently, the reserve described earlier keeps a bounded set of
+complementary partial solutions available to breed from.
+
+LUT runs using the experimental spatial I/O also propose compact port
+arrangements and nearby one-bit rule changes at output cells.
+
+The important constraint: every one of these proposals is an ordinary heritable
+genome, grown by the normal rules and scored by the unchanged spec. Nothing here
+injects a hand-built circuit or hands out privileged fitness.
 The hard-target compiler rescue is available only when `UNRESTRICTED` is in the
 selected LUT inventory, because its synthesized truth tables are not guaranteed
 to belong to a named physical bank.
 This makes a plateau diagnosable: a rescued genome demonstrates search
-difficulty, while failure of a separately hand-designed phenotype still points
+difficulty, while failure of a separately hand-designed circuit still points
 to scoring or substrate representation.
 
 ### Current and compatibility I/O modes
 
 The main app exposes only each substrate's current physical I/O:
 
-- **Nervous and FNV** — evolved relative internal source pads plus globally
+- **Nervous and FNV**: evolved relative internal source pads plus globally
   fitted, distinct, read-only output probes. There is no placement dropdown
   choice for fresh runs.
-- **LUT** — either evolved internal source pads or fixed alternating exterior
+- **LUT**: either evolved internal source pads or fixed alternating exterior
   perimeter buses, with the same global output fitter in both modes.
-- **SNN** — the original fixed binding plus the retained `tag_rank`,
+- **SNN**: the original fixed binding plus the retained `tag_rank`,
   `wiring_chromosome`, and `spatial_chromosome` experimental strategies.
 
 The shared `io_placement` machinery remains for old checkpoints and controlled
 programmatic comparisons. `spatial_chromosome` is still causal for SNN and
-programmatic LUT runs: chromosome 3 encodes input germlines and target-blind
+programmatic LUT runs: chromosome 3 encodes input seed cells and task-blind
 output anchors. Programmatic LUT runs may also use `terminal_nodes`, whose
 heritable `io_kind` alleles create source-only inputs and sink-only outputs.
 Fresh Nervous and FNV runs reject all of these older placement strategies
@@ -319,9 +602,9 @@ pad coordinates would invent a different organism.
 | File | Description |
 |------|-------------|
 | `ui/app.py` | Single-window GUI: pick a model + target, inspect its executable Behavior Contract, evolve, inspect scored observations / growth / activity / genome, and drive circuits interactively |
-| `ui/designer.py` | Manual circuit **designer** — build a circuit by hand at either encoding level: edit the genome (chromosomes/genes) and press Grow, or edit the grown grid directly (place cells, set routing states). Simulate and score it against any target; available as a GUI tab and standalone |
-| `ui/diversity_ui.py` | "Diversity" tab — analyse a complete evaluated population, solved or failed: the four-level collapse funnel, fitness summary, and optional mutational-robustness histogram. Runs on a worker thread with progress and Stop; nervous/LUT only |
-| `ui/interactive.py` | "Interactive / Test" tab — after evolving/loading a circuit, drive its inputs and watch the response play out. Temporal SNN, nervous-net, FNV, and LUT runs load the exact scored trial into an editable continuous-time pulse timeline; FNV displays its real fixed-function components and directed wires, and combinational FNV cases use the same genotype-derived settling window as fitness. SNN shows recurrent LIF voltage/spike playback in contract seconds, while static SNN truth tables retain input toggles |
+| `ui/designer.py` | Manual circuit **designer**. Build a circuit by hand at either level: edit the genome (chromosomes/genes) and press Grow, or edit the grown grid directly (place cells, set routing states). Simulate and score it against any target; available as a GUI tab and standalone |
+| `ui/diversity_ui.py` | "Diversity" tab. Analyses a complete evaluated population, solved or failed, showing the four-level collapse funnel, fitness summary, and optional mutational-robustness histogram. Runs on a worker thread with progress and Stop; nervous/LUT only |
+| `ui/interactive.py` | "Interactive / Test" tab. After evolving or loading a circuit, drive its inputs and watch the response play out. Temporal SNN, nervous-net, FNV, and LUT runs load the exact scored trial into an editable continuous-time pulse timeline; FNV displays its real fixed-function components and directed wires, and combinational FNV cases use the same circuit-derived settling window as fitness. SNN shows recurrent LIF voltage/spike playback in contract seconds, while static SNN truth tables retain input toggles |
 | `substrates/fnv/playback.py` | Scorer-faithful FNV continuous-time player and preparation adapter used by Interactive; wraps the same `FunctionalSim`, evolved source pads, fitted probes, and temporal/logic observation horizons as FNV fitness |
 | `substrates/nervous/playback.py` | Shared continuous-time nervous-net player and pulse-lane editor used by Interactive and Designer; wraps the same paper-faithful `PulseSim` used by Nervous evolution |
 | `ui/concept_gui.py` | GUI playground for the proof-of-concept GAs in `experiments/concept/`, with live matplotlib fitness / best-organism visuals |
@@ -334,7 +617,7 @@ pad coordinates would invent a different organism.
 | `substrates/snn/targets.py` | Combinational target registry + builders (gates, adders, MUX, majority, parity, decoder, comparator, multiplier, custom truth tables) |
 | `substrates/nervous/` | Nervous-net backend (hex genome, honeycomb growth, pulse dynamics, targets, GA) |
 | `substrates/fnv/` | Functional NV Net backend (fixed component catalogue, directed-wire dynamics, indirect growth, GA) |
-| `substrates/nervous/targets.py` | Temporal target registry — eight hand-built timing banks plus the oracle-backed memory, interval, cadence, handshake, filtering, serialization, watchdog, and pulse-width families from `substrates/nervous/oracle.py` |
+| `substrates/nervous/targets.py` | Temporal target registry: eight hand-built timing banks plus the oracle-backed memory, interval, cadence, handshake, filtering, serialization, watchdog, and pulse-width families from `substrates/nervous/oracle.py` |
 | `substrates/nervous/oracle.py` | Reference-state-machine targets + stimulus generator + held-out generalisation scoring |
 | `substrates/nervous/contracts.py` | Serializable behavior-contract and constraint data plus concise target-definition helpers |
 | `substrates/nervous/scoring.py` | The single `score_contract` evaluator: truth tables, event correspondence, phase-invariant state, bounded retention, complete intervals, cadence, alignment, and reports |
@@ -342,7 +625,7 @@ pad coordinates would invent a different organism.
 | `substrates/nervous/tritile.py` | The paper's three-circuit tile (Fig. 2): 15-bit tile states (three 5-bit AND/OR-capable channels) expanded onto the unchanged pulse engine via pre-resolved sources; legacy 12-bit states migrate once |
 | `substrates/nervous/analog.py` | Analog Fig. 1 node (charge / leak / comparator / hysteresis) with emergent coincidence, width and refractory; event-driven with analytical crossings |
 | `substrates/nervous/certification.py` | The held-out verdict rule (CERTIFIED / OVERFIT / BELOW THRESHOLD / SOLVED / PLATEAU / UNCERTIFIED) shared by the GUI and `reproduce.py` |
-| `substrates/nervous/diversity.py` | Population diversity: the four-level collapse funnel (exact genotype → functional → phenotype → off-spec behaviour) plus mutational robustness. It works on unsuccessful populations too; once everyone solves, structural variety replaces the now-zero fitness spread |
+| `substrates/nervous/diversity.py` | Population diversity: the four-level collapse funnel (identical genome -> identical function -> identical grown circuit -> off-spec behaviour) plus mutational robustness. It works on unsuccessful populations too; once everyone solves, structural variety replaces the now-zero fitness spread |
 | `substrates/nervous/hexgrid.py` | Honeycomb geometry and facing-channel wiring |
 | `substrates/nervous/ga.py` | Loop/memory-tuned GA (topology tie-break, duplication, immigrants, caching, SOS hypermutation, annealing) |
 | `substrates/topology.py` | Target-blind Nervous connectivity/feedback measurement; FNV's physical extractor is separate and its aggregation is contract-tested against this one |
@@ -353,7 +636,7 @@ pad coordinates would invent a different organism.
 | `tools/diversity_report.py` | Prints the diversity funnel (and optionally the robustness panel) for a saved population |
 | `substrates/lut/` | LUT-array backend (16-bit lookup cells, paper Architecture 2) |
 | `substrates/lut/boolfn.py` | Decode 16-bit LUTs to boolean logic (minimised SOP over N/S/E/W) |
-| `substrates/lut/ontogeny.py` | sim6 `table_create` morphogenesis — shape browser + the LUT GA's seed factory |
+| `substrates/lut/ontogeny.py` | Port of the `sim6` `table_create` growth routine: shape browser plus the LUT GA's seed factory |
 | `experiments/concept/` | Standalone proof-of-concept GA sims (hierarchical / coderack / multi-layer experiments) that predate the main backends |
 | `ui/ui_compat.py` | Cross-platform Tk helpers (monospace-font probing, ttk theming) so the GUI behaves the same on Windows / Linux / macOS |
 
@@ -367,29 +650,33 @@ python app.py        # compatibility launch (also safe for existing shortcuts)
 ```
 
 In the GUI: pick a **Model** (SNN / Nervous / FNV / LUT) and a **Target** from the dropdown
-(use the category filter or type part of a name to search; click **Custom…** to
+(use the category filter or type part of a name to search; click **Custom...** to
 enter your own truth table), set Population / Generations / Restarts / Workers plus the
-GA tuning row — **Mutations/child**, **Anneal α** (α < 1 cools the mutation rate
-each generation for a hot-start simulated-annealing schedule; α = 1 is off),
-**Plateau β** (stagnation reheat strength; β = 0 disables it, β = 1 is default),
+GA tuning row: **Mutations/child**, **Anneal alpha** (alpha < 1 cools the mutation rate
+each generation for a hot-start simulated-annealing schedule; alpha = 1 is off),
+**Plateau beta** (stagnation reheat strength; beta = 0 disables it, beta = 1 is default),
 **Mutation cap** (the maximum effective mutations per child after the starting
 rate, annealing, and plateau reheating are combined; default 8),
-immigrants, tournament size and **Elites** (size of the elite *breeding pool* — the
+immigrants, tournament size and **Elites** (size of the elite *breeding pool*: the
 top N genomes are the recombination parents for the next generation but are **not**
 copied by the reproduction operator; after a terminal solve, evaluated parents may
-survive environmental selection; 0 = breed from the whole population) — and click
-**Run**. **Chroms** is the exact chromosome count for the run (1–32), is preserved by
+survive environmental selection; 0 = breed from the whole population), then click
+**Run**. **Chroms** is the exact chromosome count for the run (1-32), is preserved by
 mutation, and is stored with the checkpoint. The fitness chart plots all-time
 best, the best newly generated offspring before survivor selection, population
 mean, and effective mutation rate (secondary axis). GUI defaults are Population
 50, Generations 500, Restarts 1, Workers up to 8, Chroms 2, and Elites 5, with a hot-start
-anneal (Mutations 4.0, α 0.997) so slow, steady progress is visible. Growth is
-self-limiting via the telomere, so there are no
-grid-size or iteration controls; **Max telomere** caps how large organisms may
-grow (a chromosome's telomere is its growth *radius*, and eval cost ≈ radius²) —
-  LUT runs default to 8 while the other growing backends use 20; raise it when
-  a task genuinely needs a larger organism. Use **Load Saved** to reload `results/best_genome.json`
-and **Save PNGs** to export the growth and voltage figures.
+anneal (Mutations 4.0, alpha 0.997) so slow, steady progress is visible.
+
+Circuits stop growing on their own, so there is no grid-size or iteration
+control. **Max telomere** is the upper bound on that self-limit: each
+chromosome carries a division counter that is effectively the circuit's growth
+*radius*, and evaluation cost scales as roughly radius^2. LUT runs default to 8;
+the other growing backends default to 20. Raise it only when a task genuinely
+needs a larger circuit.
+
+Use **Load Saved** to reload `results/best_genome.json` and **Save PNGs** to
+export the growth and voltage figures.
 
 For LUT runs, the **LUT function banks** row chooses the run-level hardware
 inventory. Enable any combination of the named gate families, or leave the
@@ -409,26 +696,32 @@ gradient where binary scoring would otherwise flatline. A perfect circuit still 
 1.0, so it's safe to leave on.
 
 > Note: large targets (full/multi-bit adders, big custom tables) have many truth-table
-> rows and evolve slowly — the framework supports them, but small targets are best for
+> rows and evolve slowly. The framework supports them, but small targets are best for
 > interactive runs.
 
-For a run trapped at a true local peak, the Escape panel includes **Lineage
-walk**. It reserves a configurable share of the existing population for
-one-edit, mutation-only lineages. Those lineages are allowed to remain worse
-for several generations, which lets later edits build on otherwise-discarded
-stepping stones; improvements flow back into ordinary breeding. It adds no
-target-specific scoring and no extra evaluations. Rebirth now archives the
-generation-zero champion and defaults to a 15-generation trigger, while island
-migration ranks evaluated offspring rather than borrowing fitness from the old
-genome that happened to occupy the same slot. Every escape mechanism is off in
-new GUI sessions and serialized/headless defaults; **Reset escape** restores
-that reproducible baseline. The 10% lineage share remains merely the starting
-value if the mechanism is explicitly enabled: an early raw-score screen did
-not measure solves and is not evidence that it improves solvability.
+For a run stuck at a genuine local optimum, the Escape panel offers **Lineage
+walk**. It sets aside a configurable share of the population for lineages that
+only mutate, one edit at a time, and are permitted to stay *worse* for several
+generations. The point is that an edit which looks useless on its own is often
+the prerequisite for the next one, and ordinary selection discards it before
+that can happen. Anything that does improve rejoins normal breeding. It adds no
+task-specific scoring and costs no extra evaluations.
+
+Rebirth archives the generation-zero best and triggers after 15 flat
+generations by default. Island migration ranks offspring that have actually been
+evaluated, rather than inheriting a score from whichever genome previously held
+that slot.
+
+**Every escape mechanism is off by default**, in new GUI sessions and in headless
+runs alike; **Reset escape** restores that baseline. Treat the 10% lineage share
+as a starting value only. An early screen of these mechanisms compared raw
+scores at a single seed and short budget, without measuring whether anything
+actually solved, so it is not evidence that they help. The benchmark section
+below explains why a score gathered that way says very little.
 
 ### Local terminal benchmark
 
-`tools/benchmark.py` runs selectable architecture × target matrices through
+`tools/benchmark.py` runs selectable architecture x target matrices through
 the same `runtime/controller.py` path as the application:
 
 ```bash
@@ -448,6 +741,16 @@ Benchmarks default to the same conservative worker limit and skip the optional
 post-solve solver-bank search so elapsed time measures the requested evolution
 and certification. Use `--workers N` or `--diversify-solvers` to opt in to a
 different load or the extra solver-bank phase.
+
+**Read a solve rate next to its budget.** The report prints a
+`Solve gen (min/med/max)` column and a **Budget caveats** section that flags a
+sweep still producing first-time solves at the cutoff (rate is a lower bound)
+or one that never solved at all (bounds nothing, since "unreachable" and "needs a
+longer run" are indistinguishable). `--gens 40` is a fast smoke default, not an
+operating point: the application itself runs 500 generations, and FNV Full
+adder first solves anywhere from generation 18 to 243. Size `--gens` past a
+target's known solve-generation spread before reading a plateau as a limit of
+the substrate.
 The script does not inspect repository state or communicate with external
 services.
 
@@ -465,7 +768,7 @@ diagnostics, not ceiling claims.
 ## Tests & reproducing the claims
 
 The project's goal is a *defensible, reproducible* claim that the asynchronous
-substrate can **evolve** useful async circuits — so the substrate's clock-freedom
+substrate can **evolve** useful async circuits, so the substrate's clock-freedom
 and the headline results are both runnable, not asserted.
 
 ```bash
@@ -475,9 +778,9 @@ py reproduce.py c_element      # evolve one claim from a fixed seed, certify on 
 py reproduce.py async_substrate  # the metamorphic "no hidden clock" audit
 ```
 
-The current suite contains **533 tests across 28 test files**.
+The current suite contains **573 tests across 28 test files**.
 
-- **`tests/`** — a metamorphic **synchrony audit** (`test_synchrony.py`) that
+- **`tests/`**: a metamorphic **synchrony audit** (`test_synchrony.py`) that
   drives the pulse engine through the audited float path and asserts the
   relations a *genuinely asynchronous*, continuous-time system must satisfy and a
   tick-clocked one cannot: a sub-tick input shift shifts every output by exactly
@@ -506,17 +809,17 @@ The current suite contains **533 tests across 28 test files**.
   against independent simulators. Finally,
   `test_scoring_equivalence.py` pins declarative Contract-v1 semantics and
   anti-cheat invariants rather than freezing old mode-specific scores.
-- **`reproduce.py`** — each *claim* is a seeded evolution plus a certification
+- **`reproduce.py`**: each *claim* is a seeded evolution plus a certification
   gate: for input-driven targets it re-samples fresh held-out schedules and
   reports **CERTIFIED** (generalises), **OVERFIT** (memorised timing),
   **BELOW THRESHOLD**, **SOLVED**, **PLATEAU** (a documented substrate limit),
   or **UNCERTIFIED**, as appropriate.
-- **Automatic certification** — every supported GUI/controller run of an
+- **Automatic certification**: every supported GUI/controller run of an
   oracle-backed temporal target certifies its winner when it finishes: the
   verdict is shown in the status line and saved into the checkpoint
   (`substrates/nervous/certification.py`, one shared rule with `reproduce.py`).
   Asynchronous truth tables are replayed exhaustively under freshly shuffled
-  row schedules and require held-out fitness ≥0.999, catching circuits that
+  row schedules and require held-out fitness >=0.999, catching circuits that
   memorized schedule position instead of computing the presented row.
   LUT exterior-edge runs are the current exception because their frozen
   outside-to-facing-edge validation adapter is still pending; they report
@@ -527,15 +830,29 @@ The current suite contains **533 tests across 28 test files**.
 - Python 3.10+
 - numpy
 - matplotlib
-- pytest is **optional** — the suite also runs with bare Python via
+- pytest is **optional**; the suite also runs with bare Python via
   `py tests/run_tests.py`
 
 ## Concepts & provenance
 
 The architectures and mechanisms trace to Andrew Edwards' *Evolvable Hardware* work on **grown**, indirectly-encoded circuits; the code cites specific figures inline where they apply:
 
-- **Nervous net** — the honeycomb "nervous net" of Edwards **EH'02**: three independently configured directional circuits per tile (Fig. 2), the 16 coincidence/veto states per circuit (Fig. 3), and context rotation (Fig. 4). The temporal/oracle target suite is layered on that substrate.
-- **LUT array** — the paper's **Architecture 2**, ported faithfully from the `sim6` reference implementation and the degree-4 case of `automaton_arrays` (4 neighbours × four 16-state lookup tables per cell; `table_create` morphogenesis in `substrates/lut/ontogeny.py`).
-- **Substrate framing** — identical tiled cells, routing SRAM / lookup tables as the reconfigurable element, and the genome as an associative memory (`context → new state`) all map onto the papers' hardware picture; the code comments name the corresponding hardware element at each point.
+- **Nervous net**: the honeycomb "nervous net" of Edwards **EH'02**: three independently configured directional circuits per tile (Fig. 2), the 16 coincidence/veto states per circuit (Fig. 3), and context rotation (Fig. 4). The temporal/oracle target suite is layered on that substrate.
+- **LUT array**: the paper's **Architecture 2**, ported faithfully from the `sim6` reference implementation and the degree-4 case of `automaton_arrays` (4 neighbours x four 16-state lookup tables per cell; the `table_create` growth routine in `substrates/lut/ontogeny.py`).
+- **Substrate framing**: identical tiled cells, routing SRAM or lookup tables
+  as the reconfigurable element, and a genome that maps `context -> new state`
+  all correspond to the papers' hardware picture. Code comments name the
+  matching hardware element at each point.
 
-Two design threads are this project's own, layered on that base: **temporal / memory circuits** scored on spike-event timing (SR latches, oscillators, cadence steppers, gated memory) rather than only combinational truth tables, and **biologically-inspired search** (telomere/Hayflick-bounded growth, stress-induced hypermutation, annealed mutation, SNN solved-only parsimony, and Nervous/FNV connectivity-and-feedback selection). See the section comments in `substrates/nervous/ga.py` and `substrates/nervous/temporal.py` for the details behind each.
+Two threads are this project's own, built on that base.
+
+The first is **timing and memory circuits** (SR latches, oscillators, rate
+controllers, gated memory) scored on when edges occur, rather than only
+combinational truth tables.
+
+The second is a set of **search mechanisms borrowed from biology**: growth
+bounded by a per-lineage division counter, a mutation rate that rises when
+progress stalls and decays otherwise, SNN's preference for smaller circuits once
+a task is solved, and the connectivity-and-feedback tie-break used by Nervous
+and FNV. The section comments in `substrates/nervous/ga.py` and
+`substrates/nervous/temporal.py` explain each in detail.

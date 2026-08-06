@@ -1,5 +1,5 @@
 """
-substrates/nervous/objectives.py — the two EXTRA objectives an escape run adds.
+substrates/nervous/objectives.py - the two EXTRA objectives an escape run adds.
 
 Both are opt-in (runtime/escape.EscapeConfig) and both are shared by the
 nervous and LUT substrates, which is why they live here alongside the shared
@@ -13,16 +13,16 @@ Its juvenile scores give it somewhere to climb from. Two rules keep this
 honest:
 
   * the REPORTED fitness is always the adult score. A run that reads 1.0 still
-    means the fully grown circuit does the job — juvenile credit never inflates
+    means the fully grown circuit does the job - juvenile credit never inflates
     it;
-  * juvenile scores enter selection only, as extra ε-lexicase cases and as a
+  * juvenile scores enter selection only, as extra epsilon-lexicase cases and as a
     rank_key tier BELOW behavioral fitness.
 
 ROBUSTNESS re-scores the adult under jittered physics. It is a second
 objective, never a substitute for the first: it is aggregated by WORST case
 (so "perfect on three trials, dead on the fourth" cannot look good) and ranked
 strictly below nominal fitness (so a robust wrong circuit can never outrank a
-correct one). Its purpose is landscape shaping — brittle solutions sit on
+correct one). Its purpose is landscape shaping - brittle solutions sit on
 narrow spikes, and preferring the broader basin among EQUALLY CORRECT circuits
 both makes the optimum easier to find and generalises better.
 """
@@ -37,9 +37,9 @@ def total_case_count(target):
     """Length of the case vector a genome must produce for this target.
 
     The contract's own cases, plus one per lifespan checkpoint when lifespan
-    scoring is on. ε-lexicase requires every population member to present the
+    scoring is on. epsilon-lexicase requires every population member to present the
     same number of cases, so this is the single source of truth for that
-    length — including for the all-zero vector a dead genome returns.
+    length - including for the all-zero vector a dead genome returns.
     """
     escape = getattr(target, '_escape', None)
     base = contract_case_count(target)
@@ -52,7 +52,7 @@ def checkpoint_indices(n_snapshots, count):
     """Interior developmental stages to score, oldest first.
 
     Index 0 is the bare seed pads (nothing has grown yet) and the last index is
-    the adult, which is scored anyway — so only the interior is useful. Fewer
+    the adult, which is scored anyway - so only the interior is useful. Fewer
     than ``count`` distinct stages come back for an organism that matures
     quickly; the caller pads.
     """
@@ -71,8 +71,8 @@ def grown_snapshots(genome, target, backend, strategy):
     """Every developmental stage of one organism, adult last.
 
     The final snapshot is bit-identical to what ``grow_nervous`` / ``grow_lut``
-    would have returned, so a lifespan run's adult body — and therefore its
-    reported fitness — is exactly the body an ordinary run would have grown.
+    would have returned, so a lifespan run's adult body - and therefore its
+    reported fitness - is exactly the body an ordinary run would have grown.
     """
     if backend == 'lut':
         from substrates.lut.genome import lut_growth_seeds
@@ -112,7 +112,7 @@ def juvenile_scores(genome, target, backend, snapshots, strategy, count,
     """Behavioural score at each lifespan checkpoint, length exactly ``count``.
 
     Padding uses the ADULT score, not zero. An organism that matures in three
-    steps has no distinct juvenile stage — at that age it already WAS its adult
+    steps has no distinct juvenile stage - at that age it already WAS its adult
     self, and scoring it as a failure would penalise compact development, which
     is not what this objective is measuring.
     """
@@ -152,7 +152,7 @@ def escape_objectives(genome, target, backend, cases):
     """``(juvenile_mean, robust_case_vector)`` for one evaluated genome.
 
     Runs inside the evaluation worker. The juvenile mean is recovered from the
-    tail of the case vector rather than recomputed — those trailing entries ARE
+    tail of the case vector rather than recomputed - those trailing entries ARE
     the per-checkpoint scores, so there is exactly one measurement and no way
     for the two to disagree.
     """
@@ -189,7 +189,7 @@ def robust_case_vector(genome, target, backend, escape):
         probe = copy.copy(target)
         setattr(probe, attribute, config)
         # Never let a jitter probe recurse into lifespan scoring or into
-        # another robustness pass — this measures the ADULT under new physics.
+        # another robustness pass - this measures the ADULT under new physics.
         setattr(probe, '_escape', None)
         try:
             from .temporal import prepare_net
@@ -219,7 +219,7 @@ def structural_topology(genome, target, *, _developed=None):
 
     Deliberately target-AGNOSTIC: it grows and interprets the body, then
     measures wiring. No truth table, expected trace, target name, fitted output,
-    gene count or telomere reaches it — the target is used only to find the
+    gene count or telomere reaches it - the target is used only to find the
     growth seeds and the tile architecture.
     """
     from substrates.topology import EMPTY

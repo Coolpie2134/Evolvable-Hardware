@@ -1,7 +1,7 @@
 """Score TRIVIAL behaviours against every combinational target.
 
-The diagnostic premise: if a bare wire — or silence, or firing on every window
-— scores what a 100-generation search achieves, the target is not measuring the
+The diagnostic premise: if a bare wire - or silence, or firing on every window
+- scores what a 100-generation search achieves, the target is not measuring the
 function it names. Two real scoring bugs in this project were found exactly this
 way (the One-shot echo degeneracy and the periodic-combinational blanket-fire
 degeneracy), and both were invisible to a solve-rate table.
@@ -17,7 +17,7 @@ actually reaches means search is parked on a decoy, not on a hard problem.
 
 Scores here are BEHAVIOURAL (substrates.nervous.scoring.score_contract). They exclude the
 GA's loop-structure shaping bonus, which adds (1 - s) * LOOP_WEIGHT * bonus on
-top — so a reported fitness of 0.8219 corresponds to s = 0.8125 here.
+top - so a reported fitness of 0.8219 corresponds to s = 0.8125 here.
 
 Usage:
     py tools/probe_trivial_baselines.py [--target NAME] [--max-inputs 3]
@@ -63,7 +63,7 @@ def _windows_with_inputs(trial, data_inputs=None):
     truth table appears to score 0.5.
 
     NOTE a silent truth-table row (all inputs 0, no strobe) has no onset and
-    therefore NO window — it is not presented at all. Reported explicitly.
+    therefore NO window - it is not presented at all. Reported explicitly.
     """
     out = []
     for start, end in _combinational_windows(trial):
@@ -156,7 +156,7 @@ def probe(name, target, max_inputs):
 
     worst = max(trivial.items(), key=lambda kv: kv[1])
     if one_level:
-        print('  ** DEGENERATE: no negative evidence (%s) — a constant output '
+        print('  ** DEGENERATE: no negative evidence (%s) - a constant output '
               'scores %.4f' % (', '.join(one_level), worst[1]))
     elif worst[1] >= correct:
         print('  ** DEGENERATE: trivial behaviour %r scores %.4f >= correct %.4f'

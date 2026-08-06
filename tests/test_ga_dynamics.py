@@ -424,7 +424,7 @@ def test_nv_reproduction_preserves_configured_count_for_children_and_immigrants(
 def test_nervous_mutation_has_no_io_tag_path_left():
     """The nervous evolve_io mutation branch is deleted, not merely unused.
 
-    LUT and SNN keep their own copies — this retirement is scoped to nervous.
+    LUT and SNN keep their own copies - this retirement is scoped to nervous.
     """
     import substrates.lut.ga as lut_ga_module
     import substrates.snn.ga as snn_ga_module
@@ -1200,7 +1200,7 @@ def test_seeded_lut_runs_do_not_depend_on_what_ran_before_them():
     make_seed_genome caches its first _ONTO_POOL_SIZE ontogeny biomorphs in a
     module-level pool that lives as long as the PROCESS. The first run of a
     process grows them fresh; every later run draws its whole population from
-    that cache instead — masters grown under an EARLIER target's RNG stream.
+    that cache instead - masters grown under an EARLIER target's RNG stream.
     Re-seeding cannot undo that, so the same seed and config gave different
     answers depending on execution order: LUT AND scored 1.000 run first and
     0.750 run after Half adder, silently contaminating rows 2..N of every

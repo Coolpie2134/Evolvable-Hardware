@@ -23,14 +23,14 @@ MEAN_MUTATIONS = 4.0
 MUT_DECAY      = 0.997
 N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see substrates.nervous.ga
 FITNESS_CACHE_MAX = 200_000
-# Below this fitness, rank on fitness alone — don't let body/gene parsimony bias
+# Below this fitness, rank on fitness alone - don't let body/gene parsimony bias
 # the search before the behaviour is solved (a counter needs its structure).
 PARSIMONY_START_FITNESS = 0.999
 
 
 def clone_genome(g):
     """Shallow structural copy: new chromosome/gene lists, shared (never mutated
-    in place) gene objects. Mirrors substrates.nervous.clone_genome — far cheaper than
+    in place) gene objects. Mirrors substrates.nervous.clone_genome - far cheaper than
     deepcopy, which dominated reproduction."""
     clone = Genome(
         chromosomes=[Chromosome(genes=list(c.genes), split=c.split, tag=c.tag,
@@ -66,7 +66,7 @@ def rank_key(genome, fitness):
     return (viability, fitness, robustness, juvenile, -n_genes(genome),
             -germline_telomere(genome))
 
-# ── evaluation ────────────────────────────────────────────────────
+# -- evaluation ----------------------------------------------------
 # (the nervous / temporal backends have their own GA: see substrates/nervous/ga.py)
 
 def evaluate_genome(genome, target=None, arch=None):
@@ -135,7 +135,7 @@ def genome_signature(genome):
 def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
                 should_stop=None, on_progress=None):
     """Evaluate a population -> list of fitnesses. A persistent `executor`
-    (ProcessPoolExecutor) is reused instead of spawning a fresh pool every call —
+    (ProcessPoolExecutor) is reused instead of spawning a fresh pool every call -
     on Windows the per-generation spawn+re-import dominated runtime, so reuse is a
     large speed-up (matches substrates/nervous/substrates/lut). Omitting it keeps the one-shot pool.
     `should_stop`/`on_progress` are threaded to map_ordered (saturated, no chunk
@@ -184,7 +184,7 @@ def _eval_batch(genomes, target=None, arch=None, executor=None, cache=None,
         record_binding_progress(genome, record[1])
     return [record[0] for record in out]
 
-# ── genetic operators ──────────────────────────────────────────────
+# -- genetic operators ----------------------------------------------
 
 _GENE_FIELDS = ("state_n", "state_s", "state_e", "state_w",
                 "self_in", "self_out")
@@ -551,7 +551,7 @@ def next_population(population, fitnesses, chromosome_count=None,
                                   mean_mutations=child_rate(cb)))
     return new_pop[:pop]
 
-# ── main loop ─────────────────────────────────────────────────────
+# -- main loop -----------------------------------------------------
 
 def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
            arch=None, seed=None, escape=None, ga_config=None):
@@ -644,7 +644,7 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
             offspring_fitnesses = _eval_batch(offspring, target, arch, ex, cache)
             # The SNN backend has no terminal (mu + lambda) consolidation, so
             # this is either crowding or the original strict generational
-            # replacement — never a survivor phase it did not have before.
+            # replacement - never a survivor phase it did not have before.
             population, fitnesses, _ = escape_state.merge_generation(
                 parents, parent_fitnesses, None,
                 offspring, offspring_fitnesses, None)

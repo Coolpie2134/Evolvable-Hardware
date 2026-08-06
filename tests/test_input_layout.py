@@ -1,5 +1,5 @@
 """
-tests/test_input_layout.py — evolved input geometry for the nervous net.
+tests/test_input_layout.py - evolved input geometry for the nervous net.
 
 The genome carries one honeycomb coordinate per logical input. This replaces
 the grown input-terminal strategies, which had a cliff: a genome that failed to
@@ -9,7 +9,7 @@ placement neighbourhood is smooth and local.
 
 The invariants that make it work, each pinned below:
 
-  * position IS logical identity — pad 0 is input 0, with no per-pad parameter;
+  * position IS logical identity - pad 0 is input 0, with no per-pad parameter;
   * input 0 is anchored at the origin, purely as a coordinate gauge;
   * one mutation moves ONE non-anchor pad by ONE honeycomb edge, never onto an
     occupied site;
@@ -46,7 +46,7 @@ def _layout_genome(n_inputs=3, seed=None):
     return random_hex_genome(2, n_inputs=n_inputs, input_layout=True)
 
 
-# ── shape of a fresh layout ───────────────────────────────────────────────────
+# -- shape of a fresh layout ---------------------------------------------------
 
 def test_fresh_layout_is_anchored_distinct_and_compact():
     for n_inputs in (1, 2, 3, 4, 6):
@@ -79,7 +79,7 @@ def test_position_is_the_only_input_identity():
     assert genome_signature(other) != genome_signature(genome)
 
 
-# ── mutation: one pad, one edge ───────────────────────────────────────────────
+# -- mutation: one pad, one edge -----------------------------------------------
 
 def test_mutation_moves_exactly_one_non_anchor_pad_by_one_edge():
     random.seed(11)
@@ -140,7 +140,7 @@ def test_layout_survives_the_whole_mutation_transaction():
         assert len(set(layout)) == 3
 
 
-# ── crossover: the layout is one module ───────────────────────────────────────
+# -- crossover: the layout is one module ---------------------------------------
 
 def test_crossover_inherits_a_whole_parent_layout_never_a_mixture():
     random.seed(17)
@@ -165,7 +165,7 @@ def test_clone_carries_the_layout():
     assert clone_genome(genome).input_layout == genome.input_layout
 
 
-# ── invalid layouts are unbindable, never repaired ────────────────────────────
+# -- invalid layouts are unbindable, never repaired ----------------------------
 
 def test_valid_layout_resolves_and_legacy_falls_back_to_the_target():
     genome = _layout_genome(3, seed=23)
@@ -194,11 +194,11 @@ def test_an_invalid_layout_is_not_silently_deduplicated_or_clamped():
     genome.input_layout = ((0, 0), (1, 0), (1, 0))
     resolved = nervous_input_positions(genome, FALLBACK)
     assert resolved == ()
-    # and the genome itself is untouched — evaluation does not rewrite genes
+    # and the genome itself is untouched - evaluation does not rewrite genes
     assert genome.input_layout == ((0, 0), (1, 0), (1, 0))
 
 
-# ── checkpoints ───────────────────────────────────────────────────────────────
+# -- checkpoints ---------------------------------------------------------------
 
 def test_layout_round_trips_and_absent_means_fixed_inputs():
     genome = _layout_genome(3, seed=37)

@@ -100,7 +100,7 @@ def fit_readout(genome, target, backend='nervous'):
     evolved_layout = getattr(genome, 'input_layout', None) is not None
     if evolved_layout:
         # The EXACT FLAT pad tuple, one coordinate per logical input. A layout
-        # pad is a single cell — there is no fan-out to represent — so the
+        # pad is a single cell - there is no fan-out to represent - so the
         # grouped form would only add a level of nesting for validation to
         # unwrap, and flat is already the shape the fixed path hands on.
         from .io_placement import flat_inputs as _flat_inputs

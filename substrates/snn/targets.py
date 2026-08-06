@@ -1,11 +1,11 @@
 """
-targets.py — pluggable target functions for the evolvable-hardware GA.
+targets.py - pluggable target functions for the evolvable-hardware GA.
 
 A `Target` is the single source of truth for one problem: where the input
 seeds are, where/how the outputs are read, and the truth table to match.
 The growth automaton, circuit interpretation, fitness scorer and GUI all read
 their I/O layout from a Target, so adding a new function is just registering a
-new Target — no changes to the core library.
+new Target - no changes to the core library.
 
 Output encoding (per output terminal):
     complement_inputs   feed (HIGH - current) instead of current
@@ -15,7 +15,7 @@ arithmetic carry outputs use the ordinary direct encoding: a high source pulse
 and a spike at the carry terminal both mean logic 1.
 
 Output strategy (per target):
-    "heuristic"   legacy behaviour — outputs are the grown neurons nearest the
+    "heuristic"   legacy behaviour - outputs are the grown neurons nearest the
                   vertical mid-line in the rightmost columns (used by the
                   original half-adder so its saved genome still scores).
     "terminals"   outputs are read at fixed terminal cells; this is what scales
@@ -28,7 +28,7 @@ from typing import List, Tuple
 from .genome import GRID_SIZE, MAX_ITER
 from substrates.nervous.contracts import BehaviorContract, logic_contract
 
-CURRENT_HIGH = 4.0   # nA — logical "1" input current
+CURRENT_HIGH = 4.0   # nA - logical "1" input current
 MIN_SPIKES   = 1     # spikes needed to count as "fired"
 
 Pos = Tuple[int, int]
@@ -64,15 +64,15 @@ class Target:
         return len(self.outputs)
 
 
-# ── layout helpers ────────────────────────────────────────────────────────────
+# -- layout helpers ------------------------------------------------------------
 
 def iters_for(grid_size: int) -> int:
     """
     Growth iterations calibrated to the grid's traversal radius: enough for input
     signals to cross to the far side once, but not so many that the cellular
     automaton converges to a genome-independent saturated fixed point (which
-    collapses the fitness gradient). For grid_size 9 this is 12 — exactly the
-    half-adder's value — so existing targets are unchanged.
+    collapses the fitness gradient). For grid_size 9 this is 12 - exactly the
+    half-adder's value - so existing targets are unchanged.
     """
     return max(MAX_ITER, grid_size + 3)
 
@@ -99,7 +99,7 @@ def _right_terminals(roles_specs, grid_size: int) -> List[OutputTerminal]:
             for (r, ci, inv), y in zip(roles_specs, ys)]
 
 
-# ── builders ──────────────────────────────────────────────────────────────────
+# -- builders ------------------------------------------------------------------
 
 # 2-input boolean functions, as f(a, b) -> bit
 _GATES = {
@@ -152,7 +152,7 @@ def adder_target(n_bits: int, grid_size: int | None = None) -> Target:
     n-bit ripple-carry adder: inputs A0..A(n-1), B0..B(n-1) (LSB index 0),
     outputs S0..S(n-1) and Cout.  Truth table has 2^(2n) rows.
 
-    NB: this is provided for capacity, not speed — a 4-bit adder is 256 rows
+    NB: this is provided for capacity, not speed - a 4-bit adder is 256 rows
     and 5 outputs, which is very slow to evolve. Use small n for real runs.
     """
     n_in  = 2 * n_bits
@@ -184,7 +184,7 @@ def _half_adder() -> Target:
     """Half-adder with sum/carry read at DISTINCT, vertically-separated terminals.
 
     (Was the legacy heuristic, which placed both outputs in adjacent middle-right
-    columns — so sum and carry landed right on top of each other. Split them to
+    columns - so sum and carry landed right on top of each other. Split them to
     opposite ends of the output edge and use the scalable `terminals` strategy.)"""
     return Target(
         name="Half adder",
@@ -219,14 +219,14 @@ def _full_adder() -> Target:
     )
 
 
-# ── more complex combinational functions (work on SNN, Nervous and LUT) ─────────
+# -- more complex combinational functions (work on SNN, Nervous and LUT) ---------
 # Each is just an explicit truth table, so nothing in the core library changes.
 # They span the interesting classes: data routing (mux/demux/decoder), voting,
 # wide parity, arithmetic (multiplier) and relational logic (comparator).
 
 def mux2_target(grid_size: int = GRID_SIZE) -> Target:
     """2-to-1 multiplexer: inputs A, B, Sel -> out = Sel ? B : A. The classic
-    'route one of two data lines' primitive — needs the select line to gate two
+    'route one of two data lines' primitive - needs the select line to gate two
     different paths, which is harder than any single gate."""
     rows = [((a, b, s), (b if s else a,))
             for s in (0, 1) for a in (0, 1) for b in (0, 1)]
@@ -251,7 +251,7 @@ def parity3_target(grid_size: int = GRID_SIZE) -> Target:
 
 def decoder2to4_target(grid_size: int = GRID_SIZE) -> Target:
     """2-to-4 one-hot decoder: inputs A1 A0 select which of D0..D3 goes high
-    (a demultiplex / address-decode primitive — four outputs, exactly one hot)."""
+    (a demultiplex / address-decode primitive - four outputs, exactly one hot)."""
     rows = []
     for a0 in (0, 1):
         for a1 in (0, 1):
@@ -263,7 +263,7 @@ def decoder2to4_target(grid_size: int = GRID_SIZE) -> Target:
 
 def comparator2_target(grid_size: int | None = None) -> Target:
     """2-bit magnitude comparator: A=(A1 A0), B=(B1 B0) -> GT, EQ, LT (one hot
-    per case). Relational logic across two multi-bit operands — three coupled
+    per case). Relational logic across two multi-bit operands - three coupled
     outputs that must partition every input."""
     if grid_size is None:
         grid_size = max(GRID_SIZE, 4)
@@ -280,7 +280,7 @@ def comparator2_target(grid_size: int | None = None) -> Target:
 
 def multiplier2_target(grid_size: int | None = None) -> Target:
     """2x2 unsigned multiplier: A=(A1 A0), B=(B1 B0) -> 4-bit product P0..P3.
-    The hardest combinational preset — four outputs, each a different nonlinear
+    The hardest combinational preset - four outputs, each a different nonlinear
     function of all four inputs (P0 = A0&B0, P3 = A1&B1&(A0|B0)-ish, etc.)."""
     if grid_size is None:
         grid_size = max(GRID_SIZE, 4)
@@ -295,7 +295,7 @@ def multiplier2_target(grid_size: int | None = None) -> Target:
                               rows, grid_size=grid_size)
 
 
-# ── registry ──────────────────────────────────────────────────────────────────
+# -- registry ------------------------------------------------------------------
 
 TARGETS = {
     "Half adder": _half_adder(),
@@ -317,3 +317,16 @@ DEFAULT_TARGET = "Half adder"
 
 def get_target(name: str) -> Target:
     return TARGETS[name]
+
+
+# The coincident-edge temporal twins are derived FROM the tables above, but they
+# live in substrates.nervous.targets, which this module imports back through
+# nervous.contracts. Whichever of the two is imported first reaches the other
+# half-built, so the registration is driven from both ends and is idempotent.
+# When nervous.targets was imported first it already ran and this is a no-op.
+def _register_temporal_twins():
+    from substrates.nervous.targets import register_temporal_logic_targets
+    register_temporal_logic_targets()
+
+
+_register_temporal_twins()

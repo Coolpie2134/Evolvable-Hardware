@@ -1,19 +1,19 @@
 """
-tests/test_tritile.py — the paper's THREE-circuit tile (substrates/nervous/tritile.py).
+tests/test_tritile.py - the paper's THREE-circuit tile (substrates/nervous/tritile.py).
 
 Edwards EH'02 Fig. 2 puts THREE independent nervous circuits in every tile, one
 per output direction (L/R/D). The legacy engine collapses that to one circuit /
 one broadcast output net. These tests defend the directional tile topology:
 
-  * geometry — the honeycomb back-direction used to wire cross-tile signals is
+  * geometry - the honeycomb back-direction used to wire cross-tile signals is
     unique and mutual;
-  * expansion — a grown tri grid becomes three single-circuit sub-nodes per
+  * expansion - a grown tri grid becomes three single-circuit sub-nodes per
     live tile, simulated on the unchanged PulseSim via its pre-resolved sources;
-  * CAPABILITY — a single tri tile routes two independent signals to two
+  * CAPABILITY - a single tri tile routes two independent signals to two
     different outputs WITHOUT merging them, which one broadcast state cannot do;
-  * determinism, and that the whole GA path (grow → interpret → mutate →
+  * determinism, and that the whole GA path (grow -> interpret -> mutate ->
     reproduce) stays homogeneously tri3 and explores the full 15-bit alphabet;
-  * isolation — the 'single' tile path is completely unaffected (arch defaults
+  * isolation - the 'single' tile path is completely unaffected (arch defaults
     to 'single' everywhere).
 
 Run under pytest, or standalone:  py tests/test_tritile.py
@@ -47,7 +47,7 @@ def _pack(cL, cR, cD):
     return cL | (cR << 5) | (cD << 10)
 
 
-# ── geometry ────────────────────────────────────────────────────────────────────
+# -- geometry --------------------------------------------------------------------
 
 def test_back_direction_is_unique_and_mutual():
     for x in range(-3, 4):
@@ -76,7 +76,7 @@ def test_tile_readout_is_a_wired_or_not_three_event_counters():
     assert _MergedView(intervals, nodes, 'rises').get(tile) == [1.0]
 
 
-# ── expansion ────────────────────────────────────────────────────────────────────
+# -- expansion --------------------------------------------------------------------
 
 def test_expansion_makes_three_subnodes_per_noninput_tile():
     grid = {(0, 0): TRI_SEED_STATE, (0, 1): TRI_SEED_STATE,
@@ -100,14 +100,14 @@ def test_offgrid_and_off_channels_have_no_live_source():
         assert s1 is None and s2 is None
 
 
-# ── capability: independent routing a single broadcast state cannot express ──────
+# -- capability: independent routing a single broadcast state cannot express ------
 
 def test_tile_routes_two_signals_to_two_outputs_independently():
     """The load-bearing fidelity claim. Build ONE relay tile P fed by two
     distinct input terminals A and B on two of its input directions. Configure
     P's channels so output-1 buffers ONLY A's direction and output-2 buffers
     ONLY B's direction. A pulse on A must reach output-1 and NOT output-2, and
-    vice-versa — three circuits acting independently on the same tile. A single
+    vice-versa - three circuits acting independently on the same tile. A single
     broadcast-state tile has one output for all neighbours and cannot do this.
     """
     P = (1, 1)
@@ -133,7 +133,7 @@ def test_tile_routes_two_signals_to_two_outputs_independently():
     assert innerA.rise_times[(P[0], P[1], 'D')], 'output fed by A did not fire'
     assert not innerA.rise_times[(P[0], P[1], 'R')], 'output fed by B fired on A'
 
-    # Pulse B only -> (P,'R') fires, (P,'D') silent — the SAME tile, other channel.
+    # Pulse B only -> (P,'R') fires, (P,'D') silent - the SAME tile, other channel.
     simB = TriSim(grid, inputs, config=PulseConfig())
     simB.inject_pulse(B, 0.0, 1.0)
     simB.advance_to(10.0)
@@ -183,7 +183,7 @@ def test_three_output_tile_composes_with_analog_node_physics():
     assert sim.rise_times.get((0, 1))
 
 
-# ── GA path ──────────────────────────────────────────────────────────────────────
+# -- GA path ----------------------------------------------------------------------
 
 def test_tri_growth_uses_fifteen_bit_states():
     # Seeded: an unseeded random genome inherits whatever RNG state the previous
@@ -241,7 +241,7 @@ def test_generation_stays_homogeneously_tri3():
         assert all(getattr(gm, 'arch', 'single') == 'tri3' for gm in pop)
 
 
-# ── isolation: the single-tile path is untouched ────────────────────────────────
+# -- isolation: the single-tile path is untouched --------------------------------
 
 def test_single_arch_is_default_and_unchanged():
     g = random_hex_genome(2)
@@ -251,7 +251,7 @@ def test_single_arch_is_default_and_unchanged():
     assert all(0 <= s < 32 for s in grid.values())
 
 
-# ── standalone runner ────────────────────────────────────────────────────────────
+# -- standalone runner ------------------------------------------------------------
 
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
@@ -273,7 +273,7 @@ if __name__ == '__main__':
     raise SystemExit(_main())
 
 
-# ── OR twins + the 4-bit -> 5-bit channel migration ─────────────────────────────
+# -- OR twins + the 4-bit -> 5-bit channel migration -----------------------------
 
 def test_tri_channels_reach_the_or_twins():
     """A tri channel indexes the full 32-value alphabet, not just the AND half.
@@ -308,7 +308,7 @@ def test_every_channel_config_is_a_valid_routing_index():
 
 def test_widening_a_legacy_state_preserves_its_three_channels():
     # Legacy configs are all 0-15 (the AND half), so a widened genome routes
-    # identically — the migration only re-lays the bit fields.
+    # identically - the migration only re-lays the bit fields.
     for state in range(4096):
         legacy = (state & 0xF, (state >> 4) & 0xF, (state >> 8) & 0xF)
         assert channel_configs(widen_legacy_state(state)) == legacy

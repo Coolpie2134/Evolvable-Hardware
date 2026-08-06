@@ -5,18 +5,18 @@ from .genome import GRID_SIZE
 SEED_A = (0, 3)
 SEED_B = (0, 5)
 
-# ── matplotlib network view (used by the Interactive tab) ─────────────────────
+# -- matplotlib network view (used by the Interactive tab) ---------------------
 
 _EXC     = '#2e8b57'      # excitatory synapse (matches substrates/nervous/viz)
 _INH     = '#d0332e'      # inhibitory synapse
-_REST    = (0.914, 0.929, 0.949)   # #e9edf2 — membrane at rest
-_HOT     = (1.000, 0.353, 0.212)   # #ff5a36 — membrane near threshold
+_REST    = (0.914, 0.929, 0.949)   # #e9edf2 - membrane at rest
+_HOT     = (1.000, 0.353, 0.212)   # #ff5a36 - membrane near threshold
 _FLASH   = '#fff17a'      # a neuron spiking THIS frame
 _R       = 0.32           # node radius in grid units
 
 
 def _charge_rgb(frac):
-    """Rest→threshold colour ramp: calm light-grey climbing to hot orange."""
+    """Rest->threshold colour ramp: calm light-grey climbing to hot orange."""
     f = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
     return tuple(_REST[i] + (_HOT[i] - _REST[i]) * f for i in range(3))
 
@@ -40,7 +40,7 @@ def draw_snn_net(ax, neurons, synapses, v=None, fired=None,
     """Render a grown LIF network for playback.
 
     neurons  : list[Neuron] (.x .y .vth .is_input .is_output .out_role)
-    synapses : list[Synapse] (.pre .post .weight — sign = excit/inhib)
+    synapses : list[Synapse] (.pre .post .weight - sign = excit/inhib)
     v        : per-neuron-id membrane potential, or None for the resting view
     fired    : per-neuron-id truthy flag for neurons spiking this frame (a flash)
 

@@ -1,5 +1,5 @@
 """
-experiments/concept/engines.py — GUI bridge for the concept simulations.
+experiments/concept/engines.py - GUI bridge for the concept simulations.
 
 Each concept sim is a self-driving CLI loop (`main()`). Rather than reimplement
 each one's selection/crossover, we let `main()` run as-is in a background thread
@@ -116,7 +116,7 @@ class HookEngine:
         return bool(self.thread and self.thread.is_alive())
 
 
-# ── sim registry ──────────────────────────────────────────────────────────────
+# -- sim registry --------------------------------------------------------------
 # popsize_attr: the module global the engine shrinks for interactivity.
 # overrides:    other module globals to set before running (kept modest).
 

@@ -1,16 +1,16 @@
 """
-substrates/lut/pulse.py — asynchronous, event-driven dynamics for the LUT array.
+substrates/lut/pulse.py - asynchronous, event-driven dynamics for the LUT array.
 
 This puts the LUT substrate on the same physical footing as the nervous net
 (substrates/nervous/pulse.py): a continuous-time, event-driven system with no global clock.
-The two substrates keep their distinct characters —
+The two substrates keep their distinct characters -
 
   * a nervous WIRE carries PULSES (edge-triggered nodes, refractory);
   * a LUT WIRE carries LEVELS (each cell is a logic element: its four output
-    bits are a lookup of the four neighbour bits facing it — a latch can hold
+    bits are a lookup of the four neighbour bits facing it - a latch can hold
     a steady level, so held state is a level, not a circulating pulse);
 
-— but both are now simulated as physical hardware: every cell has one fixed
+- but both are now simulated as physical hardware: every cell has one fixed
 propagation delay, all action is precipitated by a wire LEVEL CHANGE, and
 inputs arrive at arbitrary (possibly sub-tick) real times. Internal source-pad
 mode wired-ORs them onto source-only cells; exterior-edge mode assigns every
@@ -26,7 +26,7 @@ node cannot follow it). A cell whose re-evaluation equals its present output
 cancels its pending change.
 
 Power-on: all wires start at level 0, and every cell evaluates that all-zero
-neighbourhood — a lookup table with its index-0 bit set therefore fires
+neighbourhood - a lookup table with its index-0 bit set therefore fires
 SPONTANEOUSLY (the paper's "most circuits produce immediate sustained
 activity"). This is real LUT physics and the one deliberate contrast with the
 nervous net's no-spontaneous-activity invariant; the transient is scheduled
@@ -40,7 +40,7 @@ scaled delays exercise genuine continuous time (see tests/test_lut_synchrony).
 
 Implementation: with one uniform delay, level changes cluster into WAVES
 (times of the form input_edge + k*delay), so the simulation advances one
-whole-grid numpy update per wave instead of per-cell Python events — the
+whole-grid numpy update per wave instead of per-cell Python events - the
 event-driven semantics at (close to) the vectorised engine's speed. Waves on
 a finite set of edge offsets are structurally bounded (no Zeno runs); a wave
 cap plus the optional ``max_events`` rise cap keep a pathological genome from
@@ -63,7 +63,7 @@ class LutConfig:
     ``delay`` is each cell's propagation delay (the analogue of PulseConfig's
     node delay). There is no pulse width: LUT outputs are levels that persist
     until re-evaluated. ``wave_cap`` bounds the number of update waves in one
-    run — far above any legitimate run, purely a runaway backstop.
+    run - far above any legitimate run, purely a runaway backstop.
     """
     delay:    float = 1.0
     wave_cap: int   = 200_000
@@ -143,7 +143,7 @@ class AsyncLutSim:
         self._nE, self._nW = col(1, 0), col(-1, 0)
         self.reset()
 
-    # ── state / power-on ─────────────────────────────────────────────────────
+    # -- state / power-on -----------------------------------------------------
 
     def reset(self):
         n = self.n
@@ -202,7 +202,7 @@ class AsyncLutSim:
         out[self._input_mask] = 0
         return out
 
-    # ── event queue ──────────────────────────────────────────────────────────
+    # -- event queue ----------------------------------------------------------
 
     def _push_wave(self, t):
         if t not in self._wave_set:
@@ -246,7 +246,7 @@ class AsyncLutSim:
 
     def _process(self, t):
         """One wave: apply everything due at exactly time t, then re-evaluate
-        the readers of every wire that changed (inertial delay — the newest
+        the readers of every wire that changed (inertial delay - the newest
         evaluation supersedes any pending one)."""
         n = self.n
         wire = self._wirepad[:n]
@@ -300,10 +300,10 @@ class AsyncLutSim:
             self._overflow_now()
             return
         # The readers of a changed wire are its four grid neighbours (boolean
-        # scatter into a scratch mask — cheaper than a sorted unique). On a
+        # scatter into a scratch mask - cheaper than a sorted unique). On a
         # dense wave (a chaotic array flips most cells every delay) skip the
         # scatter and treat every cell as a reader: an unaffected cell's
-        # lookup equals its current output, landing in the cancel branch —
+        # lookup equals its current output, landing in the cancel branch -
         # EXCEPT a cell holding a pending update that is due later than this
         # wave (possible only when waves interleave within one delay, i.e.
         # off-lattice stimuli), whose pending must not be postponed; the
@@ -346,7 +346,7 @@ class AsyncLutSim:
         self._waves = []
         self._wave_set.clear()
 
-    # ── the PulseSim-dialect continuous-time interface ───────────────────────
+    # -- the PulseSim-dialect continuous-time interface -----------------------
 
     def advance_to(self, when):
         """Process queued events through an absolute physical time."""
@@ -362,7 +362,7 @@ class AsyncLutSim:
 
     @property
     def rise_times(self):
-        """{cell: [continuous leading-edge times]} — every wire's 0->high
+        """{cell: [continuous leading-edge times]} - every wire's 0->high
         transitions, no tick quantisation (the substrate's behavioural output
         for event/cadence fitness). Built lazily; ``rise_trains`` is cheaper
         when only a few cells are wanted."""
@@ -377,7 +377,7 @@ class AsyncLutSim:
 
     @property
     def pulse_intervals(self):
-        """{cell: [[start, end]]} — the complete per-wire waveform log, in the
+        """{cell: [[start, end]]} - the complete per-wire waveform log, in the
         PulseSim dialect: one [rise, fall] pair per pulse, ``end`` is
         float('inf') while the wire is still high. Level logic alternates
         rise/fall strictly per wire, so pairing the k-th rise with the k-th
@@ -412,12 +412,12 @@ class AsyncLutSim:
                 out[names[i]].append(t)
         return out
 
-    # ── the LutSim-compatible per-tick interface ─────────────────────────────
+    # -- the LutSim-compatible per-tick interface -----------------------------
 
     def step(self, input_vals):
         """Advance one tick. input_vals {cell: 0/1} drives the input nets as
         levels: a 1 holds the net high for this tick (consecutive 1s are one
-        seamless level — the wired-OR merge leaves no dip and no extra edge).
+        seamless level - the wired-OR merge leaves no dip and no extra edge).
         Returns {cell: 0/1}, every wire sampled mid-tick."""
         self._pristine = False
         t0 = self._tick * TICK
@@ -433,7 +433,7 @@ class AsyncLutSim:
     def run_bits(self, streams, in_pos, T):
         """Bulk scoring runner: T ticks driven by ``streams`` (rows of input
         bits for ``in_pos``; T past the end runs on zero input) returning a
-        [T, ncells] uint8 mid-tick level matrix — same contract and, on the
+        [T, ncells] uint8 mid-tick level matrix - same contract and, on the
         tick lattice with delay == TICK, the same bits as LutSim.run_bits.
         The trailing half tick is flushed so late edges are retained in
         ``rise_times``.
@@ -485,8 +485,8 @@ class AsyncLutSim:
         tests/test_lut_synchrony.py), so run it as one vectorised loop: the
         asynchronous engine costs evolution almost nothing on lattice targets.
         Rise log, event counts and overflow behave identically; on exit the
-        exact event-frontier state at (T - 0.5) is reconstructed — pending
-        logic changes due at T and the final tick's still-live injection — so
+        exact event-frontier state at (T - 0.5) is reconstructed - pending
+        logic changes due at T and the final tick's still-live injection - so
         the ordinary event loop continues seamlessly (the caller's trailing
         flush to T processes them)."""
         n = self.n
@@ -655,7 +655,7 @@ class AsyncLutSim:
         """Drive an explicit floating-time stimulus schedule (one list of
         ``(start, width)`` pulses per input) and run to the T-tick horizon.
         Returns the [T, ncells] mid-tick sample matrix (zeros if ``sample`` is
-        False — event fitness needs edges, not display snapshots)."""
+        False - event fitness needs edges, not display snapshots)."""
         self._pristine = False
         for i, cell in enumerate(in_pos):
             events = input_events[i] if i < len(input_events) else ()
@@ -675,7 +675,7 @@ class AsyncLutSim:
 
     @property
     def out(self):
-        """{cell: nibble} — current wire levels (post-injection), the same
+        """{cell: nibble} - current wire levels (post-injection), the same
         emission map LutSim.out exposes for playback drawing."""
         if self._out_dict is None:
             wire = self._wirepad[:self.n]

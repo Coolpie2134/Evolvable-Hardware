@@ -7,7 +7,7 @@ SEED_B     = (0, 5)
 SEED_STATE = 1
 
 
-# ── associative next-state lookup (min Hamming over the 4 sides + self) ──────────
+# -- associative next-state lookup (min Hamming over the 4 sides + self) ----------
 # The per-gene time `limit` is gone: growth is now bounded by the Hayflick
 # telomere (see _grow_step), not by which genes are active on which iteration, so
 # the lookup depends on CONTEXT ALONE and its result is cacheable for the whole
@@ -58,7 +58,7 @@ def _lookup(genome: Genome, sn: int, ss: int, se: int, sw: int, si: int) -> int:
 
 
 def cell_io_tags(genome: Genome, grid) -> Dict[Tuple[int, int], int]:
-    """Map each live cell to its CELL TYPE: the settled 4-bit state itself —
+    """Map each live cell to its CELL TYPE: the settled 4-bit state itself -
     the node-type number the growth view shows. The ``genome`` parameter is
     kept for the shared call signature but the type is purely phenotypic.
     Powers the evolvable io_placement strategies (substrates/nervous/io_placement.bind_io);
@@ -85,7 +85,7 @@ def _grow_step(program, grid, tel, seeds, L, grid_size, cache):
 
       * maintenance: every live cell re-runs its lookup and keeps its telomere;
       * division: an empty orthogonal-neighbour cell is born only if a live
-        neighbour still has telomere > 0 (the Hayflick gate) — the daughter
+        neighbour still has telomere > 0 (the Hayflick gate) - the daughter
         inherits (max live-neighbour telomere) - 1. So no cell appears past
         radius L from the seeds, and growth halts on its own;
       * seeds: germline / stem cells, always present at full telomere L.
@@ -125,7 +125,7 @@ def _grow_step(program, grid, tel, seeds, L, grid_size, cache):
     return nxt, nxt_tel
 
 
-# Growth is bounded by the telomere (Hayflick radius L) — no external iteration
+# Growth is bounded by the telomere (Hayflick radius L) - no external iteration
 # cap. Cell addition stops after ~L steps; the remaining lookups settle the
 # organism to its attractor (fixed point / 2-cycle), which needs O(L) more, so
 # a 3L + margin budget suffices and the loop early-exits on convergence.
@@ -136,11 +136,11 @@ def _grow_budget(L):
 
 def _run(genome, seeds, grid_size, collect):
     """Develop until the body is fully grown. Cells never die (the lookup always
-    returns a live state), so the live-cell SET only ever grows — until the
+    returns a live state), so the live-cell SET only ever grows - until the
     Hayflick telomere is spent and no daughter can be born. Maturity is therefore
     "no new cell this step", which halts at ~L steps (telomere-bounded). This
-    substrate is recurrent and its states never settle, so — unlike the nervous
-    net — there's no point running extra settling steps; the STRUCTURE is the
+    substrate is recurrent and its states never settle, so - unlike the nervous
+    net - there's no point running extra settling steps; the STRUCTURE is the
     organism, read at the moment it stops growing."""
     L = germline_telomere(genome)
     program = _compile_lookup(genome)
@@ -159,7 +159,7 @@ def _run(genome, seeds, grid_size, collect):
     return snaps if collect else grid
 
 
-# `iters` is accepted but ignored (vestigial) — growth self-limits via the
+# `iters` is accepted but ignored (vestigial) - growth self-limits via the
 # telomere. `grid_size` is honoured as the outer wall (default GRID_SIZE).
 
 def grow_snn(genome: Genome, seeds=(SEED_A, SEED_B),

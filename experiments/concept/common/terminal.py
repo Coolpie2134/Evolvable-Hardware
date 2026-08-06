@@ -1,6 +1,6 @@
 """
 experiments/concept/common/terminal.py
-Non-blocking terminal I/O — identical across all concept simulations.
+Non-blocking terminal I/O - identical across all concept simulations.
 
 In a GUI context these are unused; they exist only for the standalone
 CLI scripts that originally used a keypress loop to pause/inspect runs.

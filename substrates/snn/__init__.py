@@ -1,5 +1,5 @@
 """
-substrates/snn — Evolvable SNN package using Edwards indirect encoding.
+substrates/snn - Evolvable SNN package using Edwards indirect encoding.
 
 Quick start
 -----------

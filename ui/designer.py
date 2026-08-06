@@ -1,21 +1,21 @@
 """
-designer.py — manual circuit designer for the nervous-net and LUT backends.
+designer.py: manual circuit designer for the nervous-net and LUT backends.
 
 Lets a human design a circuit BY HAND at either level of the indirect encoding:
 
   * the GENOME (the DNA): a structured editor over chromosomes/genes with
     range-validated fields. Pressing Grow runs the real growth engine
-    (grow_nervous / grow_lut) and REPLACES the working grid — this direction
+    (grow_nervous / grow_lut) and REPLACES the working grid, this direction
     is exact and deterministic.
   * the CIRCUIT (the organism): the working grid itself is a first-class,
-    directly editable artifact — place/delete cells, set each legacy nv cell's
+    directly editable artifact, place/delete cells, set each legacy nv cell's
     routing state (the 32-entry ROUTING_HEX vocabulary: 0-15 AND, 16-31 OR) or
     edit a tri3 tile's three independent 4-bit directional channels; neighbours resolved
     through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
     output roles. Both PulseSim and AsyncLutSim run on a bare grid, so a
     hand-built circuit needs NO genome to be simulated or scored. The nervous
-    BOTH substrates are driven ASYNCHRONOUSLY the same way — input pulses
+    BOTH substrates are driven ASYNCHRONOUSLY the same way, input pulses
     placed on a clickable timeline, played in continuous time via the same
     event engines evolution scores with (PulseSim for the nervous net,
     AsyncLutSim for the LUT array's level logic).
@@ -129,10 +129,10 @@ class _Tip:
 DESIGN_FORMAT = 'evohw-design-v1'
 
 
-# ── text (JSON) design serialisation — human-editable, replaces the pickle ───────
+# -- text (JSON) design serialisation - human-editable, replaces the pickle -------
 # A design is genome + working grid + I/O + target name, all as plain
 # numbers/strings so the file can be opened and hand-edited in any text editor.
-# The genome is one row per gene ([ctx…, self_in, self_out]); grid keys are
+# The genome is one row per gene ([ctx..., self_in, self_out]); grid keys are
 # "x,y". Targets are stored by NAME and re-resolved from the registry on load.
 
 def _genome_to_dict(genome, backend):
@@ -215,7 +215,7 @@ def read_saved_file(path):
 
 def _route_text(idx, x, y):
     """One routing state AT cell (x,y), in E1/E2/I1 form with every direction
-    label resolved to the actual parity-dependent neighbour via hex_dirs — never
+    label resolved to the actual parity-dependent neighbour via hex_dirs: never
     show a bare L/R/D. States 0-15 are the paper's AND (coincidence) table; 16-31
     are the OR twins (fire on EITHER excitatory input)."""
     entry = ROUTING_HEX[idx]
@@ -241,10 +241,10 @@ def _route_text(idx, x, y):
 
 
 _GUIDE_NERVOUS = """\
-ARCHITECTURE 1 — nervous net (paper Figs. 2-4)
+ARCHITECTURE 1: nervous net (paper Figs. 2-4)
 
 Honeycomb array: every node touches exactly THREE
-neighbours — Left, Right, Down IN ITS OWN ORIENTATION
+neighbours, Left, Right, Down IN ITS OWN ORIENTATION
 ("the concepts right, left and down are rotated as
 necessary to match the network topology", Fig. 4). Up-
 and down-oriented nodes are mirror images, so the Cell
@@ -259,16 +259,16 @@ A node has two excitatory inputs and one inhibitory:
 (relays one line); I1, if active, vetoes the response.
 Cell-tab states 0-15 are the paper's Fig. 3 AND table.
 States 16-31 are OR twins (op=OR): fire if EITHER
-excitatory input is active — a non-paper extension you
+excitatory input is active, a non-paper extension you
 asked for (purple on the canvas).
 
 MEMORY: a pulse injected by an input circulates a loop
 of buffers "until stopped by application of an
 inhibitory input". A node is refractory after firing,
-so a stored 1 reads as RINGING (1010...) — the Score
-metric knows this (±1-second tolerance on expected 1s).
+so a stored 1 reads as RINGING (1010...), the Score
+metric knows this (+/-1-second tolerance on expected 1s).
 
-GENES (Genome tab): the associative memory — a context
+GENES (Genome tab): the associative memory, a context
 (L, R, D, self) mapped to a new state by minimum
 Hamming distance. Rows with self=0 are GROWTH rules,
 the only kind that can bring an empty cell to life.
@@ -277,7 +277,7 @@ growth halts by itself at that radius from the seeds.
 
 WORKFLOW
  1. Mark the inputs first (Input mode, or Adopt target
-    I/O) — inputs are the growth SEEDS.
+    I/O), inputs are the growth SEEDS.
  2. Grow (ontogeny) develops the genome into a circuit.
     One-way: editing the circuit never alters the DNA.
  3. Or skip DNA entirely: Place/Delete cells, then set
@@ -286,19 +286,19 @@ WORKFLOW
     the target's event, cadence, or persistence metric."""
 
 _GUIDE_LUT = """\
-ARCHITECTURE 2 — LUT array (paper §5-7, sim6)
+ARCHITECTURE 2: LUT array (paper sections 5-7, sim6)
 
 Square array, four neighbours, LATCHED and SYNCHRONOUS.
 Every cell is the SAME hardware: FOUR 16-bit lookup
 tables, one driving each output direction (N, S, E, W).
 Each LUT is a truth table over the four bits the cell
-receives from its neighbours — what differs between
+receives from its neighbours, what differs between
 cells is only the CONTENTS of the tables. The hardware
 never changes: a "dead" cell is simply one whose four
 tables are all zero (drawn as a dashed square around
 the organism; the sparse grid stores only live cells).
 In Select mode you can click a dead position and write
-a table into it — that IS how a cell comes to life.
+a table into it, that IS how a cell comes to life.
 Zeroing all four tables of a live cell kills it.
 
 Colours follow the paper: in structure view each wedge
@@ -307,7 +307,7 @@ assigned to unique LUT states", Fig. 13); during
 Step/Run the wedges show the instantaneous digital
 state in red (0) and green (1) (Fig. 14).
 
-GENES (Genome tab): Fig. 10 verbatim — a context of
+GENES (Genome tab): Fig. 10 verbatim, a context of
 FIVE 16-bit LUT states (the four neighbours' facing
 LUTs + the cell's own LUT) mapped to a new 16-bit LUT
 by minimum Hamming distance over all 80 bits. During
@@ -318,13 +318,13 @@ can bring a dead direction to life); a chromosome's
 telomere expires its growth rules, so expansion
 provably stops and maintenance settles the attractor.
 
-Click ▦ next to any 16-bit field to open it in the
+Click # next to any 16-bit field to open it in the
 table editor below: click squares to toggle bits; the
 decoded boolean function (sum of products over
 N,S,E,W) updates live.
 
 WORKFLOW
- 1. Mark inputs (the growth seeds — pinned to the
+ 1. Mark inputs (the growth seeds, pinned to the
     always-relay table FFFE during Grow).
  2. Grow (ontogeny), or hand-build: Place cells and
     edit their four tables in the Cell tab.
@@ -347,7 +347,7 @@ def _traces_report(ttarget, traces, out_pos, label):
     """Contract score report for a manually edited working grid: the shared
     scoring.score_report_lines body under a designer header, with no
     backend-detail notes (the designer shows the working grid itself)."""
-    lines = ['Target: %s   [%s — designer working grid]' % (ttarget.name, label)]
+    lines = ['Target: %s   [%s, designer working grid]' % (ttarget.name, label)]
     total, body = score_report_lines(ttarget, traces, out_pos)
     return (0.0 if total is None else total), '\n'.join(lines + body)
 
@@ -378,7 +378,7 @@ class DesignerTab:
         self._build_ui()
         self._refresh_all()
 
-    # ── UI construction ─────────────────────────────────────────────────────────
+    # -- UI construction ---------------------------------------------------------
 
     def _build_ui(self):
         top = ttk.Frame(self.parent, padding=(6, 4))
@@ -400,9 +400,11 @@ class DesignerTab:
                      'window (the designer supports the nervous net and the '
                      'LUT array; it is hidden for SNN and FNV runs).')
         else:
-            _Tip(cb, "The paper's two substrates: Architecture 1 = honeycomb nervous "
-                     "net (coincidence + inhibition, pulse dynamics); Architecture 2 = "
-                     "square array of four 16-bit LUTs per cell, asynchronous level logic.")
+            _Tip(cb, "The papers' two substrates. Architecture 1 is the honeycomb "
+                     "nervous net, using coincidence, inhibition and pulse "
+                     "dynamics. Architecture 2 is a square array holding four "
+                     "16-bit lookup tables per cell, running asynchronous "
+                     "level logic.")
 
         ttk.Label(top, text='Target:').pack(side='left')
         self._target_var = tk.StringVar(value='(none)')
@@ -420,21 +422,21 @@ class DesignerTab:
         files = ttk.Frame(self.parent, padding=(6, 0))
         files.pack(fill='x')
         ttk.Label(files, text='Files:').pack(side='left')
-        b = ttk.Button(files, text='Load evolved…', command=self._load_evolved)
+        b = ttk.Button(files, text='Load evolved...', command=self._load_evolved)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Import results/best_genome.json or solver_generation.json: the '
+        _Tip(b, 'Import results/best_genome.json or solver_generation.json. The '
                 'evolved genome opens in the Genome tab, is grown, and its '
-                'target is adopted — then refine it by hand.')
+                'target is adopted, ready to refine by hand.')
         if self.get_circuit is not None:
             b = ttk.Button(files, text='From app', command=self._from_app)
             b.pack(side='left', padx=2)
             _Tip(b, "Pull the main window's current best solution into the designer.")
-        ttk.Button(files, text='Load design…', command=self._load_design).pack(side='left', padx=2)
-        b = ttk.Button(files, text='Save design…', command=self._save_design)
+        ttk.Button(files, text='Load design...', command=self._load_design).pack(side='left', padx=2)
+        b = ttk.Button(files, text='Save design...', command=self._save_design)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Saves the genome (when one exists) AND always the working grid '
-                '+ inputs/outputs + target, so a hand-built phenotype round-trips '
-                'even without DNA.')
+        _Tip(b, 'Saves the genome when one exists, and always saves the working '
+                'grid, inputs, outputs and target, so a hand-built circuit '
+                'reloads intact even with no genome behind it.')
 
         row2 = ttk.Frame(self.parent, padding=(6, 0))
         row2.pack(fill='x')
@@ -443,17 +445,18 @@ class DesignerTab:
         self._mode.trace_add('write', self._on_mode_change)
         for label, val, tip in (
                 ('Select', 'select',
-                 'Click a live cell to inspect/edit it in the Cell tab — its '
-                 'Fig. 3 routing state (nervous) or its four LUTs.'),
+                 'Click a live cell to inspect or edit it in the Cell tab: its '
+                 'Fig. 3 routing state on the nervous net, or its four '
+                 'lookup tables on the LUT array.'),
                 ('Place/Delete', 'cell',
-                 'Click an empty lattice position to add a cell; click a live '
-                 'cell to remove it. On the LUT array this only changes '
-                 'CONTENTS — the hardware field is uniform: place loads the '
-                 'relay seed table (FFFE x4), delete zeroes all four tables.'),
+                 'Click an empty lattice position to add a cell, or a live cell '
+                 'to remove it. On the LUT array the hardware is uniform, so '
+                 'this only changes contents: place loads the relay seed '
+                 'table (FFFE x4) and delete zeroes all four tables.'),
                 ('Input', 'input',
-                 'Toggle cells as inputs (A, B, …). Inputs are the growth SEEDS '
-                 '(pinned during Grow) and receive the scheduled pulses / per-second '
-                 'streams during simulation.'),
+                 'Toggle cells as inputs (A, B, ...). Inputs are the cells growth '
+                 'starts from, stay pinned during Grow, and receive the '
+                 'scheduled pulses during simulation.'),
                 ('Output', 'output',
                  'Assign the next unfilled output role to a live cell; click an '
                  'assigned cell to clear it.')):
@@ -466,36 +469,39 @@ class DesignerTab:
         ttk.Label(actions, text='Circuit:').pack(side='left')
         b = ttk.Button(actions, text='Grow (ontogeny)', command=self._grow)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Develop the genome into a circuit with the associative-memory '
-                'ontogeny (min-Hamming gene lookup), seeds = the designated '
-                'inputs. ONE-WAY: replaces the working grid; growth is not '
-                'invertible, so hand edits never flow back into the DNA.')
-        b = ttk.Button(actions, text='⤺ To genome', command=self._reverse_to_genome)
+        _Tip(b, 'Grows the genome into a circuit, starting from the designated '
+                'inputs and picking each rule by nearest match. This is one '
+                'way only: it replaces the working grid, and hand edits never '
+                'flow back into the genome.')
+        b = ttk.Button(actions, text='<- To genome', command=self._reverse_to_genome)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Best-effort INVERSE of Grow: reconstruct a genome that develops '
-                'back into the current working grid, so a hand-built circuit gets '
-                'DNA it can be saved/evolved from. If retained DNA exists, repair '
-                'only its hand-edited delta and preserve the working bulk. '
-                'Growth is many-to-one and not '
-                'truly invertible, so it replays a monotone development with the '
-                'grid as an oracle — reproducing every cell it can, with harmless '
-                'extra cells allowed. Seeds = the designated inputs. Press Grow '
-                'afterwards to realise it, Score to confirm the outputs still match.')
+        _Tip(b, 'Attempts to reverse Grow: build a genome that grows back into '
+                'the current working grid, so a hand-built circuit gets '
+                'something it can be saved and evolved from. Where a genome '
+                'is already retained, only the hand-edited part is repaired '
+                'and the rest is preserved.\n\n'
+                'Growth is many-to-one and '
+                'cannot be inverted exactly, so this replays growth using the '
+                'grid as a reference, reproducing every cell it can and '
+                'allowing harmless extra ones. Growth starts from the '
+                'designated inputs. Press Grow afterwards to realise it, then '
+                'Score to confirm the outputs still match.')
         ttk.Button(actions, text='Random genome', command=self._random_genome).pack(side='left', padx=2)
         self._compact_btn = ttk.Button(actions, text='Compact genome', command=self._compact)
         self._compact_btn.pack(side='left', padx=2)
         _Tip(self._compact_btn,
-             'LUT only: drop never-expressed genes (win no growth lookup). Provably '
-             'behaviour-preserving — the grown organism is bit-identical — so it '
-             'reveals the genome’s functional core for inspection/editing. '
-             'Biologically, pseudogene loss.')
+             'LUT only. Drops genes that never win a growth lookup and so are '
+             'never expressed. The grown circuit stays bit-identical, so this '
+             "is safe, and it exposes the genome's working core for "
+             'inspection and editing.')
         ttk.Button(actions, text='Clear grid', command=self._clear_grid).pack(side='left', padx=2)
         ttk.Separator(actions, orient='vertical').pack(side='left', fill='y', padx=6)
         b = ttk.Button(actions, text='Score', command=self._score)
         b.pack(side='left', padx=2)
-        _Tip(b, 'Judge the working grid with the target’s actual semantic metric: '
-                'raw events, cadence, persistence windows, or settled logic. No '
-                'genome is required; circulating pulses are valid stored state.')
+        _Tip(b, 'Scores the working grid against what the target actually asks '
+                'for: raw events, cadence, persistence windows, or settled '
+                'logic. No genome is needed, and a circulating pulse counts '
+                'as valid stored state.')
         self._sync_lbl = ttk.Label(actions, text='', font=(self._mono, 9))
         self._sync_lbl.pack(side='left', padx=10, fill='x', expand=True)
 
@@ -524,7 +530,7 @@ class DesignerTab:
                                                  font=(self._mono, 8), wrap='word')
         self._report.pack(fill='both', expand=True)
 
-        # scrollable genome frame — BOTH axes. A gene row (esp. LUT hex fields, or
+        # scrollable genome frame - BOTH axes. A gene row (esp. LUT hex fields, or
         # a chromosome header ending in +gene) is wider than the left panel,
         # so a horizontal scrollbar keeps the rightmost fields reachable instead of
         # clipping them off the edge.
@@ -547,7 +553,7 @@ class DesignerTab:
         self._insp_body.pack(fill='both', expand=True)
 
         # shared 4x4 LUT table editor (one canvas, rebound to whichever 16-bit
-        # field has focus — cheap, and honours "click a cell to toggle a bit")
+        # field has focus - cheap, and honours "click a cell to toggle a bit")
         lut_ed = ttk.LabelFrame(left, text='LUT table editor (click to toggle)', padding=2)
         lut_ed.pack(fill='x', pady=(4, 0))
         self._lut_fig = plt.Figure(figsize=(2.4, 2.2))
@@ -592,7 +598,7 @@ class DesignerTab:
         self.canvas.mpl_connect('button_press_event', self._on_canvas_click)
 
         self._status = tk.StringVar(
-            value='Design by hand or Load evolved…  (Grow replaces the grid from the genome)')
+            value='Design by hand or Load evolved...  (Grow replaces the grid from the genome)')
         self._status_label = ttk.Label(
             right, textvariable=self._status, anchor='w', relief='sunken',
             padding=(6, 2), wraplength=650, justify='left')
@@ -602,17 +608,17 @@ class DesignerTab:
 
         self._refresh_target_list()
 
-    # ── backend / target plumbing ────────────────────────────────────────────────
+    # -- backend / target plumbing ------------------------------------------------
 
     _MODE_HINTS = {
-        'select': 'Select mode — click a cell to open it in the Cell tab (on the '
+        'select': 'Select mode: click a cell to open it in the Cell tab (on the '
                   'LUT array dead positions open too: write a table to bring '
                   'one to life).',
-        'cell':   'Place/Delete mode — click an empty lattice position to add a '
+        'cell':   'Place/Delete mode: click an empty lattice position to add a '
                   'cell, a live cell to remove it.',
-        'input':  'Input mode — click cells to toggle them as inputs (A, B, …); '
+        'input':  'Input mode: click cells to toggle them as inputs (A, B, ...); '
                   'inputs are the growth seeds and the driven cells in Step/Run.',
-        'output': 'Output mode — click a live cell to assign the next output '
+        'output': 'Output mode: click a live cell to assign the next output '
                   'role; click an assigned cell to clear it.',
     }
 
@@ -668,7 +674,7 @@ class DesignerTab:
         if target is None:
             self._status.set('No scoring target selected.')
         else:
-            self._status.set('Selected %s — click Adopt target I/O to place its inputs.'
+            self._status.set('Selected %s: click Adopt target I/O to place its inputs.'
                              % target.name)
         self._rebuild_input_bar()
 
@@ -726,7 +732,7 @@ class DesignerTab:
         return {p: ROUTING_HEX[state & 0x1F]
                 for p, state in grid.items()}
 
-    # ── genome operations ───────────────────────────────────────────────────────
+    # -- genome operations -------------------------------------------------------
 
     def _random_genome(self):
         if self.backend == 'nervous':
@@ -734,9 +740,9 @@ class DesignerTab:
             note = 'random nervous genome'
         else:
             # LUT seeds are dense sim6-style ontogeny biomorphs (rich, irregular
-            # morphology) — the same factory the evolver uses; sparse random
+            # morphology) - the same factory the evolver uses; sparse random
             # genomes just grow uninteresting uniform diamonds
-            self._status.set('Growing a sim6-style ontogeny biomorph seed…')
+            self._status.set('Growing a sim6-style ontogeny biomorph seed...')
             self.parent.update_idletasks()
             self.genome = make_lut_seed_genome(2)
             note = ('ontogeny biomorph genome (%d genes)'
@@ -744,15 +750,15 @@ class DesignerTab:
         self._genome_edited = True
         self._rebuild_genome_panel()
         self._refresh_sync()
-        self._status.set('Loaded a %s — press Grow (ontogeny) to develop it.' % note)
+        self._status.set('Loaded a %s: press Grow (ontogeny) to develop it.' % note)
 
     def _grow(self):
         if self.genome is None:
-            self._status.set('No genome — load or randomize one (or design the grid by hand).')
+            self._status.set('No genome: load or randomize one (or design the grid by hand).')
             return
         if not self.in_pos:
             self._status.set('Designate at least one input cell first (Input mode, or '
-                             'Adopt target I/O) — inputs are the growth seeds.')
+                             'Adopt target I/O): inputs are the growth seeds.')
             return
         t = self._current_target()
         if self.backend == 'nervous':
@@ -774,7 +780,7 @@ class DesignerTab:
         """Best-effort INVERSE of Grow: reconstruct a genome that develops back
         into the current working grid (see substrates/nervous/reverse.py, substrates/lut/reverse.py).
         Growth is many-to-one, so the reconstruction replays a monotone
-        development with the grid as an oracle — it reproduces every cell it can,
+        development with the grid as an oracle, it reproduces every cell it can,
         allowing harmless EXTRA cells (the user's contract). The genome is loaded
         into the Genome tab (not yet grown): the working grid is left untouched so
         the hand-built phenotype is preserved; press Grow to realise the genome,
@@ -784,15 +790,15 @@ class DesignerTab:
                              'single-output encoding only; the tri3 grid was left unchanged.')
             return
         if not self.grid:
-            self._status.set('Empty grid — build or grow a circuit before reversing '
+            self._status.set('Empty grid: build or grow a circuit before reversing '
                              'it to a genome.')
             return
         if not self.in_pos:
             self._status.set('Designate at least one input first (Input mode, or '
-                             'Adopt target I/O) — inputs are the growth seeds the '
+                             'Adopt target I/O): inputs are the growth seeds the '
                              'reconstruction develops from.')
             return
-        self._status.set('Reconstructing a genome from the working grid…')
+        self._status.set('Reconstructing a genome from the working grid...')
         self.parent.update_idletasks()
         retained = self.genome
         delta = retained is not None and self._grid_edited
@@ -830,13 +836,13 @@ class DesignerTab:
                   if delta else '')
         if delta and not improved and rep.get('edits_reproduced', 0) < rep.get('edits', 0):
             self._status.set(
-                'No safe genome delta found — retained the original DNA; %d/%d '
+                'No safe genome delta found: retained the original DNA; %d/%d '
                 'edits reproduce without damaging unchanged cells. The hand-edited '
                 'grid is still active and can be saved directly.'
                 % (rep.get('edits_reproduced', 0), rep.get('edits', 0)))
         else:
             self._status.set(
-                '%s a %d-gene genome — reproduces %d/%d cells%s%s%s. '
+                '%s a %d-gene genome: reproduces %d/%d cells%s%s%s. '
                 'Press Grow to realise it (extra cells may appear); Score to confirm '
                 'the outputs. Your hand-built grid is kept until you Grow.'
                 % (verb, n_genes, rep['matched'], rep['target'],
@@ -845,10 +851,10 @@ class DesignerTab:
                    if rep['matched'] < rep['target'] else '', suffix))
 
     def _reverse_report(self, rep):
-        """Human-readable account of a network→genome reconstruction."""
+        """Human-readable account of a network->genome reconstruction."""
         exact = rep['matched'] == rep['target'] and not rep['extra']
         full  = rep['matched'] == rep['target']
-        L = ['Network → genome (verified reconciliation / synthesis)',
+        L = ['Network -> genome (verified reconciliation / synthesis)',
              'Backend: %s' % ('nervous net' if rep['backend'] == 'nervous'
                               else 'LUT array'), '']
         if rep.get('note'):
@@ -885,7 +891,7 @@ class DesignerTab:
             L += ['', '=> FULL COVER: every target cell is reproduced; the grown '
                   'organism also has %d extra cell(s). Per the design contract '
                   'these are fine as long as they do not change the scored '
-                  'outputs — press Grow then Score to confirm.' % rep['extra']]
+                  'outputs: press Grow then Score to confirm.' % rep['extra']]
         else:
             L += ['', '=> PARTIAL: %d cell(s) could not be reproduced by growing '
                   'from the seeds (see below). This is an unresolved reachability '
@@ -901,7 +907,7 @@ class DesignerTab:
             for ctx, states in rep['conflicts'][:8]:
                 L.append('   %s -> %s' % (ctx, states))
             if len(rep['conflicts']) > 8:
-                L.append('   … %d more' % (len(rep['conflicts']) - 8))
+                L.append('   ... %d more' % (len(rep['conflicts']) - 8))
         if rep['seed_mismatch']:
             L += ['', 'Seed states pinned (%d): a seed/input cell is always held at '
                   'the seed state during growth, so a different state there cannot '
@@ -927,7 +933,7 @@ class DesignerTab:
                 arch = self._nv_arch()
                 routing = self._nv_routing(grid)
                 # Score under the SAME physics evolution uses: the run's node
-                # model config, its physical input schedules, and — for
+                # model config, its physical input schedules, and - for
                 config = getattr(target, 'pulse_config', None)
                 delays = (None if self.genome is None or arch == 'tri3'
                           else node_delays(self.genome, grid, config))
@@ -957,7 +963,7 @@ class DesignerTab:
                         delays=delays, arch=arch)
             else:
                 if use_manual:
-                    # pinned outputs, asynchronous engine — real edge times,
+                    # pinned outputs, asynchronous engine - real edge times,
                     # input_events schedules, and the LUT strict-hold scoring,
                     # exactly like the GA's evaluation path
                     out_pos = manual
@@ -998,10 +1004,10 @@ class DesignerTab:
             self._status.set('Compaction applies to the LUT array (dense genomes).')
             return
         if self.genome is None:
-            self._status.set('No genome to compact — load or randomize one first.')
+            self._status.set('No genome to compact: load or randomize one first.')
             return
         if not self.in_pos:
-            self._status.set('Designate the input cell(s) first — they are the '
+            self._status.set('Designate the input cell(s) first: they are the '
                              'growth seeds compaction develops from.')
             return
         t = self._current_target_obj()
@@ -1024,7 +1030,7 @@ class DesignerTab:
         self._reset_sim()
         self._refresh_all()
 
-    # ── genome editor panel ─────────────────────────────────────────────────────
+    # -- genome editor panel -----------------------------------------------------
 
     def _rebuild_genome_panel(self):
         for w in self._genome_frame.winfo_children():
@@ -1032,8 +1038,8 @@ class DesignerTab:
         g = self.genome
         if g is None:
             ttk.Label(self._genome_frame,
-                      text='(no genome)\n\nLoad evolved…, Random genome, or design\n'
-                           'the circuit directly — a hand-built grid\n'
+                      text='(no genome)\n\nLoad evolved..., Random genome, or design\n'
+                           'the circuit directly: a hand-built grid\n'
                            'needs no genome to simulate or score.',
                       foreground='#777').pack(anchor='w', padx=6, pady=6)
             return
@@ -1046,7 +1052,7 @@ class DesignerTab:
                  'Fig. 10 genes: context of five 16-bit LUTs -> new LUT,\n'
                  'min Hamming over all 80 bits; rotated so one gene serves\n'
                  'all four directions. self=0 rows are GROWTH rules.\n'
-                 'Click a field\'s ▦ to edit it as a truth table below.')
+                 'Click a field\'s # to edit it as a truth table below.')
         ttk.Label(self._genome_frame, text=intro, font=(self._mono, 8),
                   foreground='#556').pack(anchor='w', padx=2, pady=(4, 0))
         for ci, chrom in enumerate(g.chromosomes):
@@ -1070,7 +1076,7 @@ class DesignerTab:
                 self._gene_row(chrom, gi, gene, fields, nv)
             if len(chrom.genes) > _GENE_ROW_CAP:
                 ttk.Label(self._genome_frame,
-                          text='   … %d more genes not shown (evolved dense genome)'
+                          text='   ... %d more genes not shown (evolved dense genome)'
                                % (len(chrom.genes) - _GENE_ROW_CAP),
                           foreground='#a00').pack(anchor='w')
         ttk.Button(self._genome_frame, text='+ chromosome',
@@ -1119,7 +1125,7 @@ class DesignerTab:
         return sp
 
     def _hex_entry(self, parent, obj, field):
-        """16-bit field as %04X hex; the ▦ button binds it into the shared 4x4
+        """16-bit field as %04X hex; the # button binds it into the shared 4x4
         table editor (click-to-toggle); SOP shown there via lut_sop."""
         var = tk.StringVar(value='%04X' % getattr(obj, field))
 
@@ -1149,7 +1155,7 @@ class DesignerTab:
             self._lut_bind = (lambda: getattr(o, f), setter,
                               'gene.%s' % f)
             self._draw_lut_editor()
-        ttk.Button(parent, text='▦', width=2, command=bind_editor).pack(side='left')
+        ttk.Button(parent, text='#', width=2, command=bind_editor).pack(side='left')
 
     def _add_gene(self, chrom):
         chrom.genes.append(random_hex_gene(self._nv_arch())
@@ -1198,7 +1204,7 @@ class DesignerTab:
             self._rebuild_genome_panel()
             self._refresh_sync()
 
-    # ── shared LUT table editor ─────────────────────────────────────────────────
+    # -- shared LUT table editor -------------------------------------------------
 
     def _draw_lut_editor(self):
         self._lut_ax.clear()
@@ -1227,7 +1233,7 @@ class DesignerTab:
         setter((get() ^ (1 << idx)) & 0xFFFF)
         self._draw_lut_editor()
 
-    # ── circuit editor (canvas clicks + cell inspector) ─────────────────────────
+    # -- circuit editor (canvas clicks + cell inspector) -------------------------
 
     def _cell_at(self, xd, yd):
         if xd is None:
@@ -1258,7 +1264,7 @@ class DesignerTab:
         if mode == 'select':
             # the LUT field is UNIFORM hardware: every position holds the same
             # four LUTs, so an empty position is inspectable too (its tables are
-            # all zero — writing a non-zero table brings it to life)
+            # all zero - writing a non-zero table brings it to life)
             if self.backend == 'lut':
                 self._selected = pos
             else:
@@ -1296,7 +1302,7 @@ class DesignerTab:
                 roles = [o.role for o in t.outputs] if t else ['Q']
                 free = [r for r in roles if self.out_pos.get(r) is None]
                 if not free:
-                    self._status.set('All output roles assigned — click an assigned '
+                    self._status.set('All output roles assigned: click an assigned '
                                      'cell to clear its role.')
                     return
                 self.out_pos[free[0]] = pos
@@ -1311,8 +1317,8 @@ class DesignerTab:
 
     def _set_lut_dir(self, pos, k, v):
         """Write one directional table of the LUT cell at `pos`. The paper's
-        field is UNIFORM hardware — every position always contains the same four
-        LUTs and only their CONTENTS change — so this is the single mutation
+        field is UNIFORM hardware: every position always contains the same four
+        LUTs and only their CONTENTS change, so this is the single mutation
         point: writing a non-zero table to a dead position brings that cell to
         life, and zeroing the last non-zero table kills it (the sparse grid
         stores only live cells; absent == all four tables 0). Returns True if
@@ -1328,7 +1334,7 @@ class DesignerTab:
                 self.in_pos.remove(pos)
                 self._rebuild_input_bar()
             self.out_pos = {r: p for r, p in self.out_pos.items() if p != pos}
-            self._status.set('All four tables are 0 — the cell at %s is dead '
+            self._status.set('All four tables are 0: the cell at %s is dead '
                              '(same hardware, zero contents).' % (pos,))
         self._mark_grid_edit()
         self._refresh_canvas()
@@ -1394,12 +1400,12 @@ class DesignerTab:
 
         state = self.grid[pos] & 0x1F
         ttk.Label(self._insp_body,
-                  text='%s node — its L/R/D resolve to (Fig. 4 rotation):\n'
+                  text='%s node: its L/R/D resolve to (Fig. 4 rotation):\n'
                        '  L->%s   R->%s   D->%s'
                        % (orient, nb['L'], nb['R'], nb['D']),
                   font=(self._mono, 8), justify='left').pack(anchor='w', pady=(2, 4))
         ttk.Label(self._insp_body,
-                  text='out = (E1 op E2) AND NOT I1 — pick a state (hover previews\n'
+                  text='out = (E1 op E2) AND NOT I1: pick a state (hover previews\n'
                        'the wiring). 0-15 = AND (coincidence), 16-31 = OR (either):',
                   font=(self._mono, 8), justify='left').pack(anchor='w')
         routes = ttk.Frame(self._insp_body)
@@ -1445,7 +1451,7 @@ class DesignerTab:
                        '(N%s S%s E%s W%s).\n'
                        'Only the CONTENTS differ between cells: all four\n'
                        'tables 0 = dead; write a non-zero table to bring\n'
-                       'this cell to life. Edit as hex, or ▦ opens the\n'
+                       'this cell to life. Edit as hex, or # opens the\n'
                        'table below (click squares to toggle bits).'
                        % ((pos[0], pos[1] + 1), (pos[0], pos[1] - 1),
                           (pos[0] + 1, pos[1]), (pos[0] - 1, pos[1])),
@@ -1485,16 +1491,16 @@ class DesignerTab:
             on_commit, bind_editor = make()
             e.bind('<FocusOut>', on_commit)
             e.bind('<Return>', on_commit)
-            ttk.Button(row, text='▦', width=2, command=bind_editor).pack(side='left')
+            ttk.Button(row, text='#', width=2, command=bind_editor).pack(side='left')
 
-    # ── canvas rendering ────────────────────────────────────────────────────────
+    # -- canvas rendering --------------------------------------------------------
 
     def _refresh_canvas(self, preview=None):
         ax = self._ax_grid
         activity = None
         if self._tick > 0:
             activity = self._nibbles if self.backend == 'lut' else self._state
-        title = ('%s  —  %s' % (self.backend,
+        title = ('%s :  %s' % (self.backend,
                  circuit_summary_nervous(self.grid, arch=self._nv_arch())
                  if self.backend == 'nervous'
                  else '%d cells' % len(self.grid)))
@@ -1526,7 +1532,7 @@ class DesignerTab:
                          out_pos=self.out_pos, show_edges=True, title=title)
             if activity is None and self.grid:
                 # the field is UNIFORM hardware (paper): every position holds
-                # the same four LUTs, dead ones just contain zeros — show the
+                # the same four LUTs, dead ones just contain zeros - show the
                 # dead ring around the organism as dashed cells so "editing"
                 # reads as changing contents, not placing hardware
                 for (x, y) in self.grid:
@@ -1548,7 +1554,7 @@ class DesignerTab:
         else:
             ax.clear()
             ax.axis('off')
-            ax.text(0.5, 0.5, 'empty grid — Place/Delete mode to add cells,\n'
+            ax.text(0.5, 0.5, 'empty grid: Place/Delete mode to add cells,\n'
                               'or Grow (ontogeny) a genome', ha='center', va='center',
                     fontsize=10, color='#888')
         self._draw_trace_strip()
@@ -1563,7 +1569,7 @@ class DesignerTab:
                          Patch(color='#e6e9ee', label='quiet')]
             else:
                 nodes = [Patch(color='#8fb3e0', label='buffer (E1=E2)'),
-                         Patch(color='#2f6fc0', label='coincidence (E1·E2)'),
+                         Patch(color='#2f6fc0', label='coincidence (E1-E2)'),
                          Patch(color='#7b52c4', label='OR (E1+E2, either)'),
                          Patch(color='#e0902e', label='inhibited (has I1)')]
             return nodes + [
@@ -1616,9 +1622,9 @@ class DesignerTab:
         if self.genome is None:
             txt, col = 'no genome (hand-built grid)', '#777777'
         elif self._grid_edited:
-            txt, col = 'grid EDITED since grow — genome not updated', '#b06010'
+            txt, col = 'grid EDITED since grow: genome not updated', '#b06010'
         elif self._genome_edited:
-            txt, col = 'genome edited — press Grow to regrow', '#b06010'
+            txt, col = 'genome edited: press Grow to regrow', '#b06010'
         else:
             txt, col = 'genome -> grid: in sync', '#177a2f'
         self._sync_lbl.config(text=txt, foreground=col)
@@ -1635,11 +1641,11 @@ class DesignerTab:
         self._refresh_canvas()
         self._refresh_sync()
 
-    # ── simulation (mirrors interactive.py) ─────────────────────────────────────
+    # -- simulation (mirrors interactive.py) -------------------------------------
 
     def _rebuild_input_bar(self):
         # Both asynchronous substrates are driven by the same clickable pulse
-        # TIMELINE (real, possibly sub-tick times) — nervous wires carry the
+        # TIMELINE (real, possibly sub-tick times) - nervous wires carry the
         # pulses, LUT input nets hold the injected level for the pulse width.
         if getattr(self, '_editor', None) is not None:
             self._editor.disconnect()
@@ -1651,7 +1657,7 @@ class DesignerTab:
         self._input_heading.set('Input pulses (continuous time):')
         self._build_pulse_timeline()
 
-    # ── asynchronous pulse timeline + continuous-time playback (both substrates) ──
+    # -- asynchronous pulse timeline + continuous-time playback (both substrates) --
 
     def _sim_horizon(self):
         t = self._current_target()
@@ -1711,7 +1717,7 @@ class DesignerTab:
                 config=config, delays=delays,
                 arch=arch, inputs=self.in_pos, outputs=terminal_outputs,
                 terminal_inputs=terminal_inputs)
-        else:                                    # LUT — same player, level engine
+        else:                                    # LUT - same player, level engine
             self._player = LutPlayer(
                 self.grid, horizon=self._sim_horizon(),
                 config=getattr(target, 'lut_config', None),
@@ -1754,12 +1760,12 @@ class DesignerTab:
 
     def _step(self):
         if not self.grid:
-            self._status.set('Empty grid — nothing to simulate.')
+            self._status.set('Empty grid: nothing to simulate.')
             return False
         if getattr(self, '_player', None) is None:
             self._build_player()
         if self._player.at_end():
-            self._status.set('Playback is at the end — press Run to restart or Reset.')
+            self._status.set('Playback is at the end: press Run to restart or Reset.')
             return False
         self._player.step()
         self._nv_playing = True
@@ -1784,7 +1790,7 @@ class DesignerTab:
             self._run_btn.config(text='Run')
         else:
             if not self.grid:
-                self._status.set('Empty grid — place or grow a circuit before Run.')
+                self._status.set('Empty grid: place or grow a circuit before Run.')
                 return
             if getattr(self, '_player', None) is not None and self._player.at_end():
                 self._player.reset()
@@ -1814,7 +1820,7 @@ class DesignerTab:
             self._editor.disconnect()
             self._editor = None
 
-    # ── scoring ─────────────────────────────────────────────────────────────────
+    # -- scoring -----------------------------------------------------------------
 
     def _score(self):
         t = self._current_target()
@@ -1822,7 +1828,7 @@ class DesignerTab:
             self._status.set('Pick a target to score against.')
             return
         if not self.grid:
-            self._status.set('Empty grid — nothing to score.')
+            self._status.set('Empty grid: nothing to score.')
             return
         if getattr(t, 'temporal', False):
             self._score_temporal(t)
@@ -1877,7 +1883,7 @@ class DesignerTab:
                                                          arch=arch)
         else:
             if use_manual:
-                # pinned outputs, asynchronous engine — real edge times,
+                # pinned outputs, asynchronous engine - real edge times,
                 # input_events schedules, and the LUT strict-hold scoring,
                 # exactly like the GA's evaluation path
                 out_pos = manual
@@ -1886,7 +1892,7 @@ class DesignerTab:
             else:
                 out_pos, traces = lut_place_by_trace(self.grid, list(self.in_pos), t)
         if any(out_pos.get(r) is None for r in roles):
-            self._status.set('Could not place all outputs — grid too small?')
+            self._status.set('Could not place all outputs: grid too small?')
             return
         score, report = _traces_report(t, traces, out_pos, self.backend)
         self._last_score = score
@@ -1894,7 +1900,7 @@ class DesignerTab:
         self._status.set('Behavioural score %.4f against %s  (%s outputs%s)'
                          % (score, t.name,
                             'manual' if use_manual else 'trace-matched auto',
-                            '' if use_manual else ' — assign roles in Output mode to pin them'))
+                            '' if use_manual else ': assign roles in Output mode to pin them'))
 
     def _score_combinational(self, t):
         if len(self.in_pos) != len(t.inputs):
@@ -1911,7 +1917,7 @@ class DesignerTab:
         if any(out_pos.get(r) is None for r in roles):
             self._status.set('Could not place all outputs.')
             return
-        lines = ['Target: %s   [nervous — designer working grid]' % t.name,
+        lines = ['Target: %s   [nervous, designer working grid]' % t.name,
                  'Circuit: ' + circuit_summary_nervous(self.grid, arch=arch)]
         for r in roles:
             lines.append("  out '%s': pos=%s" % (r, out_pos[r]))
@@ -1949,7 +1955,7 @@ class DesignerTab:
         self._report.insert('end', text)
         self._nb.select(self._report_tab)
 
-    # ── import / export ─────────────────────────────────────────────────────────
+    # -- import / export ---------------------------------------------------------
 
     def _load_evolved(self):
         path = filedialog.askopenfilename(
@@ -2020,7 +2026,7 @@ class DesignerTab:
                         font=(self._mono, 9))
         for i, g in enumerate(genomes):
             n = sum(len(c.genes) for c in g.chromosomes)
-            lb.insert('end', 'genome %2d — %d chromosomes, %d genes'
+            lb.insert('end', 'genome %2d: %d chromosomes, %d genes'
                       % (i, len(g.chromosomes), n))
         lb.selection_set(0)
         lb.pack(padx=6, pady=6)
@@ -2031,7 +2037,7 @@ class DesignerTab:
             if sel:
                 self._adopt_state(genome=genomes[sel[0]], target=state.get('target'),
                                   backend=backend,
-                                  note='solver %d of %d (all ≥ %.3f)'
+                                  note='solver %d of %d (all >= %.3f)'
                                        % (sel[0], len(genomes),
                                           state.get('valid', 0.0)))
         ttk.Button(top, text='Load', command=ok).pack(pady=(0, 6))
@@ -2039,7 +2045,7 @@ class DesignerTab:
     def _from_app(self):
         c = self.get_circuit() if self.get_circuit else None
         if not c or c.get('genome') is None:
-            self._status.set('No current solution in the app — Run or Load Saved first.')
+            self._status.set('No current solution in the app: Run or Load Saved first.')
             return
         backend = c.get('backend', 'snn')
         if backend not in ('nervous', 'lut'):
@@ -2075,7 +2081,7 @@ class DesignerTab:
             self._target_picker.select(key or target.name)
         self._genome_edited = False
         if grid:
-            # a saved design: restore the GRID as-is — a hand-edited phenotype
+            # a saved design: restore the GRID as-is - a hand-edited phenotype
             # must never be silently replaced by a regrow of the genome
             self.grid = dict(grid)
             self.in_pos = list(in_pos or [])
@@ -2108,7 +2114,7 @@ class DesignerTab:
         self._selected, self._lut_bind = None, None
         self._reset_sim()
         self._refresh_all()
-        self._status.set('Imported %s — %d cells.' % (note, len(self.grid)))
+        self._status.set('Imported %s: %d cells.' % (note, len(self.grid)))
 
     def _current_target_obj(self):
         t = self._current_target()
@@ -2118,7 +2124,7 @@ class DesignerTab:
 
     def _save_design(self):
         if not self.grid and self.genome is None:
-            self._status.set('Nothing to save — design a circuit or load a genome first.')
+            self._status.set('Nothing to save: design a circuit or load a genome first.')
             return
         os.makedirs(RESULTS_DIR, exist_ok=True)
         path = filedialog.asksaveasfilename(
@@ -2150,7 +2156,7 @@ class DesignerTab:
         kind = ('genome + hand-edited grid' if grid_edited and self.genome
                 else 'grid only (no genome)' if self.genome is None
                 else 'genome + grown grid')
-        self._status.set('Saved editable design (%s) → %s' % (kind, path))
+        self._status.set('Saved editable design (%s) -> %s' % (kind, path))
 
     def _load_json_design(self, doc, path):
         backend = doc.get('backend', 'nervous')
@@ -2184,7 +2190,7 @@ def main():
     import multiprocessing
     multiprocessing.freeze_support()
     root = tk.Tk()
-    root.title('Evolvable Hardware — Manual Designer')
+    root.title('Evolvable Hardware: Manual Designer')
     ui_compat.apply_theme(root)
     frame = ttk.Frame(root)
     frame.pack(fill='both', expand=True)

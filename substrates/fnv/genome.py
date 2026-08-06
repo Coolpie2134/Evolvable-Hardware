@@ -29,7 +29,7 @@ SEED_STATE = BY_NAME["DELAY1_D_TO_LR"].id
 # Fixed source-interface identities break an otherwise artificial symmetry
 # between logical input roles during development. FunctionalSim treats every
 # declared input as an external driver regardless of this local component, so
-# the palette changes morphogenesis only—not the injected signal or wire rules.
+# the palette changes morphogenesis only-not the injected signal or wire rules.
 SEED_STATES = (
     SEED_STATE,
     BY_NAME["DELAY1_L_TO_RD"].id,

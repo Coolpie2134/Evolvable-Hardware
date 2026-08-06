@@ -1,13 +1,13 @@
 """
-substrates/nervous/pulse.py — deterministic event-level pulse abstraction.
+substrates/nervous/pulse.py - deterministic event-level pulse abstraction.
 
 The nervous net is "a continuous-time, asynchronous system with binary-valued
-output. It propagates a pulse arriving at its input with a fixed delay" (§3).
+output. It propagates a pulse arriving at its input with a fixed delay" (section 3).
 This module preserves those digital interface semantics, but it is not a
 transistor- or charge-level reproduction of Fig. 1:
 
   * a WIRE (each cell's output net) is idle or carries a pulse [start, end);
-  * all action is precipitated by a pulse EDGE (the pulse's leading edge —
+  * all action is precipitated by a pulse EDGE (the pulse's leading edge -
     the paper's 1->0 transition; polarity is abstracted away);
   * a buffer node (E1==E2) triggers on a single edge of its one input wire;
     a coincidence node triggers only when edges arrive on BOTH excitatory
@@ -16,11 +16,11 @@ transistor- or charge-level reproduction of Fig. 1:
   * an active inhibitory input (its wire is pulsing at trigger time) prevents
     the response;
   * a triggered node emits a pulse of width WIDTH after a fixed delay DELAY,
-    and is refractory until its own pulse ends (the comparator hysteresis —
+    and is refractory until its own pulse ends (the comparator hysteresis -
     no chattering);
   * external inputs are INJECTED onto a source pad's net (wired-OR, like
     driving an exposed physical wire). A held-high input is one long pulse
-    — one edge — not a train of edges.
+    - one edge - not a train of edges.
 
 DELAY, WIDTH, and COINC are independent behavioural parameters in this
 abstraction. In the physical circuit those behaviours are coupled through the
@@ -30,7 +30,7 @@ continuous-time fitness; wires are also sampled once per TICK for playback and
 legacy persistence-window targets.
 
 With the default constants (DELAY = WIDTH = TICK, COINC < TICK) behaviour on
-the integer tick lattice matches the earlier synchronous engine — that engine
+the integer tick lattice matches the earlier synchronous engine - that engine
 was the quantization of this one. The constants can now be varied to study
 sub-tick timing (unequal delays, edge alignment, incommensurate loop periods).
 
@@ -40,8 +40,8 @@ moment the first node fires (every internal wire has a single driver, so no
 merging ever restores it). That throws away a degree of freedom, so alongside
 the baseline this module offers two variants that give width a role:
 
-  * 'uniform'       — fixed WIDTH and DELAY at every node (legacy default)
-  * 'pulse_delay'   — retained as the checkpoint/API identifier for the
+  * 'uniform'       - fixed WIDTH and DELAY at every node (legacy default)
+  * 'pulse_delay'   - retained as the checkpoint/API identifier for the
                       width-preserving model: both edges are transported after
                       the firing node's evolvable delay d, so [t, t+w) becomes
                       [t+d, t+d+w). A neutral genome uses DELAY everywhere.
@@ -54,14 +54,14 @@ Both coincide when every pulse is one WIDTH wide. Legacy runs remain
 byte-identical under the default 'uniform' model.
 
 REFRACTORY DIVERGENCE ON WIDE PULSES. A node's refractory period is its own
-output-pulse duration in every model — but under width preservation that
+output-pulse duration in every model - but under width preservation that
 duration follows the INPUT: a 'pulse_delay' node transporting a pulse of width
 w is busy for delay + w, while a 'uniform' node regenerating the same edge is
 refractory for only DELAY + WIDTH. So on stimulus wider than WIDTH (e.g. the
 mixed 0.5-2.25s oracle event banks) a NEUTRAL width-preserving genome can drop
 a following edge that uniform passes (delay 1.0, width 2.25, next edge 3 later:
-busy until t+3.25). This is deliberate physics, not a bug — evolution recovers
-the edge by shortening the node's delay (any d <= gap - w) — but it means
+busy until t+3.25). This is deliberate physics, not a bug - evolution recovers
+the edge by shortening the node's delay (any d <= gap - w) - but it means
 neutral 'pulse_delay' starts measurably harder than 'uniform' on wide-pulse
 banks, which matters when reading cross-model learning curves.
 """
@@ -82,10 +82,10 @@ TICK  = 1.0     # sampling period of the scoring layer (one target tick)
 
 # The digital node-timing MODELS ('uniform' is the legacy abstraction; the other two
 # are this project's variants that give pulse WIDTH a role instead of letting
-# every node regenerate one fixed width — see the module docstring above and
+# every node regenerate one fixed width - see the module docstring above and
 # tests/test_pulse_models.py):
-#   'uniform'       — every node emits width WIDTH after delay DELAY.
-#   'pulse_delay'   — historical identifier for evolved-delay, width-preserving
+#   'uniform'       - every node emits width WIDTH after delay DELAY.
+#   'pulse_delay'   - historical identifier for evolved-delay, width-preserving
 #                     edge transport: [t, t+w) -> [t+d_node, t+d_node+w).
 # 'paper_analog' selects the analog Fig. 1 node engine (substrates/nervous/analog.py):
 # charge/leak/comparator/hysteresis, from which coincidence width, output width
@@ -141,7 +141,7 @@ class PulseSim:
 
     Usage: sim = PulseSim(grid, routing); then once per tick
     ``state = sim.step({input_cell: bit, ...})`` which injects/extends input
-    pulses, advances the event queue, and returns {cell: 0/1} — each wire
+    pulses, advances the event queue, and returns {cell: 0/1} - each wire
     sampled at the middle of the tick. ``sim.ever`` maps cells to whether
     their wire has pulsed at all (the combinational "did it fire" read-out).
     """
@@ -234,7 +234,7 @@ class PulseSim:
         self._tick = 0                                # next tick index
         self._prev = {}                               # input cell -> previous bit
 
-    # ── wires and events ─────────────────────────────────────────────────────
+    # -- wires and events -----------------------------------------------------
 
     def _high(self, c, t):
         # a routed direction may point at a dead / off-grid cell: no wire,
@@ -253,8 +253,8 @@ class PulseSim:
 
     def _run_legacy_until(self, t_end):
         """Process events chronologically. Events sharing a timestamp are
-        applied in two phases — first every wire rise, then every edge
-        notification — so e.g. an inhibitory pulse arriving simultaneously
+        applied in two phases - first every wire rise, then every edge
+        notification - so e.g. an inhibitory pulse arriving simultaneously
         with the excitatory edges reliably vetoes them."""
         while self._heap and self._heap[0][0] <= t_end:
             t = self._heap[0][0]
@@ -536,13 +536,13 @@ class PulseSim:
             self.refr_until[v] = t + delay_v + width_v
             self._push(t + delay_v, v, t + delay_v + width_v)
 
-    # ── the per-tick interface used by scoring / playback ────────────────────
+    # -- the per-tick interface used by scoring / playback --------------------
 
     def step(self, input_vals):
         """Advance one tick. input_vals {cell: 0/1} drives the input nets:
         a 0->1 stream transition injects a pulse edge; consecutive 1s extend
         the same pulse (a held level is ONE long pulse, one edge). Returns
-        {cell: 0/1} — every wire sampled mid-tick."""
+        {cell: 0/1} - every wire sampled mid-tick."""
         t0 = self._tick * TICK
         for c, b in input_vals.items():
             b = 1 if b else 0

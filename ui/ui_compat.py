@@ -1,5 +1,5 @@
 """
-ui_compat.py — small cross-platform helpers so the Tk GUI looks and behaves the
+ui_compat.py - small cross-platform helpers so the Tk GUI looks and behaves the
 same on Windows and Linux (and macOS).
 
 Two portability gaps this closes:
@@ -10,7 +10,7 @@ Two portability gaps this closes:
     match, falling back to Tk's guaranteed 'TkFixedFont'.
   * ttk theming: the default theme differs per platform ('vista' on Windows,
     'default'/'clam' on X11), which changes widget metrics and colours. `apply_theme`
-    selects 'clam' — present everywhere and visually consistent — so layouts don't
+    selects 'clam' - present everywhere and visually consistent - so layouts don't
     shift between machines.
 """
 from __future__ import annotations

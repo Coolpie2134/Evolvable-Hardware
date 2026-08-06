@@ -21,7 +21,7 @@ CATEGORY_ORDER = (
 def target_category(name, target):
     """Return a stable user-facing category from a target's semantics.
 
-    A target may pin itself with an explicit ``category`` attribute — used by
+    A target may pin itself with an explicit ``category`` attribute - used by
     the periodic combinational wrappers (temporal encodings of truth tables,
     which would otherwise sort under 'Timed events') and the pulse-width
     targets (whose fitness is about physical durations, not just edge times).

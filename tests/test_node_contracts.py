@@ -1,5 +1,5 @@
 """
-tests/test_node_contracts.py — primitive conformance tests for the node
+tests/test_node_contracts.py - primitive conformance tests for the node
 contracts (NODE_CONTRACTS.md).
 
 Each node-timing model must obey its OWN stated physics before any cross-model
@@ -24,7 +24,7 @@ TOL = 1e-9
 INF = float('inf')
 
 
-# ── fixtures ─────────────────────────────────────────────────────────────────────
+# -- fixtures ---------------------------------------------------------------------
 
 def _back(cell, prev):
     return [d for d in ('L', 'R', 'D') if hex_dirs(*cell)[d] == prev][0]
@@ -96,7 +96,7 @@ UNIFORM = PulseConfig()
 WP = PulseConfig(model='pulse_delay')          # width-preserving transport
 
 
-# ── uniform: window, refractory, loop ────────────────────────────────────────────
+# -- uniform: window, refractory, loop --------------------------------------------
 
 def test_uniform_coincidence_window_sweep():
     """Edge separation == coincidence triggers (inclusive); beyond it does not.
@@ -145,7 +145,7 @@ def test_uniform_or_refractory_single_pulse():
 
 
 def test_uniform_loop_period_and_survival():
-    """A circulating pulse in a 2-loop survives with period 2·delay."""
+    """A circulating pulse in a 2-loop survives with period 2-delay."""
     grid, routing, u, v = _loop_pair()
     sim = PulseSim(grid, routing, config=UNIFORM, max_events=64)
     sim.inject_pulse(u, 0.0, 1.0)
@@ -155,7 +155,7 @@ def test_uniform_loop_period_and_survival():
     assert sim.rise_times[v][:5] == [1.0, 3.0, 5.0, 7.0, 9.0]
 
 
-# ── the four inhibitor timing cases (shared contract, every model) ───────────────
+# -- the four inhibitor timing cases (shared contract, every model) ---------------
 
 def _model_sims():
     for name, config in (('uniform', UNIFORM),
@@ -203,7 +203,7 @@ def test_inhibitor_timing_cases():
 
 
 
-# ── width-preserving: chains, OR unions, coincidence widths, loops ───────────────
+# -- width-preserving: chains, OR unions, coincidence widths, loops ---------------
 
 def test_wp_chain_width_drift_zero():
     """Width is preserved exactly through 1, 2, 4 and 8 buffer hops."""
@@ -259,8 +259,8 @@ def test_wp_or_busy_discard():
 
 
 def test_wp_coincidence_later_edge_width():
-    """Non-tie coincidence transports the LATER edge's waveform — its width,
-    bound to its fall — whichever input that is (the decided rule; see the
+    """Non-tie coincidence transports the LATER edge's waveform - its width,
+    bound to its fall - whichever input that is (the decided rule; see the
     recorded discontinuity note in NODE_CONTRACTS.md)."""
     grid, routing, a, b, v = _two_input('and')
     narrow_later = PulseSim(grid, routing, config=WP)
@@ -302,7 +302,7 @@ def test_wp_loop_token_circulates():
 
 
 def test_wp_loop_intermediate_width_dies_out():
-    """Loop regime (b): delay < w < 2·delay — the returning rise finds the
+    """Loop regime (b): delay < w < 2-delay - the returning rise finds the
     node busy and the token dies out after about one lap."""
     grid, routing, u, v = _loop_pair()
     sim = PulseSim(grid, routing, config=WP, max_events=64)
@@ -313,7 +313,7 @@ def test_wp_loop_intermediate_width_dies_out():
 
 
 def test_wp_loop_wide_pulse_latches():
-    """Loop regime (c): w >= 2·delay — union swallows the returning edge and
+    """Loop regime (c): w >= 2-delay - union swallows the returning edge and
     the mutual fall-binding latches both wires permanently high (no edges)."""
     grid, routing, u, v = _loop_pair()
     for w in (2.0, 3.0):
@@ -360,7 +360,7 @@ def _assert_translation(config, widths_key):
             assert abs((x + delta) - y) <= 1e-6, (cell, x, y)
 
 
-# ── pulse_intervals: the complete-waveform log ───────────────────────────────────
+# -- pulse_intervals: the complete-waveform log -----------------------------------
 
 def test_intervals_legacy_log_matches_waveform():
     """Legacy models: one [start, end] entry per pulse; wired-OR merges extend
@@ -386,7 +386,7 @@ def test_intervals_step_held_input():
 
 def test_intervals_open_until_fall():
     """Width-preserving aggregates log [t, inf] while high, closed at the fall
-    — so interval-aware scoring can distinguish 'still high' from 'fell'."""
+    - so interval-aware scoring can distinguish 'still high' from 'fell'."""
     grid, routing, a, b = _buffer_pair()
     sim = PulseSim(grid, routing, config=WP)
     sim.inject_pulse(a, 0.0, 4.0)
@@ -398,7 +398,7 @@ def test_intervals_open_until_fall():
     assert sim.pulse_intervals[b] == [[1.0, 5.0]]
 
 
-# ── standalone runner ────────────────────────────────────────────────────────────
+# -- standalone runner ------------------------------------------------------------
 
 def _main():
     tests = [f for name, f in sorted(globals().items())

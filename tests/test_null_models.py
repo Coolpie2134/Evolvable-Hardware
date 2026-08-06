@@ -1,11 +1,11 @@
 """
-tests/test_null_models.py — the null-model gauntlet.
+tests/test_null_models.py - the null-model gauntlet.
 
 A behavioral contract is only worth its name if trivial NON-solutions fail it.
 This project has been bitten twice by the opposite: One-shot(3) once scored a
 perfect 1.0 for a single-pulse echo, and the contract-v1 rewrite briefly left
 Gated oscillator satisfied equally by silence, by one pulse, and by a correct
-oscillator — all three at 1.0.
+oscillator - all three at 1.0.
 
 The contract tests assert `score < 1.0` for a couple of hand-picked cheats.
 That bar is too low to catch either failure's near neighbours: a cheat sitting
@@ -32,7 +32,7 @@ from substrates.nervous.scoring import (TemporalTraces, score_contract,         
 # every input edge, and the filter's job is only to suppress the close ones),
 # with Veto gate next at 0.800. 0.85 clears both without excusing a degenerate
 # target. This bound used to read "near 0.77 (a free-running ring)" because the
-# wire cheat was inert — see _cheat_bundle's passthrough note.
+# wire cheat was inert - see _cheat_bundle's passthrough note.
 CHEAT_CEILING = 0.85
 
 # 'passthrough' is swept over every input lane and a few delays (see
@@ -67,8 +67,8 @@ def _cheat_bundle(target, kind, period=2, lane=0, delay=0, taps=2, spacing=2):
                 row = [1 if t % period == 0 else 0 for t in range(n)]
             elif kind == 'passthrough':
                 # A BARE WIRE: input lane `lane` echoed across time, optionally
-                # delayed. This previously read trial.streams[0] — the tick-0
-                # input ROW — and indexed it by t, so the "wire" went dead after
+                # delayed. This previously read trial.streams[0] - the tick-0
+                # input ROW - and indexed it by t, so the "wire" went dead after
                 # t == n_inputs and scored ~0 on nearly every target. The single
                 # most important null model was therefore never actually tested;
                 # a real wire scores up to 0.837, not the 0.0 it used to report.
@@ -80,13 +80,13 @@ def _cheat_bundle(target, kind, period=2, lane=0, delay=0, taps=2, spacing=2):
                 # A wire and `taps - 1` delayed copies of itself: the same input
                 # edge re-emitted `taps` times, `spacing` apart. On the nervous
                 # substrate this is just two or three paths of different length
-                # from one input — no feedback, no stored bit, about as cheap as
+                # from one input - no feedback, no stored bit, about as cheap as
                 # a circuit gets. It belongs here because a level-holding target
                 # cannot tell a short burst from a thin ring: One-shot scored a
                 # perfect 1.000 for taps=2, spacing=3, which centred itself in
                 # the 12-tick window at shift -6 and split it into gaps of
                 # 4/2/4 while sitting silent for 10 of the 12 ticks. The plain
-                # wire above misses this entirely — it emits ONE edge per input.
+                # wire above misses this entirely - it emits ONE edge per input.
                 row = [0] * n
                 for tick, stream in enumerate(trial.streams):
                     if lane < len(stream) and stream[lane]:
@@ -99,7 +99,7 @@ def _cheat_bundle(target, kind, period=2, lane=0, delay=0, taps=2, spacing=2):
                 # combinational encoding, where each truth-table row is an
                 # isolated window. None of the dense per-tick cheats above can
                 # express it (they either flood a window or miss it), which is
-                # how OR — every presented window expecting 1 — passed this
+                # how OR - every presented window expecting 1 - passed this
                 # gauntlet at 0.10 while a blanket circuit scored a clean 1.0.
                 row = [0] * n
                 for tick, stream in enumerate(trial.streams):
@@ -119,7 +119,7 @@ def _wire_variants(target, kind):
     """(lane, delay) pairs to try for the input-driven cheats.
 
     A contract fits its own propagation offset, so a delayed wire is not a
-    different cheat in principle — but the fit is bounded, and a cheat that
+    different cheat in principle - but the fit is bounded, and a cheat that
     lands one tick outside it would read as 'the target resists wires' when it
     does not. Sweeping a few offsets removes that false negative.
     """
@@ -162,7 +162,7 @@ def _every_scored_target():
 
     TEMPORAL_TARGETS alone is not that set. The nervous and LUT backends reach
     the combinational truth tables through periodic_combinational_target, and
-    those wrapped targets live in no registry this module used to sweep — which
+    those wrapped targets live in no registry this module used to sweep - which
     is why OR could expect a 1 in every presented window, score a perfect 1.0
     for blanket firing, and still pass the gauntlet.
     """
@@ -175,12 +175,12 @@ def _every_scored_target():
 
 
 # Targets known to sit above CHEAT_CEILING, with the reason and a tight bound.
-# An entry is an admission that the target measures its hard part weakly — NOT
+# An entry is an admission that the target measures its hard part weakly - NOT
 # permission to drift, since exceeding the bound still fails.
 KNOWN_WEAK = {
     # The wired-OR that used to sit at 0.860 here is fixed: the stimulus now
     # runs the queue to varying depth, and a wired-OR scores 0.670 (blanket
-    # 0.760). What binds instead is `wire_burst` — a multi-tap delay line, a
+    # 0.760). What binds instead is `wire_burst` - a multi-tap delay line, a
     # cheat this module did not own until it was added to catch One-shot.
     #
     # It is not fixable by making the stimulus denser still. Under pooled event
@@ -193,7 +193,7 @@ KNOWN_WEAK = {
 }
 
 # A different admission from KNOWN_WEAK, and it must not be confused with one.
-# These targets are not measured weakly — they are fully satisfiable WITHOUT
+# These targets are not measured weakly - they are fully satisfiable WITHOUT
 # state, so a high trivial score is the correct answer rather than a leak. A
 # 3-tap delay line really does emit three pulses per edge; a 2-tap one really
 # does halve a period. Changing the stimulus cannot alter that, because it
@@ -231,7 +231,7 @@ def test_no_trivial_output_reaches_high_fitness_on_any_target():
 
 
 def test_known_weak_targets_are_still_weak_and_still_needed():
-    """A stale exception is worse than none — it hides a target that got fixed."""
+    """A stale exception is worse than none - it hides a target that got fixed."""
     scored = dict(_every_scored_target())
     for registry, label in ((KNOWN_WEAK, 'KNOWN_WEAK'),
                             (FEEDFORWARD_BY_CONSTRUCTION,
@@ -241,7 +241,7 @@ def test_known_weak_targets_are_still_weak_and_still_needed():
                 '%s names a target that no longer exists: %s' % (label, name))
             score, _kind = _worst_cheat(scored[name])
             assert score >= CHEAT_CEILING, (
-                '%s no longer needs its exception (worst cheat %.3f < %.2f) — '
+                '%s no longer needs its exception (worst cheat %.3f < %.2f) - '
                 'delete the %s entry' % (name, score, CHEAT_CEILING, label))
 
 
@@ -249,11 +249,11 @@ def test_a_delay_line_is_neither_a_one_shot_nor_a_latch():
     """Regression pin for two targets that certified a stateless delay line.
 
     Both scored a PERFECT 1.000, and both were stimulus faults rather than
-    scoring faults — the clause that needs memory was never presented.
+    scoring faults - the clause that needs memory was never presented.
 
     One-shot: triggers were spaced min_gap = width + 4 apart, so no trigger ever
-    landed inside an active interval and make_one_shot's `rem == 0` guard — the
-    only thing there that cannot be built from delays — was never exercised.
+    landed inside an active interval and make_one_shot's `rem == 0` guard - the
+    only thing there that cannot be built from delays - was never exercised.
 
     SR latch: every hold interval fell in the band 10..14 ticks, so one fixed
     burst length fitted all of them, and a 4-tap line driven by Set alone, with
@@ -283,7 +283,7 @@ def test_silence_is_never_a_perfect_solution():
 def test_gated_oscillator_discriminates_silence_from_oscillation():
     # Regression pin. This target's active epochs are single ticks of a
     # period-2 cadence, so a state contract drops every one of them and scores
-    # the case on its quiet epochs alone — silence, one pulse and a correct
+    # the case on its quiet epochs alone - silence, one pulse and a correct
     # oscillator all reached 1.0. START fixes the phase, so the commanded train
     # is fully determined and event correspondence is the contract that fits.
     target = TEMPORAL_TARGETS['Gated oscillator']
@@ -335,8 +335,8 @@ def test_every_temporal_target_declares_a_known_relation():
 
 def test_contract_defaults_do_not_silently_pick_the_state_relation():
     """oracle_target() falls back to state_contract() when a builder passes no
-    contract. That default is the risky one — it is the relation that can drop
-    obligations — so this pins the two builders apart rather than letting a new
+    contract. That default is the risky one - it is the relation that can drop
+    obligations - so this pins the two builders apart rather than letting a new
     target inherit it by omission."""
     assert tuple(
         clause.relation for clause in state_contract().constraints

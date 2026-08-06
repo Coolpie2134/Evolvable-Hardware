@@ -1,5 +1,5 @@
 """
-substrates/lut/reverse.py — best-effort INVERSE of grow_lut (LUT network -> genome).
+substrates/lut/reverse.py - best-effort INVERSE of grow_lut (LUT network -> genome).
 
 The mirror of substrates/nervous/reverse.py for Architecture 2. Growth develops four 16-bit
 LUTs per cell by the same associative-memory rule as the nervous net, only the
@@ -44,7 +44,7 @@ def _facing(grid, x, y):
 
 def _dir_contexts(grid, x, y, st):
     """Yield (self_lut, (ctx_n, ctx_s, ctx_e, ctx_w)) for each of the four
-    directions, in the exact rotated framing grow_lut's look() presents — so a
+    directions, in the exact rotated framing grow_lut's look() presents - so a
     gene pinned here wins that direction's lookup at Hamming distance 0."""
     n, s, e, w = _facing(grid, x, y)
     #        self     (ctx_n, ctx_s, ctx_e, ctx_w)  <- look(f, b, r, l, self)
@@ -77,9 +77,9 @@ def _record(growth, conflicts, ctx, out):
 
 def _collect_contexts_lut(grid, seeds, L, seed_state=SEED_STATE):
     """Replay a MONOTONE development with the target grid as an oracle (the LUT
-    analogue of substrates.nervous.reverse._collect_contexts). Mirrors grow_lut's step —
+    analogue of substrates.nervous.reverse._collect_contexts). Mirrors grow_lut's step -
     parallel frontier growth, per-direction rotated lookup, telomere-gated
-    births — but pins every cell at its TARGET four-LUT state the moment it is
+    births - but pins every cell at its TARGET four-LUT state the moment it is
     born. Logs the birth context of EVERY evaluated frontier direction: target
     cells map to their requested LUT and exterior cells map to zero.  Those
     negative-space rules are essential with nearest-context lookup; without
@@ -257,7 +257,7 @@ def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
         report.update(matched=0, target=len(grid), extra=0, missing=len(grid),
                       conflicts=[], seed_mismatch=[], unreachable=list(grid),
                       radius=0, telomere=1, exact=False, grown={},
-                      note='no seeds/inputs — mark at least one input (the growth '
+                      note='no seeds/inputs - mark at least one input (the growth '
                            'seed) before reversing.')
         return Genome(
             chromosomes=[Chromosome(genes=[LutGene()], telomere=1)],
@@ -281,7 +281,7 @@ def grid_to_genome_lut(grid, seeds, grid_size=7, iters=30,
 
     def build(suppressors):
         # gene fields are (ctx_n, ctx_e, ctx_s, ctx_w); context tuples are
-        # (ctx_n, ctx_s, ctx_e, ctx_w) — keyword args keep the two straight.
+        # (ctx_n, ctx_s, ctx_e, ctx_w) - keyword args keep the two straight.
         genes = [LutGene(ctx_n=cn, ctx_s=cs, ctx_e=ce, ctx_w=cw,
                          self_in=0, self_out=out)
                  for (cn, cs, ce, cw), out in growth.items()]

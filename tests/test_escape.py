@@ -1,5 +1,5 @@
 """
-tests/test_escape.py — the local-minimum escape mechanisms (runtime/escape.py).
+tests/test_escape.py - the local-minimum escape mechanisms (runtime/escape.py).
 
 Three things are checked, in order of how badly they would hurt if wrong:
 
@@ -7,7 +7,7 @@ Three things are checked, in order of how badly they would hurt if wrong:
      asked for. Contract-elite survival is baseline selection, tested
      separately: it acts only when real per-case evidence is present.
   2. EACH MECHANISM ACTUALLY DOES ITS JOB when switched on, and the safety
-     properties hold — most importantly that neither escape objective can
+     properties hold - most importantly that neither escape objective can
      outrank correctness.
   3. THE TWO GA DRIVE PATHS AGREE. The desktop controller and the headless
      drivers must apply the same escape machinery; a mechanism that exists on
@@ -62,7 +62,7 @@ def _nv_config(escape=None, **ga):
                      pulse=PulseConfig(model='paper_analog'))
 
 
-# ── 1. defaults are inert ─────────────────────────────────────────────────────
+# -- 1. defaults are inert -----------------------------------------------------
 
 def test_every_mechanism_is_off_by_default():
     config = EscapeConfig()
@@ -133,7 +133,7 @@ def test_case_vector_length_is_unchanged_without_lifespan_scoring():
     assert total_case_count(target) == contract_case_count(target)
 
 
-# ── 2. lifespan scoring ───────────────────────────────────────────────────────
+# -- 2. lifespan scoring -------------------------------------------------------
 
 def test_lifespan_scoring_extends_the_case_vector_by_one_per_checkpoint():
     from substrates.nervous.objectives import total_case_count
@@ -148,9 +148,9 @@ def test_lifespan_scoring_extends_the_case_vector_by_one_per_checkpoint():
     for _ in range(6):
         genome = random_hex_genome(2)
         _fitness, cases = nv_ga.evaluate_nv_full(genome, target)
-        # ε-lexicase requires EVERY member to present the same number of cases,
+        # epsilon-lexicase requires EVERY member to present the same number of cases,
         # including dead genomes and organisms that mature in fewer steps than
-        # there are checkpoints — so the length is fixed, never "as many as
+        # there are checkpoints - so the length is fixed, never "as many as
         # this body happened to have".
         assert len(cases) == base + 4
 
@@ -206,7 +206,7 @@ def test_juvenile_mean_reaches_rank_key_only_below_fitness():
     assert nv_ga.rank_key(genome, 0.3) < nv_ga.rank_key(rival, 0.31)
 
 
-# ── 3. robustness ─────────────────────────────────────────────────────────────
+# -- 3. robustness -------------------------------------------------------------
 
 def test_robustness_can_never_outrank_correctness():
     """The safety property that makes a second objective admissible at all."""
@@ -266,7 +266,7 @@ def test_robustness_is_zero_for_genomes_that_were_never_measured():
     assert genome._robustness == 0.0
 
 
-# ── 4. crowding (restricted tournament replacement) ───────────────────────────
+# -- 4. crowding (restricted tournament replacement) ---------------------------
 
 def test_genome_distance_is_normalised_and_length_aware():
     a = random_hex_genome(2)
@@ -292,7 +292,7 @@ def test_crowding_replaces_the_nearest_incumbent_not_the_worst():
     population, fits, _cases = state.survivor_selection(
         parents, fitnesses, None, [child], [0.95], None)
     assert fits[0] == 0.95 and population[0] is child
-    # Every other niche is untouched — a plain generational replacement or a
+    # Every other niche is untouched - a plain generational replacement or a
     # replace-the-worst rule would have evicted one of the weak members.
     assert fits[1:] == [0.5] * 5
     assert state.crowding_replacements == 1
@@ -314,7 +314,7 @@ def test_crowding_rejects_a_worse_challenger():
 
 def test_a_fully_crowded_population_can_never_move_downhill():
     """The property that made the live mean rise without fluctuation. It is
-    inherent to RTR, not a defect — but it has to be a deliberate choice, so it
+    inherent to RTR, not a defect - but it has to be a deliberate choice, so it
     is pinned here rather than left to be rediscovered from a chart."""
     random.seed(8)
     parents = [random_hex_genome(2) for _ in range(8)]
@@ -463,7 +463,7 @@ def test_merge_generation_prefers_terminal_consolidation_once_solved():
     assert len(calls) == 1
 
 
-# ── 5. neutral drift ──────────────────────────────────────────────────────────
+# -- 5. neutral drift ----------------------------------------------------------
 
 def test_neutral_drift_accepts_equal_ranks_and_strict_mode_does_not():
     strict = EscapeState(OFF)
@@ -496,7 +496,7 @@ def test_neutral_drift_lets_crowding_keep_moving_across_a_plateau():
     assert drifting.crowding_replacements == 1
 
 
-# ── 6. self-adaptive mutation ─────────────────────────────────────────────────
+# -- 6. self-adaptive mutation -------------------------------------------------
 
 def test_self_adaptive_rate_is_heritable_bounded_and_phenotype_neutral():
     config = EscapeConfig(self_adaptive_mutation=True, adaptive_tau=0.25)
@@ -551,7 +551,7 @@ def test_self_adaptive_mutation_assigns_a_rate_to_every_bred_child():
     assert not any(hasattr(genome, '_mut_rate') for genome in plain)
 
 
-# ── 7. rebirth ────────────────────────────────────────────────────────────────
+# -- 7. rebirth ----------------------------------------------------------------
 
 def _rebirth_state(config):
     return EscapeState(config, mutation_limit=8.0,
@@ -667,7 +667,7 @@ def test_archive_ignores_an_unchanged_champion_and_is_bounded():
     assert len(state.archive) == 3               # ring buffer holds
 
 
-# ── 8. ε-lexicase: downsampling and the ε itself ──────────────────────────────
+# -- 8. epsilon-lexicase: downsampling and the epsilon itself ------------------------------
 
 def test_downsampling_returns_none_for_the_full_case_set():
     assert lexicase_case_subset(20, OFF) is None
@@ -698,7 +698,7 @@ def test_lexicase_streams_only_the_downsampled_cases():
 
 def test_epsilon_lexicase_keeps_near_best_candidates_on_continuous_scores():
     """Plain (exact-tie) lexicase would let the first case drawn decide every
-    selection on its own, because floats essentially never tie — the ε is what
+    selection on its own, because floats essentially never tie - the epsilon is what
     makes this usable at all on continuous scores."""
     population = [random_hex_genome(2) for _ in range(4)]
     # Three candidates are within noise of each other; one is genuinely bad.
@@ -706,15 +706,15 @@ def test_epsilon_lexicase_keeps_near_best_candidates_on_continuous_scores():
     random.seed(4)
     winners = {id(nv_ga._lexicase_parent(population, cases))
                for _ in range(60)}
-    assert len(winners) > 1                     # the near-ties all survive ε
+    assert len(winners) > 1                     # the near-ties all survive epsilon
     assert id(population[3]) not in winners     # the genuinely bad one does not
 
 
 def test_binary_lexicase_never_treats_wrong_as_epsilon_close():
     """A 50/50 binary split has MAD 1 under the upper-median convention.
 
-    Applying that ε to exact truth-table facts retained wrong candidates. Exact
-    Boolean cases must filter at ε=0 while continuous cases keep MAD ε.
+    Applying that epsilon to exact truth-table facts retained wrong candidates. Exact
+    Boolean cases must filter at epsilon=0 while continuous cases keep MAD epsilon.
     """
     population = [random_hex_genome(2) for _ in range(4)]
     cases = [(1.0,), (1.0,), (0.0,), (0.0,)]
@@ -738,7 +738,7 @@ def test_complementary_mating_covers_the_first_parents_missing_cases():
         0, [1, 2], cases, [0.34, 0.67, 0.67], (0, 1)) == 1
 
 
-# ── 9. both GA drive paths apply the same machinery ───────────────────────────
+# -- 9. both GA drive paths apply the same machinery ---------------------------
 
 def test_controller_and_headless_drivers_build_the_same_escape_state():
     """One construction point. If these ever diverge, the app and the
@@ -757,7 +757,7 @@ def test_controller_and_headless_drivers_build_the_same_escape_state():
 
 
 def test_controller_threads_the_escape_config_to_workers_and_the_breeder():
-    """The mechanisms split across two places — the worker (lifespan scoring,
+    """The mechanisms split across two places - the worker (lifespan scoring,
     robustness) and the breeder (everything else). Both have to receive it."""
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
     escape = EscapeConfig(crowding=True, self_adaptive_mutation=True,
@@ -905,8 +905,8 @@ def test_every_backend_breeder_accepts_the_escape_parameters():
 
 def test_headless_drivers_run_the_same_escape_hooks_as_the_controller():
     """Behavioural, not structural: every driver must call the shared merge,
-    champion-acceptance, archive and rebirth hooks — the ones the controller
-    calls — so a mechanism cannot be live on one path and dead on the other."""
+    champion-acceptance, archive and rebirth hooks - the ones the controller
+    calls - so a mechanism cannot be live on one path and dead on the other."""
     import inspect
     from runtime import controller
     hooks = ('merge_generation', 'accepts', 'record_champion',
@@ -994,7 +994,7 @@ def test_lifespan_and_robustness_survive_a_real_evaluation_pass():
         assert len(cases) == expected
         assert 0.0 <= juvenile <= 1.0
         # The robust vector describes the ADULT under new physics, so it has
-        # the contract's own case count — not the lifespan-extended one.
+        # the contract's own case count - not the lifespan-extended one.
         if robust is not None:
             from substrates.nervous.scoring import contract_case_count
             assert len(robust) == contract_case_count(target)
@@ -1004,7 +1004,7 @@ def test_lifespan_and_robustness_survive_a_real_evaluation_pass():
 
 def test_a_jitter_probe_never_recurses_into_lifespan_or_robustness():
     """Without this guard each robustness sample would spawn its own lifespan
-    growth and its own nested robustness pass — a quiet combinatorial blow-up
+    growth and its own nested robustness pass - a quiet combinatorial blow-up
     in evaluation cost."""
     from substrates.nervous import objectives
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
@@ -1028,7 +1028,7 @@ def test_a_jitter_probe_never_recurses_into_lifespan_or_robustness():
     assert seen == []
 
 
-# ── 9b. island model ──────────────────────────────────────────────────────────
+# -- 9b. island model ----------------------------------------------------------
 
 
 @dataclasses.dataclass
@@ -1099,7 +1099,7 @@ def test_islands_are_off_by_default_and_breed_as_one_pool():
 
 
 def test_islands_breed_each_deme_separately_at_its_own_rate():
-    """Cold demes exploit while hot demes explore AT THE SAME TIME — a single
+    """Cold demes exploit while hot demes explore AT THE SAME TIME - a single
     population can only ever be at one point of the anneal."""
     config = EscapeConfig(islands=True, island_count=4,
                           island_rate_spread=2.0,
@@ -1230,7 +1230,7 @@ def test_both_drivers_breed_through_the_island_hook():
         assert 'escape_state.breed(' in source
 
 
-# ── 10. configuration validation ──────────────────────────────────────────────
+# -- 10. configuration validation ----------------------------------------------
 
 def test_escape_config_rejects_nonsense():
     for kwargs in ({'lifespan_checkpoints': 0},

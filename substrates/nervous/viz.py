@@ -1,15 +1,15 @@
 """
-substrates/nervous/viz.py — honeycomb rendering for the nervous net.
+substrates/nervous/viz.py - honeycomb rendering for the nervous net.
 
 Nodes are drawn as CIRCLES at the *corners* of a hex array ("cells are
-positioned at the corners of a hex array" — automaton_arrays), i.e. on
+positioned at the corners of a hex array" - automaton_arrays), i.e. on
 triangular zigzag rows joined by vertical rungs, so it is visually unambiguous
 that every node touches exactly THREE others (not six):
 
   * a faint grey LATTICE between every pair of adjacent cells shows the
     physical degree-3 connectivity;
-  * routed signals are ARROWS from the source cell to the reader — green for
-    excitatory inputs, red for the inhibitory veto — so loops and their
+  * routed signals are ARROWS from the source cell to the reader - green for
+    excitatory inputs, red for the inhibitory veto - so loops and their
     direction of circulation can be followed by eye;
   * each cell is coloured by its routing kind and labelled with its 5-bit
     STATE NUMBER (0-31: 0-15 AND, 16-31 OR), so the colour/type can be mapped
@@ -70,7 +70,7 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
     """
     grid       : {(x,y): state}
     routing    : {(x,y): (e1,e2,i1[,op])} (for arrows / node-type colour)
-    in_pos     : list of input positions (labelled A, B, …)
+    in_pos     : list of input positions (labelled A, B, ...)
     out_pos    : {role: (x,y)}  outputs (labelled)
     activity   : {(x,y): level} if given, nodes coloured by activity not type;
                  level may be binary 0/1 or a graded 0..1 charge
@@ -84,7 +84,7 @@ def draw_hex_net(ax, grid, grid_size, routing=None, in_pos=None, out_pos=None,
     ax.clear()
     ax.set_aspect('equal'); ax.axis('off')
 
-    # physical lattice first (bottom layer): every adjacent live pair — makes
+    # physical lattice first (bottom layer): every adjacent live pair - makes
     # it obvious each cell connects to exactly 3 neighbours.
     drawn = set()
     for (x, y) in grid:

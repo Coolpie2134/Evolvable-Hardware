@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-concept_gui.py — a GUI playground for the `experiments/concept/` proof-of-concept GAs.
+concept_gui.py - a GUI playground for the `experiments/concept/` proof-of-concept GAs.
 
 Each sim runs its own faithful `main()` loop in a background thread, bridged to
 the GUI (see experiments/concept/engines.py). Instead of the original ASCII output you get
@@ -13,7 +13,7 @@ live matplotlib visuals:
 Controls: pick a sim, set population size, then Run / Pause / Step / Reset.
 
 The concept sims now share experiments/concept/common/terminal.py (platform-guarded), so
-they import on Windows too — but they're designed for Linux; this GUI runs the
+they import on Windows too - but they're designed for Linux; this GUI runs the
 GA logic on any platform that can import them.
 
 Usage:
@@ -55,7 +55,7 @@ class ConceptGUI:
         root.protocol('WM_DELETE_WINDOW', self._close)
         self._poll()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
+    # -- UI --------------------------------------------------------------------
 
     def _build_ui(self):
         ctrl = ttk.Frame(self.root, padding=(6, 4))
@@ -107,7 +107,7 @@ class ConceptGUI:
         self.ax_line.set_title('Fitness over time', fontsize=9)
         self.ax_line.set_xlabel('Generation'); self.ax_line.grid(True, alpha=0.3)
 
-    # ── sim selection ─────────────────────────────────────────────────────────
+    # -- sim selection ---------------------------------------------------------
 
     def _on_sim_change(self, _evt=None):
         self._reset()
@@ -118,10 +118,10 @@ class ConceptGUI:
             self._pop_var.set(str(cfg.get('popsize_default', 150)))
         for b in (self._run_btn, self._step_btn):
             b.config(state='normal' if ok else 'disabled')
-        self._status.set('%s — %s%s' % (name, status,
+        self._status.set('%s - %s%s' % (name, status,
                          '. Set Population and click Run or Step.' if ok else ''))
 
-    # ── controls ──────────────────────────────────────────────────────────────
+    # -- controls --------------------------------------------------------------
 
     def _build(self, paused):
         name = self._sim_var.get()
@@ -189,7 +189,7 @@ class ConceptGUI:
         self._step_btn.config(state='disabled' if running else 'normal')
         self._sim_cb.config(state='disabled' if running else 'readonly')
 
-    # ── polling + drawing ─────────────────────────────────────────────────────
+    # -- polling + drawing -----------------------------------------------------
 
     def _poll(self):
         latest = None
@@ -199,7 +199,7 @@ class ConceptGUI:
                 while True:
                     msg = self.engine.q.get_nowait()
                     if isinstance(msg, dict) and 'error' in msg:
-                        self._status.set('Sim error — see console.')
+                        self._status.set('Sim error - see console.')
                         print(msg['error'])
                         self._reset()
                         latest = None
@@ -236,7 +236,7 @@ class ConceptGUI:
         top  = max(1, int(s['max_fitness']))
         counts = np.bincount(np.clip(fits, 0, top), minlength=top + 1)
         self.ax_hist.bar(np.arange(len(counts)), counts, color='#3b6fb0', width=0.9)
-        self.ax_hist.set_title('Population fitness distribution — gen %d' % s['generation'],
+        self.ax_hist.set_title('Population fitness distribution - gen %d' % s['generation'],
                                fontsize=10)
         self.ax_hist.set_xlabel('Fitness'); self.ax_hist.set_ylabel('# organisms')
         self.ax_hist.set_xlim(-0.5, top + 0.5)

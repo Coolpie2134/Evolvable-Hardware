@@ -1,5 +1,5 @@
 """
-substrates/nervous/analog.py — the analog Fig. 1 node: charge, leak, comparator, hysteresis.
+substrates/nervous/analog.py - the analog Fig. 1 node: charge, leak, comparator, hysteresis.
 
 The default engine (pulse.py) is a digital abstraction of the paper's node: it
 regenerates ONE fixed-width pulse after ONE fixed delay and treats the
@@ -11,18 +11,18 @@ that single mechanism, three behaviours the digital engine hard-codes instead
 EMERGE, and are now consequences of the same physical constants rather than
 independent knobs (the reference plan's point 3):
 
-  * coincidence  — one excitatory TERMINAL edge steps the node down by ``step``;
+  * coincidence  - one excitatory TERMINAL edge steps the node down by ``step``;
     with step < (Vdd - threshold) a single edge cannot trip it, but two within a
     leak time-constant sum past threshold. "Neither input alone can trigger a
     response." The window WIDTH is set by ``tau_leak`` and ``step``, not a COINC
     knob. A buffer ties BOTH terminals to one source, so a single source edge
-    delivers 2*step and fires alone — exactly the paper's buffer-vs-coincidence
+    delivers 2*step and fires alone - exactly the paper's buffer-vs-coincidence
     distinction, falling straight out of the wiring.
-  * output width — the comparator holds its output while the node sits below
+  * output width - the comparator holds its output while the node sits below
     threshold; the leak sets how long that is. Wider/denser input pushes the node
     further down and STRETCHES the pulse (a following edge during the pulse
     extends it), so a node is paralyzable, unlike the digital fixed width.
-  * recovery/refractory — a hysteretic comparator trips at ``threshold`` and
+  * recovery/refractory - a hysteretic comparator trips at ``threshold`` and
     releases/re-arms only at ``threshold+hysteresis``. The output pulse and
     recovery are one physical state transition, not a fixed pulse followed by
     a separate hidden lock-out.
@@ -31,7 +31,7 @@ Voltages are normalised: Vdd = ``rest`` = 1.0, Ground = 0.0. The node idles at
 rest; edges step it DOWN; it recovers UP toward rest as
 ``v(t) = rest + (v0 - rest) * exp(-(t - t0) / tau_leak)``. Because steps are
 instantaneous and recovery is monotone-up between them, a downward threshold
-crossing can only happen AT an edge — so firing is decided at edge times and no
+crossing can only happen AT an edge - so firing is decided at edge times and no
 inter-event root-finding is needed. The output fall is the recovery time solved
 analytically, rescheduled (inertial-delay style, like substrates/lut/pulse.py) whenever
 a later edge extends the pulse.
@@ -62,7 +62,7 @@ class AnalogConfig:
     """Physical constants of the Fig. 1 node (normalised Vdd = rest = 1.0).
 
     Coincidence tolerance, output width and recovery are DERIVED from these, not
-    set independently — the reference plan's point 3. Defaults are chosen so a
+    set independently - the reference plan's point 3. Defaults are chosen so a
     single excitatory edge (``step``) leaves the node above ``threshold`` while
     two (a buffer's 2*step, or two coincident lines) cross it. These are
     qualitative normalised defaults: the paper does not publish transistor
@@ -143,7 +143,7 @@ class AnalogPulseSim:
             e1, e2, i1 = entry[0], entry[1], entry[2]
             # entry[3] is the routing op. 'or' means EITHER excitatory input
             # fires the node on its own; physically that is the buffer's wiring
-            # generalised — each input is coupled to BOTH terminals, so one edge
+            # generalised - each input is coupled to BOTH terminals, so one edge
             # delivers 2*step and crosses threshold. Ignoring it collapsed every
             # OR routing onto its AND twin, which made half the state alphabet
             # inert under this engine and left the tri tile unable to sustain a
@@ -185,7 +185,7 @@ class AnalogPulseSim:
         self._tick = 0
         self._prev = {c: 0 for c in grid}
 
-    # ── voltage helpers ──────────────────────────────────────────────────────
+    # -- voltage helpers ------------------------------------------------------
     def _refresh(self, c, t):
         """Leak v[c] up toward rest to absolute time t."""
         dt = t - self.v_time[c]
@@ -195,7 +195,7 @@ class AnalogPulseSim:
             self.v_time[c] = t
 
     def _recover_time(self, v_now, level):
-        """Δt for v to leak from ``v_now`` up to ``level`` (both < rest)."""
+        """deltat for v to leak from ``v_now`` up to ``level`` (both < rest)."""
         rest = self.config.rest
         num = rest - v_now
         den = rest - level
@@ -206,7 +206,7 @@ class AnalogPulseSim:
     def _high(self, c, t):
         return self.pulse_start.get(c, _NEG) <= t < self.pulse_until.get(c, _NEG)
 
-    # ── event queue ──────────────────────────────────────────────────────────
+    # -- event queue ----------------------------------------------------------
     def _push(self, t, kind, cell, arg=None):
         self._seq += 1
         heapq.heappush(self._heap, (float(t), self._seq, kind, cell, arg))
@@ -254,7 +254,7 @@ class AnalogPulseSim:
         self._tick += 1
         return self.activity_at(sample_t)
 
-    # ── the simulation core ──────────────────────────────────────────────────
+    # -- the simulation core --------------------------------------------------
     # Two timelines per node: the COMPARATOR (node voltage, trips exactly at an
     # excitatory edge, releases at threshold+hysteresis) and the OUTPUT
     # WIRE, which is the comparator delayed by delay_prop. Downstream nodes are

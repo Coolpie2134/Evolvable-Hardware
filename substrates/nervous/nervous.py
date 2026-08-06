@@ -1,7 +1,7 @@
 """
-substrates/nervous/nervous.py — hexagonal nervous-network growth, interpretation, scoring.
+substrates/nervous/nervous.py - hexagonal nervous-network growth, interpretation, scoring.
 
-The array is a honeycomb (each node has 3 neighbours: L, R, D — see hexgrid.py).
+The array is a honeycomb (each node has 3 neighbours: L, R, D - see hexgrid.py).
 A grown cell's 5-bit state is decoded (ROUTING_HEX) into a routing config
 (e1, e2, i1, op): which of the 3 directions feed the two excitatory and the one
 inhibitory input of a nervous-net node, and how the two excitatory inputs combine
@@ -11,7 +11,7 @@ Output:
         out = (val(e1) op val(e2)) AND NOT val(i1)        # coincidence/OR + veto
 
 Inputs are held at the seed cells and the array is relaxed; outputs are read at
-the target's terminals. No LIF — pure pulse logic, and the degree-3 topology is
+the target's terminals. No LIF - pure pulse logic, and the degree-3 topology is
 what forms the excitatory / inhibitory loops.
 """
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _seed_state(genome):
 # The widths are DERIVED from the state alphabets, never hard-coded: the packed
 # value is also the growth cache key, so a field narrower than its alphabet
 # would silently truncate and alias two distinct contexts onto one cache entry.
-# Single-tile is 5 bits — 4 would lose the OR twins: states 0-15 are the
+# Single-tile is 5 bits - 4 would lose the OR twins: states 0-15 are the
 # paper's AND routing and 16-31 their OR counterparts, so the growth match must
 # see the 5th bit to tell them apart. Tri-tile is 15 bits (three packed 5-bit
 # channels, each the same 32-value alphabet); because the channels are disjoint
@@ -77,33 +77,33 @@ def _compile_lookup(genome, bits=None):
     return bits, tuple(entries)
 
 
-# ── hex growth (native hex genome: self_out == 0 means the cell dies) ──────────
+# -- hex growth (native hex genome: self_out == 0 means the cell dies) ----------
 # Context reads the 3 hex neighbours (L/R/D) + self, matched against each gene's
 # ctx_l/ctx_r/ctx_d/self_in by minimum Hamming distance. Directions are the
 # node's own orientation-relative L/R/D (see hex_dirs).
 #
 # The field is UNBOUNDED; the genome bounds its own size BIOLOGICALLY, with a
 # telomere acting as a Hayflick division limit (see genome.py):
-#   * per-cell telomere — a cell divides (births a live frontier cell) only if a
+#   * per-cell telomere - a cell divides (births a live frontier cell) only if a
 #     live neighbour still has telomere > 0; the daughter inherits parent - 1.
 #     A cell at telomere 0 is senescent: alive and functional, but it cannot
 #     divide, so growth provably halts at radius L (the germline length) from the
 #     seeds. This alone bounds SIZE (was grid_size) and DURATION (was iters);
-#   * the empty-cell guard — even where a lineage still has telomere to spend, an
+#   * the empty-cell guard - even where a lineage still has telomere to spend, an
 #     empty cell only comes alive via a GROWTH rule (self_in == 0; sim6
 #     table_lookup: "if self is zero and not an exact match, return zero").
 # Maintenance rules (self_in != 0) act on LIVE cells every step regardless of
-# telomere — telomeres limit a cell's REPLICATION, not its function, exactly as
+# telomere - telomeres limit a cell's REPLICATION, not its function, exactly as
 # in biology.
 
 def _lookup_compiled(program, sL, sR, sD, si, packed=None,
                      return_kind=False):
-    """Associative next-state lookup (min Hamming). No time/telomere term — the
+    """Associative next-state lookup (min Hamming). No time/telomere term - the
     telomere now gates DIVISION per cell in _grow_step, not which genes exist.
 
     The single-tile alphabet is 5-bit; the tri-tile alphabet (three packed 5-bit
     channels) is 15-bit. Both are compared by Hamming distance over the whole
-    state — and because the tri channels occupy DISJOINT bit fields, a 15-bit
+    state - and because the tri channels occupy DISJOINT bit fields, a 15-bit
     Hamming is exactly the sum of the three per-channel Hammings, so context
     matching is per-channel for free."""
     if sL == 0 and sR == 0 and sD == 0 and si == 0:
@@ -133,7 +133,7 @@ def _lookup_nv(genome, sL, sR, sD, si):
 
 def _next_state(program, sL, sR, sD, si, cache, return_kind=False):
     """Cached packed lookup keyed on context alone (telomere does not affect the
-    lookup, so the cache is valid for the whole run — sim6 table_lookup_cached)."""
+    lookup, so the cache is valid for the whole run - sim6 table_lookup_cached)."""
     key = _pack_context(sL, sR, sD, si, program[0])
     ns = cache.get(key)
     if ns is None:
@@ -206,15 +206,15 @@ def _grow_step(program, grid, tel, seeds, L, cache, seed_state=SEED_STATE,
     return nxt, nxt_tel
 
 
-# Growth is bounded SOLELY by the telomere — there is no external iteration cap
+# Growth is bounded SOLELY by the telomere - there is no external iteration cap
 # and no grid-size clip. Spatially the organism can never pass radius L from the
 # seeds (the telomere runs out), so cell addition provably stops after ~L steps.
-# What remains is the paper's state settling — "the cycles of table lookups may
+# What remains is the paper's state settling - "the cycles of table lookups may
 # continue but the growth stops due to the fact that all queries return the same
-# value out as was passed in" (§6-7) — which ends at a fixed point or 2-cycle,
+# value out as was passed in" (section 6-7) - which ends at a fixed point or 2-cycle,
 # detected for early exit. The iteration budget is derived ENTIRELY from L: a
 # state change propagates one cell per step, so settling the whole organism
-# (diameter ~2L) after the ~L growth steps needs O(L) more — hence 3L + margin.
+# (diameter ~2L) after the ~L growth steps needs O(L) more - hence 3L + margin.
 # Nothing outside the genome's own telomere governs how far or how long it grows.
 
 def _grow_budget(L):
@@ -240,19 +240,19 @@ def apply_routing_patches(genome, grid):
     return result
 
 
-# `grid_size` and `iters` are accepted but IGNORED — vestigial, kept only so
+# `grid_size` and `iters` are accepted but IGNORED - vestigial, kept only so
 # existing callers and pickles keep working. Growth is governed entirely by the
 # genome's telomere (Hayflick limit); pass nothing and it still self-limits.
 
 def grow_nervous(genome, seeds, grid_size=None, iters=None):
     """Grow on the unbounded field until the attractor (fixed point or 2-cycle).
-    Size and duration are bounded by the genome's telomere ALONE — `grid_size`
+    Size and duration are bounded by the genome's telomere ALONE - `grid_size`
     and `iters` are ignored (see note above)."""
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
     program = _compile_lookup(genome)
     # Terminal identity is now the GROWN STATE (16 = input, 17 = output), so track
-    # terminals whenever a gene can express one — not the retired io_kind tag.
+    # terminals whenever a gene can express one - not the retired io_kind tag.
     track_terminals = any(
         (int(gene.self_out) & 0x1F) in (IO_STATE_INPUT, IO_STATE_OUTPUT)
         for _, gene in program[1])
@@ -281,7 +281,7 @@ def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
     seed_state = _seed_state(genome)
     program = _compile_lookup(genome)
     # Terminal identity is now the GROWN STATE (16 = input, 17 = output), so track
-    # terminals whenever a gene can express one — not the retired io_kind tag.
+    # terminals whenever a gene can express one - not the retired io_kind tag.
     track_terminals = any(
         (int(gene.self_out) & 0x1F) in (IO_STATE_INPUT, IO_STATE_OUTPUT)
         for _, gene in program[1])
@@ -310,7 +310,7 @@ def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
     return snaps
 
 
-# ── interpret / evaluate ────────────────────────────────────────────────────────
+# -- interpret / evaluate --------------------------------------------------------
 
 def _place_outputs(grid, target):
     """Assign each output role a live cell: nearest free non-input cell to its
@@ -385,8 +385,8 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
                      terminal_outputs=None):
     """Evaluate one combinational case on the asynchronous pulse engine.
     Input levels are held for the whole horizon (one long pulse on each driven
-    input net — a single edge). Returns {pos: 0/1} where 1 means the cell's
-    wire PULSED at some point — the natural read-out of a pulse-based array
+    input net - a single edge). Returns {pos: 0/1} where 1 means the cell's
+    wire PULSED at some point - the natural read-out of a pulse-based array
     (an AND gate's output is a pulse, not a held level)."""
     from .simulation import create_simulator
     if steps is None:
@@ -410,8 +410,8 @@ def evaluate_nervous(grid, routing, input_vals, grid_size, steps=None,
 def _resolve_io_binding(genome, grid, target, in_pos, out_pos):
     """Swap the geometric port binding for the genome's evolvable one when the
     target opts into an io_placement strategy (substrates/nervous/io_placement.py). Returns
-    (in_pos, out_pos) — under a strategy each in_pos entry is a LIST of
-    attachment cells (an input may fan out; ports may share sites) — or None
+    (in_pos, out_pos) - under a strategy each in_pos entry is a LIST of
+    attachment cells (an input may fan out; ports may share sites) - or None
     when the strategy is active but the organism cannot bind every port.
     'fixed' passes the geometric binding through."""
     from .io_placement import io_strategy, bind_io
@@ -569,7 +569,7 @@ def nervous_truth_table(genome, target):
             ('wired-OR at %s' % ', '.join(map(str, cells)))
             if cells else '(not found)'))
     if not cases:
-        lines += ['', '(circuit incomplete — inputs/outputs missing)']
+        lines += ['', '(circuit incomplete - inputs/outputs missing)']
         return '\n'.join(lines)
     in_hdr  = ' '.join('i%d' % i for i in range(len(target.inputs)))
     out_hdr = ' '.join('%s:e/a' % t.role for t in target.outputs)

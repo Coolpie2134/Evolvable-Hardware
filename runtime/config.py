@@ -30,7 +30,7 @@ LUT_FUNCTION_FAMILIES = (
 #: (tile_arch, node_model, evolve_delay) per profile.
 NV_NEW_RUN_PROFILES = {
     # ONE profile. The paper's three-circuit tile on the paper's Fig. 1 analog
-    # node — the most physically faithful configuration, and also the best
+    # node - the most physically faithful configuration, and also the best
     # measured, which is the rare case where fidelity and results agree.
     #
     # The topology-vs-physics ablation that the retired 'digital_tri' profile
@@ -40,11 +40,11 @@ NV_NEW_RUN_PROFILES = {
     #     digital_tri  (paper tile,  digital)  mean 0.8823   solved 3/8
     #     analog_tri   (paper tile,  analog)   mean 0.9554   solved 5/8
     #
-    # The paper's tile ALONE does not help — digital_tri scored below the
+    # The paper's tile ALONE does not help - digital_tri scored below the
     # single-tile engine. The analog node physics is what does the work.
     #
     # Held-out certification decided it. On Toggle, legacy trained to 1.000 on
-    # 5/5 seeds but only 2/5 CERTIFIED — three memorised timing. analog_tri was
+    # 5/5 seeds but only 2/5 CERTIFIED - three memorised timing. analog_tri was
     # 5/5 CERTIFIED. The digital engine's fixed pulse width and rectangular
     # coincidence window are exploitable timing invariants; the analog node's
     # window, output width and refractory all EMERGE from charge/leak/comparator
@@ -121,7 +121,7 @@ class GAConfig:
     # supplied by nv_run_config() rather than by shifting the field default.
     node_model: str = 'uniform'
     # Nervous-net TILE architecture (substrates/nervous/genome.py TILE_ARCHS):
-    # 'single' — one Fig. 3 circuit per tile. 'tri3' — the paper's
+    # 'single' - one Fig. 3 circuit per tile. 'tri3' - the paper's
     #            three-circuit tile (three independent L/R/D outputs per tile).
     # Tri3 supports the fixed digital abstraction and paper_analog physics; the
     # per-node-type width/delay vectors are single-tile features.
@@ -133,17 +133,17 @@ class GAConfig:
     # strategy except directional terminal nodes; LUT keeps the legacy
     # strategies programmatically in addition to its two native lut_io_mode
     # choices.
-    #   'fixed'          — compatibility selector. SNN uses declared pads;
+    #   'fixed'          - compatibility selector. SNN uses declared pads;
     #                      Nervous/FNV genomes resolve native layouts; LUT uses
     #                      its selected native lut_io_mode.
     #   'terminal_nodes' - body genes evolve ordinary/input/output identity;
     #                      matching mature cells become one-way terminals.
-    #   'tag_rank'       — body-gene expression tags rank mature cells; ports
+    #   'tag_rank'       - body-gene expression tags rank mature cells; ports
     #                      claim the highest still-free cells in order (Method A).
-    #   'wiring_chromosome' — chromosome 3 is a non-developmental but evolvable
+    #   'wiring_chromosome' - chromosome 3 is a non-developmental but evolvable
     #                      port map. Each gene selects one cell by node type and
     #                      offset in an unbiased stable site order (Method B).
-    #   'spatial_chromosome' — chromosome 3 evolves one normalised (x,y)
+    #   'spatial_chromosome' - chromosome 3 evolves one normalised (x,y)
     #                      anchor per port. Input anchors are developmental
     #                      germlines; outputs attach to nearest free live cells.
     # Kept 'fixed' by default so native-pad backends and old fixed checkpoints
@@ -161,7 +161,7 @@ class GAConfig:
     lut_function_families: tuple[str, ...] = ('UNRESTRICTED',)
     # Delay-mutation toggle, decoupled from the model name for ablations.
     # ``None`` keeps the model's pairing (pulse_delay <-> delay mutation). An
-    # explicit False disables it — node_model='pulse_delay' with
+    # explicit False disables it - node_model='pulse_delay' with
     # evolve_delay=False is width-preserving transport at the FIXED base delay,
     # isolating width preservation from delay evolvability. True is only valid
     # under the matching model: the engine ignores the vector everywhere else,
@@ -188,8 +188,8 @@ class GAConfig:
     # validated field so existing v2 checkpoints still round-trip.
     evaluation_chunk_multiplier: int = 2
     # Local-minimum escape mechanisms (runtime/escape.py). Every one is off by
-    # default, so an unconfigured run — and any checkpoint written before the
-    # module existed — behaves exactly as it did before.
+    # default, so an unconfigured run - and any checkpoint written before the
+    # module existed - behaves exactly as it did before.
     escape: EscapeConfig = EscapeConfig()
 
     def __post_init__(self):

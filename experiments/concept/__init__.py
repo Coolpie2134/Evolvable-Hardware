@@ -1,1 +1,1 @@
-# concept — original proof-of-concept simulations (2003–2007)
+# concept - original proof-of-concept simulations (2003-2007)

@@ -1,9 +1,9 @@
 """
-substrates/nervous/playback.py — asynchronous (continuous-time) playback and a clickable
+substrates/nervous/playback.py - asynchronous (continuous-time) playback and a clickable
 pulse-timeline, shared by the Interactive and Designer substrate views.
 
-Both asynchronous substrates — the nervous net (substrates/nervous/pulse.py) and the LUT
-array (substrates/lut/pulse.py) — are continuous-time, event-driven elements whose
+Both asynchronous substrates - the nervous net (substrates/nervous/pulse.py) and the LUT
+array (substrates/lut/pulse.py) - are continuous-time, event-driven elements whose
 fitness reads real edge timestamps.  These helpers let the GUI DRIVE and SHOW
 them in that same continuous time instead of a synchronous tick lattice:
 
@@ -12,7 +12,7 @@ them in that same continuous time instead of a synchronous tick lattice:
     ``overflow``): it injects pulse intervals at their real times and advances
     a physical-time cursor, reporting wire activity and the real leading-edge
     times of any cell. No GUI dependency.
-  * NervousPlayer builds it over the configured digital or analog simulator —
+  * NervousPlayer builds it over the configured digital or analog simulator -
     the same engine used by Nervous evolution. The LUT twin (substrates.lut.playback.LutPlayer)
     builds it over AsyncLutSim.
   * PulseLaneEditor binds a matplotlib axis to editable input pulses: click for
@@ -83,7 +83,7 @@ class AsyncPlayer:
         return self.cursor >= self.horizon - 1e-9
 
     def activity(self):
-        """{cell: 0/1} — which wires are high at the current cursor time."""
+        """{cell: 0/1} - which wires are high at the current cursor time."""
         return self.sim.activity_at(self.cursor)
 
     def events_upto(self, cell):
@@ -134,7 +134,7 @@ class NervousPlayer(AsyncPlayer):
 
 
 # Display-only RC constants for capacitor-style playback (charge_levels).
-# Fast charge while a wire pulses, slower visible discharge after it falls —
+# Fast charge while a wire pulses, slower visible discharge after it falls -
 # these shape the ANIMATION only; the scored physics stays the binary pulse.
 CHARGE_TAU    = 0.30
 DISCHARGE_TAU = 0.90
@@ -147,7 +147,7 @@ def charge_levels(sim, t, charge_tau=CHARGE_TAU, discharge_tau=DISCHARGE_TAU):
     rises toward 1 while the wire is high (time constant ``charge_tau``) and
     decays toward 0 after it falls (``discharge_tau``), so playback shows
     nodes charging and discharging like the paper's capacitively-coupled
-    hardware instead of snapping on/off. Purely cosmetic — reads the engine's
+    hardware instead of snapping on/off. Purely cosmetic - reads the engine's
     ``pulse_intervals`` waveform log and never touches the simulation.
     Returns None when the simulator has no waveform log."""
     intervals = getattr(sim, 'pulse_intervals', None)
@@ -350,7 +350,7 @@ class PulseLaneEditor:
         ax.set_yticklabels(self.labels, fontsize=8)
         ax.set_xlabel('continuous time (seconds)', fontsize=8)
         ax.tick_params(labelsize=7)
-        ax.set_title('input pulses — click for default width; drag for custom width',
+        ax.set_title('input pulses - click for default width; drag for custom width',
                      fontsize=8)
         for lane in range(len(self.labels)):
             ax.axhline(lane, color='#e6e6e6', lw=0.6, zorder=0)

@@ -1,8 +1,8 @@
 """
-tests/test_diversity_ui.py — GUI-free checks of the Diversity tab's runtime.
+tests/test_diversity_ui.py - GUI-free checks of the Diversity tab's runtime.
 
 Tk is never constructed. The worker thread body and the queue-draining poll are
-plain methods, so they are exercised against stand-in widgets — the same trick
+plain methods, so they are exercised against stand-in widgets - the same trick
 tests/test_designer_runtime.py uses. What matters here is the behaviour that is
 easy to get wrong and invisible until a long run: Stop actually stops, a bad
 file reports instead of hanging, and the controls are always released.

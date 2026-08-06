@@ -1,25 +1,25 @@
 """
-substrates/lut/viz.py — square-array rendering for the LUT model (paper Architecture 2).
+substrates/lut/viz.py - square-array rendering for the LUT model (paper Architecture 2).
 
-A cell is NOT fixed directional wiring — it is FOUR 16-bit lookup tables, one per
+A cell is NOT fixed directional wiring - it is FOUR 16-bit lookup tables, one per
 output direction (Ln, Ls, Le, Lw). During growth (associative-memory ontogeny)
 each cell's four LUT *states* are rewritten by a table lookup on its neighbours'
-states, so a mature organism is a field of position-dependent LUT states — the
+states, so a mature organism is a field of position-dependent LUT states - the
 paper's Fig. 13 ("unique colours are assigned to unique LUT states, one pixel per
 LUT"). This renderer shows exactly that:
 
   * a faint grey LATTICE joins physically-adjacent live cells (degree-4);
   * each cell is drawn as FOUR directional WEDGES (N/E/S/W), each coloured by
-    that direction's 16-bit LUT STATE — equal states read the same colour, so
+    that direction's 16-bit LUT STATE - equal states read the same colour, so
     the internal state structure and its variation with position are visible (a
     dead direction, LUT == 0, is near-white). This is the paper's "one pixel per
     LUT" made directional.
   * given an ACTIVITY map (each cell's 4-bit N/S/E/W output this tick), the
-    wedges instead show each directional OUTPUT BIT as green (1) or red (0) —
+    wedges instead show each directional OUTPUT BIT as green (1) or red (0) -
     the paper's Fig. 14 "instantaneous digital state ... coloured in binary
-    values red and green" — so the running dynamics can be watched tick by tick.
+    values red and green" - so the running dynamics can be watched tick by tick.
 
-Inputs are ringed red and labelled A, B, … (internal pads or every tap of an
+Inputs are ringed red and labelled A, B, ... (internal pads or every tap of an
 outside perimeter bus); fitted outputs are ringed green and labelled.
 """
 from __future__ import annotations
@@ -69,9 +69,9 @@ def draw_lut_net(ax, grid, grid_size=None, activity=None, in_pos=None,
                  external_inputs=None):
     """
     grid     : {(x,y): (Ln, Ls, Le, Lw)}  grown 4-LUT cell states
-    activity : {(x,y): nibble}  4-bit N/S/E/W emission this tick — if given, the
+    activity : {(x,y): nibble}  4-bit N/S/E/W emission this tick - if given, the
                wedges show firing (green) / silent instead of LUT-state colour
-    in_pos   : input positions or per-logical-input groups (labelled A, B, …)
+    in_pos   : input positions or per-logical-input groups (labelled A, B, ...)
     out_pos  : {role: (x,y)} outputs (green-ringed, labelled)
     """
     in_pos  = in_pos or []
@@ -153,7 +153,7 @@ def draw_lut_table(ax, lut, swatch=None, title=None):
     """Draw the ACTUAL 16-bit lookup table as a 4x4 truth grid: columns vary the
     two bits coming from N,S; rows vary the two from E,W; a cell is green when
     the table outputs 1 for that neighbour input and white when it outputs 0.
-    This is the raw table itself (out = table[N + 2S + 4E + 8W]) — the thing the
+    This is the raw table itself (out = table[N + 2S + 4E + 8W]) - the thing the
     wedge colours only hash. `swatch` (an RGB) draws the matching net colour so a
     table can be tied back to the cells; `title` labels it (hex / logic)."""
     ax.clear()

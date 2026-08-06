@@ -161,7 +161,7 @@ def growth_seeds(target, strategy=None, genome=None):
     """Return germline cells for the selected I/O architecture.
 
     A genome carrying an evolved ``input_layout`` grows from EXACTLY those
-    coordinates — the pads are the germlines, so input geometry and body
+    coordinates - the pads are the germlines, so input geometry and body
     geometry are one decision rather than two that have to agree.
 
     Fixed binding grows from declared pads. Developmental spatial binding grows
@@ -288,7 +288,7 @@ def mutate_terminal_kind(genome):
     return True
 
 
-# ── nervous-net dedicated I/O node-type states (16 = input, 17 = output) ─────────
+# -- nervous-net dedicated I/O node-type states (16 = input, 17 = output) ---------
 # For the NERVOUS backend, terminal identity is the GROWN STATE, not the io_kind
 # tag (which LUT/SNN still use). A gene expresses a terminal by growing a cell
 # into the I/O state, so seeding/mutation set ``self_out`` instead of io_kind.
@@ -297,7 +297,7 @@ def seed_terminal_states(genome, n_inputs, n_outputs):
     """Nervous: seed genes that grow dedicated I/O node-type states.
 
     Mirrors :func:`seed_terminal_kinds` but sets ``self_out`` to the input
-    (16) / output (17) node-type state — a gene grows a terminal by expressing
+    (16) / output (17) node-type state - a gene grows a terminal by expressing
     the state, so identity is developmental like every other cell fate. Binding
     still activates exactly one cell per port; extra expressed terminals stay
     ordinary I/O-state cells.
@@ -883,7 +883,7 @@ def mutate_io_allele(genome, node_type_max, strategy=None):
                             % (upper - 1))
     else:
         old = _gene_selector(gene)
-        # The selector is an ordinal offset, so ±1 replaces only one edge of a
+        # The selector is an ordinal offset, so +/-1 replaces only one edge of a
         # selected window. The old bit-flip/hash scheme globally reshuffled the
         # port and provided almost no heritable placement locality.
         gene.io_selector = old + random.choice((-1, 1))
@@ -1338,7 +1338,7 @@ def flat_outputs(out_pos):
 
 
 def terminal_node_sets(target, in_pos, out_pos, genome=None):
-    """Return ``(source_cells, sink_cells)`` — the EXPLICIT terminal membership.
+    """Return ``(source_cells, sink_cells)`` - the EXPLICIT terminal membership.
 
     Source-only physics is decided by membership in the resolved input-pad set,
     never by a cell's state id. That distinction matters: an ordinary evolved
@@ -1350,7 +1350,7 @@ def terminal_node_sets(target, in_pos, out_pos, genome=None):
     pads sources. Its fitted outputs are non-invasive probes, not sink
     terminals, so they are checked for overlap but are not added to the sink
     set. Other strategies return two empty sets, keeping every legacy
-    simulation byte-for-byte on its original path — a fixed-input genome keeps
+    simulation byte-for-byte on its original path - a fixed-input genome keeps
     the old wired-OR input semantics, so existing solutions do not silently
     change physics.
     """

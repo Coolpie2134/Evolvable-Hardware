@@ -1,9 +1,9 @@
 """
-substrates/lut/ontogeny.py — sim6-faithful morphogenesis (STAGE 0 diagnostic).
+substrates/lut/ontogeny.py - sim6-faithful morphogenesis (STAGE 0 diagnostic).
 
 The substrates/lut GA evolves FIXED genomes: a small random gene set, matched by
 minimum Hamming distance during growth. sim6 (sim6_faster.py) does something
-different and richer — it *generates* the genome during growth via
+different and richer - it *generates* the genome during growth via
 `table_create`: an on-the-fly ontogeny that invents a new gene for every context
 it has not seen, and frequently sets a new cell's output by COPYING a
 neighbour's facing LUT (so structure propagates and mutates through space)
@@ -37,7 +37,7 @@ _PC16 = bytes(bin(i).count("1") for i in range(1 << 16))
 
 @dataclass
 class Gene:
-    """sim6's Gene, in sim6's own field order (N,S,E,W) — kept faithful so the
+    """sim6's Gene, in sim6's own field order (N,S,E,W) - kept faithful so the
     ontogeny reads like genetic.c. Converted to substrates/lut's LutGene by
     `to_lut_genome` (which reorders to N,E,S,W)."""
     limit:    int = 255
@@ -52,7 +52,7 @@ class Gene:
 def _set_limit(g: Gene, rng: random.Random) -> None:
     """sim6 set_limit: a growth gene (self_in == 0) with <=2 live context sides
     gets a SHORT random activity window; a well-surrounded one never expires.
-    This prunes the sparse growth front irregularly — a key source of ragged,
+    This prunes the sparse growth front irregularly - a key source of ragged,
     non-diamond boundaries."""
     if g.self_in > 0:
         return
@@ -67,7 +67,7 @@ def table_create(sn, ss, se, sw, s_self, genome: List[Gene], iteration: int,  # 
     """sim6 table_create: the build-phase ontogeny. If the context is unseen,
     invent a gene for it, deciding its output by (usually) copying a same-context
     gene's output, else copying a neighbour's facing LUT, else a random LUT."""
-    # Fully surrounded — no gene needed (sim6 line 296).
+    # Fully surrounded - no gene needed (sim6 line 296).
     if sn > 0 and ss > 0 and se > 0 and sw > 0:
         return s_self
     # All-zero context stays zero (no spontaneous generation).
@@ -131,8 +131,8 @@ def table_lookup(sn, ss, se, sw, s_self, genome: List[Gene], iteration: int) -> 
     return best.self_out
 
 
-# ── morphogenesis ────────────────────────────────────────────────────────────
-# Grid cells are {pos: [sn, ss, se, sw]}; index 0=N,1=S,2=E,3=W — the same order
+# -- morphogenesis ------------------------------------------------------------
+# Grid cells are {pos: [sn, ss, se, sw]}; index 0=N,1=S,2=E,3=W - the same order
 # as lut.py's (Ln, Ls, Le, Lw) tuple, and directions match lut.py (N=+y, S=-y,
 # E=+x, W=-x) so a grown grid renders directly with draw_lut_net.
 
@@ -246,7 +246,7 @@ def random_ontogeny_genome(n_chroms: int = 2, cap_genes: int = 350,
                            max_tries: int = 60,
                            rng: Optional[random.Random] = None) -> Genome:
     """GA seed factory (Stage 1): grow a sim6-style biomorph and keep it only if
-    it is DENSE (raw genome >= `min_genes` — density is what makes shapes rich;
+    it is DENSE (raw genome >= `min_genes` - density is what makes shapes rich;
     trivial few-gene biomorphs just fill a uniform diamond) and, capped to
     `cap_genes` (see _cap_genes) and regrown by substrates/lut's own grow_lut, makes at
     least `min_cells` live cells (sim6's `good < 10` retry). Falls back to the
@@ -267,7 +267,7 @@ def random_ontogeny_genome(n_chroms: int = 2, cap_genes: int = 350,
     return random_lut_genome(n_chroms)
 
 
-# ── diagnostic gallery ─────────────────────────────────────────────────────────
+# -- diagnostic gallery ---------------------------------------------------------
 
 def render_gallery(out_path: str, base_seed: int = 1, n: int = 16) -> str:
     """Grow `n` biomorphs from consecutive seeds and render them in a grid,
@@ -292,7 +292,7 @@ def render_gallery(out_path: str, base_seed: int = 1, n: int = 16) -> str:
               % (i, base_seed + i, len(genes), live))
     for j in range(n, len(flat)):
         flat[j].set_visible(False)
-    fig.suptitle("sim6-style ontogeny (table_create) — Stage 0 shape check",
+    fig.suptitle("sim6-style ontogeny (table_create) - Stage 0 shape check",
                  fontsize=11, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(out_path, dpi=100)
