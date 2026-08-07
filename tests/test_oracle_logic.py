@@ -23,7 +23,8 @@ from substrates.nervous.oracle import (make_c_element, orc_sr_latch,   # noqa: E
                            make_watchdog, make_a_parity_query,
                            make_a_mod3_query, make_a_batch_parity_query)
 from substrates.nervous.temporal import TemporalTraces, event_score     # noqa: E402
-from substrates.nervous.scoring import contract_relations               # noqa: E402
+from substrates.nervous.scoring import (contract_relations,             # noqa: E402
+                            combinational_level_traces, score_contract)
 from substrates.snn.targets import gate_target, get_target         # noqa: E402
 
 
@@ -37,6 +38,16 @@ def _trace(fn, seq):
 
 def _is_event_target(target):
     return contract_relations(target) == ('event_correspondence',)
+
+
+def _row_onsets(trial):
+    """Ticks where a periodic combinational row RISES.
+
+    Rows are presented as held levels, so a row occupies many active ticks and
+    only the first of a contiguous run starts a case (see
+    targets.periodic_combinational_target)."""
+    return [tick for tick, row in enumerate(trial.streams)
+            if any(row) and not (tick and any(trial.streams[tick - 1]))]
 
 
 def test_a_parity_query_counts_a_and_b_only_reads_state():
@@ -123,7 +134,9 @@ def test_a_count_query_targets_use_mixed_pulse_lengths():
 def test_binary_truth_tables_become_phase_locked_periodic_targets():
     target = periodic_combinational_target(gate_target('AND'))
     assert target.temporal
-    assert _is_event_target(target)
+    # A truth table is a LEVEL relation, not an edge relation - the same
+    # contract FNV's settled-level readout has always been scored against.
+    assert contract_relations(target) == ('combinational_level',)
     assert target.supported_backends == ('nervous', 'lut')
     assert len(target.trials) == 4  # two row orders at two phases
     assert 'tick' not in target.description.lower()
@@ -133,8 +146,7 @@ def test_binary_truth_tables_become_phase_locked_periodic_targets():
     # few-tick settling transient, not the old cramped 4-second packing.
     spacings = []
     for trial in target.trials:
-        onsets = sorted(second for second, row in enumerate(trial.streams)
-                        if any(row))
+        onsets = sorted(_row_onsets(trial))
         spacings += [b - a for a, b in zip(onsets, onsets[1:])]
     spacing = min(spacings)
     assert spacing >= 3 * target.grid_size
@@ -151,17 +163,44 @@ def test_binary_truth_tables_become_phase_locked_periodic_targets():
                 event + cycle for event in first_cycle]
 
     role = target.outputs[0].role
-    expected = [trial.expected_events[role] for trial in target.trials]
-    exact = TemporalTraces(
-        {role: [[] for _ in target.trials]}, events={role: expected})
-    assert event_score(exact, target) == 1.0
+    exact = combinational_level_traces(
+        target, lambda _role, bits: all(bits))
+    assert score_contract(exact, target)[0] == 1.0
+
+    # Holding the right rows is the whole answer; merely TWITCHING inside them
+    # is a partial one, which is the difference between this contract and the
+    # twin's. A one-tick assertion in the middle of the read window is worth its
+    # duty, no more.
+    def held(width):
+        return TemporalTraces(
+            {role: [[] for _ in target.trials]},
+            events={role: [[low for low, _high in trial.expected_intervals[role]]
+                           for trial in target.trials]},
+            intervals={role: [[(low, low + width)
+                               for low, _high in trial.expected_intervals[role]]
+                              for trial in target.trials]})
+
+    assert 0.5 < score_contract(held(1.0), target)[0] < 1.0
+    assert score_contract(held(1.0), target)[0] < score_contract(
+        held(3.0), target)[0] < 1.0
+
+    # An edge at the old point-event latency has come and gone long before the
+    # level is read, so it earns nothing on the rows that must assert.
+    stale = TemporalTraces(
+        {role: [[] for _ in target.trials]},
+        events={role: [list(trial.expected_events[role])
+                       for trial in target.trials]},
+        intervals={role: [[(start, start + 1.0)
+                           for start in trial.expected_events[role]]
+                          for trial in target.trials]})
+    assert score_contract(stale, target)[0] <= 0.5 + 1e-9
 
     # One autonomous oscillator cannot satisfy all rows/phases of an AND gate.
     oscillator = [[4.0 + 4.0 * index for index in range(5)]
                   for _ in target.trials]
     free_running = TemporalTraces(
         {role: [[] for _ in target.trials]}, events={role: oscillator})
-    assert event_score(free_running, target) < 1.0
+    assert score_contract(free_running, target)[0] < 1.0
 
 
 def test_multi_output_gate_cannot_coast_on_the_easy_output():
@@ -179,27 +218,20 @@ def test_multi_output_gate_cannot_coast_on_the_easy_output():
     roles = [terminal.role for terminal in target.outputs]
     assert len(roles) == 2
 
+    truth = {role: dict(zip(
+        [bits for bits, _ in target.combinational_cases],
+        [out[index] for _, out in target.combinational_cases]))
+        for index, role in enumerate(roles)}
+
     def score(strong_only=None):
-        """strong_only=None -> both outputs follow truth; else that role follows
-        truth and the other blankets (fires in every case window)."""
-        data, events = {}, {}
-        for role in roles:
-            data[role], events[role] = [], []
-            for trial in target.trials:
-                if strong_only is None or role == strong_only:
-                    times = [float(t) for t in trial.expected_events.get(role, ())]
-                else:
-                    times = [
-                        float(window[0] + target.latency)
-                        for window in trial.case_windows]
-                times = sorted(times)
-                trace = [0.0] * target.T
-                for t in times:
-                    if 0 <= int(t) < target.T:
-                        trace[int(t)] = 1.0
-                data[role].append(trace)
-                events[role].append(times)
-        return score_contract(Traces(data, events=events), target)[0]
+        """strong_only=None -> both outputs hold the truth; else that role holds
+        the truth and the other blankets (asserts in every case window)."""
+        traces = combinational_level_traces(
+            target,
+            lambda role, bits: (bool(truth[role].get(bits))
+                                if strong_only is None or role == strong_only
+                                else True))
+        return score_contract(traces, target)[0]
 
     both_perfect = score(None)
     carry_only = score(strong_only=roles[0])
@@ -223,30 +255,19 @@ def test_lopsided_truth_tables_do_not_reward_indiscriminate_firing():
     static truth-table path has always balanced expected-1 against expected-0
     rows for exactly this reason; the periodic encoding must too.
     """
-    from substrates.nervous.scoring import TemporalTraces as Traces, score_contract
+    from substrates.nervous.scoring import score_contract
 
-    def score(target, make_events):
+    def score(target, decide):
+        return score_contract(
+            combinational_level_traces(target, decide), target)[0]
+
+    def truth_of(target):
         roles = [terminal.role for terminal in target.outputs]
-        data, events = {}, {}
-        for role in roles:
-            data[role], events[role] = [], []
-            for trial in target.trials:
-                times = sorted(float(t) for t in make_events(role, trial))
-                trace = [0.0] * target.T
-                for t in times:
-                    if 0 <= int(t) < target.T:
-                        trace[int(t)] = 1.0
-                data[role].append(trace)
-                events[role].append(times)
-        return score_contract(Traces(data, events=events), target)[0]
-
-    def every_window(target):
-        return lambda role, trial: [
-            float(window[0] + target.latency)
-            for window in trial.case_windows]
-
-    def truth(role, trial):
-        return trial.expected_events.get(role, ())
+        table = {
+            role: {bits: out[index]
+                   for bits, out in target.combinational_cases}
+            for index, role in enumerate(roles)}
+        return lambda role, bits: bool(table[role].get(bits))
 
     # EVERY combinational target, not a hand-picked few. This list used to name
     # NAND/NOR/XNOR/Majority-3 only, and OR - whose sole 0 is the dropped
@@ -258,15 +279,73 @@ def test_lopsided_truth_tables_do_not_reward_indiscriminate_firing():
         if getattr(base, 'temporal', False) or not getattr(base, 'cases', ()):
             continue
         target = periodic_combinational_target(base)
-        assert score(target, truth) >= 0.999, name
-        blanket = score(target, every_window(target))
+        assert score(target, truth_of(target)) >= 0.999, name
+        blanket = score(target, lambda role, bits: True)
         assert blanket <= 0.5 + 1e-9, (
             '%s rewards indiscriminate firing: %.4f' % (name, blanket))
-        silent = score(target, lambda role, trial: ())
+        silent = score(target, lambda role, bits: False)
         assert silent <= 0.5 + 1e-9, (
             '%s rewards silence: %.4f' % (name, silent))
         checked += 1
     assert checked >= 15, 'expected the whole combinational suite, got %d' % checked
+
+
+def test_combinational_rows_are_held_levels_and_temporal_twins_are_edges():
+    """The one difference that makes the two encodings different problems.
+
+    A combinational function is a function of a level PRESENT while the circuit
+    computes: FNV holds its inputs for the whole settling horizon, SNN holds an
+    input current for the whole run, and the native nervous/LUT static scorers
+    hold their case levels. The periodic wrapper - the presentation nervous and
+    LUT actually evolve against - must hold too, or it is posing a memory task
+    (remember the row, then compute it) that duplicates its own `(temporal)`
+    twin. The twin, conversely, must stay edge-timed.
+    """
+    from substrates.nervous.simulation import streams_to_schedule
+    from substrates.nervous.targets import coincident_temporal_target
+    from substrates.nervous.pulse import TICK
+
+    for name in ('AND', 'XOR'):
+        base = gate_target(name)
+        held = periodic_combinational_target(base)
+
+        # The hold outlasts a crossing of the grid, so a level is still applied
+        # when the far side of the array settles ...
+        assert held.combinational_hold >= 2 * held.grid_size
+        for trial in held.trials:
+            for tick in _row_onsets(trial):
+                lanes = [lane for lane, bit in enumerate(trial.streams[tick])
+                         if bit]
+                assert lanes, 'a presented row must drive at least one lane'
+                for lane in lanes:
+                    assert all(trial.streams[tick + step][lane]
+                               for step in range(held.combinational_hold))
+
+        # ... and every row falls silent again before the next one rises, so a
+        # shared lane cannot merge two rows into one uninterrupted level.
+        for trial in held.trials:
+            onsets = _row_onsets(trial)
+            for tick, following in zip(onsets, onsets[1:]):
+                assert following - tick >= held.combinational_hold + 2
+                assert not any(trial.streams[tick + held.combinational_hold])
+
+        # What the substrate physically receives is ONE long pulse per row, not
+        # a burst of re-triggering edges.
+        for trial in held.trials:
+            schedule = streams_to_schedule(
+                trial.streams, held.n_inputs, held.T)
+            for lane in schedule:
+                for _, width in lane:
+                    assert abs(width - held.combinational_hold * TICK) < 1e-9
+
+        # The edge-timed twin keeps the point-event presentation.
+        twin = coincident_temporal_target(base)
+        assert not getattr(twin, 'combinational_hold', 0)
+        for trial in twin.trials:
+            schedule = streams_to_schedule(trial.streams, twin.n_inputs, twin.T)
+            for lane in schedule:
+                for _, width in lane:
+                    assert width <= TICK + 1e-9
 
 
 def test_every_periodic_truth_table_receives_an_explicit_zero_row_window():
@@ -283,9 +362,11 @@ def test_every_periodic_truth_table_receives_an_explicit_zero_row_window():
     assert decoder.n_inputs == 3
     assert 'case-valid lane' in decoder.description
     for trial in decoder.trials:
+        # The strobe is HELD like every other lane, so count row onsets, not
+        # the ticks the level occupies.
         marked_zero_rows = [
-            tick for tick, row in enumerate(trial.streams)
-            if row == (0, 0, 1)]
+            tick for tick in _row_onsets(trial)
+            if trial.streams[tick] == (0, 0, 1)]
         assert len(marked_zero_rows) == 2
         expected = set(trial.expected_events['D0'])
         assert all(
@@ -315,7 +396,7 @@ def test_all_zero_rows_are_presented_even_when_their_level_is_redundant():
     role = target.outputs[0].role
     for trial in target.trials:
         expected = set(trial.expected_events[role])
-        onsets = [tick for tick, row in enumerate(trial.streams) if any(row)]
+        onsets = _row_onsets(trial)
         assert len(onsets) == 8, 'all four rows must be presented, twice each'
         levels = {any(abs(e - (tick + target.latency)) < 1e-9 for e in expected)
                   for tick in onsets}

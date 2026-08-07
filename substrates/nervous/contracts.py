@@ -22,6 +22,11 @@ RELATION_PRESENTATION = {
     'event_correspondence': (
         'One-to-one timed events',
         'Required and produced leading edges are paired; misses and extras both cost.'),
+    'combinational_level': (
+        'Held combinational level',
+        'While a truth-table row is applied, every output must SIT at its '
+        'required level for the whole settled read window - a momentary pulse '
+        'is a partial answer, not a correct one.'),
     'transition_correspondence': (
         'Common-latency state transitions',
         'Input commands and logical output changes are paired in order under '
@@ -177,6 +182,20 @@ def event_contract(tolerance=0.5, max_shift=12.0, fit_latency=True):
             'max_shift': float(max_shift),
             'fit_latency': bool(fit_latency),
         })])
+
+
+def combinational_contract():
+    """A truth table as a LEVEL relation: held input in, held output out.
+
+    This is the contract every substrate's native static scorer already
+    expresses - FNV holds each row's input levels for its whole settling
+    horizon and reads the settled output level, and the LUT array reads a
+    settled duty over the held window. Asking the asynchronous backends for a
+    momentary edge instead made 'combinational' mean something weaker there.
+    Observing complete rise/fall intervals is what makes a held level, rather
+    than an edge, the observable.
+    """
+    return BehaviorContract([Constraint('combinational_level', 'intervals')])
 
 
 def state_contract(max_shift=12.0, fit_latency=True, transition_tolerance=0.25,

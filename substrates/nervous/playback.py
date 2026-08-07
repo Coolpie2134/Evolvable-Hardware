@@ -235,6 +235,68 @@ def pulses_from_case(target, n_inputs, case_index=0, backend='lut',
     return out
 
 
+def combinational_rows(target):
+    """The truth-table rows a PERIODIC COMBINATIONAL target is scored on.
+
+    Such a target is carried as a handful of long temporal trials, but fitness
+    does not grade a trial as a unit: it splits each one into the isolated case
+    window every row owns and grades the rows (see
+    ``scoring._combinational_windows`` / ``_combinational_case_confidence``).
+    The row is therefore the real test case, and this reports one entry per row:
+
+        (in_bits, out_bits, raw_row, lead, span)
+
+    ``raw_row`` is the physical stimulus row - the truth-table bits plus the
+    case-valid strobe lane where the wrapper added one - ``lead`` is the phase
+    the first window opens at, and ``span`` the window's full width. Rows are
+    returned in truth-table order, not schedule order, and the repeats/orders/
+    phases that replicate each row are deliberately collapsed: they are the same
+    presentation at different times.
+
+    Empty for every other kind of target (a plain temporal target's fitness unit
+    is the whole trial; a static truth table has ``cases`` already).
+    """
+    rows = list(getattr(target, 'combinational_cases', ()) or ())
+    trials = list(getattr(target, 'trials', None) or ())
+    if not rows or not trials:
+        return []
+    trial = trials[0]
+    windows = list(getattr(trial, 'case_windows', None) or ())
+    if not windows:
+        return []                      # pre-window checkpoint: trials only
+    lead = min(float(window[0]) for window in windows)
+    spans = {}
+    for start, end, bits in windows:
+        spans.setdefault(tuple(int(bit) for bit in bits),
+                         (float(start), float(end)))
+    out = []
+    for in_bits, out_bits in rows:
+        key = tuple(int(bit) for bit in in_bits)
+        window = spans.get(key)
+        if window is None:
+            continue
+        start, end = window
+        out.append((key, tuple(int(bit) for bit in out_bits),
+                    tuple(trial.streams[int(start)]), lead, end - start))
+    return out
+
+
+def pulses_from_combinational_row(target, n_inputs, row_index):
+    """Input pulse lanes for ONE truth-table row of a periodic combinational
+    target, exactly as fitness applies them inside that row's window: every
+    lane the row asserts (plus the strobe, where there is one) is HELD for
+    ``combinational_hold`` from the window's phase, and a row that asserts
+    nothing is presented as the silence fitness presents."""
+    rows = combinational_rows(target)
+    if not rows:
+        return [[] for _ in range(n_inputs)]
+    index = max(0, min(int(row_index), len(rows) - 1))
+    _in_bits, _out_bits, raw, lead, _span = rows[index]
+    hold = float(getattr(target, 'combinational_hold', 0) or 1)
+    return [[(lead, hold)] if (lane < len(raw) and raw[lane]) else []
+            for lane in range(n_inputs)]
+
+
 class PulseLaneEditor:
     """A clickable per-input pulse timeline drawn on a matplotlib axis."""
 

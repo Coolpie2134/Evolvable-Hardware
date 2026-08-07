@@ -21,6 +21,7 @@ from .evaluation import evaluate_functional_full
 from .genome import (
     MAX_CHROMS, MAX_GENES, MAX_TELOMERE, Chromosome, FunctionalGene, Genome,
     SEED_STATES, input_layout_domain, input_layout_radius, is_constructive,
+    is_typed,
     random_component_id,
     random_functional_chromosome, random_functional_gene,
     random_functional_genome,
@@ -493,6 +494,26 @@ def plateau_rescue_candidates(
         return []
     enabled = normalise_families(families)
     focused = tuple(family for family in focus_families if family in enabled)
+    if is_typed(genome):
+        # The constructive rescue enumerates placements at live frontier tips.
+        # A typed gene has no single tip - it is a rule that fires wherever its
+        # pattern occurs - so rescue is simply extra mutated descendants, which
+        # is what the other substrates' archive rescue does.
+        from .construction_ga import clone_constructive, mutate_typed
+        n_inputs = len(
+            getattr(genome, "input_layout", None) or growth_seeds or (1,))
+        proposals, seen = [], {genome_signature(genome)}
+        for _ in range(limit * 3):
+            if len(proposals) >= limit:
+                break
+            candidate = clone_constructive(genome)
+            mutate_typed(candidate, None, enabled, n_inputs, max_telomere)
+            signature = genome_signature(candidate)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            proposals.append(candidate)
+        return proposals
     if is_constructive(genome):
         from .construction_ga import plateau_candidates_constructive
         return plateau_candidates_constructive(
@@ -627,7 +648,8 @@ def mutate_functional(genome, mean_mutations=None, *,
                       focus_families=()):
     enabled = normalise_families(families)
     if is_constructive(genome):
-        from .construction_ga import mutate_constructive
+        from .construction_ga import (
+            mutate_constructive, mutate_typed, new_typed_chromosome)
         # Input pads are named roots, so a local pad move translates only the
         # branches that depend on that source. It is an independent physical
         # mutation, not a rewrite of placement coordinates.
@@ -635,12 +657,40 @@ def mutate_functional(genome, mean_mutations=None, *,
                 and len(genome.input_layout) > 1
                 and random.random() < 0.04):
             mutate_input_layout(genome, max_telomere)
-        mutate_constructive(
-            genome, mean_mutations, enabled, growth_seeds, focus_families)
+        if is_typed(genome):
+            # A typed gene is a reusable rule, so the frontier-walking operators
+            # do not apply: there is no single live tip to extend. Its menu is
+            # the one the other substrates use - retarget, duplicate, add,
+            # delete, and adjust the chromosome's growth lifespan.
+            mutate_typed(
+                genome, mean_mutations, enabled,
+                len(getattr(genome, "input_layout", None) or growth_seeds
+                    or (1,)),
+                max_telomere)
+        else:
+            # The germline telomere is the constructive organism's growth
+            # radius, so a genome inherited from a looser run has to be brought
+            # under this run's ceiling. Downward only, and never onto a legacy
+            # genome: a telomere of 1 means unbounded (see growth_radius), and
+            # raising it to 2 would collapse a resumed checkpoint's body.
+            ceiling = max(2, int(max_telomere))
+            for chromosome in genome.chromosomes:
+                if int(chromosome.telomere) > 1:
+                    chromosome.telomere = min(
+                        int(chromosome.telomere), ceiling)
+            mutate_constructive(
+                genome, mean_mutations, enabled, growth_seeds, focus_families)
         if chromosome_count is not None:
             while len(genome.chromosomes) < chromosome_count:
-                genome.chromosomes.append(Chromosome(
-                    genes=[], split=0, tag=random.randint(0, 999), telomere=1))
+                # Both encodings read the telomere now - as a lifespan in
+                # developmental rounds for typed, as a growth radius for
+                # constructive - so a new container must be born at the run's
+                # ceiling rather than at a hardcoded 1.
+                genome.chromosomes.append(
+                    new_typed_chromosome(max_telomere) if is_typed(genome)
+                    else Chromosome(
+                        genes=[], split=0, tag=random.randint(0, 999),
+                        telomere=max(2, int(max_telomere))))
             if len(genome.chromosomes) > chromosome_count:
                 # Preserve placements by moving removed containers into the
                 # last retained chromosome when capacity permits.
@@ -738,6 +788,11 @@ def crossover_functional(parent_a, parent_b, families=DEFAULT_FAMILIES):
     """Chromosome/gene recombination followed by mutation in the breeder."""
     if is_constructive(parent_a) or is_constructive(parent_b):
         if not (is_constructive(parent_a) and is_constructive(parent_b)):
+            return clone_genome(parent_a)
+        if is_typed(parent_a) and is_typed(parent_b):
+            from .construction_ga import crossover_typed
+            return crossover_typed(parent_a, parent_b, families)
+        if is_typed(parent_a) or is_typed(parent_b):
             return clone_genome(parent_a)
         from .construction_ga import crossover_constructive
         return crossover_constructive(parent_a, parent_b, families)

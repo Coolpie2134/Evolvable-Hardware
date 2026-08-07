@@ -13,9 +13,25 @@ from substrates.nervous.hexgrid import hex_dirs
 
 from .catalogue import BY_ID, COMPONENTS, DIRECTIONS, normalise_families
 from .genome import (
-    BranchRef, MAX_GENES, MAX_PLACEMENTS, PlacementGene, input_node_id,
-    input_seed_grid,
+    BranchRef, MAX_GENES, MAX_PLACEMENTS, PlacementGene, germline_telomere,
+    input_node_id, input_seed_grid, is_typed,
 )
+
+
+def growth_radius(genome):
+    """How many divisions from a source pad this organism may extend.
+
+    The run's Max telomere control is documented as the organism's growth
+    RADIUS, and on this substrate a placement always sits adjacent to the port
+    that drives it, so dependency depth IS lattice radius.
+
+    A germline telomere of 1 means UNBOUNDED. Every constructive genome written
+    before the radius was honoured carries exactly that value, so this keeps
+    those checkpoints developing as they always did; the GUI cannot produce it,
+    because it requires Max telomere >= 2.
+    """
+    radius = germline_telomere(genome)
+    return None if radius <= 1 else radius
 
 
 @dataclass(frozen=True)
@@ -68,6 +84,179 @@ def _placement_target(gene, coordinates, gene_by_id):
     return targets[0]
 
 
+def branch_growth_order(chromosome):
+    """The two arms, each read outward from the centromere.
+
+    ``split`` is a CENTROMERE: a fixed index with one arm on either side. The
+    rule adjacent to it is that arm's SPAWN, and rules further out are the
+    context rules. Either arm may be empty.
+    """
+    rules = [gene for gene in chromosome.genes
+             if isinstance(gene, PlacementGene)]
+    cut = max(0, min(int(chromosome.split), len(rules)))
+    return (tuple(reversed(rules[:cut])), tuple(rules[cut:]))
+
+
+def arm_telomere(chromosome, arm):
+    """One arm's lifespan, counted in placements its own rules make."""
+    value = (chromosome.telomere_top if int(arm) == 0
+             else chromosome.telomere_bottom)
+    return max(0, int(value))
+
+
+def _spawn_site(gene, entry, pad_cells, occupied):
+    """Where a branch starts: the cell one step out of a pad.
+
+    The spawn names an input pad and a direction. Every direction here is its
+    own reverse, so that direction is also the pin of the new cell facing back
+    at the pad - which is why a spawn is a single-input component.
+    """
+    refs = tuple(gene.inputs)
+    if entry is None or entry.id == 0 or len(refs) != 1:
+        return None
+    if tuple(entry.inputs) != (refs[0].direction,):
+        return None
+    source = pad_cells.get(int(refs[0].node_id))
+    if source is None:
+        return None
+    target = hex_dirs(*source).get(refs[0].direction)
+    if target is None or target in occupied:
+        return None
+    return ((target, (source,)),)
+
+
+def _rule_sites(gene, entry, by_type, occupied):
+    """Every empty cell whose neighbourhood satisfies one context rule.
+
+    For each input pin the rule names the grown node TYPE that must drive it; a
+    cell qualifies when every pin is fed that way at once. Pads are absent from
+    ``by_type``, so only grown nodes match: a context rule reaches an input
+    through what a spawn built from it, never directly.
+    """
+    refs = tuple(gene.inputs)
+    if entry is None or entry.id == 0 or len(refs) != len(entry.inputs):
+        return ()
+    per_pin = []
+    for pin, ref in zip(entry.inputs, refs):
+        wanted = int(ref.node_id)
+        source = BY_ID.get(wanted)
+        if wanted <= 0 or source is None or pin not in source.outputs:
+            return ()
+        found = {}
+        for cell in by_type.get(wanted, ()):
+            target = hex_dirs(*cell).get(pin)
+            if target is not None and target not in occupied:
+                found[target] = cell
+        if not found:
+            return ()
+        per_pin.append(found)
+    sites = set(per_pin[0])
+    for other in per_pin[1:]:
+        sites &= set(other)
+    return tuple((cell, tuple(pins[cell] for pins in per_pin))
+                 for cell in sorted(sites))
+
+
+def _develop_branched(genome, seeds, *, snapshots=False):
+    """Grow every living arm at once, one synchronous iteration at a time.
+
+    Each iteration every rule of every living arm is matched against the grid as
+    it stood at the START of that iteration, and every rule that fits is
+    followed - at EVERY cell it fits. Which arm a rule came from and where it
+    sits in the genome have no bearing on whether it applies; an arm decides
+    only where its branch starts and how long it lives.
+
+    A cell claimed by two rules proposing DIFFERENT components is left empty:
+    they disagree, so neither wins. Rules proposing the same component agree,
+    and it is placed once.
+
+    An arm's telomere is spent one per placement its own rules make, and is
+    checked at the start of an iteration, so a burst that carries it past zero
+    still stands in full; from the next iteration that arm is dead.
+    """
+    seeds = tuple(tuple(seed) for seed in seeds)
+    grid = dict(input_seed_grid(seeds))
+    pad_cells = {input_node_id(index): cell
+                 for index, cell in enumerate(seeds)}
+    pads = set(pad_cells.values())
+    coordinates = dict(pad_cells)
+    occupied = {cell: node for node, cell in pad_cells.items()}
+    depths = {node: 0 for node in coordinates}
+    active = set()
+    frames = [dict(grid)] if snapshots else []
+
+    arms = []
+    for chromosome in genome.chromosomes:
+        for index, members in enumerate(branch_growth_order(chromosome)):
+            arms.append({"rules": members, "spawned": False,
+                         "life": arm_telomere(chromosome, index)})
+
+    occurrence = 0
+    while len(occupied) - len(pads) < MAX_PLACEMENTS:
+        # One index of the frozen grid, shared by every rule this iteration.
+        by_type = {}
+        for cell in occupied:
+            if cell not in pads:
+                by_type.setdefault(int(grid.get(cell, 0)), []).append(cell)
+        proposals = {}
+        for position_arm, arm in enumerate(arms):
+            if arm["life"] <= 0 or not arm["rules"]:
+                continue
+            for position, gene in enumerate(arm["rules"]):
+                entry = BY_ID.get(int(gene.component_id))
+                if position == 0:
+                    if arm["spawned"]:
+                        continue
+                    sites = _spawn_site(gene, entry, pad_cells, occupied) or ()
+                else:
+                    sites = _rule_sites(gene, entry, by_type, occupied)
+                for cell, sources in sites:
+                    claim = proposals.setdefault(cell, {
+                        "component": int(gene.component_id),
+                        "sources": sources, "arms": set(), "genes": set(),
+                        "spawn": set(), "agreed": True})
+                    if claim["component"] != int(gene.component_id):
+                        claim["agreed"] = False
+                    claim["arms"].add(position_arm)
+                    claim["genes"].add(int(gene.gene_id))
+                    if position == 0:
+                        claim["spawn"].add(position_arm)
+
+        placed = {cell: claim for cell, claim in proposals.items()
+                  if claim["agreed"]}
+        if not placed:
+            break
+        spent = {}
+        for cell in sorted(placed):
+            claim = placed[cell]
+            node = ("g", min(claim["genes"]), occurrence)
+            occurrence += 1
+            grid[cell] = claim["component"]
+            occupied[cell] = node
+            coordinates[node] = cell
+            depths[node] = 1 + max(
+                (depths.get(occupied.get(source), 0)
+                 for source in claim["sources"]), default=0)
+            active.update(claim["genes"])
+            for owner in claim["arms"]:
+                spent[owner] = spent.get(owner, 0) + 1
+            for owner in claim["spawn"]:
+                arms[owner]["spawned"] = True
+        for position_arm, arm in enumerate(arms):
+            # May go negative: every placement of the iteration stands, and the
+            # arm is simply dead from here.
+            arm["life"] -= spent.get(position_arm, 0)
+        if snapshots:
+            frames.append(dict(grid))
+
+    every = {int(gene.gene_id) for arm in arms for gene in arm["rules"]}
+    if snapshots and (not frames or frames[-1] != grid):
+        frames.append(dict(grid))
+    return ConstructionTrace(
+        grid, coordinates, frozenset(active), frozenset(every - active),
+        depths, tuple(frames))
+
+
 def develop_constructive(genome, seeds, *, snapshots=False):
     """Resolve placements by dependency, with strictly local collision loss.
 
@@ -75,7 +264,12 @@ def develop_constructive(genome, seeds, *, snapshots=False):
     placement; an earlier occupant remains and unrelated branches continue.
     Descendants of a suppressed/unresolved gene stay dormant because their
     explicitly named source port never comes into existence.
+
+    A branched genome resolves its references RELATIVE to its own branch and
+    grows outward from a spawn point; see :func:`_develop_branched`.
     """
+    if is_typed(genome):
+        return _develop_branched(genome, seeds, snapshots=snapshots)
     seeds = tuple(tuple(seed) for seed in seeds)
     seed_states = input_seed_grid(seeds)
     grid = dict(seed_states)
@@ -84,6 +278,7 @@ def develop_constructive(genome, seeds, *, snapshots=False):
     depths = {input_node_id(index): 0 for index in range(len(seeds))}
     occupied = {cell: input_node_id(index)
                 for index, cell in enumerate(seeds)}
+    radius = growth_radius(genome)
     ordered = sorted(_genes(genome), key=lambda gene: int(gene.gene_id))
     gene_by_id = {}
     duplicate_ids = set()
@@ -113,11 +308,18 @@ def develop_constructive(genome, seeds, *, snapshots=False):
             if target is None or target in occupied:
                 failed.add(gene_id)
                 continue
+            depth = 1 + max(depths[int(ref.node_id)] for ref in gene.inputs)
+            if radius is not None and depth > radius:
+                # The lineage has divided as often as its germline allows. The
+                # gene stays dormant exactly like one whose source never came
+                # into existence, so the bound is developmental, not a clip
+                # applied to a finished body.
+                failed.add(gene_id)
+                continue
             grid[target] = int(gene.component_id)
             occupied[target] = gene_id
             coordinates[gene_id] = target
-            depths[gene_id] = 1 + max(
-                depths[int(ref.node_id)] for ref in gene.inputs)
+            depths[gene_id] = depth
             active.add(gene_id)
             changed = True
         if snapshots and changed:

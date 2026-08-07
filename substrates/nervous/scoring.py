@@ -970,7 +970,11 @@ def _combinational_windows(trial):
         return [
             (float(window[0]), float(window[1]))
             for window in declared]
-    onsets = [tick for tick, row in enumerate(trial.streams) if any(row)]
+    # A row's onset is a RISING edge, not merely an active tick: rows are
+    # presented as held levels (see targets.periodic_combinational_target), so
+    # every tick of the hold is active and only the first one starts a case.
+    onsets = [tick for tick, row in enumerate(trial.streams)
+              if any(row) and not (tick and any(trial.streams[tick - 1]))]
     if not onsets:
         return []
     spans = [b - a for a, b in zip(onsets, onsets[1:])]
@@ -1084,6 +1088,157 @@ def _combinational_event_score(traces, target, shift):
     else:
         total = 0.0
     return total, tuple(cases)
+
+
+def _merged_spans(intervals):
+    """Sorted, non-overlapping copies of ``intervals`` (a wired-OR bus can hand
+    back overlapping spans, which would double-count coverage)."""
+    spans = sorted((float(a), float(b)) for a, b in intervals if b > a)
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _high_fraction(intervals, start, end):
+    """Fraction of [start, end) the output actually sits HIGH.
+
+    This is the level read: 1.0 means the output was asserted for the whole
+    settled window, 0.0 that it was never asserted, and a lone pulse inside an
+    otherwise quiet window lands at its own duty - which is the gradient a pulse
+    substrate needs to climb from 'twitches once' to 'holds the answer'.
+    """
+    span = float(end) - float(start)
+    if span <= 0:
+        return 0.0
+    covered = 0.0
+    for low, high in _merged_spans(intervals):
+        lo = low if low > start else start
+        hi = high if high < end else end
+        if hi > lo:
+            covered += hi - lo
+    return max(0.0, min(1.0, covered / span))
+
+
+def _combinational_read_windows(target, trial):
+    """(row_start, row_end, read_start, read_end) per scored row window.
+
+    The read window is the SETTLED TAIL of the interval the row's inputs are
+    held over: propagation across the body is forgiven (``combinational_settle``
+    at the front), and the recovery gap after the inputs are released is not
+    read at all, because the row is no longer applied there. That is exactly
+    where FNV reads its settled levels and where the native LUT scorer measures
+    its steady duty.
+    """
+    hold = float(getattr(target, 'combinational_hold', 0) or 0.0)
+    settle = float(getattr(target, 'combinational_settle', 0) or 0.0)
+    windows = []
+    for start, end in _combinational_windows(trial):
+        read_low, read_high = start + settle, start + hold
+        if not hold or read_high <= read_low or read_high > end:
+            # A target that never declared a hold (a pre-level checkpoint)
+            # still gets a defined read: the whole row window.
+            read_low, read_high = start, end
+        windows.append((start, end, read_low, read_high))
+    return windows
+
+
+def _combinational_level_score(traces, target):
+    """Score the periodic combinational encoding as HELD LEVELS.
+
+    A combinational function is a function of an applied level: while the row is
+    held, the output must SIT at the required value, not merely twitch once
+    inside the window. FNV has always been scored this way (settled level at the
+    horizon, `_run_logic_case`), and so is the LUT array's native path (steady
+    duty over the held window); this is the same contract for the periodic
+    wrapper the asynchronous backends evolve against.
+
+    Correctness per row is the settled window's duty for a row that must assert
+    and its complement for a row that must stay quiet, so a half-held answer
+    scores a half - selection gets a smooth path from 'pulses once' to 'holds'
+    instead of a pass/fail cliff.
+
+    Aggregation is unchanged: expected-1 and expected-0 rows are balanced per
+    output (an indiscriminate output still caps at 0.5) and the outputs combine
+    mean-and-worst, so one easy output cannot carry a hard one. Returns
+    ``(score, cases)`` with one case per ``(trial, role, row)`` for lexicase.
+    """
+    roles = [terminal.role for terminal in target.outputs]
+    per_output = {role: {0: [], 1: []} for role in roles}
+    cases = []
+    for trial_index, trial in enumerate(target.trials):
+        windows = _combinational_read_windows(target, trial)
+        for role in trial.expected:
+            observed = _role_intervals(traces, role, trial_index)
+            if not observed:
+                # A backend that reported only leading edges still gets a level
+                # read: credit each edge with the run's minimum assertion width
+                # rather than silently scoring every row zero.
+                observed = [(t, t + _assertion_width(target))
+                            for t in _role_events(traces, role, trial_index)]
+            expected = sorted(trial.expected_events.get(role, ()))
+            for start, end, read_low, read_high in windows:
+                wanted = (bisect_left(expected, end)
+                          - bisect_left(expected, start)) > 0
+                duty = _high_fraction(observed, read_low, read_high)
+                correctness = duty if wanted else 1.0 - duty
+                correctness = max(0.0, min(1.0, correctness))
+                if role in per_output:
+                    per_output[role][1 if wanted else 0].append(correctness)
+                cases.append(correctness)
+
+    output_scores = []
+    for role in roles:
+        groups = [sum(cells) / len(cells)
+                  for cells in per_output[role].values() if cells]
+        if groups:
+            output_scores.append(sum(groups) / len(groups))
+    if output_scores:
+        total = 0.5 * (sum(output_scores) / len(output_scores)
+                       + min(output_scores))
+    else:
+        total = 0.0
+    return total, tuple(cases)
+
+
+def _assertion_width(target):
+    """The narrowest assertion a backend can physically report as a level."""
+    config = getattr(target, 'pulse_config', None)
+    return float(getattr(config, 'width', 1.0) or 1.0)
+
+
+def combinational_level_traces(target, decide):
+    """Traces of a hypothetical readout that HOLDS a level on the rows it picks.
+
+    ``decide(role, input_bits) -> bool`` decides whether that readout asserts
+    for a truth-table row. The result is what a circuit with that behaviour and
+    ideal settling would physically look like under the level contract, which is
+    what ceiling/baseline probes (tools/probe_trivial_baselines.py) and the
+    contract's own tests need: constructing them as bare edges would understate
+    every one of them, since an edge is no longer a full answer.
+    """
+    roles = [terminal.role for terminal in target.outputs]
+    events = {role: [] for role in roles}
+    intervals = {role: [] for role in roles}
+    for trial in target.trials:
+        windows = _combinational_read_windows(target, trial)
+        declared = list(getattr(trial, 'case_windows', ()) or ())
+        for role in roles:
+            spans = []
+            for index, (_start, _end, low, high) in enumerate(windows):
+                bits = (tuple(int(bit) for bit in declared[index][2])
+                        if index < len(declared) else ())
+                if decide(role, bits):
+                    spans.append((float(low), float(high)))
+            intervals[role].append(spans)
+            events[role].append([low for low, _high in spans])
+    return TemporalTraces(
+        {role: [[] for _ in target.trials] for role in roles},
+        events=events, intervals=intervals)
 
 
 def _best_combinational_shift(traces, target):
@@ -1726,6 +1881,11 @@ def _score_constraint(traces, target, relation, alignment):
             used = float(alignment)
             score, cases = cadence_score(traces, target, latency=used)
         return score, tuple(cases), used
+    if relation == 'combinational_level':
+        # No shift search: the read window already starts after a full settling
+        # allowance, so any propagation delay shorter than that is absorbed.
+        score, cases = _combinational_level_score(traces, target)
+        return score, cases, 0.0
     if relation == 'event_correspondence':
         # A periodic combinational wrapper carries its truth table, and its rows
         # are level-balanced rather than pooled (see _combinational_event_score).
@@ -2199,13 +2359,19 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
             total, '   SOLVED' if total >= 0.999 else '')]
         return total, lines
 
-    if ('event_correspondence' in relations
-            and getattr(ttarget, 'combinational_cases', ())):
+    if ('combinational_level' in relations
+            or ('event_correspondence' in relations
+                and getattr(ttarget, 'combinational_cases', ()))):
+        level = 'combinational_level' in relations
         lines += [
             '',
-            'Backend detail: each explicitly scheduled truth-table row owns one '
-            'isolated event window; only assertion or silence in that window '
-            'is scored.',
+            ('Backend detail: each truth-table row is HELD as a level, and the '
+             'settled tail of that hold is read - the output must sit at its '
+             'required value there, not merely edge into the window.'
+             if level else
+             'Backend detail: each explicitly scheduled truth-table row owns one '
+             'isolated event window; only assertion or silence in that window '
+             'is scored.'),
         ]
         if traces is not None:
             out_lines()
@@ -2213,8 +2379,8 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
             lines.append('')
             lines.append('Schedule %d:' % (ti + 1))
             declared = getattr(trial, 'case_windows', None) or ()
-            for window_index, (start, end) in enumerate(
-                    _combinational_windows(trial)):
+            for window_index, (start, end, read_low, read_high) in enumerate(
+                    _combinational_read_windows(ttarget, trial)):
                 if (window_index < len(declared)
                         and len(declared[window_index]) >= 3):
                     bits = tuple(
@@ -2232,6 +2398,18 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
                     if traces is None:
                         parts.append('%s want=%d' % (role, wanted))
                         continue
+                    if level:
+                        observed = _role_intervals(traces, role, ti)
+                        if not observed:
+                            observed = [(t, t + _assertion_width(ttarget))
+                                        for t in _role_events(traces, role, ti)]
+                        duty = _high_fraction(observed, read_low, read_high)
+                        correctness = duty if wanted else 1.0 - duty
+                        parts.append(
+                            '%s want=%d held=%.0f%% score=%.3f'
+                            % (role, wanted, 100.0 * duty,
+                               max(0.0, min(1.0, correctness))))
+                        continue
                     observed = list(_role_events(traces, role, ti))
                     fired = sum(1 for tick in observed if start <= tick < end)
                     confidence = _combinational_case_confidence(
@@ -2243,16 +2421,19 @@ def score_report_lines(ttarget, traces, out_pos, notes=None):
                         '%s want=%d fired=%d score=%.3f'
                         % (role, wanted, fired, correctness))
                 lines.append(
-                    '  row %s [%g,%g): %s'
-                    % (row_label, start, end, '; '.join(parts)))
+                    '  row %s applied [%g,%g), read [%g,%g): %s'
+                    % (row_label, start, end, read_low, read_high,
+                       '; '.join(parts)))
         total = None
         if traces is not None:
             total, cases, _ = score_contract(traces, ttarget)
             lines += [
                 '',
                 'row/output cases: %d' % len(cases),
-                '=> Contract score %.4f%s  [windowed truth table]'
-                % (total, '   SOLVED' if total >= 0.999 else ''),
+                '=> Contract score %.4f%s  [%s]'
+                % (total, '   SOLVED' if total >= 0.999 else '',
+                   'held truth-table levels' if level
+                   else 'windowed truth table'),
             ]
         return total, lines
 

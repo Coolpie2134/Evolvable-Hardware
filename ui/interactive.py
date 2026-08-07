@@ -41,7 +41,8 @@ from substrates.nervous import prepare_net
 from substrates.nervous.viz import draw_hex_net
 from substrates.nervous.contracts import behavior_contract_badge
 from substrates.nervous.playback import (NervousPlayer, PulseLaneEditor, pulses_from_trial,
-                             pulses_from_case, charge_levels)
+                             pulses_from_case, pulses_from_combinational_row,
+                             combinational_rows, charge_levels)
 from substrates.lut import (
     prepare_lut, lut_case_outputs, lut_input_positions,
     lut_exterior_inputs, lut_io_mode)
@@ -204,10 +205,14 @@ class InteractiveTab:
         self._case_cb = None
         # Temporal targets enumerate stored trials; combinational targets have no
         # trials, only a truth table (`cases`) presented as fitness-matched input
-        # pulses. Either way the dropdown loads exactly what fitness scored.
+        # pulses; a periodic combinational wrapper has both, and its scored unit
+        # is the row inside each window rather than the trial (see
+        # _case_entries). Either way the dropdown loads exactly what fitness
+        # scored.
         self._case_kind = ('trials' if getattr(target, 'trials', None)
                            else 'cases' if getattr(target, 'cases', None)
                            else None)
+        self._case_index = self._default_case_index(target)
         if backend in ('nervous', 'fnv', 'lut') or self._temporal_snn:
             # every stored test case is loadable, not just trial 0: pick one
             # from the dropdown to see exactly what fitness scored, then edit
@@ -219,7 +224,7 @@ class InteractiveTab:
                 self._case_cb = ttk.Combobox(
                     self._inbar, textvariable=self._case_var, state='readonly',
                     width=34, values=self._case_labels(target))
-                self._case_cb.current(0)
+                self._case_cb.current(self._case_index)
                 self._case_cb.pack(side='left', padx=(0, 6))
                 self._case_cb.bind('<<ComboboxSelected>>',
                                    self._on_case_selected)
@@ -392,6 +397,9 @@ class InteractiveTab:
             chr(65 + i) if i < 26 else 'i%d' % i
             for i in range(len(self._in_pos))]
         self._snn_horizon = float(max(1, getattr(target, 'T', 20) or 20))
+        # SNN never receives a periodic combinational wrapper (those declare
+        # nervous/lut), so every entry keeps this one horizon.
+        self._base_horizon = self._snn_horizon
         self.fig.clf()
         gs = self.fig.add_gridspec(
             3, 2, height_ratios=[0.55, 0.65, 0.65],
@@ -404,7 +412,8 @@ class InteractiveTab:
             self._ax_lanes, self.canvas, labels,
             horizon=self._snn_horizon, snap=0.5,
             on_change=self._snn_schedule_changed, default_width=1.0)
-        self._editor.set_pulses(self._case_pulses(target, 0))
+        self._editor.set_pulses(
+            self._case_pulses(target, getattr(self, '_case_index', 0)))
 
     # -- nervous + FNV + LUT: continuous-time playback -----------------------------
 
@@ -427,6 +436,14 @@ class InteractiveTab:
             schedule = _combinational_schedule(target)
             horizon = max(horizon,
                           max(d + max(ws) for d, ws in schedule) + 4.0)
+        # A single scored combinational case is one isolated window, not the
+        # whole multi-row schedule; open on that window and keep the full
+        # horizon for the schedule entries (see _case_entries).
+        self._base_horizon = horizon
+        opening = getattr(self, '_case_index', 0)
+        first = self._case_horizon(target, opening)
+        if first is not None:
+            horizon = first
         pulse_config = getattr(target, 'pulse_config', None)
         default_width = (
             1.0 if self._backend == 'fnv'
@@ -443,7 +460,8 @@ class InteractiveTab:
                                        horizon=horizon, snap=0.5,
                                        on_change=self._nv_schedule_changed,
                                        default_width=default_width)
-        self._editor.set_pulses(self._case_pulses(target, 0))
+        self._editor.set_pulses(
+            self._case_pulses(target, getattr(self, '_case_index', 0)))
         if self._backend == 'nervous':
             config = pulse_config
             # Resolved once with the scorer-prepared input pads and probes.
@@ -482,45 +500,124 @@ class InteractiveTab:
         return ('trials' if getattr(target, 'trials', None)
                 else 'cases' if getattr(target, 'cases', None) else None)
 
-    def _case_pulses(self, target, index):
-        """The input pulse lanes for case/trial ``index``, matching what fitness
-        scores for this backend (temporal trial vs combinational truth table)."""
-        n_inputs = len(self._in_pos)
+    def _case_entries(self, target):
+        """The dropdown's rows: the cases fitness scores, in the unit it scores.
+
+        For most targets that unit is already what the target stores - one
+        temporal trial, or one row of a static truth table. A PERIODIC
+        COMBINATIONAL wrapper is the exception: it is carried as a few long
+        trials, but fitness grades the truth-table row inside each isolated case
+        window (substrates.nervous.playback.combinational_rows), so the rows are
+        listed first, each loadable on its own, and the complete trial schedules
+        follow for watching row order and re-arming.
+
+        Each entry is ``(kind, index, horizon, label)``; ``horizon`` of None
+        means "keep the timeline the target set up with".
+        """
+        n_inputs = len(target.inputs)
+        rows = (combinational_rows(target)
+                if self._case_kind_for(target) == 'trials' else [])
+        entries = []
+        for index, (in_bits, out_bits, _raw, lead, span) in enumerate(rows):
+            entries.append((
+                'row', index, lead + span,
+                'Case %d/%d: in=%s -> %s'
+                % (index + 1, len(rows),
+                   ''.join(map(str, in_bits)), ''.join(map(str, out_bits)))))
         if self._case_kind_for(target) == 'cases':
+            for index, (in_bits, out_bits) in enumerate(target.cases):
+                entries.append((
+                    'case', index, None,
+                    'Case %d/%d: in=%s -> %s'
+                    % (index + 1, len(target.cases),
+                       ''.join(map(str, in_bits)),
+                       ''.join(map(str, out_bits)))))
+            return entries
+        count = len(getattr(target, 'trials', ()) or ())
+        for index in range(count):
+            if rows:
+                # The rows above already name what each presentation is; a
+                # wrapper trial replays all of them, so listing its dozens of
+                # onsets here would be unreadable.
+                presentations = len(
+                    getattr(target.trials[index], 'case_windows', ()) or ())
+                label = ('Full schedule %d/%d: all %d presentations'
+                         % (index + 1, count, presentations))
+            else:
+                lanes = pulses_from_trial(target, n_inputs, index)
+                parts = []
+                for lane, events in enumerate(lanes):
+                    if not events:
+                        continue
+                    name = chr(65 + lane) if lane < 26 else 'i%d' % lane
+                    times = ', '.join('%g' % round(start, 2)
+                                      for start, _ in events)
+                    parts.append('%s[%s]' % (name, times))
+                label = ('Case %d/%d: %s'
+                         % (index + 1, count,
+                            '  '.join(parts) if parts else 'silent'))
+            entries.append(('trial', index, None, label))
+        return entries
+
+    def _default_case_index(self, target):
+        """Which dropdown row to open on.
+
+        The first one, except for the periodic combinational rows: a truth
+        table's all-zero row is genuinely presented as silence (that IS what
+        fitness applies), and opening a fresh tab on an empty timeline reads as
+        a broken circuit. Open on the first row that actually drives something -
+        the same 'activity first' rule the wrapper uses to order its schedules."""
+        for index, (kind, _sub, _horizon, _label) in enumerate(
+                self._case_entries(target)):
+            if kind != 'row':
+                break
+            if any(self._case_pulses(target, index, len(target.inputs))):
+                return index
+        return 0
+
+    def _case_pulses(self, target, index, n_inputs=None):
+        """The input pulse lanes for dropdown row ``index``, matching what
+        fitness applies for this backend (a scored combinational row, a temporal
+        trial, or a static truth-table case)."""
+        n_inputs = len(self._in_pos) if n_inputs is None else int(n_inputs)
+        entries = self._case_entries(target)
+        kind, sub_index, _horizon, _label = (
+            entries[index] if 0 <= index < len(entries)
+            else (self._case_kind_for(target) or 'trial', index, None, ''))
+        if kind == 'row':
+            return pulses_from_combinational_row(target, n_inputs, sub_index)
+        if kind in ('case', 'cases'):
             if getattr(self, '_backend', None) == 'fnv':
                 return functional_case_pulses(
-                    target, n_inputs, self._fnv_horizon, index)
-            return pulses_from_case(target, n_inputs, index,
+                    target, n_inputs, self._fnv_horizon, sub_index)
+            return pulses_from_case(target, n_inputs, sub_index,
                                     getattr(self, '_backend', 'lut'))
-        return pulses_from_trial(target, n_inputs, index)
+        return pulses_from_trial(target, n_inputs, sub_index)
 
     def _case_labels(self, target):
-        """One dropdown row per stored test case: 'Case k/N: ...'."""
-        n_inputs = len(target.inputs)
-        if self._case_kind_for(target) == 'cases':
-            labels = []
-            for index, (in_bits, out_bits) in enumerate(target.cases):
-                labels.append('Case %d/%d: in=%s -> %s'
-                              % (index + 1, len(target.cases),
-                                 ''.join(map(str, in_bits)),
-                                 ''.join(map(str, out_bits))))
-            return labels
-        count = len(target.trials)
-        labels = []
-        for index in range(count):
-            lanes = pulses_from_trial(target, n_inputs, index)
-            parts = []
-            for lane, events in enumerate(lanes):
-                if not events:
-                    continue
-                name = chr(65 + lane) if lane < 26 else 'i%d' % lane
-                times = ', '.join('%g' % round(start, 2)
-                                  for start, _ in events)
-                parts.append('%s[%s]' % (name, times))
-            labels.append('Case %d/%d: %s'
-                          % (index + 1, count,
-                             '  '.join(parts) if parts else 'silent'))
-        return labels
+        """One dropdown row per selectable test case."""
+        return [label for _kind, _index, _horizon, label
+                in self._case_entries(target)]
+
+    def _case_horizon(self, target, index):
+        """Timeline window for dropdown row ``index``: a single scored
+        combinational window zooms to that window, everything else keeps the
+        target's own horizon."""
+        entries = self._case_entries(target)
+        horizon = (entries[index][2] if 0 <= index < len(entries) else None)
+        if horizon is None:
+            horizon = getattr(self, '_base_horizon', None)
+        return None if horizon is None else float(horizon)
+
+    def _apply_case_horizon(self, horizon):
+        """Retime the timeline and playback window together (the trace strips
+        read the player's horizon), so a zoomed case stays consistent."""
+        if horizon is None:
+            return
+        if getattr(self, '_editor', None) is not None:
+            self._editor.horizon = float(horizon)
+        if getattr(self, '_player', None) is not None:
+            self._player.horizon = float(horizon)
 
     def _on_case_selected(self, _evt=None):
         if not self._circuit or getattr(self, '_editor', None) is None:
@@ -530,8 +627,10 @@ class InteractiveTab:
             return
         self._loading_case = True
         try:
+            target = self._circuit['target']
+            self._apply_case_horizon(self._case_horizon(target, index))
             self._editor.set_pulses(
-                self._case_pulses(self._circuit['target'], index))
+                self._case_pulses(target, index))
             if getattr(self, '_temporal_snn', False):
                 self._snn_schedule_changed()
             else:

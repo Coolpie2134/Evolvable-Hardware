@@ -43,7 +43,7 @@ USAGE
     py tools/benchmark.py --architectures nervous --targets temporal --seeds 3
     py tools/benchmark.py --architectures paper --targets "Half adder,Full adder"
     py tools/benchmark.py --report-only --out results/benchmark.json
-    py tools/benchmark.py --architectures nervous,lut --gens 40 --pop 60 \
+    py tools/benchmark.py --architectures nervous,lut --gens 40 --pop 60 
         --crowding --neutral-drift
 """
 from __future__ import annotations

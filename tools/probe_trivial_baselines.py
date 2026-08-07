@@ -36,7 +36,8 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 from substrates.snn.targets import TARGETS                          # noqa: E402
 from substrates.nervous.targets import periodic_combinational_target     # noqa: E402
-from substrates.nervous.scoring import score_contract, _combinational_windows  # noqa: E402
+from substrates.nervous.scoring import (score_contract,                   # noqa: E402
+                            combinational_level_traces, _combinational_windows)
 
 
 class SyntheticTraces(dict):
@@ -45,6 +46,12 @@ class SyntheticTraces(dict):
     Bypassing the substrate is the point. These behaviours are reference
     YARDSTICKS, not evolved circuits, so they must not be able to fail for
     substrate reasons (bad I/O placement, a net that never settles).
+
+    Kept for the event-scored targets; a periodic combinational target is judged
+    as a HELD LEVEL now, so its baselines are built by
+    ``scoring.combinational_level_traces`` instead - an idealised readout that
+    holds each row it picks. Emitting bare edges there would understate every
+    baseline and make an undiscriminating target look safe.
     """
 
     def __init__(self, events):
@@ -74,21 +81,9 @@ def _windows_with_inputs(trial, data_inputs=None):
     return out
 
 
-def _emit(target, decide, latency=1.0):
-    """Traces for a readout that fires once per window where ``decide`` is true."""
-    data_inputs = getattr(target, 'combinational_data_inputs', None)
-    events = {}
-    for terminal in target.outputs:
-        role = terminal.role
-        per_trial = []
-        for trial in target.trials:
-            times = [start + latency
-                     for start, _end, bits in _windows_with_inputs(
-                         trial, data_inputs)
-                     if decide(role, bits)]
-            per_trial.append(times)
-        events[role] = per_trial
-    return SyntheticTraces(events)
+def _emit(target, decide):
+    """Traces for an ideal readout that HOLDS its answer on the rows it picks."""
+    return combinational_level_traces(target, decide)
 
 
 def _score(target, decide):

@@ -49,6 +49,11 @@ def genome_to_dict(genome, backend):
     fields = (() if constructive_fnv else _FIELDS[backend])
     def split_for(chromosome):
         count = len(chromosome.genes)
+        if constructive_fnv:
+            # The branched centromere may sit at either end: an arm is allowed
+            # to be empty, and clamping it inward would silently move rules into
+            # the other branch and change what they mean.
+            return max(0, min(int(chromosome.split), count))
         return (0 if count < 2 else
                 max(1, min(int(chromosome.split), count - 1)))
     sd = getattr(genome, 'state_delays', None)     # nervous width-preserving model
@@ -66,6 +71,9 @@ def genome_to_dict(genome, backend):
                 'tag': int(c.tag),
                 'split': split_for(c),
                 'telomere': int(getattr(c, 'telomere', 1)),
+                # Branched encoding: one lifespan per arm.
+                'telomere_top': int(getattr(c, 'telomere_top', 0)),
+                'telomere_bottom': int(getattr(c, 'telomere_bottom', 0)),
                 'wiring': False,
                 'genes': [
                     {
@@ -129,18 +137,28 @@ def genome_to_dict(genome, backend):
 
 
 def genome_from_dict(data, backend):
-    if backend == 'fnv' and data.get('encoding') == 'constructive_v3':
+    if backend == 'fnv' and data.get('encoding') in (
+            'constructive_v3', 'typed_v4'):
         from substrates.fnv.catalogue import verify_catalogue_hash
         from substrates.fnv.genome import (
-            CONSTRUCTIVE_ENCODING, DEVELOPMENT_VERSION, BranchRef,
+            CONSTRUCTIVE_ENCODING, DEVELOPMENT_VERSION,
+            TYPED_DEVELOPMENT_VERSION, TYPED_ENCODING, BranchRef,
             Chromosome, Genome, PlacementGene,
         )
+        # Both encodings store the identical gene record; they differ only in
+        # how a reference resolves, which is exactly what the version stamp
+        # distinguishes. The typed growth budget rides along as the ordinary
+        # per-chromosome telomere, so nothing else has to be persisted.
+        typed = data.get('encoding') == TYPED_ENCODING
+        encoding = TYPED_ENCODING if typed else CONSTRUCTIVE_ENCODING
+        expected = (TYPED_DEVELOPMENT_VERSION if typed
+                    else DEVELOPMENT_VERSION)
         verify_catalogue_hash(data.get('catalogue_hash'))
-        if int(data.get('development_version', -1)) != DEVELOPMENT_VERSION:
+        if int(data.get('development_version', -1)) != expected:
             raise ValueError(
                 "FNV checkpoint development version mismatch: expected %d, "
                 "found %r" % (
-                    DEVELOPMENT_VERSION, data.get('development_version')))
+                    expected, data.get('development_version')))
         chromosomes = []
         for item in data.get('chromosomes', ()):
             genes = [PlacementGene(
@@ -150,11 +168,12 @@ def genome_from_dict(data, backend):
                              for ref in row.get('inputs', ())),
                 branch_id=int(row.get('branch', row['id'])),
             ) for row in item.get('genes', ())]
-            split = (0 if len(genes) < 2 else max(
-                1, min(int(item.get('split', 0)), len(genes) - 1)))
+            split = max(0, min(int(item.get('split', 0)), len(genes)))
             chromosomes.append(Chromosome(
                 genes=genes, split=split, tag=int(item.get('tag', 0)),
-                telomere=int(item.get('telomere', 1))))
+                telomere=int(item.get('telomere', 1)),
+                telomere_top=int(item.get('telomere_top', 0)),
+                telomere_bottom=int(item.get('telomere_bottom', 0))))
         layout = data.get('input_layout')
         max_id = max((gene.gene_id for chromosome in chromosomes
                       for gene in chromosome.genes), default=0)
@@ -164,7 +183,7 @@ def genome_from_dict(data, backend):
             input_layout=(
                 tuple((int(cell[0]), int(cell[1])) for cell in layout)
                 if layout is not None else None),
-            encoding=CONSTRUCTIVE_ENCODING,
+            encoding=encoding,
             next_gene_id=max(
                 max_id + 1, int(data.get('next_gene_id') or 1)),
         )

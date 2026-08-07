@@ -10,6 +10,14 @@ from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
+# FNV bodies are chains of individually named placements rather than a radially
+# dividing sheet, so they run far deeper than a nervous net at the same setting:
+# measured median depth 15-22 with a tail past 50. Inheriting the nervous
+# default of 20 clipped real structure - the Full adder still solved but took
+# generation 229 instead of 32. This equals the placement cap, so no body can
+# reach it and the default run is unchanged; lowering the control then bounds
+# growth for real.
+DEFAULT_FNV_MAX_TELOMERE = 128
 MAX_EVALUATION_WORKERS = 16
 # Physical cores are usually the useful ceiling for these CPU-heavy event
 # simulations. There is no portable stdlib physical-core count, so default to
@@ -98,8 +106,12 @@ def nv_run_config(**ga):
 
 def default_max_telomere(backend):
     """Backend-specific growth ceiling used by fresh GUI runs."""
-    return (DEFAULT_LUT_MAX_TELOMERE
-            if str(backend).lower() == 'lut' else DEFAULT_MAX_TELOMERE)
+    name = str(backend).lower()
+    if name == 'lut':
+        return DEFAULT_LUT_MAX_TELOMERE
+    if name == 'fnv':
+        return DEFAULT_FNV_MAX_TELOMERE
+    return DEFAULT_MAX_TELOMERE
 
 
 @dataclass(frozen=True)

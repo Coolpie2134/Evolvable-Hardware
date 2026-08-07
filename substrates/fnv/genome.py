@@ -23,8 +23,25 @@ MAX_CHROMS = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 20
 LEGACY_DEVELOPMENT_VERSION = 2
 DEVELOPMENT_VERSION = 3
+TYPED_DEVELOPMENT_VERSION = 5
 ASSOCIATIVE_ENCODING = "associative_v2"
 CONSTRUCTIVE_ENCODING = "constructive_v3"
+#: Generative variant of the constructive genome. A gene names the COMPONENT
+#: TYPE its inputs must come from instead of one specific earlier gene, so a
+#: single gene builds wherever its pattern occurs rather than exactly once.
+#: That reuse is what makes growth open-ended, so growth needs a bound -
+#: without one, "attach a delay to every AND" would place a delay on each AND
+#: it just created, forever. The bound is the CHROMOSOME's telomere, exactly as
+#: in the associative encoding: a chromosome is one growth program and its
+#: telomere is how many developmental rounds that program stays alive for.
+#: Rules do not each carry their own budget; a chromosome is what lives and
+#: dies, so a block of co-operating rules shares one lifespan.
+#:
+#: Input pads stay addressed individually (negative ids). Collapsing them into
+#: one "pad" type would make logical input A indistinguishable from B, and a
+#: circuit that cannot tell its inputs apart cannot compute an asymmetric
+#: function like a full adder.
+TYPED_ENCODING = "typed_v4"
 SEED_STATE = BY_NAME["DELAY1_D_TO_LR"].id
 # Fixed source-interface identities break an otherwise artificial symmetry
 # between logical input roles during development. FunctionalSim treats every
@@ -114,13 +131,23 @@ class BranchRef:
 
 @dataclass
 class PlacementGene:
-    """One dependency-addressed fixed component placement.
+    """One fixed component placement, or one rule that makes them.
 
-    The first input does not act as an implicit developmental cursor: every
-    input explicitly names the output port that must face this component.
-    Output branch labels are the stable pairs ``(gene_id, direction)``.
-    ``branch_id`` groups a connected unary/fan-out branch for block mutation
-    and crossover; a binary join starts a new block.
+    Under constructive_v3 every input explicitly names the output port that must
+    face this component, and the gene places exactly once.
+
+    Under the branched encoding a gene means one of two things, decided purely
+    by WHERE it sits in its arm:
+
+    * the rule at the centromere end is its branch's SPAWN. Its single input
+      names an input pad and the direction out of that pad, which is where the
+      branch starts, and it places its component in that cell.
+    * every other rule is a CONTEXT rule. Each input names the grown node TYPE
+      that must drive that pin, so the rule fires in every empty cell whose
+      neighbourhood matches - wherever that is, and whichever branch built it.
+
+    ``branch_id`` records which arm a gene currently sits in. It is derived from
+    position, not hereditary.
     """
 
     gene_id: int
@@ -135,6 +162,12 @@ class Chromosome:
     split: int = 0
     tag: int = 0
     telomere: int = 3
+    #: Branched encoding only: one lifespan per arm, counted in PLACEMENTS its
+    #: rules make. A chromosome has two arms and therefore two branches, each
+    #: living and dying on its own. ``telomere`` above stays what it always was
+    #: - the constructive growth radius - and neither field reads the other.
+    telomere_top: int = 0
+    telomere_bottom: int = 0
 
 
 @dataclass
@@ -151,9 +184,20 @@ class Genome:
     next_gene_id: int = 1
 
 
+def is_typed(genome: Genome) -> bool:
+    """True for the generative variant whose refs name component types."""
+    return getattr(genome, "encoding", ASSOCIATIVE_ENCODING) == TYPED_ENCODING
+
+
 def is_constructive(genome: Genome) -> bool:
-    return getattr(genome, "encoding", ASSOCIATIVE_ENCODING) == \
-        CONSTRUCTIVE_ENCODING
+    """True for both placement-gene encodings.
+
+    The typed variant shares the gene structure, mutation set and crossover of
+    constructive_v3 and differs only in how a reference RESOLVES, so every
+    caller that asks "is this a placement genome?" must accept it too.
+    """
+    return getattr(genome, "encoding", ASSOCIATIVE_ENCODING) in (
+        CONSTRUCTIVE_ENCODING, TYPED_ENCODING)
 
 
 def input_node_id(index: int) -> int:
@@ -162,6 +206,11 @@ def input_node_id(index: int) -> int:
 
 
 def genome_development_version(genome: Genome) -> int:
+    # Typed development interprets the same gene fields by a different rule, so
+    # it is its own version: a checkpoint written by one must not silently load
+    # under the other.
+    if is_typed(genome):
+        return TYPED_DEVELOPMENT_VERSION
     return (DEVELOPMENT_VERSION if is_constructive(genome)
             else LEGACY_DEVELOPMENT_VERSION)
 
@@ -256,8 +305,12 @@ def random_functional_genome(
     # chromosome-count control and checkpoint metadata retain meaning. Their
     # genes are constructive placements rather than associative CAM rows.
     genome = Genome(
+        # The germline telomere is the organism's growth RADIUS, which is what
+        # the run's Max telomere control sets. Fresh genomes are born at that
+        # ceiling; development refuses any placement deeper than it.
         chromosomes=[Chromosome(
-            genes=[], split=0, tag=random.randint(0, 999), telomere=1)
+            genes=[], split=0, tag=random.randint(0, 999),
+            telomere=max(2, int(max_telomere)))
             for _ in range(int(n_chroms))],
         tag=random.randint(0, 9999),
         input_layout=(
@@ -314,7 +367,13 @@ def validate_genome(genome: Genome, families=None) -> None:
             raise ValueError("FNV input pads must occupy distinct sites")
     if is_constructive(genome):
         seen = set()
+        typed = is_typed(genome)
         for chromosome in genome.chromosomes:
+            # Only typed development reads this: it is the number of rounds the
+            # chromosome's rules stay alive for, so zero would be a chromosome
+            # that cannot express at all.
+            if typed and int(chromosome.telomere) < 1:
+                raise ValueError("FNV chromosome telomere must be positive")
             for gene in chromosome.genes:
                 if not isinstance(gene, PlacementGene):
                     raise ValueError(

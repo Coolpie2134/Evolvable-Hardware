@@ -395,6 +395,104 @@ def test_interactive_combinational_cases_load_fitness_pulses():
         assert tab._case_var.value is None
 
 
+def test_interactive_lists_the_rows_a_periodic_combinational_target_is_scored_on():
+    """The dropdown must offer the cases FITNESS uses, in the unit it uses them.
+
+    A periodic combinational wrapper is carried as a few long multi-row trials,
+    but nothing is graded at trial granularity: the scorer splits each trial
+    into the isolated window every truth-table row owns and grades the rows. So
+    listing only the trials offered the truth table's 8 cases as 4 unlabelled
+    250-tick schedules. Rows come first now, each loading exactly the held
+    stimulus its own window applies, with the full schedules kept after them.
+    """
+    from ui.interactive import InteractiveTab
+    from substrates.nervous.playback import pulses_from_trial
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    target = periodic_combinational_target(get_target('Half adder'))
+    rows = list(target.combinational_cases)
+    hold = target.combinational_hold
+    assert hold > 0
+
+    tab = InteractiveTab.__new__(InteractiveTab)
+    tab._circuit = {'target': target}
+    tab._in_pos = list(target.inputs)
+    tab._backend = 'nervous'
+    tab._running = False
+    tab._base_horizon = float(target.T)
+
+    labels = InteractiveTab._case_labels(tab, target)
+    assert len(labels) == len(rows) + len(target.trials)
+    assert labels[:len(rows)] == [
+        'Case %d/%d: in=%s -> %s'
+        % (index + 1, len(rows), ''.join(map(str, in_bits)),
+           ''.join(map(str, out_bits)))
+        for index, (in_bits, out_bits) in enumerate(rows)]
+    assert labels[len(rows)].startswith('Full schedule 1/')
+
+    class _Editor:
+        pulses = None
+        horizon = None
+
+        def set_pulses(self, pulses):
+            self.pulses = pulses
+
+        def schedule(self, _cells):
+            return {}
+
+    class _Player:
+        horizon = None
+
+        def set_schedule(self, _schedule):
+            pass
+
+    class _Var:
+        value = None
+
+        def set(self, value):
+            self.value = value
+
+    tab._editor = _Editor()
+    tab._player = _Player()
+    tab._case_var = _Var()
+    tab._draw_async = lambda: None
+    tab._stop = lambda: None
+
+    trial = target.trials[0]
+    window_by_bits = {tuple(bits): (start, end)
+                      for start, end, bits in trial.case_windows}
+    lead = min(start for start, _end, _bits in trial.case_windows)
+
+    for index, (in_bits, _out_bits) in enumerate(rows):
+        tab._case_cb = type('Box', (), {'current': lambda _s, i=index: i})()
+        InteractiveTab._on_case_selected(tab)
+        # exactly the stimulus this row's scored window applies: the physical
+        # stream row (data lanes plus any strobe), HELD, at the window's phase
+        start, end = window_by_bits[tuple(in_bits)]
+        assert tab._editor.pulses == [
+            [(lead, float(hold))] if bit else []
+            for bit in trial.streams[int(start)]]
+        # and the timeline shows that one window, not the whole schedule
+        assert tab._editor.horizon == lead + (end - start)
+        assert tab._player.horizon == tab._editor.horizon
+        assert tab._case_var.value is None
+
+    # the full schedules stay available, at the target's own horizon
+    tab._case_cb = type('Box', (), {'current': lambda _s: len(rows)})()
+    InteractiveTab._on_case_selected(tab)
+    assert tab._editor.horizon == float(target.T)
+    assert tab._editor.pulses == pulses_from_trial(
+        target, len(tab._in_pos), 0)
+    assert tab._case_var.value is None
+
+    # A half adder's 00 row IS presented as silence, so opening the tab there
+    # would look like a dead circuit: open on the first row that drives.
+    opening = InteractiveTab._default_case_index(tab, target)
+    assert opening == 1
+    assert any(InteractiveTab._case_pulses(tab, target, opening))
+
+
 def test_interactive_fnv_cases_hold_inputs_for_its_genetic_settling_window():
     from substrates.fnv.playback import functional_case_pulses
     from substrates.snn.targets import get_target

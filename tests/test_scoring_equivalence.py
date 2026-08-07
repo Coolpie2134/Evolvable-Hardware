@@ -18,6 +18,7 @@ from substrates.nervous.targets import (OutputTerminal, TEMPORAL_TARGETS,       
                                         TemporalTarget, Trial)
 from substrates.nervous.scoring import (TemporalTraces, contract_relations,     # noqa: E402
                             contract_case_count, needs_samples,
+                            combinational_level_traces,
                             score_contract, score_report_lines,
                             transition_score, _expected_events,
                             _expected_state_changes, _expected_windows,
@@ -166,15 +167,12 @@ def test_periodic_truth_table_reports_the_exact_row_level_selection_score():
         len(trial.case_windows)
         == len(target.combinational_cases) * 2
         for trial in target.trials)
-    traces = TemporalTraces(
-        {terminal.role: [[] for _ in target.trials]
-         for terminal in target.outputs},
-        events={
-            terminal.role: [
-                list(trial.expected_events[terminal.role])
-                for trial in target.trials]
-            for terminal in target.outputs
-        })
+    # A perfect circuit HOLDS each row's answer through the settled read window.
+    roles = [terminal.role for terminal in target.outputs]
+    table = {role: {bits: out[index] for bits, out in target.combinational_cases}
+             for index, role in enumerate(roles)}
+    traces = combinational_level_traces(
+        target, lambda role, bits: bool(table[role].get(bits)))
     score, cases, _ = score_contract(traces, target)
     reported, lines = score_report_lines(target, traces, {
         terminal.role: [terminal.pos] for terminal in target.outputs})
@@ -186,10 +184,11 @@ def test_periodic_truth_table_reports_the_exact_row_level_selection_score():
         * 2  # repeats
         * len(target.outputs))
     text = '\n'.join(lines)
-    assert 'Windowed truth-table correspondence' in text
-    assert 'windowed truth table' in text
+    assert 'Held combinational level' in text
+    assert 'held truth-table levels' in text
     assert 'one-to-one timed events' not in text
     assert 'row 00' in text and 'row 11' in text
+    assert 'held=100%' in text
 
 
 def _ring_intervals(target, phase, period=4.0, width=1.0):

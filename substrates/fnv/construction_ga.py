@@ -8,15 +8,17 @@ import random
 from substrates.nervous.hexgrid import hex_dirs
 
 from .catalogue import (
-    BY_ID, COMPONENTS, behavior_component_ids, local_component_ids,
-    normalise_families,
+    BY_ID, COMPONENTS, DIRECTIONS, behavior_component_ids,
+    local_component_ids, normalise_families,
 )
 from .construction import (
     append_logic_with_fanout, append_placement_choice,
-    append_random_placement, develop_constructive, feasible_placements,
-    frontier_references, source_ancestry,
+    append_random_placement, branch_growth_order, develop_constructive,
+    feasible_placements, frontier_references, source_ancestry,
 )
-from .genome import BranchRef, MAX_GENES, MAX_PLACEMENTS, PlacementGene
+from .genome import (
+    BranchRef, MAX_GENES, MAX_PLACEMENTS, PlacementGene, input_node_id,
+    is_typed)
 
 
 def clone_constructive(genome):
@@ -39,7 +41,7 @@ def placement_genes(genome):
 
 
 def constructive_signature(genome):
-    return (
+    identity = (
         tuple(tuple(cell) for cell in (getattr(
             genome, "input_layout", None) or ())),
         tuple(
@@ -48,6 +50,18 @@ def constructive_signature(genome):
             for gene in sorted(
                 placement_genes(genome), key=lambda item: int(item.gene_id))),
     )
+    if not is_typed(genome):
+        return identity
+    # A rule's MEANING comes from where it sits - which arm, and whether it is
+    # that arm's spawn - and each arm has its own lifespan. Without all of this
+    # a centromere shift or a lifespan mutation would look like no change and be
+    # discarded as a duplicate.
+    return identity + (tuple(
+        (int(chromosome.telomere_top), int(chromosome.telomere_bottom),
+         int(branch_cut(chromosome)),
+         tuple(int(gene.gene_id) for gene in chromosome.genes
+               if isinstance(gene, PlacementGene)))
+        for chromosome in genome.chromosomes),)
 
 
 def _seeds(genome, fallback=()):
@@ -1131,3 +1145,464 @@ def plateau_candidates_constructive(
             seen.add(signature)
             proposals.append(candidate)
     return proposals
+
+
+# -- branched genome mutation ---------------------------------------------------
+# A chromosome has two arms and therefore two branches. The rule at the
+# centromere end of an arm is its SPAWN: it names an input pad and a direction
+# out of it, and places its component there. Every other rule is a CONTEXT rule
+# naming, for each of its component's input pins, the grown node TYPE that must
+# drive it.
+#
+# Development applies every rule of every living arm at once, wherever it fits.
+# A rule's arm and its position in the genome do not gate where it applies - an
+# arm decides only where its branch starts and how long it lives.
+
+TYPED_MUT_OPS = ["tweak", "add_gene", "duplicate_branch", "del_rule",
+                 "del_branch", "telomere"]
+TYPED_MUT_WEIGHTS = [0.32, 0.16, 0.12, 0.11, 0.03, 0.08]
+#: Placements one arm may make before it dies. A branch that alone fills the
+#: body crowds out every other branch.
+MAX_TYPED_TELOMERE = 24
+#: Starting lifespan of a fresh arm.
+TYPED_TELOMERE_SEED = (4, 10)
+
+
+def chromosome_rules(chromosome):
+    return [gene for gene in chromosome.genes
+            if isinstance(gene, PlacementGene)]
+
+
+def _centromere(chromosome):
+    """Keep the centromere between the same two arms. It is not a free index.
+
+    Prepending a rule extends the top arm outward, so the boundary shifts with
+    it; appending extends the bottom arm and leaves it alone. Either arm may be
+    EMPTY, so this only clamps into range and never recentres.
+    """
+    chromosome.split = max(
+        0, min(int(chromosome.split), len(chromosome_rules(chromosome))))
+
+
+def branch_cut(chromosome):
+    """The centromere: where a chromosome divides into its two branches."""
+    return max(0, min(int(chromosome.split),
+                      len(chromosome_rules(chromosome))))
+
+
+def typed_branches(genome):
+    """``(chromosome index, arm) -> that arm's rules, outward from the centromere."""
+    branches = {}
+    for index, chromosome in enumerate(genome.chromosomes):
+        arms = branch_growth_order(chromosome)
+        branches[(index, 0)] = list(arms[0])
+        branches[(index, 1)] = list(arms[1])
+    return branches
+
+
+def branch_label(chromosome_index, half):
+    """Stable non-zero id for one branch position."""
+    return 2 * int(chromosome_index) + int(half) + 1
+
+
+def relabel_branches(genome):
+    """Stamp every rule with the arm it currently sits in."""
+    for (index, half), members in typed_branches(genome).items():
+        label = branch_label(index, half)
+        for gene in members:
+            gene.branch_id = label
+    return genome
+
+
+def typed_telomere_ceiling(max_telomere=None):
+    """The run's Max telomere, or the built-in default when none is given."""
+    if max_telomere is None:
+        return MAX_TYPED_TELOMERE
+    return max(1, int(max_telomere))
+
+
+def new_typed_chromosome(max_telomere=None):
+    """An empty chromosome: two arms, each with its own lifespan."""
+    from .genome import Chromosome
+    ceiling = typed_telomere_ceiling(max_telomere)
+    low, high = TYPED_TELOMERE_SEED
+    draw = lambda: random.randint(min(low, ceiling), min(high, ceiling))
+    return Chromosome(genes=[], split=0, tag=random.randint(0, 999),
+                      telomere_top=draw(), telomere_bottom=draw())
+
+
+def _spawn_components(families):
+    """Single-input components, the only form a spawn may take.
+
+    A spawn declares one direction out of a pad, and that direction is also the
+    pin facing back at it, so a spawn has exactly one pin.
+    """
+    enabled = normalise_families(families)
+    return [entry for entry in COMPONENTS
+            if entry.id and entry.family in enabled and len(entry.inputs) == 1]
+
+
+def _random_spawn_gene(gene_id, families, n_inputs):
+    """Where a branch starts: an input pad, and a direction out of it."""
+    choices = _spawn_components(families)
+    if not choices:
+        return None
+    entry = random.choice(choices)
+    pad = input_node_id(random.randrange(max(1, int(n_inputs))))
+    return PlacementGene(gene_id, entry.id,
+                         (BranchRef(pad, entry.inputs[0]),), gene_id)
+
+
+def _grown_types(genome, direction):
+    """Component types the genome can actually produce that drive ``direction``.
+
+    A rule naming a type nothing builds can never fire, so the menu is drawn
+    from the types already present in the genome.
+    """
+    types = []
+    for component_id in sorted({int(gene.component_id)
+                                for gene in placement_genes(genome)}):
+        entry = BY_ID.get(component_id)
+        if entry is not None and direction in entry.outputs:
+            types.append(component_id)
+    return types
+
+
+def _random_context_gene(genome, gene_id, families):
+    """One rule: a component, and the node type that must drive each pin."""
+    enabled = normalise_families(families)
+    choices = [entry for entry in COMPONENTS
+               if entry.id and entry.family in enabled]
+    random.shuffle(choices)
+    for entry in choices:
+        refs = []
+        for pin in entry.inputs:
+            types = _grown_types(genome, pin)
+            if not types:
+                refs = None
+                break
+            refs.append(BranchRef(random.choice(types), pin))
+        if refs:
+            return PlacementGene(gene_id, entry.id, tuple(refs), gene_id)
+    return None
+
+
+def _repair_genome(genome, families=None, n_inputs=1):
+    """Make every rule take the form its POSITION requires.
+
+    Position is what decides a gene's meaning, so an edit that moves a rule
+    across the centromere - or deletes the spawn in front of it - changes what
+    it is. This restores the form rather than letting a malformed rule sit there
+    silently never firing.
+    """
+    for chromosome in genome.chromosomes:
+        _centromere(chromosome)
+    for members in typed_branches(genome).values():
+        for index, gene in enumerate(members):
+            entry = BY_ID.get(int(gene.component_id))
+            if entry is None:
+                continue
+            if index == 0:
+                pad = next((int(ref.node_id) for ref in gene.inputs
+                            if int(ref.node_id) < 0), None)
+                if pad is None:
+                    pad = input_node_id(random.randrange(max(1, int(n_inputs))))
+                if len(entry.inputs) != 1:
+                    replacement = _spawn_components(families)
+                    if not replacement:
+                        continue
+                    entry = random.choice(replacement)
+                    gene.component_id = entry.id
+                gene.inputs = (BranchRef(pad, entry.inputs[0]),)
+            elif (len(gene.inputs) != len(entry.inputs)
+                  or any(int(ref.node_id) <= 0 for ref in gene.inputs)):
+                refreshed = _random_context_gene(
+                    genome, int(gene.gene_id), families)
+                if refreshed is not None:
+                    gene.component_id = refreshed.component_id
+                    gene.inputs = refreshed.inputs
+    return relabel_branches(genome)
+
+
+def _extend_arm(chromosome, gene, top):
+    """Attach one rule to the outer end of an arm, past its spawn."""
+    if top:
+        chromosome.genes.insert(0, gene)
+        chromosome.split = int(chromosome.split) + 1
+    else:
+        chromosome.genes.append(gene)
+
+
+def _add_typed_gene(genome, families, n_inputs):
+    """Grow one arm by a rule, at the top or the bottom of a chromosome."""
+    available = [chromosome for chromosome in genome.chromosomes
+                 if len(chromosome.genes) < MAX_GENES]
+    if not available or len(placement_genes(genome)) >= MAX_PLACEMENTS:
+        return False
+    chromosome = random.choice(available)
+    top = random.random() < 0.5
+    arm = branch_growth_order(chromosome)[0 if top else 1]
+    gene_id = int(genome.next_gene_id)
+    gene = (_random_spawn_gene(gene_id, families, n_inputs) if not arm
+            else _random_context_gene(genome, gene_id, families))
+    if gene is None:
+        return False
+    genome.next_gene_id = gene_id + 1
+    _extend_arm(chromosome, gene, top)
+    _repair_genome(genome, families, n_inputs)
+    return True
+
+
+def _adopt_typed_branch(genome, members):
+    """Renumbered copies of an arm, in growth order.
+
+    Nothing inside needs remapping: a spawn names a pad and a context rule names
+    a component type, so both mean the same thing in any genome they land in.
+    """
+    copies = []
+    for gene in members:
+        new_id = int(genome.next_gene_id)
+        genome.next_gene_id = new_id + 1
+        copies.append(PlacementGene(
+            new_id, int(gene.component_id), tuple(gene.inputs), new_id))
+    return copies
+
+
+def _tweak_typed_gene(gene, genome, families, n_inputs):
+    """Retarget a rule: its component, or what its inputs must come from."""
+    enabled = normalise_families(families)
+    spawn = any(int(ref.node_id) < 0 for ref in gene.inputs)
+    if gene.inputs and random.random() < 0.6:
+        position = random.randrange(len(gene.inputs))
+        ref = gene.inputs[position]
+        if spawn:
+            # Move where the branch starts: a different pad, same direction.
+            sources = [input_node_id(i) for i in range(max(1, int(n_inputs)))
+                       if input_node_id(i) != int(ref.node_id)]
+        else:
+            sources = [t for t in _grown_types(genome, ref.direction)
+                       if t != int(ref.node_id)]
+        if not sources:
+            return False
+        refs = list(gene.inputs)
+        refs[position] = BranchRef(random.choice(sources), ref.direction)
+        gene.inputs = tuple(refs)
+        return True
+    # Swap the component. Its pins must stay put, because a reference's
+    # direction IS the pin it feeds.
+    current = BY_ID[int(gene.component_id)]
+    pins = tuple(ref.direction for ref in gene.inputs)
+    compatible = [entry for entry in COMPONENTS
+                  if entry.id and entry.family in enabled
+                  and tuple(entry.inputs) == pins and entry.id != current.id]
+    if not compatible:
+        return False
+    gene.component_id = int(random.choice(compatible).id)
+    return True
+
+
+def _arm_slots(genome):
+    """Every (chromosome, arm) pair, for the operators that work on lifespans."""
+    return [(chromosome, arm) for chromosome in genome.chromosomes
+            for arm in (0, 1)]
+
+
+def mutate_typed_once(genome, families, n_inputs, max_telomere=None):
+    """One state-changing edit, chosen from the shared weighted menu."""
+    _repair_genome(genome, families, n_inputs)
+    genes = placement_genes(genome)
+    branches = typed_branches(genome)
+    populated = sorted(key for key, members in branches.items() if members)
+    options, weights = [], []
+    for name, weight in zip(TYPED_MUT_OPS, TYPED_MUT_WEIGHTS):
+        if name == "tweak" and not genes:
+            continue
+        if name == "add_gene" and len(genes) >= MAX_PLACEMENTS:
+            continue
+        if name == "duplicate_branch" and not populated:
+            continue
+        if name == "del_rule" and len(genes) <= 1:
+            continue
+        if name == "del_branch" and not any(
+                0 < len(branches[key]) < len(genes) for key in populated):
+            continue
+        options.append(name)
+        weights.append(weight)
+    if not options:
+        return False
+    op = random.choices(options, weights=weights)[0]
+
+    if op == "tweak":
+        changed = _tweak_typed_gene(
+            random.choice(genes), genome, families, n_inputs)
+        _repair_genome(genome, families, n_inputs)
+        return changed
+    if op == "add_gene":
+        return _add_typed_gene(genome, families, n_inputs)
+    if op == "duplicate_branch":
+        source = random.choice(populated)
+        copies = _adopt_typed_branch(genome, branches[source])
+        available = [chromosome for chromosome in genome.chromosomes
+                     if len(chromosome.genes) + len(copies) <= MAX_GENES]
+        if not available or len(genes) + len(copies) > MAX_PLACEMENTS:
+            return False
+        chromosome = random.choice(available)
+        top = random.random() < 0.5
+        if top:
+            chromosome.genes[:0] = list(reversed(copies))
+            chromosome.split = int(chromosome.split) + len(copies)
+        else:
+            chromosome.genes.extend(copies)
+        _repair_genome(genome, families, n_inputs)
+        _tweak_typed_gene(random.choice(copies), genome, families, n_inputs)
+        _repair_genome(genome, families, n_inputs)
+        return True
+    if op == "del_rule":
+        victim = random.choice(genes)
+        for chromosome in genome.chromosomes:
+            for position, gene in enumerate(chromosome.genes):
+                if gene is victim:
+                    chromosome.genes.pop(position)
+                    if position < branch_cut(chromosome):
+                        chromosome.split = max(0, int(chromosome.split) - 1)
+                    _repair_genome(genome, families, n_inputs)
+                    return True
+        return False
+    if op == "del_branch":
+        index, half = random.choice([
+            key for key in populated if len(branches[key]) < len(genes)])
+        doomed = {id(gene) for gene in branches[(index, half)]}
+        chromosome = genome.chromosomes[index]
+        if half == 0:
+            chromosome.split = 0
+        chromosome.genes = [gene for gene in chromosome.genes
+                            if id(gene) not in doomed]
+        _repair_genome(genome, families, n_inputs)
+        return True
+    # telomere: how many placements one ARM may make before it dies.
+    chromosome, arm = random.choice(_arm_slots(genome))
+    ceiling = typed_telomere_ceiling(max_telomere)
+    field = "telomere_top" if arm == 0 else "telomere_bottom"
+    base = max(0, min(int(getattr(chromosome, field)), ceiling))
+    values = [base + delta for delta in (-4, -2, -1, 1, 2, 4)
+              if 0 <= base + delta <= ceiling]
+    if not values:
+        return False
+    setattr(chromosome, field, random.choice(values))
+    return True
+
+
+def mutate_typed(genome, mean_mutations, families, n_inputs,
+                 max_telomere=None):
+    """Poisson-many edits, with at least one guaranteed to land."""
+    lam = 4.0 if mean_mutations is None else max(0.0, float(mean_mutations))
+    # A genome arriving from a run with a looser ceiling (or a checkpoint) must
+    # be brought under this run's control, not left above it forever.
+    ceiling = typed_telomere_ceiling(max_telomere)
+    for chromosome in genome.chromosomes:
+        chromosome.telomere_top = max(
+            0, min(int(chromosome.telomere_top), ceiling))
+        chromosome.telomere_bottom = max(
+            0, min(int(chromosome.telomere_bottom), ceiling))
+    for _ in range(max(1, _poisson(lam))):
+        if not mutate_typed_once(genome, families, n_inputs, max_telomere):
+            break
+    return genome
+
+
+def random_typed_genome(chromosome_count, families, n_inputs,
+                        input_layout=None, blocks=2, max_telomere=None):
+    """A fresh genome: every arm gets a spawn and a few context rules."""
+    from .genome import Genome, TYPED_ENCODING, random_input_layout
+    count = max(1, int(chromosome_count))
+    genome = Genome(
+        chromosomes=[new_typed_chromosome(max_telomere)
+                     for _ in range(count)],
+        input_layout=(tuple(input_layout) if input_layout is not None
+                      else random_input_layout(max(1, int(n_inputs)))),
+        encoding=TYPED_ENCODING,
+        next_gene_id=1)
+    seeds = tuple(genome.input_layout or ((0, 0),))
+    for chromosome in genome.chromosomes:
+        for top in (True, False):
+            gene_id = int(genome.next_gene_id)
+            spawn = _random_spawn_gene(gene_id, families, n_inputs)
+            if spawn is None:
+                continue
+            genome.next_gene_id = gene_id + 1
+            _extend_arm(chromosome, spawn, top)
+            _repair_genome(genome, families, n_inputs)
+            for _ in range(max(1, int(blocks))):
+                attempts = 6
+                while attempts > 0:
+                    attempts -= 1
+                    before = len(develop_constructive(genome, seeds).grid)
+                    gene_id = int(genome.next_gene_id)
+                    gene = _random_context_gene(genome, gene_id, families)
+                    if gene is None:
+                        break
+                    genome.next_gene_id = gene_id + 1
+                    _extend_arm(chromosome, gene, top)
+                    _repair_genome(genome, families, n_inputs)
+                    # A starting organism has to develop. A rule that fires
+                    # nowhere adds nothing for the next one to build on, so it
+                    # is redrawn. Developmental viability only: no target, truth
+                    # table or output role is consulted.
+                    if len(develop_constructive(genome, seeds).grid) > before:
+                        break
+                    chromosome.genes.remove(gene)
+                    if top:
+                        chromosome.split = max(0, int(chromosome.split) - 1)
+                    _repair_genome(genome, families, n_inputs)
+    return _repair_genome(genome, families, n_inputs)
+
+
+def crossover_typed(parent_a, parent_b, families=None):
+    """Draw each arm from either parent, with equal chance.
+
+    An arm carries its own lifespan with it, because how long a branch lives and
+    what its rules do are selected together. A spawn names a pad and a context
+    rule names a component type, so neither dangles on arrival - which is what
+    lets a whole arm cross intact.
+    """
+    child = clone_constructive(parent_a)
+    shared = min(len(child.chromosomes), len(parent_b.chromosomes))
+    if shared < 1:
+        return child
+    layout_b = getattr(parent_b, "input_layout", None)
+    if (layout_b is not None
+            and (getattr(child, "input_layout", None) is None
+                 or len(child.input_layout) == len(layout_b))
+            and random.random() < 0.5):
+        # Input geometry is one co-adapted physical module, and every branch
+        # spawns on it.
+        child.input_layout = tuple(tuple(cell) for cell in layout_b)
+    donors = typed_branches(parent_b)
+    mine = typed_branches(child)
+    for index in range(shared):
+        target = child.chromosomes[index]
+        donor = parent_b.chromosomes[index]
+        chosen, lifespans = [], []
+        for half in (0, 1):
+            from_donor = random.random() < 0.5
+            source = donors if from_donor else mine
+            chosen.append(list(source.get((index, half), ())))
+            owner = donor if from_donor else target
+            lifespans.append(int(owner.telomere_top if half == 0
+                                 else owner.telomere_bottom))
+        top, bottom = chosen
+        room = min(MAX_GENES,
+                   MAX_PLACEMENTS - (len(placement_genes(child))
+                                     - len(chromosome_rules(target))))
+        if len(top) + len(bottom) > room:
+            # Trim the outer ends, where an arm is youngest, so both spawns and
+            # everything near them stay intact.
+            bottom = bottom[:max(0, room - len(top))]
+            top = top[:max(0, room - len(bottom))]
+        adopted_top = _adopt_typed_branch(child, top)
+        adopted_bottom = _adopt_typed_branch(child, bottom)
+        target.genes = list(reversed(adopted_top)) + adopted_bottom
+        target.split = len(adopted_top)
+        target.telomere_top, target.telomere_bottom = lifespans
+    n_inputs = len(getattr(child, "input_layout", None) or (1,))
+    return _repair_genome(child, families, n_inputs)

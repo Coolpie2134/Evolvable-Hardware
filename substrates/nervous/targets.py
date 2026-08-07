@@ -18,7 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .contracts import (BehaviorContract, cadence_contract, event_contract,
+from .contracts import (BehaviorContract, cadence_contract,
+                        combinational_contract, event_contract,
                         state_contract, toggle_contract)
 
 Pos = Tuple[int, int]
@@ -117,6 +118,11 @@ class TemporalTarget:
         Tuple[Tuple[int, ...], Tuple[int, ...]]] = field(default_factory=list)
     combinational_data_inputs: int = 0
     combinational_strobe: bool = False
+    # Ticks each active input LEVEL is held inside its row window (0 for the
+    # edge-timed twins, which present a row as one point event), and how much of
+    # that hold is a settling allowance before the output level is read.
+    combinational_hold: int = 0
+    combinational_settle: int = 0
 
     def __post_init__(self):
         # The established scoring primitives still read these names. They are
@@ -211,20 +217,36 @@ def _zero_row_holds_sole_negative(cases, zero_outputs, n_outputs):
         for index in range(n_outputs))
 
 
-def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
-    """Encode a static binary truth table as widely-spaced asynchronous events.
+def periodic_combinational_target(target, spacing=None, repeats=2, latency=1,
+                                  hold=None):
+    """Encode a static binary truth table as widely-spaced asynchronous cases.
 
     Every input combination in the truth table (all 2**n_inputs rows) is
-    presented as its own isolated test window: a 1 emits a single point event, a
-    0 stays silent, and the expected output emits an event ``latency`` ticks
-    later for the rows whose output is 1. Consecutive windows are separated by a
-    generous settle gap - ``spacing`` ticks between onsets, several times the
-    few-tick transient of these small grids - so any circulating pulse from one
-    case dies out before the next begins and no test can contaminate the next.
+    presented as its own isolated test window: a 1 is HELD HIGH for ``hold``
+    ticks, a 0 stays silent, and the expected output emits an event ``latency``
+    ticks after the row's onset for the rows whose output is 1. Consecutive
+    windows are separated by a generous settle gap - ``spacing`` ticks between
+    onsets, several times the few-tick transient of these small grids - so any
+    circulating pulse from one case dies out before the next begins and no test
+    can contaminate the next.
 
-    The whole table then repeats ``repeats`` times (so a circuit must re-arm,
-    not fire once and stick) under alternate row orders and two phases, which
-    keeps a fixed oscillator from passing without doing input-dependent logic.
+    The held level is what makes this a COMBINATIONAL presentation rather than a
+    temporal one. A combinational function is a function of a level that is
+    present while the circuit computes: FNV holds its inputs for the whole
+    settling horizon, SNN holds an input current for the whole run, and the
+    native LUT/nervous static scorers hold their case levels too. This wrapper
+    used to be the odd one out - a single-tick point event per row - which asked
+    the asynchronous backends to REMEMBER the row while computing it. That is a
+    memory task, and it is exactly what the ``<name> (temporal)`` twin
+    (:func:`coincident_temporal_target`) exists to pose; the two encodings are
+    only different problems if this one holds.
+
+    ``hold`` defaults to a full grid diameter, so the level is still applied
+    when the far side of the array settles, and the settle gap after release
+    keeps its previously justified width. The whole table then repeats
+    ``repeats`` times (so a circuit must re-arm, not fire once and stick) under
+    alternate row orders and two phases, which keeps a fixed oscillator from
+    passing without doing input-dependent logic.
 
     ``spacing`` defaults to a comfortable multiple of the grid so it scales with
     the substrate size (a 2-bit adder's larger grid gets proportionally wider
@@ -251,19 +273,36 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
     n_inputs = data_inputs + int(has_strobe)
     span = max(n_inputs, n_outputs, 2)
     grid_size = max(5, 2 * span + 1)
+    # The row is held long enough to SETTLE and then be READ as a level:
+    # one grid diameter (~2G here) for the level to cross the body and the
+    # answer to stabilise, then a read window the output must sit at its value
+    # through. Both halves are recorded on the target so the scorer reads the
+    # same window the stimulus guarantees.
+    settle = 2 * grid_size
+    measure = max(4, grid_size)
+    if hold is None:
+        hold = settle + measure
+    hold = max(2, int(hold))
+    settle = min(settle, hold - 1)
     if spacing is None:
-        # Each window must outlast the substrate's settling transient, which
-        # grows with the grid: a circulating nervous pulse - and especially the
-        # LUT array, which often rings for several passes before it stabilises -
-        # can take multiple traversals of a G-wide grid to die out. Four
-        # grid-widths sits comfortably above the ~2G grid diameter and scales up
-        # automatically for the larger grids that back the multi-bit targets, so
-        # no case bleeds into the next even on the slow-settling LUT backend.
-        spacing = max(4 * grid_size, latency + 8)
+        # After the level is released, each window must still outlast the
+        # substrate's settling transient, which grows with the grid: a
+        # circulating nervous pulse - and especially the LUT array, which often
+        # rings for several passes before it stabilises - can take multiple
+        # traversals of a G-wide grid to die out. Four grid-widths sits
+        # comfortably above the ~2G grid diameter and scales up automatically
+        # for the larger grids that back the multi-bit targets, so no case
+        # bleeds into the next even on the slow-settling LUT backend. Counting
+        # that gap from the RELEASE rather than the onset keeps the old margin
+        # intact instead of spending it on the hold.
+        spacing = max(hold + 4 * grid_size, hold + latency + 8)
     spacing = int(spacing)
-    if spacing < latency + 2 or repeats < 1 or latency < 0:
+    if spacing < hold + latency + 2 or repeats < 1 or latency < 0:
+        # A row must fall silent before the next one rises, or two rows that
+        # share an input lane would merge into one uninterrupted level and the
+        # second row would never present an edge.
         raise ValueError(
-            'spacing/repeats/latency must be >= latency+2, >= 1, and >= 0')
+            'spacing/repeats/latency must be >= hold+latency+2, >= 1, and >= 0')
     inputs = [(0, 2 * index + 1) for index in range(n_inputs)]
     output_ys = ([grid_size // 2] if n_outputs == 1 else [
         int(round(1 + index * (grid_size - 3) / (n_outputs - 1)))
@@ -303,29 +342,50 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
                 for repetition in range(repeats)
                 for slot, (input_bits, _output_bits) in enumerate(schedule)
             ]
+            expected_intervals = {}
             for output_index, terminal in enumerate(outputs):
                 events = []
+                held_levels = []
                 for repetition in range(repeats):
                     for slot, (input_bits, output_bits) in enumerate(schedule):
                         tick = phase + (repetition * len(schedule) + slot) * spacing
+                        # Hold the row's levels: contiguous 1s are ONE physical
+                        # pulse of that width on every backend (nervous
+                        # temporal._inject_stream_edges, LUT AsyncLutSim), so
+                        # this is a level applied and later released, not a
+                        # burst of re-triggering edges.
+                        held = range(tick, min(tick + hold, T))
                         for lane, bit in enumerate(input_bits):
                             if bit:
-                                streams[tick][lane] = 1
+                                for step in held:
+                                    streams[step][lane] = 1
                         if has_strobe:
-                            streams[tick][data_inputs] = 1
+                            for step in held:
+                                streams[step][data_inputs] = 1
                         if output_bits[output_index]:
+                            # The row asserts: the output must SIT high across
+                            # the settled read window, not merely edge once.
+                            # The event marks which rows assert (and keeps the
+                            # older event readers working); the interval is the
+                            # level the contract actually judges.
                             events.append(float(tick + latency))
-                event_set = set(events)
+                            held_levels.append(
+                                (float(tick + settle), float(tick + hold)))
                 expected[terminal.role] = [
-                    1 if float(tick) in event_set else 0 for tick in range(T)]
+                    1 if any(low <= tick < high for low, high in held_levels)
+                    else 0
+                    for tick in range(T)]
                 expected_events[terminal.role] = events
+                expected_intervals[terminal.role] = held_levels
             trials.append(Trial(
                 [tuple(row) for row in streams], expected, expected_events,
+                expected_intervals=expected_intervals,
                 case_windows=case_windows))
 
     return TemporalTarget(
         target.name, inputs, outputs, T, trials,
-        grid_size=grid_size, iters=30, contract=event_contract(), latency=latency,
+        grid_size=grid_size, iters=30, contract=combinational_contract(),
+        latency=latency,
         supported_backends=('nervous', 'lut'),
         category='Combinational logic',
         combinational_cases=[
@@ -333,19 +393,25 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1):
             for input_bits, output_bits in cases],
         combinational_data_inputs=data_inputs,
         combinational_strobe=has_strobe,
+        combinational_hold=hold,
+        combinational_settle=settle,
         description=describe_target(
             'Compute the %s binary truth table one case at a time: each input '
-            'combination gets its own %d-second test window (input 1 emits an '
-            'event, input 0 is silent%s), spaced far enough apart that the circuit '
-            'settles between cases. Each output must emit its event pattern.'
-            % (target.name, spacing,
-               '; a case-valid lane marks every row'
-               if has_strobe else ''),
+            'combination gets its own %d-second test window (input 1 is HELD '
+            'high for %d seconds, input 0 is silent%s), spaced far enough apart '
+            'that the circuit settles between cases. Each output must then SIT '
+            'at its required level for the last %d seconds the row is applied.'
+            % (target.name, spacing, hold,
+               '; a case-valid lane is held on every row'
+               if has_strobe else '', hold - settle),
             'All %d truth-table rows are tested in isolated, widely-spaced '
             'windows and repeated in full cycles under alternate row orders and '
             'two phases, so one case cannot contaminate the next and a fixed '
-            'oscillator cannot replace input-dependent logic.'
-            % len(target.cases)))
+            'oscillator cannot replace input-dependent logic. Held level in, '
+            'held level out, as combinational logic means everywhere else in '
+            'this project - the edge-timed version of the same table is the '
+            'separate "%s (temporal)" target.'
+            % (len(target.cases), target.name)))
 
 
 def with_io_placement(target, strategy):

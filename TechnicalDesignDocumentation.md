@@ -513,8 +513,9 @@ honest LUT physics and the deliberate contrast with the nervous net's
 quiescence; named-bank-only runs exclude those tables. Second, recurrent LUT
 bodies may oscillate or become chaotic rather than settling. Raw static
 truth-table scoring is therefore a poor interface for this backend;
-combinational targets are converted to widely spaced, repeated event-driven
-cases, while temporal targets use their native schedules.
+combinational targets are converted to widely spaced, repeated cases whose input
+levels are held through each case window and released before the next, while
+temporal targets use their native schedules.
 
 **Native I/O.** `GAConfig.lut_io_mode` selects one of two physical input
 architectures. `source_pads` carries one square-lattice coordinate per logical
@@ -1278,6 +1279,7 @@ A contract can combine restrictions. The current reusable relations are:
 | :---- | :---- | :---- |
 | `truth_table` | normalized logic value or confidence | Match every expected output bit for every input row. Missing or unstable readouts score zero. |
 | `event_correspondence` | continuous rise times | Match required edges one-to-one. Missing and spurious edges both cost. A single optional latency offset is shared across the complete trial bank. |
+| `combinational_level` | complete rise/fall intervals | While a truth-table row is HELD, sit at the required level through the settled tail of that hold. Correctness per row is the read window's duty (its complement for a row that must stay low), so a momentary pulse is a partial answer, not a correct one. Expected-1 and expected-0 rows are balanced per output, so an indiscriminate output caps at 0.5. |
 | `transition_correspondence` | logical changes derived from complete intervals | Time distinguishable state activations with one shared latency. For a nervous pulse ring, ordinary circulation and the pulse already in flight after reset are not counted as new logical transitions. |
 | `logical_state` | complete pulse intervals, with sampled levels as a backend fallback | Satisfy active and quiet epochs. A nervous active state may be a circulating pulse; a LUT active state is a held level. Exact tick phase is not part of the target. |
 | `pulse_intervals` | complete rise/fall intervals | Match event identity and duration. Correct rise times with wrong widths cannot pass. |
@@ -1292,6 +1294,48 @@ failed one. A total of 1.0 is possible only when every constraint is perfect.
 observables. Checkpoints serialize the contract; the loader performs a one-way
 migration from historical `score_mode` fields, but runtime target objects no
 longer contain or dispatch on that field.
+
+#### Held combinational levels, and what a pulse substrate can do about them
+
+A combinational function is a function of an APPLIED level, so every backend
+presents one: FNV injects each row for its whole settling horizon and reads the
+settled level, SNN holds an input current for the whole run, and the periodic
+wrapper holds each row for a grid diameter plus a read window. The
+`combinational_level` contract completes that symmetry on the output side - the
+readout must sit at its value through the read window, not merely edge into it.
+
+That is a physical demand, and the two asynchronous backends answer it very
+differently. It is worth stating plainly, because it decides what a
+combinational result on each substrate means:
+
+* **LUT array**: its wires carry levels, so a settled cell simply holds. Under
+  the level contract it still solves and certifies (AND, XOR at 60 generations,
+  population 60).
+* **Nervous net**: the analog node is EDGE-coupled. A held input wire is one
+  wired-OR interval, so only its rising edge is capacitively coupled downstream,
+  and the output pulse's duration comes from the node's own leak/hysteresis
+  recovery. Measured directly: one input pulse of width 1, 5, 10, 20 or 40
+  yields a downstream high interval of **3.47 every time** under `paper_analog`
+  (1.00 under `uniform`; only the retired width-preserving `pulse_delay` tracks
+  the input). A lone node therefore cannot hold; a CIRCUIT can, by sustaining
+  activity into the readout while the input is applied, but that is rare -
+  sampling 305 random grown nets under a 15-tick held input, 1 reached a 5-tick
+  sustained high.
+
+The consequence is measured, not predicted. A nervous circuit with correct logic
+and a single-pulse answer scores about **0.875** on AND - exactly the duty of one
+3.47-tick pulse inside a 5-tick read window, balanced against perfect quiet rows -
+and that is where 60-generation runs land (AND 0.875, XOR 0.783, 0/2 solved;
+the same budget certified both 2/2 under the previous edge-scored wrapper).
+
+It is a hard problem, not a wall. Given a real budget the substrate climbs past
+that single-pulse figure: 200 generations at population 80 reaches **0.977** on
+AND, i.e. circuits that sustain the readout across most of the read window rather
+than twitching once. Holding is therefore evolvable here; it just makes a
+combinational solve a strictly larger circuit - compute the row AND hold the
+answer - on a substrate whose only exposed node model regenerates a fixed pulse
+width per edge. Read a nervous plateau at 0.87 as "correct logic, no hold yet",
+not as a solved gate.
 
 #### Phase-invariant logical state
 
@@ -1432,7 +1476,7 @@ idle settle interval. Tables whose zero row is all low are unchanged.
 
 | Folder (GUI) | Examples | Notes |
 | :---- | :---- | :---- |
-| Combinational logic | AND/OR/XOR/NAND/NOR/XNOR, half and full adder, 2-bit adder, 2x2 multiplier, 2:1 MUX, 2-to-4 decoder, comparator, majority-3, parity-3 | Native truth tables on SNN. On the asynchronous backends they are wrapped by `periodic_combinational_target(...)`: every input combination is tested in its own widely-spaced window (a 1 emits an event, a 0 is silent), with the onset-to-onset gap set to several times the grid's settling transient so one case cannot contaminate the next. Each table repeats under alternate row orders and two phases so a fixed oscillator cannot replace input-dependent logic. |
+| Combinational logic | AND/OR/XOR/NAND/NOR/XNOR, half and full adder, 2-bit adder, 2x2 multiplier, 2:1 MUX, 2-to-4 decoder, comparator, majority-3, parity-3 | Native truth tables on SNN. On the asynchronous backends they are wrapped by `periodic_combinational_target(...)`: every input combination is tested in its own widely-spaced window (a 1 is held high for a grid diameter plus a read window, a 0 is silent), with the gap between release and the next onset set to several times the grid's settling transient so one case cannot contaminate the next. Held level in, **held level out**: the `combinational_level` contract reads the settled tail of the hold and asks the output to SIT at its required value there, exactly as FNV reads a settled level at its horizon. That is what separates this wrapper from its `(temporal)` twin, which is edge-in/edge-out. See 5.4 for the physical consequence on a pulse substrate. Each table repeats under alternate row orders and two phases so a fixed oscillator cannot replace input-dependent logic. |
 | Timed events | Coincidence, Temporal XOR, Sequence A->B, Veto gate, Burst x3, Divide-by-3, Echo, Pair detector, C-element, A-first rendezvous, Collision serializer, Refractory filter, Watchdog, the A-count query family, Period doubler/tripler/halver, Temporal sum | Point-event (F1) scoring. The mixed-width A-count query family is the fairest cross-model comparison set. |
 | Memory and state | SR latch, Toggle flip-flop, One-shot, Gated oscillator, Resettable toggle | Persistence-window scoring; the real memory tests. |
 | Cadence and patterns | Oscillator (period 2), Pattern (1000), Period stepper | Oscillator and Pattern are autonomous hand-built banks. Period stepper is command-driven and oracle-backed. |
@@ -1652,11 +1696,20 @@ a Load Saved. A persistent blue **Behavior Contract v1** badge names the active
 restriction(s) and aggregation rule above the visualization, so raw playback is
 never presented without saying what evolution actually judged.
 
-* **Case dropdown** (temporal SNN / nervous / FNV / LUT): every stored test case of the target,
-  listed with its pulse times (for example `Case 3/10: A[3, 7, 14, 21]`; guard
-  banks read silent). Selecting one loads that trial's physical schedule, widths
-  included, so width-preserving playback sees what fitness scored, and resets
-  playback to `t = 0`. Hand-editing the timeline afterwards flips the box to
+* **Case dropdown** (temporal SNN / nervous / FNV / LUT): every case fitness
+  scores, **in the unit fitness scores it in**. For a temporal target that unit
+  is the stored trial, listed with its pulse times (for example
+  `Case 3/10: A[3, 7, 14, 21]`; guard banks read silent); for a static truth
+  table it is the row (`Case 4/4: in=11 -> 1`). A periodic combinational wrapper
+  carries a few long multi-row trials but is graded row by row inside isolated
+  windows (5.4), so it lists **the rows first** - `Case 3/8: in=101 -> 10`, each
+  loading the held stimulus of its own window and zooming the timeline to that
+  window - followed by `Full schedule k/N` entries that replay a complete trial
+  at the target's own horizon. The tab opens on the first row that actually
+  drives a lane, since an all-zero row is presented as genuine silence.
+  Selecting an entry loads that physical schedule, widths included, so
+  width-preserving playback sees what fitness scored, and resets playback to
+  `t = 0`. Hand-editing the timeline afterwards flips the box to
   "(custom schedule)", so it never claims to show a case it no longer matches.
 * **Pulse timeline**: click a lane for a default-width pulse, drag for a custom
   width, click an existing pulse to remove it. This is the stimulus.
