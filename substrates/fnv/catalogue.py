@@ -280,7 +280,7 @@ def behavior_component_ids(component_id: int) -> tuple[int, ...]:
     Catalogue distance correctly treats small route edits as very local, but
     that made AND/OR/XOR substitutions rare even though swapping the gate
     component while keeping its pins is an equally physical mutation. VETO's
-    ordered A/B inputs remain distinct.
+    ordered A/B role can change while the same two physical pins stay wired.
     """
     current = component(component_id)
     if current.family != LOGIC:
@@ -289,9 +289,10 @@ def behavior_component_ids(component_id: int) -> tuple[int, ...]:
         candidate.id for candidate in COMPONENTS
         if candidate.family == current.family
         and candidate.id != current.id
-        and candidate.inputs == current.inputs
+        and set(candidate.inputs) == set(current.inputs)
         and candidate.outputs == current.outputs
-        and candidate.behavior != current.behavior)
+        and (candidate.behavior != current.behavior
+             or candidate.inputs != current.inputs))
 
 
 def quiescent_component(component_type: ComponentType) -> bool:

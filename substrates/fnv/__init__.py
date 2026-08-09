@@ -11,14 +11,15 @@ from .simulation import (
     FunctionalSim, effective_wiring_edges, facing_direction, source_for_input,
 )
 from .genome import (
-    BranchRef, Chromosome, FunctionalGene, Genome, PlacementGene,
-    functional_input_positions,
+    Chromosome, ContextGene, Genome, InputGene, OutputGene, OUT_STATE,
+    PAD_STATE, functional_input_positions, functional_output_positions,
     input_layout_domain, input_layout_radius, input_seed_grid,
-    input_seed_state, is_constructive, random_functional_genome,
-    random_input_layout,
+    input_seed_state, is_branched, random_functional_genome,
+    random_input_layout, resolve_output_layout, sync_output_layout,
 )
-from .growth import (
-    active_gene_loci, grow_functional, grow_functional_snapshots)
+from .construction import (
+    branch_growth_order, develop_constructive, grow_functional,
+    grow_functional_snapshots)
 from .evaluation import (
     FunctionalTopology, evaluate_functional_full, functional_case_outputs,
     functional_logic_horizon, functional_report, functional_topology,
@@ -34,8 +35,8 @@ from .ga import (
 
 __all__ = [
     "BY_ID", "BY_NAME", "CATALOGUE_HASH", "COMPONENTS", "DEFAULT_FAMILIES",
-    "DIRECTIONS", "FAMILIES", "NODE_TYPE_DICTIONARY", "BranchRef",
-    "Chromosome", "ComponentType", "FunctionalGene", "PlacementGene",
+    "DIRECTIONS", "FAMILIES", "NODE_TYPE_DICTIONARY",
+    "Chromosome", "ComponentType", "ContextGene", "InputGene", "OutputGene",
     "FunctionalPlayer", "FunctionalSim", "FunctionalTopology", "Genome",
     "clone_genome", "component",
     "crossover_functional",
@@ -44,13 +45,16 @@ __all__ = [
     "evaluate_functional_full", "functional_case_outputs",
     "functional_case_pulses", "functional_logic_horizon", "functional_report",
     "native_component_baseline", "prepare_functional",
-    "grow_functional", "grow_functional_snapshots", "normalise_families",
-    "active_gene_loci",
-    "functional_input_positions", "input_layout_domain",
+    "branch_growth_order", "develop_constructive", "grow_functional",
+    "grow_functional_snapshots",
+    "normalise_families",
+    "OUT_STATE", "PAD_STATE", "functional_input_positions",
+    "functional_output_positions", "input_layout_domain",
     "input_layout_radius", "input_seed_grid", "input_seed_state",
-    "is_constructive",
+    "is_branched",
     "mutate_functional", "prepare_functional_playback",
-    "random_functional_genome", "run_functional_events",
+    "random_functional_genome", "resolve_output_layout",
+    "run_functional_events", "sync_output_layout",
     "random_input_layout", "score_functional",
     "source_for_input", "state_distance",
     "verify_catalogue_hash",

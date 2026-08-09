@@ -33,19 +33,34 @@ def _genome_types(backend):
     elif backend == 'lut':
         from substrates.lut.genome import LutGene as Gene, Chromosome, Genome
     elif backend == 'fnv':
-        from substrates.fnv.genome import (
-            FunctionalGene as Gene, Chromosome, Genome)
+        from substrates.fnv.genome import ContextGene as Gene, Chromosome, Genome
     else:
         raise ValueError('unknown backend: %s' % backend)
     return Gene, Chromosome, Genome
 
 
+def _fnv_gene_document(gene):
+    from substrates.fnv.genome import ControlGene, InputGene, OutputGene
+    if isinstance(gene, InputGene):
+        return {'id': int(gene.gene_id), 'branch': int(gene.branch_id),
+                'pad': [int(gene.distance), int(gene.bearing)]}
+    if isinstance(gene, OutputGene):
+        return {'id': int(gene.gene_id), 'branch': int(gene.branch_id),
+                'output': [str(gene.role), int(gene.distance),
+                           int(gene.bearing)]}
+    if isinstance(gene, ControlGene):
+        return {'id': int(gene.gene_id), 'branch': int(gene.branch_id),
+                'control': [int(gene.tolerance), int(gene.telomere)]}
+    return {'id': int(gene.gene_id), 'branch': int(gene.branch_id),
+            'context': [int(gene.ctx_l), int(gene.ctx_r), int(gene.ctx_d),
+                        int(gene.self_in)],
+            'out': int(gene.self_out), 'depth': int(gene.depth)}
+
+
 def genome_to_dict(genome, backend):
     from substrates.nervous.tritile import _CHAN_BITS
-    constructive_fnv = False
-    if backend == 'fnv':
-        from substrates.fnv.genome import is_constructive
-        constructive_fnv = is_constructive(genome)
+    # FNV has exactly one encoding, so its growth genes are always context rules.
+    constructive_fnv = backend == 'fnv'
     fields = (() if constructive_fnv else _FIELDS[backend])
     def split_for(chromosome):
         count = len(chromosome.genes)
@@ -70,22 +85,10 @@ def genome_to_dict(genome, backend):
             {
                 'tag': int(c.tag),
                 'split': split_for(c),
-                'telomere': int(getattr(c, 'telomere', 1)),
-                # Branched encoding: one lifespan per arm.
-                'telomere_top': int(getattr(c, 'telomere_top', 0)),
-                'telomere_bottom': int(getattr(c, 'telomere_bottom', 0)),
                 'wiring': False,
-                'genes': [
-                    {
-                        'id': int(g.gene_id),
-                        'component': int(g.component_id),
-                        'branch': int(g.branch_id),
-                        'inputs': [
-                            [int(ref.node_id), str(ref.direction)]
-                            for ref in g.inputs],
-                    }
-                    for g in c.genes
-                ],
+                # Two gene kinds: context rules, and one control gene per arm
+                # carrying that arm's reach and lifespan.
+                'genes': [_fnv_gene_document(g) for g in c.genes],
             }
             for c in genome.chromosomes]
     else:
@@ -128,6 +131,24 @@ def genome_to_dict(genome, backend):
             and getattr(genome, 'edge_input_layout', None) is not None
             else None),
         'chromosomes': chromosome_documents,
+        'input_chromosome': (
+            {'tag': int(genome.input_chromosome.tag),
+             'genes': [_fnv_gene_document(g)
+                       for g in genome.input_chromosome.genes]}
+            if backend == 'fnv'
+            and getattr(genome, 'input_chromosome', None) is not None
+            else None),
+        'output_layout': (
+            [[str(role), [int(cell[0]), int(cell[1])]]
+             for role, cell in (getattr(genome, 'output_layout', ()) or ())]
+            if backend == 'fnv' else None),
+        'output_chromosome': (
+            {'tag': int(genome.output_chromosome.tag),
+             'genes': [_fnv_gene_document(g)
+                       for g in genome.output_chromosome.genes]}
+            if backend == 'fnv'
+            and getattr(genome, 'output_chromosome', None) is not None
+            else None),
         'state_delays': ([float(x) for x in sd] if sd else None),
         'arch': getattr(genome, 'arch', 'single'),      # nervous tile architecture
         # Tri channel field width. Absent (or 4) marks the pre-OR layout, which
@@ -137,56 +158,95 @@ def genome_to_dict(genome, backend):
 
 
 def genome_from_dict(data, backend):
-    if backend == 'fnv' and data.get('encoding') in (
-            'constructive_v3', 'typed_v4'):
+    if backend == 'fnv':
         from substrates.fnv.catalogue import verify_catalogue_hash
         from substrates.fnv.genome import (
-            CONSTRUCTIVE_ENCODING, DEVELOPMENT_VERSION,
-            TYPED_DEVELOPMENT_VERSION, TYPED_ENCODING, BranchRef,
-            Chromosome, Genome, PlacementGene,
+            BRANCHED_ENCODING, DEVELOPMENT_VERSION, Chromosome, ContextGene,
+            ControlGene, Genome, InputGene, OutputGene, sync_input_layout,
+            sync_output_layout,
         )
-        # Both encodings store the identical gene record; they differ only in
-        # how a reference resolves, which is exactly what the version stamp
-        # distinguishes. The typed growth budget rides along as the ordinary
-        # per-chromosome telomere, so nothing else has to be persisted.
-        typed = data.get('encoding') == TYPED_ENCODING
-        encoding = TYPED_ENCODING if typed else CONSTRUCTIVE_ENCODING
-        expected = (TYPED_DEVELOPMENT_VERSION if typed
-                    else DEVELOPMENT_VERSION)
+        # The retired associative and constructive encodings stored genes that
+        # this one would silently misread, so the version stamp rejects them
+        # rather than loading a genome that means something else.
         verify_catalogue_hash(data.get('catalogue_hash'))
-        if int(data.get('development_version', -1)) != expected:
+        if (data.get('encoding') != BRANCHED_ENCODING
+                or int(data.get('development_version', -1))
+                != DEVELOPMENT_VERSION):
             raise ValueError(
-                "FNV checkpoint development version mismatch: expected %d, "
-                "found %r" % (
-                    expected, data.get('development_version')))
+                "FNV checkpoint is not a %s genome (development version %d): "
+                "found encoding %r version %r" % (
+                    BRANCHED_ENCODING, DEVELOPMENT_VERSION,
+                    data.get('encoding'), data.get('development_version')))
+        encoding = BRANCHED_ENCODING
         chromosomes = []
         for item in data.get('chromosomes', ()):
-            genes = [PlacementGene(
-                gene_id=int(row['id']),
-                component_id=int(row['component']),
-                inputs=tuple(BranchRef(int(ref[0]), str(ref[1]))
-                             for ref in row.get('inputs', ())),
-                branch_id=int(row.get('branch', row['id'])),
-            ) for row in item.get('genes', ())]
+            genes = []
+            for row in item.get('genes', ()):
+                if 'control' in row:
+                    tolerance, telomere = row['control']
+                    genes.append(ControlGene(
+                        gene_id=int(row['id']), tolerance=int(tolerance),
+                        telomere=int(telomere),
+                        branch_id=int(row.get('branch', row['id']))))
+                    continue
+                ctx_l, ctx_r, ctx_d, self_in = row['context']
+                genes.append(ContextGene(
+                    gene_id=int(row['id']),
+                    ctx_l=int(ctx_l), ctx_r=int(ctx_r), ctx_d=int(ctx_d),
+                    self_in=int(self_in), self_out=int(row['out']),
+                    branch_id=int(row.get('branch', row['id'])),
+                    depth=int(row.get('depth', -1))))
             split = max(0, min(int(item.get('split', 0)), len(genes)))
             chromosomes.append(Chromosome(
-                genes=genes, split=split, tag=int(item.get('tag', 0)),
-                telomere=int(item.get('telomere', 1)),
-                telomere_top=int(item.get('telomere_top', 0)),
-                telomere_bottom=int(item.get('telomere_bottom', 0))))
+                genes=genes, split=split, tag=int(item.get('tag', 0))))
         layout = data.get('input_layout')
         max_id = max((gene.gene_id for chromosome in chromosomes
                       for gene in chromosome.genes), default=0)
-        return Genome(
+        max_id = max(max_id, max(
+            (int(row['id'])
+             for row in ((data.get('input_chromosome') or {}).get('genes')
+                         or ())),
+            default=0))
+        max_id = max(max_id, max(
+            (int(row['id'])
+             for row in ((data.get('output_chromosome') or {}).get('genes')
+                         or ())),
+            default=0))
+        roots = data.get('output_chromosome')
+        if roots is None:
+            raise ValueError('FNV v6 checkpoint has no output chromosome')
+        output_genes = []
+        for row in roots.get('genes', ()):
+            role, distance, bearing = row['output']
+            output_genes.append(OutputGene(
+                gene_id=int(row['id']), role=str(role),
+                distance=int(distance), bearing=int(bearing),
+                branch_id=int(row['branch'])))
+        genome = Genome(
             chromosomes=chromosomes,
             tag=int(data.get('tag', 0)),
             input_layout=(
                 tuple((int(cell[0]), int(cell[1])) for cell in layout)
                 if layout is not None else None),
+            output_chromosome=Chromosome(
+                genes=output_genes, split=0, tag=int(roots.get('tag', 0))),
             encoding=encoding,
             next_gene_id=max(
                 max_id + 1, int(data.get('next_gene_id') or 1)),
         )
+        pads = data.get('input_chromosome')
+        if pads is not None:
+            genome.input_chromosome = Chromosome(
+                genes=[
+                    InputGene(gene_id=int(row['id']),
+                              distance=int(row['pad'][0]),
+                              bearing=int(row['pad'][1]),
+                              branch_id=int(row.get('branch', row['id'])))
+                    for row in pads['genes']],
+                split=0, tag=int(pads.get('tag', 0)))
+            sync_input_layout(genome)
+        sync_output_layout(genome)
+        return genome
     Gene, Chromosome, Genome = _genome_types(backend)
     fields = tuple(data.get('gene_fields') or _FIELDS[backend])
     chroms = []
@@ -224,28 +284,9 @@ def genome_from_dict(data, backend):
                 tuple(int(value) for value in data['edge_input_layout'])
                 if data.get('edge_input_layout') is not None else None),
         })
-    elif backend == 'fnv':
-        layout = data.get('input_layout')
-        from substrates.fnv.genome import ASSOCIATIVE_ENCODING
-        backend_fields.update({
-            'input_layout': (
-                tuple((int(cell[0]), int(cell[1])) for cell in layout)
-                if layout is not None else None),
-            'encoding': ASSOCIATIVE_ENCODING,
-        })
     genome = Genome(
         chromosomes=chroms, tag=int(data.get('tag', 0)),
         **backend_fields)
-    if backend == 'fnv':
-        from substrates.fnv.catalogue import verify_catalogue_hash
-        from substrates.fnv.genome import LEGACY_DEVELOPMENT_VERSION
-        verify_catalogue_hash(data.get('catalogue_hash'))
-        if data.get('development_version') != LEGACY_DEVELOPMENT_VERSION:
-            raise ValueError(
-                "FNV checkpoint development version mismatch: expected %d, "
-                "found %r" % (
-                    LEGACY_DEVELOPMENT_VERSION,
-                    data.get('development_version')))
     # 'state_widths' appears in checkpoints written before width evolution was
     # retired. It is deliberately ignored: the vector no longer exists on the
     # genome and no engine reads it (RunConfig.from_dict moves such runs onto
@@ -505,6 +546,9 @@ def load_checkpoint(path):
         setattr(
             target, '_lut_function_families',
             run_config.ga.lut_function_families)
+    elif backend == 'fnv':
+        setattr(target, '_fnv_families', run_config.fnv.families)
+        setattr(target, '_fnv_readout_mode', run_config.fnv.readout_mode)
     return {'best_genome': genome_from_dict(doc['genome'], backend),
             'best_fitness': float(doc['fitness']), 'target': target,
             'target_name': target.name, 'arch': arch, 'seed': doc.get('seed'),

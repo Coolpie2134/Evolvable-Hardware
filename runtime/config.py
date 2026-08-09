@@ -10,14 +10,10 @@ from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
 DEFAULT_MAX_TELOMERE = 20
 DEFAULT_LUT_MAX_TELOMERE = 8
-# FNV bodies are chains of individually named placements rather than a radially
-# dividing sheet, so they run far deeper than a nervous net at the same setting:
-# measured median depth 15-22 with a tail past 50. Inheriting the nervous
-# default of 20 clipped real structure - the Full adder still solved but took
-# generation 229 instead of 32. This equals the placement cap, so no body can
-# reach it and the default run is unchanged; lowering the control then bounds
-# growth for real.
-DEFAULT_FNV_MAX_TELOMERE = 128
+# FNV Max telomere is the ceiling on an ARM's lifespan - how many placements one
+# branch may make before it dies - and never a growth radius. A genome has two
+# arms per chromosome, so this bounds the body directly.
+DEFAULT_FNV_MAX_TELOMERE = 32
 MAX_EVALUATION_WORKERS = 16
 # Physical cores are usually the useful ceiling for these CPU-heavy event
 # simulations. There is no portable stdlib physical-core count, so default to
@@ -318,9 +314,13 @@ class GAConfig:
 
 @dataclass(frozen=True)
 class FNVConfig:
-    """Family-level component-bank selection for Functional NV Net runs."""
+    """Component-bank and output-readout selection for Functional NV Net."""
 
     families: tuple[str, ...] = FNV_FAMILIES
+    # ``fitted`` is the control mode: development is output-rooted but scoring
+    # may select the best mature probes. ``genetic`` reads the role sites named
+    # by the output chromosome, with an unwritten site remaining silent.
+    readout_mode: str = 'genetic'
 
     def __post_init__(self):
         families = tuple(str(family).upper() for family in self.families)
@@ -336,10 +336,19 @@ class FNVConfig:
         object.__setattr__(
             self, 'families',
             tuple(family for family in FNV_FAMILIES if family in families))
+        mode = str(self.readout_mode).lower()
+        if mode not in ('fitted', 'genetic'):
+            raise ValueError("FNV readout_mode must be 'fitted' or 'genetic'")
+        object.__setattr__(self, 'readout_mode', mode)
 
     @classmethod
     def from_dict(cls, values):
+        # A fresh FNV run uses its evolved output chromosome.  Checkpoints from
+        # before the readout field existed were evaluated with fitted probes,
+        # however, so absence during deserialisation must preserve that meaning
+        # instead of silently changing their phenotype.
         values = dict(values or {})
+        values.setdefault('readout_mode', 'fitted')
         if 'families' in values:
             values['families'] = tuple(values['families'])
         return cls(**values)

@@ -179,7 +179,7 @@ def score_frozen(genome, target, fitted):
                 {tuple(cell) for cell in flat_inputs(in_pos)}
                 if evolved_layout else None))
     elif fitted.backend == 'fnv':
-        from substrates.fnv.growth import grow_functional
+        from substrates.fnv.construction import grow_functional
         from substrates.fnv.evaluation import (
             score_fixed_logic_outputs, trace_fixed_outputs,
         )

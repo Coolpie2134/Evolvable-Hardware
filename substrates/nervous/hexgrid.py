@@ -15,7 +15,11 @@ not absolute compass sides - see hex_dirs.
 """
 from __future__ import annotations
 
+from collections import deque
+from functools import lru_cache
 
+
+@lru_cache(maxsize=8192)
 def hex_dirs(x, y):
     """{'D','R','L'} -> neighbour coordinate, in the node's own orientation frame.
 
@@ -31,6 +35,10 @@ def hex_dirs(x, y):
     It lets one gene express structure symmetrically across both orientations.
     The neighbour *set* is identical to the absolute one (only the R/L labels
     swap by parity), so physical adjacency and frontier growth are unchanged.
+
+    The returned mapping is shared and read-only by convention. Geometry is a
+    dominant inner loop for every substrate, while coordinates repeat heavily;
+    caching avoids millions of identical three-entry dictionary allocations.
     """
     if (x + y) % 2 == 0:                        # up-node: apex +y, R on the +x side
         return {'D': (x, y + 1), 'R': (x + 1, y), 'L': (x - 1, y)}
@@ -44,6 +52,36 @@ def hex_frontier_cells(x, y):
     Hayflick limit - a cell stops dividing once its telomere runs out) and by
     growth converging to its attractor, not by walls."""
     return list(hex_dirs(x, y).values())
+
+
+@lru_cache(maxsize=4096)
+def _honeycomb_delta_distance(dx, dy, start_parity):
+    """Shortest edge distance from the origin on this brick-wall lattice."""
+    target = (int(dx), int(dy))
+    if target == (0, 0):
+        return 0
+    pending = deque([((0, 0), 0)])
+    seen = {(0, 0)}
+    while pending:
+        (x, y), distance = pending.popleft()
+        if (x + y + int(start_parity)) % 2 == 0:
+            neighbours = ((x - 1, y), (x + 1, y), (x, y + 1))
+        else:
+            neighbours = ((x - 1, y), (x + 1, y), (x, y - 1))
+        for neighbour in neighbours:
+            if neighbour == target:
+                return distance + 1
+            if neighbour not in seen:
+                seen.add(neighbour)
+                pending.append((neighbour, distance + 1))
+    raise AssertionError("unbounded honeycomb must be connected")
+
+
+def honeycomb_distance(left, right):
+    """Exact number of honeycomb edges between two integer coordinates."""
+    return _honeycomb_delta_distance(
+        int(right[0]) - int(left[0]), int(right[1]) - int(left[1]),
+        (int(left[0]) + int(left[1])) & 1)
 
 
 def hex_pixel(x, y):

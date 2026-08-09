@@ -285,7 +285,7 @@ def build_run_config(args, backend, chromosome_count):
             escape=build_escape_config(args),
             **extra),
         pulse=pulse,
-        fnv=FNVConfig(tuple(args.fnv_families)))
+        fnv=FNVConfig(tuple(args.fnv_families), args.fnv_readout))
 
 
 def build_arch(args, target, backend):
@@ -304,7 +304,8 @@ def architecture_summary(architecture, args):
         tile, model, _delay = NV_NEW_RUN_PROFILES[args.nv_profile]
         return '%s/%s' % (tile, model)
     if architecture == 'fnv':
-        return 'families=' + '+'.join(args.fnv_families)
+        return 'families=%s; readout=%s' % (
+            '+'.join(args.fnv_families), args.fnv_readout)
     if architecture == 'lut':
         return '%s; functions=%s' % (
             args.lut_io_mode, '+'.join(args.lut_function_families))
@@ -356,6 +357,7 @@ def config_record(args, architectures):
             'lut_function_families': list(args.lut_function_families),
         },
         'fnv_families': list(args.fnv_families),
+        'fnv_readout': args.fnv_readout,
         'escape': dataclasses.asdict(build_escape_config(args)),
         'certification': {
             'solver_valid': SOLVER_VALID,
@@ -998,6 +1000,10 @@ def build_parser():
     io.add_argument('--fnv-families', default=','.join(FNV_FAMILIES),
                     help='comma-separated FNV component families: %s'
                          % ', '.join(FNV_FAMILIES))
+    io.add_argument('--fnv-readout', choices=('fitted', 'genetic'),
+                    default=FNVConfig().readout_mode,
+                    help='FNV output scoring: fitted probes (control) or the '
+                         'evolved output-role sites')
     if LUT_FUNCTION_FAMILIES:
         io.add_argument('--lut-function-families', default='UNRESTRICTED',
                         help='comma-separated LUT truth-table banks: %s '

@@ -529,7 +529,8 @@ def test_interactive_fnv_builds_and_draws_a_real_functional_player():
     for _ in range(40):
         genome = random_functional_genome(
             2, max_telomere=3, n_inputs=target.n_inputs,
-            families=('LOGIC', 'DELAY'))
+            families=('LOGIC', 'DELAY'),
+            output_roles=tuple(t.role for t in target.outputs))
         playback = prepare_functional_playback(genome, target)
         if playback is not None:
             break
@@ -537,7 +538,7 @@ def test_interactive_fnv_builds_and_draws_a_real_functional_player():
 
     tab = InteractiveTab.__new__(InteractiveTab)
     (tab._grid, tab._in_pos, tab._out_pos,
-     tab._fnv_horizon) = playback
+     tab._fnv_horizon, tab._fnv_branches) = playback
     tab._backend = 'fnv'
     tab._case_kind = 'cases'
     tab._circuit = {'target': target}
@@ -555,6 +556,44 @@ def test_interactive_fnv_builds_and_draws_a_real_functional_player():
     tab._player.step()
     InteractiveTab._draw_async(tab)
     assert 'output edges:' in tab._status.value
+
+
+def test_fnv_genome_view_draws_context_and_control_cards():
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from substrates.fnv.genome import random_functional_genome
+
+    random.seed(193)
+    genome = random_functional_genome(
+        2, n_inputs=2, output_roles=('sum', 'carry'),
+        families=('LOGIC', 'DELAY'))
+    app = App.__new__(App)
+    app._disp_backend = 'fnv'
+    app._disp_target = None
+    app._genome_fig = Figure(figsize=(8, 5))
+    app._genome_canvas = FigureCanvasAgg(app._genome_fig)
+
+    App._draw_genome(app, genome, 0.25)
+    labels = [text.get_text() for axis in app._genome_fig.axes
+              for text in axis.texts]
+    assert any('CONTROL' in label for label in labels)
+    assert any('depth:' in label for label in labels)
+    assert any('output root' in label for label in labels)
+
+
+def test_fnv_view_keeps_a_dead_genetic_output_visible():
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from substrates.fnv.viz import draw_functional_net
+
+    figure = Figure(figsize=(3, 3))
+    FigureCanvasAgg(figure)
+    axis = figure.add_subplot(111)
+    draw_functional_net(
+        axis, {}, output_positions={'sum': (2, 0)},
+        root_positions={'sum': (2, 0)})
+    assert any(text.get_text() == 'sum' for text in axis.texts)
+    assert axis.collections                  # hollow root/readout markers
 
 
 def test_interactive_width_strip_clips_open_intervals_to_cursor():

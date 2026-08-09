@@ -16,9 +16,9 @@ uses the input and time representation appropriate to its physics:
                latch, and oscillators run. It uses the paper-faithful PulseSim,
                the same asynchronous event engine used by Nervous evolution.
   * FNV      - continuous-time playback over FunctionalSim: evolved source pads,
-               fixed physical component types, directed honeycomb wires, and
-               globally fitted non-invasive output probes. Temporal trials and
-               static logic settling windows are identical to fitness.
+               output-rooted fixed physical components, directed honeycomb
+               wires, and the run's fitted or genetic readout. Temporal trials
+               and static logic settling windows are identical to fitness.
   * LUT      - the SAME timeline and continuous-time playback, driving the
                asynchronous level-logic engine (AsyncLutSim, the same one LUT
                evolution scores with): watch the cells' four directional
@@ -268,7 +268,7 @@ class InteractiveTab:
                     'FNV circuit incomplete - no playback is available.')
                 return
             (self._grid, self._in_pos, self._out_pos,
-             self._fnv_horizon) = playback
+             self._fnv_horizon, self._fnv_branches) = playback
             self._setup_async(target)
             self._playback_controls(
                 '   (click the timeline to place input pulses; '
@@ -356,11 +356,15 @@ class InteractiveTab:
         strategy = io_strategy(target)
         note = ''
         if backend == 'fnv':
+            readout = (
+                'genetic output site%s'
+                if getattr(target, '_fnv_readout_mode', 'fitted') == 'genetic'
+                else 'globally fitted output probe%s')
             note = ('   [I/O binding: evolved source pads; '
-                    '%d input%s; globally fitted output probe%s]'
+                    '%d input%s; %s]'
                     % (len(self._in_pos),
                        '' if len(self._in_pos) == 1 else 's',
-                       '' if len(self._out_pos) == 1 else 's'))
+                       readout % ('' if len(self._out_pos) == 1 else 's')))
         elif backend == 'lut':
             architecture = (
                 'alternating exterior perimeter buses'
@@ -687,11 +691,17 @@ class InteractiveTab:
                          arch=getattr(self, '_nv_arch', 'single'),
                          title=title)
         elif self._backend == 'fnv':
+            # Coloured by BRANCH, not by component family: the question this
+            # view has to answer is which arm built what, and whether the arms
+            # are doing separate work at all. Inputs and outputs stay ringed.
             draw_functional_net(
                 self._axg, self._grid,
                 input_positions=self._in_pos,
                 output_positions=self._out_pos,
+                root_positions=dict(getattr(
+                    self._circuit.get('genome'), 'output_layout', ()) or ()),
                 activity=self._player.activity(),
+                branches=getattr(self, '_fnv_branches', {}) or {},
                 show_edges=True, title=title)
         else:
             draw_lut_net(self._axg, self._grid, activity=self._player.nibbles(),

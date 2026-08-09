@@ -67,6 +67,8 @@ from ui.designer import DesignerTab, _Tip
 
 #: Shown, disabled, for the substrates with one native I/O mechanism.
 NATIVE_IO_LABEL = 'Evolved inputs / fitted outputs'
+FNV_FITTED_IO_LABEL = 'Evolved inputs / output-rooted growth / fitted probes'
+FNV_GENETIC_IO_LABEL = 'Evolved inputs / output-rooted growth / genetic outputs'
 #: Shown when a legacy fixed-input nervous checkpoint is loaded.
 LEGACY_IO_LABEL = 'Legacy fixed inputs / fitted outputs'
 LUT_PAD_IO_LABEL = 'Evolved internal source pads'
@@ -252,8 +254,103 @@ def grid_to_rgba(grid, grid_size, seed_set, output_pos):
     return img
 
 
+def _fnv_state(value):
+    """One context slot: a component number, EMPTY, PAD, or OUT by name."""
+    from substrates.fnv.genome import OUT_STATE, PAD_STATE
+    value = int(value)
+    if value == OUT_STATE:
+        return 'OUT'
+    if value == PAD_STATE:
+        return 'PAD'
+    if value == 0:
+        return '.'
+    return str(value)
+
+
+def _fnv_gene_row(index, gene):
+    """One row of the FNV genome table, for either gene kind."""
+    from substrates.fnv.catalogue import BY_ID
+    from substrates.fnv.genome import DEPTH_ANY, ControlGene
+    if isinstance(gene, ControlGene):
+        return ('  %4d | %9d | CONTROL   reach %-4d life %-4d | %6d |'
+                % (index, gene.gene_id, int(gene.tolerance),
+                   int(gene.telomere), gene.branch_id))
+    out = int(gene.self_out)
+    name = 'ERASE' if out == 0 else BY_ID[out].name
+    depth = ('any' if int(gene.depth) == DEPTH_ANY else str(int(gene.depth)))
+    return ('  %4d | %9d | %4s %4s %4s %4s | %6s | %6d | %4d %s'
+            % (index, gene.gene_id,
+               _fnv_state(gene.ctx_l), _fnv_state(gene.ctx_r),
+               _fnv_state(gene.ctx_d), _fnv_state(gene.self_in),
+               depth, gene.branch_id, out, name))
+
+
+def _fnv_input_lines(genome):
+    """The extra chromosome that places the input pads."""
+    from substrates.fnv.genome import InputGene
+    chromosome = getattr(genome, 'input_chromosome', None)
+    if chromosome is None:
+        return []
+    lines = ['Input chromosome  -  places the pads; pad 0 is the anchor at (0,0)',
+             '    #  | stable id | bearing | distance | cell',
+             '  -----+-----------+---------+----------+-------']
+    layout = list(getattr(genome, 'input_layout', ()) or ())
+    lines.append('  %4s | %9s | %7s | %8s | %s'
+                 % ('-', '-', '-', '-', layout[0] if layout else '(0, 0)'))
+    for index, gene in enumerate(chromosome.genes):
+        if not isinstance(gene, InputGene):
+            continue
+        cell = layout[index + 1] if index + 1 < len(layout) else gene.cell()
+        lines.append('  %4d | %9d | %7d | %8d | %s'
+                     % (index, gene.gene_id, int(gene.bearing),
+                        int(gene.distance), cell))
+    lines.append('')
+    return lines
+
+
+def _fnv_output_lines(genome):
+    """The extra chromosome placing role-labelled output roots."""
+    from substrates.fnv.genome import OutputGene
+    chromosome = getattr(genome, 'output_chromosome', None)
+    if chromosome is None:
+        return []
+    layout = dict(getattr(genome, 'output_layout', ()) or ())
+    lines = ['Output chromosome  -  one genetic writable root per role',
+             '    #  | stable id | role       | branch | bearing | distance | cell',
+             '  -----+-----------+------------+--------+---------+----------+-------']
+    for index, gene in enumerate(chromosome.genes):
+        if not isinstance(gene, OutputGene):
+            continue
+        lines.append('  %4d | %9d | %-10s | %6d | %7d | %8d | %s'
+                     % (index, gene.gene_id, str(gene.role)[:10],
+                        int(gene.branch_id), int(gene.bearing),
+                        int(gene.distance), layout.get(gene.role, gene.cell())))
+    lines.append('')
+    return lines
+
+
+def _telomere_display(chromosome):
+    """Lifespans for one chromosome, however its substrate stores them.
+
+    A branched FNV chromosome has two arms and so two telomeres, one per
+    branch; every other substrate has a single chromosome-wide one.
+    """
+    from substrates.fnv.genome import ControlGene
+    controls = [g for g in chromosome.genes if isinstance(g, ControlGene)]
+    if controls:
+        return 'reach/life ' + ' '.join(
+            '%d/%d' % (int(g.tolerance), int(g.telomere)) for g in controls)
+    value = getattr(chromosome, 'telomere', None)
+    return None if value is None else 'telomere %d' % int(value)
+
+
 def _split_display(chromosome):
     count = len(chromosome.genes)
+    from substrates.fnv.genome import ControlGene
+    if any(isinstance(g, ControlGene) for g in chromosome.genes):
+        # The FNV centromere: genes before it are the top arm, after it the
+        # bottom. Either arm may be empty, so 0 and count are both legal.
+        return '%d (centromere)' % max(0, min(int(chromosome.split), count))
     if count == 0:
         return 'none'
     if count == 1:
@@ -289,20 +386,31 @@ def build_genome_text(genome, fitness=None, binding=None):
     L.append('')
     g0 = next((gene for chromosome in chroms
                for gene in chromosome.genes), None)
-    constructive_fnv = g0 is not None and hasattr(g0, 'component_id')
-    hexmode = g0 is not None and hasattr(g0, 'ctx_l')
+    from substrates.fnv.genome import (
+        ContextGene as _FnvContext, ControlGene as _FnvControl)
+    constructive_fnv = any(
+        isinstance(gene, (_FnvContext, _FnvControl))
+        for chromosome in chroms for gene in chromosome.genes)
+    hexmode = (not constructive_fnv
+               and g0 is not None and hasattr(g0, 'ctx_l'))
     lutmode = g0 is not None and hasattr(g0, 'ctx_n')
-    sides = ('named FNV output ports and dependency labels'
+    sides = ('the states of L/R/D and the cell itself'
              if constructive_fnv else
              'rotated circuit context L/R/D (4-bit states 0-15)' if hexmode
              else 'the 4 sides N/E/S/W (each a 16-bit LUT)' if lutmode
              else 'the 4 sides N/E/S/W')
     element = 'core circuit' if hexmode else 'cell'
     if constructive_fnv:
-        L.append('Each placement gene installs one permanent FNV component at')
-        L.append('the empty honeycomb site faced by all of its named input ports.')
-        L.append('IDs and output-port labels are stable: list order is not a cursor.')
-        L.append('A collision suppresses only that placement; unrelated branches survive.')
+        L.append('A chromosome has two arms about its centromere, so two branches.')
+        L.append('Each gene is a CONTEXT rule: the states required of L/R/D and of')
+        L.append('the cell itself, and what the cell becomes. 0 is EMPTY, -1 is a')
+        L.append('read-only input PAD, and -2 is an unwritten genetic output root.')
+        L.append('Each target role owns one arm; its self=OUT rule starts there and')
+        L.append('development grows back toward PAD terminal cues.')
+        L.append('Every living arm fires at once, at every cell it matches; two rules')
+        L.append('contesting one cell resolve by nearest match, then stable arm/rule priority.')
+        L.append('CONTROL rows carry that arm\'s reach (how far a rule may sit from a')
+        L.append('neighbourhood) and its lifespan in cell changes.')
     else:
         L.append('Each gene maps an expected neighbourhood (%s + the %s' %
                  (sides, element))
@@ -310,7 +418,7 @@ def build_genome_text(genome, fitness=None, binding=None):
                  element)
         L.append('gene whose pattern is closest (min Hamming distance) to its real neighbours.')
     if constructive_fnv:
-        L.append('branch labels group connected blocks for duplication, rerouting, and crossover.')
+        L.append('Each output allele crosses together with the complete arm that grows it.')
     elif hexmode:
         L.append('Each rule develops one 4-bit core circuit and is applied independently')
         L.append("to a tile's L/R/D circuits in their rotated orientation. out = 0 switches")
@@ -325,7 +433,7 @@ def build_genome_text(genome, fitness=None, binding=None):
     else:
         L.append("'until' = the gene only applies while the growth iteration <= that limit.")
     if constructive_fnv:
-        L.append('Chromosomes are hereditary containers; crossover exchanges labelled branch blocks.')
+        L.append('Chromosomes are hereditary containers; each arm crosses with its own lifespan.')
     else:
         L.append('split = the between-gene crossover point; a one-gene chromosome')
         L.append('recombines the rule fields inside that gene instead.')
@@ -358,22 +466,31 @@ def build_genome_text(genome, fitness=None, binding=None):
     else:
         hdr = '    #  |   N    E    S    W  | self |  out | until' + iotag_hdr
         sep = '  -----+---------------------+------+------+-------' + iotag_sep
+    if constructive_fnv:
+        hdr = ('    #  | stable id |    L    R    D self |  depth | branch |'
+               '  out')
+        sep = ('  -----+-----------+--------------------+--------+--------+'
+               '------')
     for ci, c in enumerate(chroms):
-        tel = getattr(c, 'telomere', None)
+        tel = _telomere_display(c)
         L.append('Chromosome %s     tag=%-4d  split=%-11s%s   (%d genes)%s'
                  % (chr(ord('a') + ci), c.tag, _split_display(c),
-                    ('  telomere=%d' % tel) if tel is not None else '',
+                    ('  %s' % tel) if tel is not None else '',
                     len(c.genes),
                     '   [WIRING chromosome - I/O port map]'
                     if getattr(c, 'wiring', False) else ''))
         if hdr:
             L.append(hdr)
             L.append(sep)
-        effective_split = (max(1, min(int(c.split), len(c.genes) - 1))
-                           if len(c.genes) > 1 else 0)
+        effective_split = (
+            max(0, min(int(c.split), len(c.genes)))
+            if constructive_fnv else
+            (max(1, min(int(c.split), len(c.genes) - 1))
+             if len(c.genes) > 1 else 0))
         for gi, g in enumerate(c.genes):
             if effective_split == gi:
-                L.append('       - - - - - - split - - - - - -')
+                L.append('       - - - - - - %s - - - - - -' % (
+                    'centromere' if constructive_fnv else 'split'))
             if show_iotags:
                 iotag = (' | %5d/%d'
                          % (getattr(g, 'tag', 0),
@@ -381,13 +498,7 @@ def build_genome_text(genome, fitness=None, binding=None):
             else:
                 iotag = ''
             if constructive_fnv:
-                from substrates.fnv.catalogue import BY_ID
-                refs = ', '.join('%d:%s' % (ref.node_id, ref.direction)
-                                 for ref in g.inputs)
-                name = BY_ID[g.component_id].name
-                L.append('  %4d | %9d | %4d %-15s | %6d | %s'
-                         % (gi, g.gene_id, g.component_id, name,
-                            g.branch_id, refs))
+                L.append(_fnv_gene_row(gi, g))
             elif hexmode:
                 L.append('  %4d | %4d %4d %4d | %4d | %4d%s'
                          % (gi, g.ctx_l, g.ctx_r, g.ctx_d, g.self_in,
@@ -398,7 +509,12 @@ def build_genome_text(genome, fitness=None, binding=None):
                 L.append('  %4d | %4d %4d %4d %4d | %4d | %4d | %5d%s'
                          % (gi, g.state_n, g.state_e, g.state_s, g.state_w,
                             g.self_in, g.self_out, g.limit, iotag))
+        if constructive_fnv and effective_split == len(c.genes):
+            L.append('       - - - - - - centromere - - - - - -')
         L.append('')
+    if constructive_fnv:
+        L.extend(_fnv_input_lines(genome))
+        L.extend(_fnv_output_lines(genome))
     if binding:
         L.append('I/O binding (evolved):')
         L.extend('  ' + line for line in str(binding).splitlines())
@@ -869,6 +985,20 @@ class App:
             self._fnv_family_checks.append(check)
         ttk.Separator(self._fnv_row, orient='vertical').pack(
             side='left', fill='y', padx=(2, 8))
+        ttk.Label(self._fnv_row, text='Output readout:').pack(side='left')
+        self._FNV_READOUT_LABELS = {
+            'Fitted probes (control)': 'fitted',
+            'Genetic output sites': 'genetic',
+        }
+        self._fnv_readout_var = tk.StringVar(value='Genetic output sites')
+        self._fnv_readout_cb = ttk.Combobox(
+            self._fnv_row, textvariable=self._fnv_readout_var, width=22,
+            state='readonly', values=list(self._FNV_READOUT_LABELS))
+        self._fnv_readout_cb.pack(side='left', padx=(4, 0))
+        self._fnv_readout_cb.bind(
+            '<<ComboboxSelected>>', lambda _event: self._reconfigure_for_backend())
+        ttk.Separator(self._fnv_row, orient='vertical').pack(
+            side='left', fill='y', padx=(2, 8))
         self._fnv_dictionary_btn = ttk.Button(
             self._fnv_row, text='Node number dictionary',
             command=self._show_fnv_node_dictionary)
@@ -1154,8 +1284,14 @@ class App:
                 if self._io_placement_var.get() not in labels:
                     self._io_placement_var.set(LUT_PAD_IO_LABEL)
             elif native_io:
-                labels = [NATIVE_IO_LABEL]
-                self._io_placement_var.set(NATIVE_IO_LABEL)
+                label = (
+                    FNV_GENETIC_IO_LABEL
+                    if backend == 'fnv'
+                    and self._selected_fnv_readout_mode() == 'genetic'
+                    else FNV_FITTED_IO_LABEL
+                    if backend == 'fnv' else NATIVE_IO_LABEL)
+                labels = [label]
+                self._io_placement_var.set(label)
             else:
                 labels = [
                     label for label, strategy
@@ -1703,6 +1839,12 @@ class App:
             family for family in FNV_FAMILIES
             if self._fnv_family_vars[family].get())
 
+    def _selected_fnv_readout_mode(self):
+        if not hasattr(self, '_fnv_readout_var'):
+            return 'fitted'
+        return self._FNV_READOUT_LABELS.get(
+            self._fnv_readout_var.get(), 'fitted')
+
     def _selected_lut_function_families(self):
         if not hasattr(self, '_lut_function_family_vars'):
             return ('UNRESTRICTED',)
@@ -1757,7 +1899,9 @@ class App:
             # inside ((1-Vth)/2, 1-Vth)); report as invalid tuning, not a crash.
             return None
         try:
-            fnv_config = FNVConfig(self._selected_fnv_families())
+            fnv_config = FNVConfig(
+                self._selected_fnv_families(),
+                self._selected_fnv_readout_mode())
         except ValueError:
             return None
         lut_function_families = self._selected_lut_function_families()
@@ -1899,6 +2043,9 @@ class App:
                        else 'readonly'))
         for widget in getattr(self, '_fnv_family_checks', ()):
             widget.configure(state='disabled' if locked else 'normal')
+        if hasattr(self, '_fnv_readout_cb'):
+            self._fnv_readout_cb.configure(
+                state='disabled' if locked else 'readonly')
         for widget in getattr(self, '_lut_function_family_checks', ()):
             widget.configure(state='disabled' if locked else 'normal')
 
@@ -2247,6 +2394,8 @@ class App:
         if saved_backend == 'fnv':
             setattr(saved_target, '_fnv_families',
                     normalized_config.fnv.families)
+            setattr(saved_target, '_fnv_readout_mode',
+                    normalized_config.fnv.readout_mode)
         elif saved_backend == 'lut':
             setattr(
                 saved_target, 'lut_io_mode',
@@ -2301,6 +2450,12 @@ class App:
         for family, variable in getattr(
                 self, '_fnv_family_vars', {}).items():
             variable.set(family in normalized_config.fnv.families)
+        if hasattr(self, '_fnv_readout_var'):
+            readout_label = next(
+                (label for label, mode in self._FNV_READOUT_LABELS.items()
+                 if mode == normalized_config.fnv.readout_mode),
+                'Fitted probes (control)')
+            self._fnv_readout_var.set(readout_label)
         for family, variable in getattr(
                 self, '_lut_function_family_vars', {}).items():
             variable.set(
@@ -2779,6 +2934,7 @@ class App:
                 grid_size=target.grid_size, iters=target.iters)
             prepared = prepare_functional(genome, target)
             outputs = prepared[2] if prepared is not None else {}
+            roots = dict(getattr(genome, 'output_layout', ()) or ())
         except Exception:
             return
         fig = self._growth_fig
@@ -2796,6 +2952,7 @@ class App:
             draw_functional_net(
                 flat[index], snapshot, input_positions=inputs,
                 output_positions=(outputs if index == count - 1 else {}),
+                root_positions=roots,
                 show_edges=(index == count - 1),
                 title=('Seed (%d)' % len(snapshot) if index == 0 else
                        'Iter %d (%d)' % (index, len(snapshot))))
@@ -3261,7 +3418,10 @@ class App:
                 for out_index, terminal in enumerate(target.outputs))
             draw_functional_net(
                 axes[index], grid, input_positions=inputs,
-                output_positions=outputs, activity=case['node_outputs'],
+                output_positions=outputs,
+                root_positions=dict(
+                    getattr(genome, 'output_layout', ()) or ()),
+                activity=case['node_outputs'],
                 show_edges=True,
                 title='in=%s\n%s  %s' % (
                     ''.join(map(str, case['in_bits'])), result,
@@ -3333,6 +3493,8 @@ class App:
                      boxstyle='round,pad=0.02,rounding_size=0.2',
                      facecolor='white', edgecolor='#cdd6e2', lw=1.0, zorder=1))
 
+        from substrates.fnv.genome import ContextGene as FnvContextGene, ControlGene
+        fnv_context = isinstance(gene, FnvContextGene)
         lut = hasattr(gene, 'ctx_n')                       # 16-bit LUT gene
 
         def chip(cx, cy, val, sz=0.92, fs=8.5):
@@ -3340,27 +3502,25 @@ class App:
             ax.add_patch(FancyBboxPatch((cx, cy), sz, sz,
                          boxstyle='round,pad=0,rounding_size=0.14',
                          facecolor=face, edgecolor='#5b6b7d', lw=0.7, zorder=2))
+            label = (('%04X' % val) if lut else
+                     (_fnv_state(val) if fnv_context else str(val)))
             ax.text(cx + sz / 2, cy + sz / 2,
-                    ('%04X' % val) if lut else str(val), ha='center', va='center',
+                    label, ha='center', va='center',
                     fontsize=(fs * 0.55) if lut else fs,
                          fontweight='bold', color=txt, zorder=3)
 
-        if hasattr(gene, 'component_id'):
-            from substrates.fnv.catalogue import BY_ID
-            entry = BY_ID[gene.component_id]
-            refs = ', '.join('%d:%s' % (ref.node_id, ref.direction)
-                             for ref in gene.inputs)
-            ax.text(ox + 0.15, oy + 0.25, 'id %d   branch %d' % (
-                gene.gene_id, gene.branch_id), fontsize=7.5,
-                color='#556', zorder=3)
-            chip(ox + 0.2, oy + 1.05, gene.component_id, sz=1.25, fs=10)
-            ax.text(ox + 1.7, oy + 1.15, entry.name, fontsize=7.2,
-                    fontweight='bold', color='#223', zorder=3)
-            ax.text(ox + 1.7, oy + 1.75, 'inputs: ' + refs,
-                    fontsize=7.0, color='#556', zorder=3)
-            ax.text(ox + 1.7, oy + 2.35,
-                    'outputs: ' + ','.join(entry.outputs),
-                    fontsize=7.0, color='#556', zorder=3)
+        if isinstance(gene, ControlGene):
+            ax.text(ox + 0.2, oy + 0.35,
+                    'ARM %d CONTROL' % int(gene.branch_id), fontsize=8.5,
+                    fontweight='bold', color='#334', zorder=3)
+            ax.text(ox + 0.2, oy + 1.25,
+                    'match tolerance  %d' % int(gene.tolerance), fontsize=8,
+                    color='#556', zorder=3)
+            ax.text(ox + 0.2, oy + 2.05,
+                    'cell-change life  %d' % int(gene.telomere), fontsize=8,
+                    color='#556', zorder=3)
+            ax.text(ox + 5.85, oy + 3.05, 'id:%d' % int(gene.gene_id),
+                    ha='right', va='top', fontsize=6.5, color='#888', zorder=3)
             return
 
         # neighbourhood (y grows downward; axis is inverted below)
@@ -3385,6 +3545,13 @@ class App:
         ax.add_patch(FancyArrowPatch((ox + 3.1, oy + 1.45), (ox + 4.05, oy + 1.45),
                      arrowstyle='-|>', mutation_scale=11, color='#445', lw=1.4, zorder=2))
         chip(ox + 4.2, oy + 0.85, gene.self_out, sz=1.25, fs=11)
+        if fnv_context:
+            depth = ('any' if int(gene.depth) < 0 else str(int(gene.depth)))
+            ax.text(ox + 0.15, oy + 3.05,
+                    'arm:%d  depth:%s' % (int(gene.branch_id), depth),
+                    ha='left', va='top', fontsize=6.5, color='#666', zorder=3)
+            ax.text(ox + 5.85, oy + 3.05, 'id:%d' % int(gene.gene_id),
+                    ha='right', va='top', fontsize=6.5, color='#888', zorder=3)
         # growth-limit badge (top-right of card) - SNN genes only; the hex gene
         # has no per-gene iteration limit (paper-faithful associative memory)
         if hasattr(gene, 'limit'):
@@ -3443,7 +3610,11 @@ class App:
         title += self._seed_tag()
 
         g0 = next((g for c in chroms for g in c.genes), None)
-        constructive_fnv = g0 is not None and hasattr(g0, 'component_id')
+        from substrates.fnv.genome import ContextGene as FnvContextGene, ControlGene
+        functional_fnv = (
+            getattr(self, '_disp_backend', None) == 'fnv'
+            or any(isinstance(gene, (FnvContextGene, ControlGene))
+                   for chromosome in chroms for gene in chromosome.genes))
         lutmode = g0 is not None and hasattr(g0, 'ctx_n')
         CARD_CAP = 24
         # A dense LUT genome (hundreds of ontogeny genes) can't be shown as one
@@ -3470,11 +3641,11 @@ class App:
         truncated = False
 
         for ci, chrom in enumerate(chroms):
-            tel = getattr(chrom, 'telomere', None)
+            tel = _telomere_display(chrom)
             is_wiring = getattr(chrom, 'wiring', False)
             ax.text(0.0, y, "Chromosome %s   -   tag %d   -   split %s%s   -   %d genes%s"
                     % (chr(ord('a') + ci), chrom.tag, _split_display(chrom),
-                       ('   -   telomere %d' % tel) if tel is not None else '',
+                       ('   -   %s' % tel) if tel is not None else '',
                        len(chrom.genes),
                        '   -   WIRING (I/O port map)' if is_wiring else ''),
                     fontsize=9.5, fontweight='bold',
@@ -3501,19 +3672,20 @@ class App:
                 break
 
         _hex = bool(g0 is not None and hasattr(g0, 'ctx_l'))
-        if constructive_fnv:
-            _sides = 'stable source/output-port labels'
-            _tail = '; dependency order places components and collisions fail locally.'
+        if functional_fnv:
+            _sides = 'rotated L/R/D component states'
+            _tail = ('; rules act only in their arm territory, starting at its '
+                     'writable genetic output root and growing toward PAD cues.')
         else:
             _sides = ('rotated L/R/D circuit states (each 0-15)'
                       if _hex else 'N/E/S/W sides')
             _tail = ('.' if _hex else
                      ', active while iter <= limit.')
         explanation = (
-            'card = one fixed component placement: its stable ID owns the '
-            'listed output ports and its named inputs anchor it to existing '
-            'physical branches%s' % _tail
-            if constructive_fnv else
+            'card = one ontogenic FNV context rule (or arm control): the cluster '
+            'is the expected local neighbourhood and the chip after -> is the '
+            'new fixed-function component%s' % _tail
+            if functional_fnv else
             'card = one gene: the cluster is the expected neighbourhood '
             '(%s + centre = self), the chip after -> is the output state; '
             'growth picks the gene closest (min Hamming distance) to a circuit%s'
@@ -3552,7 +3724,7 @@ class App:
         for r, c in enumerate(shown):
             counts = Counter(g.self_out for g in c.genes if g.self_out)
             n_growth = sum(1 for g in c.genes if getattr(g, 'self_in', 1) == 0)
-            tel = getattr(c, 'telomere', None)
+            tel = _telomere_display(c)
             is_wiring = getattr(c, 'wiring', False)
             lbl = axes[r][0]
             lbl.axis('off')

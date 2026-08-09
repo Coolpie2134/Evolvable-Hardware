@@ -12,81 +12,63 @@ from runtime.mutation import adaptive_mutation_rate
 from runtime.parallel import map_ordered
 from substrates.nervous.hexgrid import hex_frontier_cells
 
-from .catalogue import (
-    BY_ID, COMPONENTS, DEFAULT_FAMILIES, behavior_component_ids,
-    enabled_component_ids,
-    local_component_ids, normalise_families,
-)
-from .evaluation import evaluate_functional_full
+from .catalogue import DEFAULT_FAMILIES, normalise_families
+from .evaluation import (
+    evaluate_functional_full, logic_morphology_capacities)
 from .genome import (
-    MAX_CHROMS, MAX_GENES, MAX_TELOMERE, Chromosome, FunctionalGene, Genome,
-    SEED_STATES, input_layout_domain, input_layout_radius, is_constructive,
-    is_typed,
-    random_component_id,
-    random_functional_chromosome, random_functional_gene,
-    random_functional_genome,
+    MAX_CHROMS, MAX_GENES, MAX_TELOMERE,
+    input_layout_domain, input_layout_radius, random_functional_genome,
 )
 
 N_WORKERS = max(1, min((os.cpu_count() or 2) - 2, 16))
 FITNESS_CACHE_MAX = 200_000
-GENE_FIELDS = ("ctx_l", "ctx_r", "ctx_d", "self_in", "self_out")
-MORPHOLOGY_PARENT_RATE = 0.15
+MORPHOLOGY_PARENT_RATE = 0.40
 MORPHOLOGY_ELITE_FRACTION = 0.10
+MODULE_ASSEMBLY_FRACTION = 0.04
+FUNCTION_EXPLORER_FRACTION = 0.35
+FUNCTION_EXPLORER_WARM_FRACTION = 0.08
+FUNCTION_EXPLORER_PATIENCE = 4
+DEVELOPMENTAL_SEED_CANDIDATES = 1
 
 
 def clone_genome(genome):
     """Copy mutable FNV structure without recursively walking scalar fields.
 
     FNV mutations edit gene objects in place, so unlike NV/LUT their genes
-    cannot be shared between offspring.  They contain only scalar alleles,
-    however, making one shallow copy per gene equivalent to ``deepcopy`` while
-    avoiding its memo/dispatch overhead throughout reproduction.
+    cannot be shared between offspring.
     """
-    if is_constructive(genome):
-        from .construction_ga import clone_constructive
-        return clone_constructive(genome)
-    clone = copy.copy(genome)
-    clone.chromosomes = []
-    for chromosome in genome.chromosomes:
-        copied = copy.copy(chromosome)
-        copied.genes = [copy.copy(gene) for gene in chromosome.genes]
-        clone.chromosomes.append(copied)
-    layout = getattr(genome, "input_layout", None)
-    if layout is not None:
-        clone.input_layout = tuple(tuple(cell) for cell in layout)
-    return clone
+    from .construction_ga import clone_constructive
+    return clone_constructive(genome)
 
 
 def genome_signature(genome):
-    if is_constructive(genome):
-        from .construction_ga import constructive_signature
-        return (getattr(genome, "encoding", None),
-                constructive_signature(genome))
-    layout = (
-        None if getattr(genome, "input_layout", None) is None
-        else tuple(tuple(cell) for cell in genome.input_layout)
-    )
-    return (layout, tuple(
-            (
-                chromosome.tag,
-                chromosome.split,
-                chromosome.telomere,
-                tuple(tuple(getattr(gene, field) for field in GENE_FIELDS)
-                      for gene in chromosome.genes),
-            )
-            for chromosome in genome.chromosomes
-        ))
+    from .construction_ga import branched_signature
+    return branched_signature(genome)
 
 
-def _evaluate_record(genome, target):
-    fitness, cases, topology = evaluate_functional_full(
-        genome, target, include_topology=True)
-    selection_cases = _selection_case_vector(cases, target)
-    total = target.n_inputs + len(target.outputs)
-    # Correctness ties are resolved only by target-blind physical structure.
-    # Truth-signature repertoire remains useful diagnostic telemetry, but it
-    # must not steer selection toward Boolean-rich bodies under another name.
-    topology_rank = (
+def genome_morphology_signature(genome):
+    from .construction_ga import branched_morphology_signature
+    return branched_morphology_signature(genome)
+
+
+def _topology_tuple(topology):
+    return (
+        topology.min_function_capacity,
+        topology.total_function_capacity,
+        topology.min_output_input_convergence,
+        topology.total_output_input_connections,
+        topology.min_output_branch_input_convergence,
+        topology.total_output_branch_input_convergence,
+        topology.min_output_input_edges,
+        topology.total_output_input_edges,
+        topology.min_output_branch_input_edges,
+        topology.total_output_branch_input_edges,
+        topology.min_output_input_proximity,
+        topology.total_output_input_proximity,
+        topology.live_output_roots,
+        topology.output_integrating_nodes,
+        topology.distinct_convergence_cones,
+        topology.fully_integrating_nodes,
         topology.max_input_convergence,
         topology.distinct_convergence_cones,
         topology.fully_integrating_nodes,
@@ -94,9 +76,21 @@ def _evaluate_record(genome, target):
         topology.loop_rank,
         topology.loop_regions,
         topology.cyclic_nodes,
-        topology.reachable_edges,
-        topology.reachable_nodes,
+        topology.output_integrating_nodes,
+        topology.integrating_nodes,
     )
+
+
+def _evaluate_record(genome, target):
+    fitness, cases, topology = evaluate_functional_full(
+        genome, target, include_topology=True)
+    selection_cases = _selection_case_vector(cases, target)
+    output_scores = _output_balanced_scores(cases, target)
+    total = target.n_inputs + len(target.outputs)
+    # Correctness ties are resolved only by target-blind physical structure.
+    # Truth-signature repertoire remains useful diagnostic telemetry, but it
+    # must not steer selection toward Boolean-rich bodies under another name.
+    topology_rank = _topology_tuple(topology)
     behavior_diagnostic = (
         topology.distinct_behaviors,
         topology.multi_input_behaviors,
@@ -104,7 +98,51 @@ def _evaluate_record(genome, target):
         topology.max_behavioral_inputs,
     )
     return (fitness, selection_cases, (total, total), 0.0, None, topology.score,
-            topology_rank, behavior_diagnostic)
+            topology_rank, behavior_diagnostic, output_scores,
+            topology.function_capacities)
+
+
+def select_developmental_seed(make_genome, attempts=DEVELOPMENTAL_SEED_CANDIDATES,
+                              prefer_logic_capacity=False):
+    """Choose the richest of a few random ontogenic starts, target-blindly."""
+    from .construction import grow_functional
+    from .evaluation import functional_topology, logic_morphology_capacity
+    candidates = [make_genome() for _ in range(max(1, int(attempts)))]
+
+    def key(genome):
+        grid = grow_functional(genome, genome.input_layout)
+        outputs = dict(getattr(genome, "output_layout", ()) or ())
+        topology = functional_topology(
+            grid, genome.input_layout, output_positions=outputs)
+        capacity = (
+            logic_morphology_capacity(
+                grid, genome.input_layout, outputs)
+            if prefer_logic_capacity else (0, 0))
+        return capacity + _topology_tuple(topology)
+
+    return max(candidates, key=key)
+
+
+def _output_balanced_scores(cases, target):
+    base = tuple(float(value) for value in cases)
+    if getattr(target, "temporal", False) or not getattr(target, "cases", ()):
+        return ()
+    n_outputs = len(getattr(target, "outputs", ()))
+    n_rows = len(target.cases)
+    if not n_outputs or len(base) != n_rows * n_outputs:
+        return ()
+    output_scores = []
+    for output_index in range(n_outputs):
+        by_level = {0: [], 1: []}
+        for row_index, (_inputs, expected) in enumerate(target.cases):
+            level = 1 if expected[output_index] else 0
+            by_level[level].append(
+                base[row_index * n_outputs + output_index])
+        level_means = [sum(values) / len(values)
+                       for values in by_level.values() if values]
+        output_scores.append(
+            sum(level_means) / len(level_means) if level_means else 0.0)
+    return tuple(output_scores)
 
 
 def _selection_case_vector(cases, target):
@@ -128,23 +166,44 @@ def _selection_case_vector(cases, target):
     if not n_outputs or len(base) != expected_size:
         return base
 
-    output_scores = []
-    for output_index in range(n_outputs):
-        by_level = {0: [], 1: []}
-        for row_index, (_inputs, expected) in enumerate(target.cases):
-            level = 1 if expected[output_index] else 0
-            by_level[level].append(
-                base[row_index * n_outputs + output_index])
-        level_means = [
-            sum(values) / len(values)
-            for values in by_level.values() if values]
-        output_scores.append(
-            sum(level_means) / len(level_means) if level_means else 0.0)
+    output_scores = _output_balanced_scores(cases, target)
 
     joint_rows = tuple(
         min(base[row_index * n_outputs:(row_index + 1) * n_outputs])
         for row_index in range(n_rows))
     return base + tuple(output_scores) + joint_rows + (min(output_scores),)
+
+
+def _contract_input_dependencies(target, output_index):
+    """Inputs that can change one static output in the supplied contract.
+
+    This extracts no gate or circuit recipe. It is only the generic Boolean
+    influence relation used by stalled output-arm regrowth to avoid wiring a
+    role to pads that provably cannot affect it. A partial table falls back to
+    every input when it does not contain enough paired rows to decide safely.
+    """
+    rows = {
+        tuple(int(bit) & 1 for bit in inputs): int(expected[output_index]) & 1
+        for inputs, expected in getattr(target, "cases", ())
+        if len(expected) > int(output_index)}
+    n_inputs = int(getattr(target, "n_inputs", 0))
+    dependencies = set()
+    paired = False
+    for inputs, value in rows.items():
+        if len(inputs) != n_inputs:
+            continue
+        for index in range(n_inputs):
+            other = list(inputs)
+            other[index] ^= 1
+            other = tuple(other)
+            if other not in rows:
+                continue
+            paired = True
+            if rows[other] != value:
+                dependencies.add(index)
+    if not paired:
+        return tuple(range(n_inputs))
+    return tuple(sorted(dependencies))
 
 
 def eval_batch_cases(genomes, target, cache=None, executor=None,
@@ -184,9 +243,13 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
             float(record[5]) if len(record) > 5 else 0.0)
         genome._topology_rank = (
             tuple(record[6]) if len(record) > 6 else
-            (0, 0, 0, 0, 0, 0, 0, 0, 0))
+            (0,) * 25)
         genome._behavior_diagnostic = (
             tuple(record[7]) if len(record) > 7 else (0, 0, 0, 0))
+        genome._output_scores = (
+            tuple(record[8]) if len(record) > 8 else ())
+        genome._function_capacities = (
+            tuple(record[9]) if len(record) > 9 else ())
     return [record[0] for record in records], [record[1] for record in records]
 
 
@@ -198,254 +261,6 @@ def _poisson(mean):
         count += 1
         product *= random.random()
     return count - 1
-
-
-def _normalize_split(chromosome):
-    count = len(chromosome.genes)
-    chromosome.split = (
-        0 if count < 2 else max(1, min(int(chromosome.split), count - 1)))
-
-
-def _different_state(current, families, *, local_probability=0.85,
-                     empty_probability=0.08):
-    if current != 0 and random.random() < local_probability:
-        if random.random() < 0.75:
-            nearby = local_component_ids(current, families)
-            if nearby:
-                return random.choice(nearby)
-        same_family = [
-            entry.id for entry in COMPONENTS
-            if entry.id != current
-            and entry.family == BY_ID[current].family
-            and entry.family in families
-        ]
-        if same_family:
-            return random.choice(same_family)
-    candidate = random_component_id(
-        families, empty_probability=empty_probability)
-    if candidate == current:
-        alternatives = [
-            state for state in enabled_component_ids(
-                families, include_empty=True)
-            if state != current
-        ]
-        if alternatives:
-            candidate = random.choice(alternatives)
-    return candidate
-
-
-def _mutate_allele(genome, families, preferred_loci=(), focused_loci=(),
-                   focused_families=()):
-    locus = None
-    if focused_loci and random.random() < 0.95:
-        candidates = [
-            (chromosome_index, gene_index)
-            for chromosome_index, gene_index in focused_loci
-            if chromosome_index < len(genome.chromosomes)
-            and gene_index < len(genome.chromosomes[
-                chromosome_index].genes)
-        ]
-        if candidates:
-            locus = random.choice(candidates)
-    if locus is None and preferred_loci and random.random() < 0.80:
-        candidates = [
-            (chromosome_index, gene_index)
-            for chromosome_index, gene_index in preferred_loci
-            if chromosome_index < len(genome.chromosomes)
-            and gene_index < len(genome.chromosomes[
-                chromosome_index].genes)
-        ]
-        if candidates:
-            locus = random.choice(candidates)
-    if locus is None:
-        chromosome = random.choice(genome.chromosomes)
-        gene = random.choice(chromosome.genes)
-    else:
-        chromosome = genome.chromosomes[locus[0]]
-        gene = chromosome.genes[locus[1]]
-    # On a rule known to control development, changing its expressed output is
-    # much more likely to create a coherent phenotype neighbor than perturbing
-    # one context coordinate and leaving the winning output unchanged.
-    field = (
-        "self_out"
-        if locus is not None and random.random() < 0.60
-        else random.choice(GENE_FIELDS)
-    )
-    current = getattr(gene, field)
-    # A target-class focus is a search bias, not a hidden family restriction.
-    # Developmentally active rules stay inside the useful family. Inactive
-    # rules and structural/new-gene mutations keep the complete user-enabled
-    # bank, so every allowed physical component remains reachable without
-    # repeatedly destroying the scaffold that made a rule active.
-    focused = bool(locus is not None and locus in focused_loci)
-    mutation_families = (
-        focused_families
-        if focused and focused_families
-        else families)
-    # EMPTY remains an independently reachable absence allele.  Within a
-    # family, route/output-count/timing neighbors dominate.
-    behavior_choices = (
-        behavior_component_ids(current)
-        if (field == "self_out" and current != 0
-            and BY_ID[current].family == "LOGIC"
-            and BY_ID[current].family in mutation_families)
-        else ())
-    if behavior_choices and random.random() < 0.35:
-        replacement = random.choice(behavior_choices)
-    else:
-        replacement = _different_state(
-            current, mutation_families,
-            empty_probability=(0.12 if field == "self_in" else 0.08))
-    setattr(gene, field, replacement)
-
-
-def _diverged_duplicate(gene, families, focused_families=()):
-    """Copy a rule and immediately make the later copy selectable.
-
-    An exact duplicate after its source can never win the developmental
-    first-match tie. Diverging one context coordinate creates a neighboring
-    domain, while diverging the output gives that domain a new physical role.
-    """
-    duplicate = copy.copy(gene)
-    context = random.choice(("ctx_l", "ctx_r", "ctx_d", "self_in"))
-    setattr(duplicate, context, _different_state(
-        getattr(duplicate, context), families))
-    output_families = focused_families or families
-    choices = behavior_component_ids(duplicate.self_out)
-    duplicate.self_out = (
-        random.choice(choices)
-        if (choices and duplicate.self_out != 0
-            and BY_ID[duplicate.self_out].family in output_families)
-        else _different_state(duplicate.self_out, output_families))
-    return duplicate
-
-
-def _mutate_observed_context(genome, contexts, families,
-                             focused_families=()):
-    """Insert a random rule for a context development actually encounters.
-
-    The physical component is not chosen from target behavior. Exact context
-    capture merely avoids the overwhelmingly common no-op where a new random
-    associative rule never wins any lookup. Inserting first makes a captured
-    exact match authoritative while retaining indirect repeated expression.
-    """
-    if not contexts:
-        return False
-    candidates = [chromosome for chromosome in genome.chromosomes
-                  if len(chromosome.genes) < MAX_GENES]
-    if not candidates:
-        return False
-    context_pool = tuple(contexts)
-    # Prefer genuine live frontiers. The previous occupancy-only draw commonly
-    # inserted a gate next to a component whose facing port was not an output,
-    # creating impressive-looking but electrically disconnected tissue.
-    live_frontier = tuple(
-        context for context in context_pool
-        if int(context[3]) == 0
-        and _driven_context_directions(*context[:3]))
-    ctx_l, ctx_r, ctx_d, self_in = random.choice(
-        live_frontier if live_frontier and random.random() < 0.75
-        else context_pool)
-    output_families = focused_families or families
-    gene = FunctionalGene(
-        ctx_l=int(ctx_l), ctx_r=int(ctx_r), ctx_d=int(ctx_d),
-        self_in=int(self_in),
-        self_out=_contextual_component_id(
-            ctx_l, ctx_r, ctx_d, self_in, output_families))
-    # Lookup order is chromosome-major.  An exact rule inserted into a later
-    # chromosome can still lose a zero-distance tie to an older exact rule in
-    # chromosome 0, contradicting this operator's locality guarantee.  Use the
-    # earliest chromosome with capacity so the captured context really wins.
-    chromosome = candidates[0]
-    chromosome.genes.insert(0, gene)
-    _normalize_split(chromosome)
-    return True
-
-
-def _specialize_observed_context(genome, context, families,
-                                 focused_families=(), replacement=None):
-    """Split one encountered context from a broad developmental rule.
-
-    The existing winner supplies the component route.  A different basic gate
-    behavior on those same physical pins is then installed as an exact,
-    first-priority rule.  The broad source rule remains intact for the rest of
-    its context domain, making the developmental representation substantially
-    more local without translating a desired phenotype back into a genome.
-    """
-    candidates = [chromosome for chromosome in genome.chromosomes
-                  if len(chromosome.genes) < MAX_GENES]
-    if not candidates:
-        return False
-    from .growth import lookup
-    ctx_l, ctx_r, ctx_d, self_in = tuple(map(int, context))
-    current = int(lookup(genome, ctx_l, ctx_r, ctx_d, self_in))
-    output_families = normalise_families(focused_families or families)
-    alternatives = tuple(
-        component_id for component_id in behavior_component_ids(current)
-        if BY_ID[component_id].family in output_families)
-    if replacement is None:
-        if not alternatives:
-            return False
-        replacement = random.choice(alternatives)
-    elif int(replacement) not in alternatives:
-        return False
-    candidates[0].genes.insert(0, FunctionalGene(
-        ctx_l=ctx_l, ctx_r=ctx_r, ctx_d=ctx_d, self_in=self_in,
-        self_out=int(replacement)))
-    _normalize_split(candidates[0])
-    return True
-
-
-def _contextual_component_id(ctx_l, ctx_r, ctx_d, self_in, families):
-    """Choose hardware whose pins can consume an observed local context.
-
-    This is target-blind physical locality, not inverse development: no desired
-    output or target answer is inspected. A new frontier rule should read the
-    neighbours that caused it to be expressed instead of usually pointing its
-    input pins into empty space. With two occupied sides, prefer a two-input
-    gate; with one, prefer a unary transport/fan-out component. Mature-cell
-    rules retain the same principle while remaining free to change behavior.
-    """
-    enabled = normalise_families(families)
-    states = {"L": int(ctx_l), "R": int(ctx_r), "D": int(ctx_d)}
-    driven = _driven_context_directions(ctx_l, ctx_r, ctx_d)
-    candidates = [
-        entry for entry in COMPONENTS
-        if entry.id != 0 and entry.family in enabled and entry.outputs
-    ]
-    if driven:
-        fully_driven = [
-            entry for entry in candidates
-            if entry.inputs and set(entry.inputs).issubset(driven)]
-        if fully_driven:
-            max_inputs = max(len(entry.inputs) for entry in fully_driven)
-            candidates = [entry for entry in fully_driven
-                          if len(entry.inputs) == max_inputs]
-        else:
-            partly_driven = [
-                entry for entry in candidates
-                if driven.intersection(entry.inputs)]
-            if partly_driven:
-                candidates = partly_driven
-    if self_in:
-        # Prefer a local route/behavior neighbor when that is also physically
-        # compatible with the encountered context.
-        local = set(local_component_ids(int(self_in), enabled))
-        compatible_local = [entry for entry in candidates if entry.id in local]
-        if compatible_local:
-            candidates = compatible_local
-    if not candidates:
-        return random_component_id(enabled, empty_probability=0.05)
-    return random.choice(candidates).id
-
-
-def _driven_context_directions(ctx_l, ctx_r, ctx_d):
-    """Receiver-local sides whose neighboring component drives this edge."""
-    states = {"L": int(ctx_l), "R": int(ctx_r), "D": int(ctx_d)}
-    return frozenset(
-        direction for direction, state in states.items()
-        if state != 0 and (
-            state in SEED_STATES or direction in BY_ID[state].outputs))
 
 
 def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
@@ -479,380 +294,127 @@ def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
 
 def plateau_rescue_candidates(
         genome, limit=48, max_telomere=MAX_TELOMERE,
-        families=DEFAULT_FAMILIES, growth_seeds=(), focus_families=()):
-    """Enumerate honest local program neighbours after a long FNV stall.
+        families=DEFAULT_FAMILIES, growth_seeds=(), focus_families=(),
+        target=None):
+    """Bounded local neighbours after a long stall.
 
-    Random mutation repeatedly spends events on inactive associative rules.
-    During a plateau, expose a bounded set of ordinary genomes that change one
-    expressed gate behavior/route, capture one observed context, move one input
-    pad, or adjust one telomere. The proposals never inspect expected outputs
-    and are evaluated by the unchanged contract, so this improves locality
-    without inverse-growing a target-shaped circuit.
+    A branched rule is not tied to any one live tip - it fires wherever its
+    neighbourhood occurs - so rescue is simply extra mutated descendants, the
+    same thing the other substrates' archive rescue does. Static FNV contracts
+    additionally regrow one role arm and choose the closest physically
+    attainable fixed-gate signature; temporal rescue remains target-blind.
     """
+    from .construction_ga import (
+        clone_constructive, mutate_branched, randomize_branch_behavior,
+        regrow_branch)
     limit = max(0, int(limit))
     if not limit:
         return []
     enabled = normalise_families(families)
-    focused = tuple(family for family in focus_families if family in enabled)
-    if is_typed(genome):
-        # The constructive rescue enumerates placements at live frontier tips.
-        # A typed gene has no single tip - it is a rule that fires wherever its
-        # pattern occurs - so rescue is simply extra mutated descendants, which
-        # is what the other substrates' archive rescue does.
-        from .construction_ga import clone_constructive, mutate_typed
-        n_inputs = len(
-            getattr(genome, "input_layout", None) or growth_seeds or (1,))
-        proposals, seen = [], {genome_signature(genome)}
-        for _ in range(limit * 3):
-            if len(proposals) >= limit:
-                break
-            candidate = clone_constructive(genome)
-            mutate_typed(candidate, None, enabled, n_inputs, max_telomere)
-            signature = genome_signature(candidate)
-            if signature in seen:
-                continue
-            seen.add(signature)
-            proposals.append(candidate)
-        return proposals
-    if is_constructive(genome):
-        from .construction_ga import plateau_candidates_constructive
-        return plateau_candidates_constructive(
-            genome, limit, enabled, growth_seeds, focused,
-            layout_mutator=lambda candidate: mutate_input_layout(
-                candidate, max_telomere))
-    seeds = (
-        tuple(genome.input_layout)
-        if getattr(genome, "input_layout", None) is not None
-        else tuple(growth_seeds or ()))
-    from .growth import active_gene_loci_and_contexts
-    active, contexts = active_gene_loci_and_contexts(genome, seeds)
-    proposals = []
-    seen = {genome_signature(genome)}
-
-    def add(candidate):
+    n_inputs = len(
+        getattr(genome, "input_layout", None) or growth_seeds or (1,))
+    proposals, seen = [], {genome_signature(genome)}
+    output_genes = tuple(getattr(
+        getattr(genome, "output_chromosome", None), "genes", ()))
+    regrowth_families = (
+        normalise_families(focus_families)
+        if focus_families else enabled)
+    for attempt_index in range(limit * 3):
+        if len(proposals) >= limit:
+            break
+        candidate = clone_constructive(genome)
+        static_contract = (
+            target is not None
+            and not getattr(target, "temporal", False)
+            and bool(getattr(target, "cases", ()))
+            and bool(output_genes))
+        if static_contract:
+            # Alternate attempted roles even when one candidate is a duplicate.
+            # Keying this to len(proposals) repeatedly retried the same role
+            # after a rejected duplicate and could starve its siblings.
+            output_index = attempt_index % len(output_genes)
+            branch_id = int(output_genes[output_index].branch_id)
+            if (attempt_index // len(output_genes)) % 2 == 0:
+                regrow_branch(
+                    candidate, branch_id, regrowth_families, n_inputs,
+                    max_telomere=max_telomere,
+                    required_inputs=_contract_input_dependencies(
+                        target, output_index))
+            preferred = sum(
+                (int(expected[output_index]) & 1) << row
+                for row, (_inputs, expected) in enumerate(target.cases))
+            randomize_branch_behavior(
+                candidate, branch_id, n_inputs, limit=20_000,
+                preferred_signature=preferred,
+                input_patterns=tuple(inputs for inputs, _expected
+                                     in target.cases))
+        else:
+            mutate_branched(
+                candidate, None, enabled, n_inputs, max_telomere,
+                focus_families=focus_families)
         signature = genome_signature(candidate)
         if signature in seen:
-            return
+            continue
         seen.add(signature)
         proposals.append(candidate)
-
-    loci = list(active)
-    random.shuffle(loci)
-    for chromosome_index, gene_index in loci:
-        gene = genome.chromosomes[chromosome_index].genes[gene_index]
-        current = int(gene.self_out)
-        replacements = list(dict.fromkeys(
-            list(behavior_component_ids(current))
-            + list(local_component_ids(current, focused or enabled))))
-        random.shuffle(replacements)
-        for replacement in replacements:
-            if BY_ID[replacement].family not in enabled:
-                continue
-            candidate = clone_genome(genome)
-            candidate.chromosomes[chromosome_index].genes[
-                gene_index].self_out = replacement
-            add(candidate)
-
-    from .growth import lookup
-    context_order = list(contexts)
-    random.shuffle(context_order)
-    for context in context_order:
-        current = int(lookup(genome, *context))
-        replacements = [
-            component_id for component_id in behavior_component_ids(current)
-            if BY_ID[component_id].family in (focused or enabled)]
-        random.shuffle(replacements)
-        # Enumerate local gate substitutions before route-changing growth.
-        # This is the missing edit for repeated broad rules: one exact context
-        # can change AND/OR/XOR/VETO behavior without changing its pins or the
-        # other cells expressed by the old rule.
-        for replacement in replacements:
-            candidate = clone_genome(genome)
-            if _specialize_observed_context(
-                    candidate, context, enabled, focused, replacement):
-                add(candidate)
-        for _ in range(2):
-            candidate = clone_genome(genome)
-            if _mutate_observed_context(
-                    candidate, (context,), enabled, focused):
-                add(candidate)
-
-    for _ in range(min(6, max(0, len(getattr(
-            genome, "input_layout", ()) or ()) - 1) * 2)):
-        candidate = clone_genome(genome)
-        if mutate_input_layout(candidate, max_telomere):
-            add(candidate)
-
-    for chromosome_index, chromosome in enumerate(genome.chromosomes):
-        for step in (-1, 1):
-            telomere = max(
-                1, min(int(max_telomere), int(chromosome.telomere) + step))
-            if telomere == chromosome.telomere:
-                continue
-            candidate = clone_genome(genome)
-            candidate.chromosomes[chromosome_index].telomere = telomere
-            add(candidate)
-
-    # Bias the bounded batch toward direct expressed-rule repairs while still
-    # varying which part of a large neighbourhood is exposed on later stalls.
-    head = proposals[:max(1, limit // 2)]
-    tail = proposals[len(head):]
-    random.shuffle(tail)
-    return (head + tail)[:limit]
-
-
-def _mutate_structure(genome, families, max_telomere, chromosome_count,
-                      preferred_loci=(), focused_loci=(),
-                      focused_families=()):
-    choices = ["telomere", "add_gene", "delete_gene", "duplicate_gene",
-               "split", "tag"]
-    if chromosome_count is None:
-        choices.extend(["add_chromosome", "delete_chromosome"])
-    action = random.choice(choices)
-    chromosome = random.choice(genome.chromosomes)
-    if action == "telomere":
-        step = random.choice((-1, 1))
-        chromosome.telomere = max(
-            1, min(int(max_telomere), chromosome.telomere + step))
-    elif action == "add_gene" and len(chromosome.genes) < MAX_GENES:
-        index = random.randrange(len(chromosome.genes) + 1)
-        chromosome.genes.insert(
-            index, random_functional_gene(families))
-    elif action == "delete_gene" and len(chromosome.genes) > 1:
-        del chromosome.genes[random.randrange(len(chromosome.genes))]
-    elif action == "duplicate_gene" and len(chromosome.genes) < MAX_GENES:
-        index = random.randrange(len(chromosome.genes))
-        chromosome.genes.insert(index + 1, _diverged_duplicate(
-            chromosome.genes[index], families, focused_families))
-    elif action == "split":
-        if len(chromosome.genes) > 1:
-            chromosome.split = random.randint(1, len(chromosome.genes) - 1)
-    elif action == "tag":
-        chromosome.tag = random.randint(0, 999)
-    elif action == "add_chromosome" and len(genome.chromosomes) < MAX_CHROMS:
-        genome.chromosomes.append(random_functional_chromosome(
-            max_telomere=max_telomere, families=families))
-    elif action == "delete_chromosome" and len(genome.chromosomes) > 1:
-        del genome.chromosomes[random.randrange(len(genome.chromosomes))]
-    else:
-        _mutate_allele(
-            genome, families, preferred_loci, focused_loci,
-            focused_families)
-    for item in genome.chromosomes:
-        _normalize_split(item)
+    return proposals
 
 
 def mutate_functional(genome, mean_mutations=None, *,
                       max_telomere=MAX_TELOMERE, chromosome_count=None,
                       families=DEFAULT_FAMILIES, growth_seeds=None,
                       focus_families=()):
+    from .construction_ga import mutate_branched, new_branched_chromosome
     enabled = normalise_families(families)
-    if is_constructive(genome):
-        from .construction_ga import (
-            mutate_constructive, mutate_typed, new_typed_chromosome)
-        # Input pads are named roots, so a local pad move translates only the
-        # branches that depend on that source. It is an independent physical
-        # mutation, not a rewrite of placement coordinates.
-        if (getattr(genome, "input_layout", None) is not None
-                and len(genome.input_layout) > 1
-                and random.random() < 0.04):
-            mutate_input_layout(genome, max_telomere)
-        if is_typed(genome):
-            # A typed gene is a reusable rule, so the frontier-walking operators
-            # do not apply: there is no single live tip to extend. Its menu is
-            # the one the other substrates use - retarget, duplicate, add,
-            # delete, and adjust the chromosome's growth lifespan.
-            mutate_typed(
-                genome, mean_mutations, enabled,
-                len(getattr(genome, "input_layout", None) or growth_seeds
-                    or (1,)),
-                max_telomere)
-        else:
-            # The germline telomere is the constructive organism's growth
-            # radius, so a genome inherited from a looser run has to be brought
-            # under this run's ceiling. Downward only, and never onto a legacy
-            # genome: a telomere of 1 means unbounded (see growth_radius), and
-            # raising it to 2 would collapse a resumed checkpoint's body.
-            ceiling = max(2, int(max_telomere))
-            for chromosome in genome.chromosomes:
-                if int(chromosome.telomere) > 1:
-                    chromosome.telomere = min(
-                        int(chromosome.telomere), ceiling)
-            mutate_constructive(
-                genome, mean_mutations, enabled, growth_seeds, focus_families)
-        if chromosome_count is not None:
-            while len(genome.chromosomes) < chromosome_count:
-                # Both encodings read the telomere now - as a lifespan in
-                # developmental rounds for typed, as a growth radius for
-                # constructive - so a new container must be born at the run's
-                # ceiling rather than at a hardcoded 1.
-                genome.chromosomes.append(
-                    new_typed_chromosome(max_telomere) if is_typed(genome)
-                    else Chromosome(
-                        genes=[], split=0, tag=random.randint(0, 999),
-                        telomere=max(2, int(max_telomere))))
-            if len(genome.chromosomes) > chromosome_count:
-                # Preserve placements by moving removed containers into the
-                # last retained chromosome when capacity permits.
-                retained = genome.chromosomes[:chromosome_count]
-                overflow = [gene for chromosome in genome.chromosomes[
-                    chromosome_count:] for gene in chromosome.genes]
-                for gene in overflow:
-                    destinations = [chromosome for chromosome in retained
-                                    if len(chromosome.genes) < MAX_GENES]
-                    if destinations:
-                        random.choice(destinations).genes.append(gene)
-                genome.chromosomes = retained
-        return genome
-    effective_seeds = (
-        tuple(getattr(genome, "input_layout"))
-        if getattr(genome, "input_layout", None) is not None
-        else tuple(growth_seeds or ()))
-    focused_families = tuple(
-        family for family in focus_families if family in enabled)
-
-    def development_hints():
-        preferred = ()
-        contexts = ()
-        if effective_seeds:
-            from .growth import active_gene_loci_and_contexts
-            preferred, contexts = active_gene_loci_and_contexts(
-                genome, effective_seeds)
-        focused = tuple(
-            (chromosome_index, gene_index)
-            for chromosome_index, gene_index in preferred
-            if (
-                chromosome_index < len(genome.chromosomes)
-                and gene_index < len(
-                    genome.chromosomes[chromosome_index].genes)
-                and getattr(
-                    genome.chromosomes[chromosome_index].genes[gene_index],
-                    "self_out", 0) != 0
-                and BY_ID[
-                    genome.chromosomes[chromosome_index].genes[
-                        gene_index].self_out
-                ].family in focused_families
-            )
-        )
-        return preferred, contexts, focused
-
-    preferred_loci, observed_contexts, focused_loci = development_hints()
-    mean = 4.0 if mean_mutations is None else max(0.0, float(mean_mutations))
-    count = max(1, _poisson(mean))
-    for mutation_index in range(count):
-        refresh = False
-        if (getattr(genome, "input_layout", None) is not None
-                and len(genome.input_layout) > 1
-                and random.random() < 0.12
-                and mutate_input_layout(genome, max_telomere)):
-            refresh = True
-        elif (observed_contexts and random.random() < 0.25
-              and (
-                  (random.random() < 0.70 and _specialize_observed_context(
-                      genome, random.choice(observed_contexts), enabled,
-                      focused_families))
-                  or _mutate_observed_context(
-                      genome, observed_contexts, enabled,
-                      focused_families))):
-            refresh = True
-        elif random.random() < 0.78:
-            _mutate_allele(
-                genome, enabled, preferred_loci, focused_loci,
-                focused_families)
-        else:
-            _mutate_structure(
-                genome, enabled, max_telomere, chromosome_count,
-                preferred_loci, focused_loci, focused_families)
-            refresh = True
-        # Insertions/deletions shift loci, and context/layout edits change the
-        # phenotype on which the next edit should build.  Continuing with the
-        # pre-edit trace mutated unrelated genes and prevented a multi-event
-        # child from assembling a causal chain of basic components.
-        if refresh and mutation_index + 1 < count:
-            effective_seeds = (
-                tuple(getattr(genome, "input_layout"))
-                if getattr(genome, "input_layout", None) is not None
-                else tuple(growth_seeds or ()))
-            preferred_loci, observed_contexts, focused_loci = (
-                development_hints())
+    # Pad placement is the input chromosome's job now (the "inputs" operator),
+    # so there is no separate layout edit here to fall out of step with it.
+    mutate_branched(
+        genome, mean_mutations, enabled,
+        len(getattr(genome, "input_layout", None) or growth_seeds or (1,)),
+        max_telomere, focus_families=focus_families)
     if chromosome_count is not None:
+        output_count = len(getattr(
+            getattr(genome, "output_chromosome", None), "genes", ()))
+        if 2 * int(chromosome_count) < output_count:
+            raise ValueError("FNV needs at least one chromosome arm per output")
         while len(genome.chromosomes) < chromosome_count:
-            genome.chromosomes.append(random_functional_chromosome(
-                max_telomere=max_telomere, families=enabled))
+            genome.chromosomes.append(new_branched_chromosome(max_telomere))
         if len(genome.chromosomes) > chromosome_count:
-            del genome.chromosomes[chromosome_count:]
+            # Preserve rules by moving removed containers into the last
+            # retained chromosome when capacity permits.
+            retained = genome.chromosomes[:chromosome_count]
+            overflow = [gene for chromosome in genome.chromosomes[
+                chromosome_count:] for gene in chromosome.genes]
+            for gene in overflow:
+                destinations = [chromosome for chromosome in retained
+                                if len(chromosome.genes) < MAX_GENES]
+                if destinations:
+                    random.choice(destinations).genes.append(gene)
+            genome.chromosomes = retained
     return genome
 
 
 def crossover_functional(parent_a, parent_b, families=DEFAULT_FAMILIES):
-    """Chromosome/gene recombination followed by mutation in the breeder."""
-    if is_constructive(parent_a) or is_constructive(parent_b):
-        if not (is_constructive(parent_a) and is_constructive(parent_b)):
-            return clone_genome(parent_a)
-        if is_typed(parent_a) and is_typed(parent_b):
-            from .construction_ga import crossover_typed
-            return crossover_typed(parent_a, parent_b, families)
-        if is_typed(parent_a) or is_typed(parent_b):
-            return clone_genome(parent_a)
-        from .construction_ga import crossover_constructive
-        return crossover_constructive(parent_a, parent_b, families)
-    child = clone_genome(parent_a)
-    layout_b = getattr(parent_b, "input_layout", None)
-    if (layout_b is not None
-            and (getattr(child, "input_layout", None) is None
-                 or len(child.input_layout) == len(layout_b))
-            and random.random() < 0.5):
-        # Input geometry is one co-adapted physical module. Per-pad crossover
-        # would manufacture collisions and tear apart useful relative layouts.
-        child.input_layout = tuple(tuple(cell) for cell in layout_b)
-    shared = min(len(child.chromosomes), len(parent_b.chromosomes))
-    crossover_draw = random.random()
-    if shared >= 2 and crossover_draw < 0.55:
-        # A chromosome is a co-adapted developmental rule module. Replacing a
-        # proper subset of whole chromosomes lets complementary specialists
-        # coexist without first tearing apart the contexts that make each
-        # module express. Fine-grained suffix/field crossover remains below as
-        # the alternate path for discovering new rules inside a module.
-        inherited = set(random.sample(
-            range(shared), random.randint(1, shared - 1)))
-        for index in inherited:
-            source = parent_b.chromosomes[index]
-            copied = copy.copy(source)
-            copied.genes = [copy.copy(gene) for gene in source.genes]
-            child.chromosomes[index] = copied
-        return child
-    for index in range(shared):
-        if random.random() >= 0.5:
-            continue
-        a = child.chromosomes[index]
-        b = parent_b.chromosomes[index]
-        if len(a.genes) > 1 and len(b.genes) > 1:
-            cut_a = max(1, min(a.split, len(a.genes) - 1))
-            cut_b = max(1, min(b.split, len(b.genes) - 1))
-            genes = (
-                [copy.copy(gene) for gene in a.genes[:cut_a]]
-                + [copy.copy(gene) for gene in b.genes[cut_b:]]
-            )[:MAX_GENES]
-            if genes:
-                a.genes = genes
-        elif a.genes and b.genes:
-            gene_a, gene_b = a.genes[0], random.choice(b.genes)
-            fields = [field for field in GENE_FIELDS
-                      if getattr(gene_a, field) != getattr(gene_b, field)]
-            if fields:
-                for field in random.sample(
-                        fields, random.randint(1, len(fields))):
-                    setattr(gene_a, field, getattr(gene_b, field))
-        if random.random() < 0.5:
-            a.telomere = b.telomere
-        _normalize_split(a)
-    return child
+    """Each arm from either parent, then mutation in the breeder."""
+    from .construction_ga import crossover_branched
+    return crossover_branched(parent_a, parent_b, families)
 
 
 def _topology_rank(genome):
     return tuple(getattr(
         genome, "_topology_rank",
-        (0, 0, 0, 0, 0, 0, 0, 0, 0)))
+        (0,) * 25))
+
+
+def _role_capacity(genome, role_index, output_genes=()):
+    """Best physically consistent capacity sample available for one role."""
+    if role_index < len(output_genes):
+        label = int(output_genes[role_index].branch_id)
+        sampled = getattr(genome, "_sampled_branch_capacities", {})
+        if label in sampled:
+            return int(sampled[label])
+    capacities = getattr(genome, "_function_capacities", ())
+    return int(capacities[role_index]) if role_index < len(capacities) else 0
 
 
 def rank_key(genome, fitness):
@@ -936,8 +498,7 @@ def next_population(population, fitnesses, make_genome=None,
                     recombination=True, archive_parent=None,
                     stagnation=0, rescue_candidates=None,
                     families=DEFAULT_FAMILIES, growth_seeds=None,
-                    focus_families=(), **_ignored):
-    del stagnation
+                    focus_families=(), target=None, **_ignored):
     count = len(population)
     if not count:
         return []
@@ -949,12 +510,17 @@ def next_population(population, fitnesses, make_genome=None,
         chromosome_count = ga_config.chromosome_count
     if make_genome is None:
         reference_layout = getattr(population[0], "input_layout", None)
+        output_roles = tuple(
+            str(gene.role) for gene in getattr(
+                getattr(population[0], "output_chromosome", None),
+                "genes", ()))
         make_genome = lambda: random_functional_genome(
             chromosome_count or 2, max_telomere=max_telomere,
             families=enabled,
             n_inputs=(
                 len(reference_layout)
-                if reference_layout is not None else None))
+                if reference_layout is not None else None),
+            output_roles=output_roles)
     immigrant_fraction = (
         ga_config.immigrant_fraction if ga_config is not None else 0.08)
     tournament_size = (
@@ -974,6 +540,89 @@ def next_population(population, fitnesses, make_genome=None,
             max_telomere=max_telomere, chromosome_count=chromosome_count,
             families=enabled, growth_seeds=growth_seeds,
             focus_families=focus_families))
+    output_genes = tuple(getattr(
+        getattr(population[0], "output_chromosome", None), "genes", ()))
+    # Output-rooted heredity only pays off if independently useful role modules
+    # get a chance to coexist. Ordinary crossover made that join and then
+    # immediately applied ~4 mutations, often destroying Sum or Carry before
+    # the assembled child was ever evaluated. Build a tiny unmutated cohort
+    # from the best role specialists that share one input environment. This is
+    # generic multi-output recombination: it uses measured per-role quality,
+    # never a target name, gate recipe, route, or expected truth-table value.
+    if len(output_genes) > 1 and len(children) < count:
+        from .construction_ga import assemble_role_modules
+        groups = {}
+        for index, genome in enumerate(population):
+            groups.setdefault(
+                tuple(getattr(genome, "input_layout", ()) or ()), []).append(index)
+        assemblies = []
+        for indices in groups.values():
+            if len(indices) < 2:
+                continue
+            donor_indices = []
+            donor_scores = []
+            valid = True
+            for role_index, _output in enumerate(output_genes):
+                eligible = [
+                    index for index in indices
+                    if len(getattr(population[index], "_output_scores", ()))
+                    > role_index]
+                if not eligible:
+                    valid = False
+                    break
+                donor_index = max(
+                    eligible,
+                    key=lambda index: (
+                        population[index]._output_scores[role_index],
+                        rank_key(population[index], fitnesses[index])))
+                donor_indices.append(donor_index)
+                donor_scores.append(
+                    population[donor_index]._output_scores[role_index])
+            if not valid or len(set(donor_indices)) < 2:
+                continue
+            base_index = max(
+                indices,
+                key=lambda index: rank_key(population[index], fitnesses[index]))
+            donors = {
+                int(output_genes[role_index].branch_id): population[donor_index]
+                for role_index, donor_index in enumerate(donor_indices)}
+            candidate = assemble_role_modules(
+                population[base_index], donors, enabled)
+            assemblies.append((
+                (min(donor_scores), sum(donor_scores),
+                 rank_key(population[base_index], fitnesses[base_index])),
+                candidate))
+        assembly_count = min(
+            count - len(children),
+            max(1, int(round(count * MODULE_ASSEMBLY_FRACTION))))
+        for _quality, candidate in sorted(
+                assemblies, key=lambda row: row[0], reverse=True)[:assembly_count]:
+            children.append(candidate)
+    # Preserve the best complete behavior of each inherited output module.
+    # Row-level environmental memory can retain a genome that happens to pass
+    # one Sum row while deleting the only arm that computes Sum coherently over
+    # all rows.  With output-rooted heredity that is equivalent to throwing away
+    # a useful organ before crossover can use it.  One unmutated specialist per
+    # role is small, target-generic, and ordered early enough to survive the
+    # generational merge; it uses the same scored role cells as selection and
+    # does not prescribe a function or morphology.
+    role_elite_signatures = set()
+    for role_index, _output in enumerate(output_genes):
+        eligible = [
+            index for index, genome in enumerate(population)
+            if len(getattr(genome, "_output_scores", ())) > role_index]
+        if not eligible or len(children) >= count:
+            continue
+        index = max(
+            eligible,
+            key=lambda candidate: (
+                population[candidate]._output_scores[role_index],
+                rank_key(population[candidate], fitnesses[candidate])))
+        signature = genome_signature(population[index])
+        if signature in role_elite_signatures:
+            continue
+        children.append(clone_genome(population[index]))
+        role_elite_signatures.add(signature)
     # A parent selected for computational morphology still vanished under
     # generational replacement unless it was also a current contract expert.
     # Preserve a small target-blind repertoire reserve so converged source
@@ -989,14 +638,136 @@ def next_population(population, fitnesses, make_genome=None,
         reverse=True)
     seen_morphologies = set()
     if morphology_count:
-        for index in morphology_order:
-            topology = _topology_rank(population[index])
-            if topology in seen_morphologies:
+        role_count = len(output_genes)
+        # A body may devote its available territory to one exceptionally rich
+        # output cone. Preserve the best cone for EACH role before asking for a
+        # balanced organism; crossover/regrowth can then combine specialists.
+        for role_index in range(role_count):
+            index = max(
+                range(count),
+                key=lambda candidate: (
+                    _role_capacity(
+                        population[candidate], role_index, output_genes),
+                    _topology_rank(population[candidate])))
+            signature = genome_morphology_signature(population[index])
+            if signature in seen_morphologies:
                 continue
             children.append(clone_genome(population[index]))
-            seen_morphologies.add(topology)
+            seen_morphologies.add(signature)
             if len(seen_morphologies) >= morphology_count:
                 break
+        for index in morphology_order:
+            signature = genome_morphology_signature(population[index])
+            if signature in seen_morphologies:
+                continue
+            children.append(clone_genome(population[index]))
+            seen_morphologies.add(signature)
+            if len(seen_morphologies) >= morphology_count:
+                break
+    # A connected output tree can be separated from a better gate assignment
+    # by several individually worse substitutions (Majority-3's familiar 7/8
+    # basin is the small example). Dedicate a bounded cohort to resampling the
+    # fixed components on ONE intact output arm. Static contracts may request
+    # their closest attainable truth signature; physical routes, contexts,
+    # pads and all other role modules stay unchanged.
+    from .construction_ga import (
+        mutate_branch_function, randomize_branch_behavior,
+        randomize_branch_functions, regrow_branch)
+    deep_function_search = int(stagnation) >= FUNCTION_EXPLORER_PATIENCE
+    regrowth_families = (
+        normalise_families(focus_families)
+        if focus_families else enabled)
+    function_fraction = (
+        FUNCTION_EXPLORER_FRACTION if deep_function_search
+        else FUNCTION_EXPLORER_WARM_FRACTION)
+    function_count = min(
+        count - len(children),
+        max(1, int(round(count * function_fraction))))
+    behavior_order = sorted(
+        range(count),
+        key=lambda index: rank_key(population[index], fitnesses[index]),
+        reverse=True)
+    for slot in range(function_count):
+        preserve_index = slot % max(1, len(output_genes))
+        specialists = [
+            index for index, genome in enumerate(population)
+            if len(getattr(genome, "_output_scores", ())) > preserve_index]
+        if specialists and len(output_genes) > 1:
+            preserved_label = int(output_genes[preserve_index].branch_id)
+            mutable = [
+                (index, int(gene.branch_id))
+                for index, gene in enumerate(output_genes)
+                if int(gene.branch_id) != preserved_label]
+            mutable_index, branch_id = random.choice(mutable)
+            preferred_signature = (
+                sum((int(expected[mutable_index]) & 1) << row
+                    for row, (_inputs, expected) in enumerate(target.cases))
+                if (target is not None
+                    and not getattr(target, "temporal", False)
+                    and getattr(target, "cases", ())
+                    and all(len(expected) > mutable_index
+                            for _inputs, expected in target.cases))
+                else None)
+            input_patterns = (
+                tuple(inputs for inputs, _expected in target.cases)
+                if preferred_signature is not None else None)
+            required_inputs = (
+                _contract_input_dependencies(target, mutable_index)
+                if preferred_signature is not None else None)
+            source_index = max(
+                specialists,
+                key=lambda index: (
+                    population[index]._output_scores[preserve_index],
+                    _role_capacity(
+                        population[index], mutable_index, output_genes),
+                    _topology_rank(population[index]),
+                    rank_key(population[index], fitnesses[index])))
+        else:
+            order = morphology_order if slot % 2 == 0 else behavior_order
+            source_index = order[slot % len(order)]
+            branch_id = None
+            preferred_signature = None
+            input_patterns = None
+            required_inputs = None
+        candidate = clone_genome(population[source_index])
+        if not deep_function_search:
+            mutate_branch_function(candidate, branch_id=branch_id)
+        elif branch_id is not None and slot % 4 == 0:
+            from .construction import grow_functional
+            n_inputs = len(getattr(candidate, "input_layout", ()) or (1,))
+            variants = []
+            attempt_count = 2
+            for _attempt in range(attempt_count):
+                variant = clone_genome(candidate)
+                regrow_branch(
+                    variant, branch_id, regrowth_families, n_inputs,
+                    max_telomere=max_telomere,
+                    required_inputs=required_inputs)
+                randomize_branch_behavior(
+                    variant, branch_id, n_inputs, limit=1000,
+                    preferred_signature=preferred_signature,
+                    input_patterns=input_patterns)
+                grid = grow_functional(variant, variant.input_layout)
+                capacities = logic_morphology_capacities(
+                    grid, variant.input_layout,
+                    dict(variant.output_layout))
+                variants.append((
+                    (evaluate_functional_full(variant, target)[0]
+                     if target is not None else 0.0),
+                    _role_capacity(
+                        variant, mutable_index, output_genes),
+                    sum(capacities), variant))
+            candidate = max(variants, key=lambda row: row[:3])[3]
+        elif slot % 7 == 6:
+            randomize_branch_functions(candidate, branch_id=branch_id)
+        else:
+            if (branch_id is None or not randomize_branch_behavior(
+                    candidate, branch_id,
+                    len(getattr(candidate, "input_layout", ()) or (1,)),
+                    preferred_signature=preferred_signature,
+                    input_patterns=input_patterns)):
+                mutate_branch_function(candidate, branch_id=branch_id)
+        children.append(candidate)
     immigrant_count = min(
         count - len(children), int(round(count * immigrant_fraction)))
     for _ in range(immigrant_count):
@@ -1026,6 +797,8 @@ def next_population(population, fitnesses, make_genome=None,
             population[index], fitnesses[index]))
 
     signatures = [genome_signature(genome) for genome in population]
+    morphology_signatures = [
+        genome_morphology_signature(genome) for genome in population]
 
     def parent_pair():
         first = parent_index()
@@ -1034,19 +807,21 @@ def next_population(population, fitnesses, make_genome=None,
         candidates = [index for index in range(count) if index != first]
         distinct = [index for index in candidates
                     if signatures[index] != signatures[first]]
-        # Exact module transplantation is possible when constructive parents
-        # share their co-adapted input geometry. Prefer that compatibility when
-        # available; complementary behavior still chooses within the pool.
-        if is_constructive(population[first]):
-            first_layout = getattr(population[first], "input_layout", None)
-            compatible = [
-                index for index in (distinct or candidates)
-                if getattr(population[index], "input_layout", None)
-                == first_layout
-            ]
-        else:
-            compatible = []
-        parent_pool = compatible or distinct or candidates
+        same_morphology = [
+            index for index in distinct
+            if morphology_signatures[index] == morphology_signatures[first]]
+        # Inputs are the shared environment of every output module. Prefer a
+        # matching pad geometry when available; each output root itself travels
+        # atomically with its arm during crossover.
+        first_layout = getattr(population[first], "input_layout", None)
+        compatible = [
+            index for index in (distinct or candidates)
+            if getattr(population[index], "input_layout", None) == first_layout
+        ]
+        # Function variants of one body plan are the highest-value mate: their
+        # intramodule crossover can combine gate alleles without rebuilding a
+        # single wire. Structurally different role modules remain the fallback.
+        parent_pool = same_morphology or compatible or distinct or candidates
         if selection == "lexicase" and case_vecs:
             from runtime.escape import complementary_parent_index
             second = complementary_parent_index(

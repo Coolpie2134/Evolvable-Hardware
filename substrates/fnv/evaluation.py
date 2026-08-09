@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from itertools import product
 import math
+
+from substrates.nervous.hexgrid import honeycomb_distance
 
 from substrates.nervous.scoring import (
     PhysicalEvents, TemporalTraces, _obs_len, _score_output_candidate,
@@ -10,19 +13,18 @@ from substrates.nervous.scoring import (
     contract_case_count, needs_samples, score_contract,
 )
 
-from .catalogue import BY_ID
-from .genome import (
-    functional_input_positions, germline_telomere, is_constructive,
-)
-from .growth import grow_functional
+from .catalogue import BY_ID, behavior_component_ids
+from .genome import functional_input_positions, functional_output_positions
+from .construction import constructive_depth, grow_functional
 from .simulation import (
     FunctionalSim, TICK, compile_functional_grid, effective_wiring_edges,
+    source_for_input,
 )
 
 
 @dataclass(frozen=True)
 class FunctionalTopology:
-    """Target-agnostic computational structure reachable from input pads."""
+    """Target-agnostic physical structure seen from both circuit termini."""
 
     reachable_nodes: int = 0
     reachable_edges: int = 0
@@ -37,6 +39,23 @@ class FunctionalTopology:
     cyclic_nodes: int = 0
     loop_rank: int = 0
     loop_regions: int = 0
+    live_output_roots: int = 0
+    output_cone_nodes: int = 0
+    output_cone_edges: int = 0
+    output_integrating_nodes: int = 0
+    min_output_input_convergence: int = 0
+    total_output_input_connections: int = 0
+    min_output_input_edges: int = 0
+    total_output_input_edges: int = 0
+    min_output_branch_input_edges: int = 0
+    total_output_branch_input_edges: int = 0
+    min_output_branch_input_convergence: int = 0
+    total_output_branch_input_convergence: int = 0
+    min_output_input_proximity: float = 0.0
+    total_output_input_proximity: float = 0.0
+    min_function_capacity: int = 0
+    total_function_capacity: int = 0
+    function_capacities: tuple = ()
 
     @property
     def connectivity(self):
@@ -57,8 +76,30 @@ class FunctionalTopology:
         )
 
     @property
+    def developmental(self):
+        """Useful output-rooted body plan, without inspecting node behavior."""
+        return (
+            math.log1p(self.live_output_roots)
+            + math.log1p(self.output_cone_nodes)
+            + math.log1p(self.output_cone_edges)
+            + math.log1p(self.output_integrating_nodes)
+            + math.log1p(self.min_output_input_convergence)
+            + math.log1p(self.total_output_input_connections)
+            + math.log1p(self.min_output_input_edges)
+            + math.log1p(self.total_output_input_edges)
+            + math.log1p(self.min_output_branch_input_edges)
+            + math.log1p(self.total_output_branch_input_edges)
+            + math.log1p(self.min_output_branch_input_convergence)
+            + math.log1p(self.total_output_branch_input_convergence)
+            + math.log1p(self.min_output_input_proximity)
+            + math.log1p(self.total_output_input_proximity)
+            + math.log1p(self.min_function_capacity)
+            + math.log1p(self.total_function_capacity)
+        )
+
+    @property
     def score(self):
-        return self.connectivity + self.feedback
+        return self.connectivity + self.feedback + self.developmental
 
 
 def _reachable_from(start, adjacency):
@@ -120,15 +161,82 @@ def _strong_components(nodes, adjacency):
     return components
 
 
-def functional_topology(grid, inputs, *, _compiled=None):
+def functional_topology(grid, inputs, *, output_positions=None, _compiled=None):
     """Measure connected and cyclic FNV hardware without inspecting behavior."""
     input_set = set(map(tuple, inputs))
     edges = effective_wiring_edges(
         grid, input_set, compiled=_compiled)
     adjacency = {cell: set() for cell in grid}
+    reverse = {cell: set() for cell in grid}
     for source, destination in edges:
         adjacency.setdefault(source, set()).add(destination)
         adjacency.setdefault(destination, set())
+        reverse.setdefault(destination, set()).add(source)
+        reverse.setdefault(source, set())
+
+    roots = tuple(
+        tuple(cell) for cell in (
+            (output_positions or {}).values()
+            if isinstance(output_positions, dict) else
+            (output_positions or ()))
+        if cell is not None)
+    live_roots = tuple(root for root in roots if root in grid)
+    output_cones = [_reachable_from(root, reverse) for root in live_roots]
+    output_cone = set().union(*output_cones) if output_cones else set()
+    output_cone_nodes = output_cone - input_set
+    output_cone_edges = tuple(
+        (source, destination) for source, destination in edges
+        if source in output_cone and destination in output_cone)
+    output_integrating_nodes = sum(
+        len(reverse.get(cell, ())) >= 2 for cell in output_cone_nodes)
+    root_input_counts = [len(cone.intersection(input_set))
+                         for cone in output_cones]
+    root_input_edges = [sum(
+        source in input_set and destination in cone
+        for source, destination in edges)
+        for cone in output_cones]
+    root_branch_edges, root_branch_inputs = [], []
+    for root in live_roots:
+        counts = []
+        for direction in BY_ID[grid[root]].inputs:
+            source = source_for_input(root, direction)
+            if source not in reverse.get(root, ()):
+                counts.append(0)
+                root_branch_inputs.append(0)
+                continue
+            limb = _reachable_from(source, reverse)
+            root_branch_inputs.append(len(limb.intersection(input_set)))
+            counts.append(
+                1 if source in input_set else
+                sum(edge_source in input_set and edge_destination in limb
+                    for edge_source, edge_destination in edges))
+        root_branch_edges.extend(counts or [0])
+    root_proximities = []
+    for cone in output_cones:
+        # The exposed input pins are the branch's developmental frontier. Give
+        # a smooth, target-blind gradient while that frontier approaches each
+        # source pad; exact contacts remain the stronger integer metric above.
+        ports = set()
+        for destination in cone - input_set:
+            entry = BY_ID[grid[destination]]
+            for direction in entry.inputs:
+                source = source_for_input(destination, direction)
+                if source not in cone:
+                    ports.add(source)
+        root_proximities.append(sum(
+            1.0 if pad in cone else
+            1.0 / (1.0 + min(
+                (honeycomb_distance(port, pad) for port in ports),
+                default=honeycomb_distance(next(iter(cone)), pad)))
+            for pad in input_set
+        ))
+    # Dead role roots contribute zero to the weakest-output measure.
+    if len(root_input_counts) < len(roots):
+        root_input_counts.extend([0] * (len(roots) - len(root_input_counts)))
+        root_input_edges.extend([0] * (len(roots) - len(root_input_edges)))
+        root_branch_edges.extend([0] * (len(roots) - len(live_roots)))
+        root_branch_inputs.extend([0] * (len(roots) - len(live_roots)))
+        root_proximities.extend([0.0] * (len(roots) - len(root_proximities)))
 
     per_input = [
         _reachable_from(tuple(cell), adjacency)
@@ -191,7 +299,104 @@ def functional_topology(grid, inputs, *, _compiled=None):
         cyclic_nodes=cyclic_nodes,
         loop_rank=loop_rank,
         loop_regions=loop_regions,
+        live_output_roots=len(live_roots),
+        output_cone_nodes=len(output_cone_nodes),
+        output_cone_edges=len(output_cone_edges),
+        output_integrating_nodes=output_integrating_nodes,
+        min_output_input_convergence=min(root_input_counts, default=0),
+        total_output_input_connections=sum(root_input_counts),
+        min_output_input_edges=min(root_input_edges, default=0),
+        total_output_input_edges=sum(root_input_edges),
+        min_output_branch_input_edges=min(root_branch_edges, default=0),
+        total_output_branch_input_edges=sum(root_branch_edges),
+        min_output_branch_input_convergence=min(
+            root_branch_inputs, default=0),
+        total_output_branch_input_convergence=sum(root_branch_inputs),
+        min_output_input_proximity=min(root_proximities, default=0.0),
+        total_output_input_proximity=sum(root_proximities),
     )
+
+
+def logic_morphology_capacities(grid, inputs, output_positions, cap=256):
+    """Relaxed truth-signature upper bound for fixed physical wiring.
+
+    This never sees desired outputs. It holds every route fixed and asks how
+    many distinct Boolean signatures each genetic output could express if its
+    existing basic gates changed function. Reconvergent paths are relaxed and
+    may reuse an upstream signature inconsistently, so this is only a cheap
+    developmental screen; allele rescue separately evaluates complete shared-
+    gene assignments exactly. Cyclic or terminal-dead bodies have zero capacity;
+    large repertoires saturate at ``cap`` to keep seed screening bounded.
+    """
+    inputs = tuple(map(tuple, inputs))
+    row_count = 1 << len(inputs)
+    mask = (1 << row_count) - 1
+    possible = {}
+    for index, cell in enumerate(inputs):
+        signature = sum(
+            ((row >> (len(inputs) - index - 1)) & 1) << row
+            for row in range(row_count))
+        possible[cell] = {signature}
+    pending = set(grid).difference(inputs)
+    limit = max(1, int(cap))
+    while pending:
+        progressed = False
+        for cell in sorted(pending):
+            variants = (int(grid[cell]),) + behavior_component_ids(grid[cell])
+            dependencies = set()
+            for state in variants:
+                for direction in BY_ID[state].inputs:
+                    source = source_for_input(cell, direction)
+                    if (source in inputs
+                            or (source in grid
+                                and direction in BY_ID[grid[source]].outputs)):
+                        dependencies.add(source)
+            if dependencies.intersection(pending):
+                continue
+            values = set()
+            for state in variants:
+                entry = BY_ID[state]
+                sources = []
+                for direction in entry.inputs:
+                    source = source_for_input(cell, direction)
+                    driven = (
+                        source in inputs
+                        or (source in grid
+                            and direction in BY_ID[grid[source]].outputs))
+                    sources.append(possible.get(source, {0}) if driven else {0})
+                for args in product(*sources):
+                    if entry.behavior == "AND":
+                        value = args[0] & args[1]
+                    elif entry.behavior == "OR":
+                        value = args[0] | args[1]
+                    elif entry.behavior == "XOR":
+                        value = args[0] ^ args[1]
+                    elif entry.behavior == "VETO":
+                        value = args[0] & (~args[1] & mask)
+                    else:
+                        value = args[0] if args else 0
+                    values.add(value)
+                    if len(values) >= limit:
+                        break
+                if len(values) >= limit:
+                    break
+            possible[cell] = values or {0}
+            pending.remove(cell)
+            progressed = True
+        if not progressed:
+            break
+    cells = tuple(
+        tuple(cell) for cell in (
+            output_positions.values()
+            if isinstance(output_positions, dict) else output_positions))
+    return tuple(len(possible.get(cell, ())) for cell in cells)
+
+
+def logic_morphology_capacity(grid, inputs, output_positions, cap=256):
+    """Weakest and total capacity, retained as the compact public summary."""
+    capacities = logic_morphology_capacities(
+        grid, inputs, output_positions, cap=cap)
+    return min(capacities, default=0), sum(capacities)
 
 
 def logic_behavior_diversity(cases, target):
@@ -500,6 +705,8 @@ def _develop_functional(genome, target):
     inputs = list(functional_input_positions(genome, target.inputs))
     if len(inputs) != int(target.n_inputs):
         return None
+    if functional_output_positions(genome, target.outputs) is None:
+        return None
     grid = grow_functional(
         genome, inputs, grid_size=target.grid_size, iters=target.iters)
     return grid, inputs
@@ -513,20 +720,38 @@ def prepare_functional(genome, target, *, _developed=_UNSET,
     if developed is None:
         return None
     grid, inputs = developed
-    if len(grid) <= len(inputs) or any(cell not in grid for cell in inputs):
+    mode = str(getattr(target, "_fnv_readout_mode", "fitted")).lower()
+    if any(cell not in grid for cell in inputs):
+        return None
+    genetic_positions = functional_output_positions(genome, target.outputs)
+    if genetic_positions is None:
         return None
     circuit = (
         compile_functional_grid(grid, inputs)
         if _compiled is None else _compiled)
     if getattr(target, "temporal", False):
-        output_positions, traces = place_temporal_outputs(
-            grid, inputs, target, _compiled=circuit)
+        if mode == "genetic":
+            output_positions = genetic_positions
+            traces = trace_fixed_outputs(
+                grid, inputs, output_positions, target, _compiled=circuit)
+        else:
+            if len(grid) <= len(inputs):
+                return None
+            output_positions, traces = place_temporal_outputs(
+                grid, inputs, target, _compiled=circuit)
         if any(output_positions[terminal.role] is None
                for terminal in target.outputs):
             return None
         return grid, inputs, output_positions, traces
-    output_positions, cases = place_logic_outputs(
-        genome, grid, inputs, target, _compiled=circuit)
+    if mode == "genetic":
+        output_positions = genetic_positions
+        runs = _logic_runs(genome, grid, inputs, target, circuit)
+        cases = _logic_cases(runs, output_positions, target)
+    else:
+        if len(grid) <= len(inputs):
+            return None
+        output_positions, cases = place_logic_outputs(
+            genome, grid, inputs, target, _compiled=circuit)
     if any(output_positions[terminal.role] is None
            for terminal in target.outputs):
         return None
@@ -536,14 +761,11 @@ def prepare_functional(genome, target, *, _developed=_UNSET,
 def functional_logic_horizon(genome):
     """Continuous-time settling window used by FNV logic fitness.
 
-    It is genotype-derived because FNV growth is bounded by the germline
+    It is genotype-derived because FNV growth is bounded by each arm's own
     telomere rather than by the target's display grid.
     """
-    if is_constructive(genome):
-        from .construction import constructive_depth
-        seeds = tuple(getattr(genome, "input_layout", None) or ((0, 0),))
-        return 2 * max(1, constructive_depth(genome, seeds)) + 4
-    return 2 * germline_telomere(genome) + 4
+    seeds = tuple(getattr(genome, "input_layout", None) or ((0, 0),))
+    return 2 * max(1, constructive_depth(genome, seeds)) + 4
 
 
 def _run_logic_case(genome, grid, inputs, bits, target, *, _compiled=None):
@@ -635,21 +857,7 @@ def _bit_parallel_logic_runs(grid, inputs, target, circuit):
 
 def place_logic_outputs(genome, grid, inputs, target, *, _compiled=None):
     input_set = set(inputs)
-    if _compiled is None:
-        # Keep the public helper's historical call seam: diagnostics/tests may
-        # replace _run_logic_case with a five-argument physical oracle.
-        runs = [
-            _run_logic_case(genome, grid, inputs, bits, target)
-            for bits, _ in target.cases
-        ]
-    else:
-        runs = _bit_parallel_logic_runs(grid, inputs, target, _compiled)
-        if runs is None:
-            runs = [
-                _run_logic_case(
-                    genome, grid, inputs, bits, target, _compiled=_compiled)
-                for bits, _ in target.cases
-            ]
+    runs = _logic_runs(genome, grid, inputs, target, _compiled)
     positions = {terminal.role: None for terminal in target.outputs}
     candidates = _output_candidates(grid, input_set)
     candidates = behavior_representatives(
@@ -669,6 +877,28 @@ def place_logic_outputs(genome, grid, inputs, target, *, _compiled=None):
         tuple(positions), candidates, scores, balance_worst=True)
     if assignment is not None:
         positions.update(assignment)
+    return positions, _logic_cases(runs, positions, target)
+
+
+def _logic_runs(genome, grid, inputs, target, compiled=None):
+    """Execute every static row once, shared by fitted and genetic readout."""
+    if compiled is None:
+        # Keep the public helper's historical call seam: diagnostics/tests may
+        # replace _run_logic_case with a five-argument physical oracle.
+        return [
+            _run_logic_case(genome, grid, inputs, bits, target)
+            for bits, _ in target.cases]
+    runs = _bit_parallel_logic_runs(grid, inputs, target, compiled)
+    if runs is not None:
+        return runs
+    return [
+        _run_logic_case(
+            genome, grid, inputs, bits, target, _compiled=compiled)
+        for bits, _ in target.cases]
+
+
+def _logic_cases(runs, positions, target):
+    """Materialise scorer rows; absent genetic sites remain physically silent."""
     cases = []
     for run, (input_bits, expected) in zip(runs, target.cases):
         acts = {
@@ -685,7 +915,7 @@ def place_logic_outputs(genome, grid, inputs, target, *, _compiled=None):
             "acts": acts,
             "overflow": run[2],
         })
-    return positions, cases
+    return cases
 
 
 def score_fixed_logic_outputs(genome, grid, inputs, output_positions, target):
@@ -710,9 +940,23 @@ def evaluate_functional_full(genome, target, *, include_topology=False):
         compile_functional_grid(*developed)
         if developed is not None else None)
     topology = (
-        functional_topology(*developed, _compiled=circuit)
+        functional_topology(
+            *developed,
+            output_positions=functional_output_positions(
+                genome, target.outputs),
+            _compiled=circuit)
         if include_topology and developed is not None
         else FunctionalTopology())
+    if (include_topology and developed is not None
+            and not getattr(target, "temporal", False)):
+        function_capacities = logic_morphology_capacities(
+            developed[0], developed[1], functional_output_positions(
+                genome, target.outputs))
+        topology = replace(
+            topology,
+            min_function_capacity=min(function_capacities, default=0),
+            total_function_capacity=sum(function_capacities),
+            function_capacities=function_capacities)
     prepared = prepare_functional(
         genome, target, _developed=developed, _compiled=circuit)
     if prepared is None:
@@ -778,7 +1022,9 @@ def functional_report(target, genome=None):
     if prepared is None:
         return "\n".join(lines + ["", "(circuit incomplete)"])
     grid, inputs, outputs, observations = prepared
-    topology = functional_topology(grid, inputs)
+    topology = functional_topology(
+        grid, inputs,
+        output_positions=functional_output_positions(genome, target.outputs))
     behavior_diagnostic = (
         logic_behavior_diversity(observations, target)
         if not getattr(target, "temporal", False) else None)
@@ -798,16 +1044,39 @@ def functional_report(target, genome=None):
             if getattr(genome, "input_layout", None) is not None
             else "legacy fixed"
         )) + ", ".join(map(str, inputs)),
-        "Outputs (globally fitted probes): " + ", ".join(
+        "Outputs (%s): " % (
+            "genetic role sites"
+            if getattr(target, "_fnv_readout_mode", "fitted") == "genetic"
+            else "globally fitted probes") + ", ".join(
             f"{role}={cell}" for role, cell in outputs.items()),
         (
             "Topology: score=%.3f, reachable=%d nodes/%d edges, "
-            "multi-input=%d, cyclic=%d, loop-rank=%d in %d regions"
+            "multi-input=%d, output-roots=%d, output-cone=%d nodes/%d forks, "
+            "root-inputs=%d minimum/%d total, terminal-edges=%d/%d, "
+            "root-branch-edges=%d/%d, root-branch-inputs=%d/%d, "
+            "function-capacity=%d/%d, "
+            "proximity=%.3f/%.3f, cyclic=%d, "
+            "loop-rank=%d in %d regions"
         ) % (
             topology.score,
             topology.reachable_nodes,
             topology.reachable_edges,
             topology.integrating_nodes,
+            topology.live_output_roots,
+            topology.output_cone_nodes,
+            topology.output_integrating_nodes,
+            topology.min_output_input_convergence,
+            topology.total_output_input_connections,
+            topology.min_output_input_edges,
+            topology.total_output_input_edges,
+            topology.min_output_branch_input_edges,
+            topology.total_output_branch_input_edges,
+            topology.min_output_branch_input_convergence,
+            topology.total_output_branch_input_convergence,
+            topology.min_function_capacity,
+            topology.total_function_capacity,
+            topology.min_output_input_proximity,
+            topology.total_output_input_proximity,
             topology.cyclic_nodes,
             topology.loop_rank,
             topology.loop_regions,

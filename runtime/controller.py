@@ -148,8 +148,9 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 'or programmatic LUT runs.' % (config.ga.io_placement,))
     if backend == 'fnv' and config.ga.io_placement != 'fixed':
         raise ValueError(
-            "Functional NV Net uses native evolved source pads plus fitted "
-            "output probes; set the compatibility field io_placement='fixed'")
+            "Functional NV Net uses native evolved source pads and its own "
+            "fitted/genetic output selector; set the compatibility field "
+            "io_placement='fixed'")
     if (backend == 'lut'
             and getattr(config.ga, 'lut_io_mode',
                         'source_pads') == 'exterior_edges'
@@ -172,6 +173,11 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     if (config.ga.chromosome_count is not None
             and n_chroms != config.ga.chromosome_count):
         raise ValueError('n_chroms disagrees with run_config chromosome_count')
+    if backend == 'fnv' and 2 * chromosome_count < len(target.outputs):
+        raise ValueError(
+            'Functional NV Net needs at least one chromosome arm per output; '
+            'increase Chroms to at least %d' %
+            ((len(target.outputs) + 1) // 2))
     if config.ga.chromosome_count is None:
         config = dataclasses.replace(
             config, ga=dataclasses.replace(
@@ -261,31 +267,35 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         from substrates.fnv.ga import (
             adaptive_mutation_rate, consolidate_population, diversify,
             eval_batch_cases, initialization_families, next_population,
-            plateau_rescue_candidates, rank_key)
+            plateau_rescue_candidates, rank_key, select_developmental_seed)
         from substrates.fnv.genome import random_functional_genome
         families = config.fnv.families
         seed_families = initialization_families(families, target)
         setattr(target, '_fnv_families', families)
         setattr(target, 'io_placement', 'fixed')
+        setattr(target, '_fnv_readout_mode', config.fnv.readout_mode)
         evolve_io = False
         cache = LRUCache(config.ga.cache_size)
         pool = ProcessPoolExecutor(max_workers=workers)
-
-        def make_genome():
-            # FNV search is forward-only: named physical branches assemble from
-            # source pads. No target-shaped phenotype is constructed and no
-            # body is translated back into a genome.
-            return random_functional_genome(
-                chromosome_count, max_telomere=config.ga.max_telomere,
-                families=seed_families, n_inputs=target.n_inputs)
-
-        raw_eval = lambda genomes, should_stop=None, on_progress=None: \
-            eval_batch_cases(
-                genomes, target, cache, pool, should_stop, on_progress)
         fnv_logic_contract = (
             bool(getattr(target, "combinational_cases", ()))
             or (not getattr(target, "temporal", False)
                 and bool(getattr(target, "cases", ()))))
+
+        def make_genome():
+            # Role names seed genetic output niches, not desired behavior or
+            # coordinates. Local rules grow backward from those roots toward
+            # the evolved source pads.
+            return select_developmental_seed(lambda: random_functional_genome(
+                chromosome_count, max_telomere=config.ga.max_telomere,
+                families=seed_families, n_inputs=target.n_inputs,
+                output_roles=tuple(terminal.role
+                                   for terminal in target.outputs)),
+                prefer_logic_capacity=fnv_logic_contract)
+
+        raw_eval = lambda genomes, should_stop=None, on_progress=None: \
+            eval_batch_cases(
+                genomes, target, cache, pool, should_stop, on_progress)
         selection_mode = (
             'lexicase'
             if (not getattr(target, 'temporal', False)
@@ -298,6 +308,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 recombination=recombine, archive_parent=archive,
                 stagnation=stagnation, rescue_candidates=rescue,
                 families=families, growth_seeds=target.inputs,
+                target=target,
                 focus_families=(
                     tuple(family for family in ("LOGIC", "DELAY")
                           if family in families)
@@ -314,7 +325,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 focus_families=(
                     tuple(family for family in ("LOGIC", "DELAY")
                           if family in families)
-                    if fnv_logic_contract else ()))
+                    if fnv_logic_contract else ()),
+                target=target)
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,

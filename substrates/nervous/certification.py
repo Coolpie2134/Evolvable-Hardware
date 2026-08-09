@@ -71,7 +71,7 @@ def oracle_spec_for(target):
 # it onto each spec target so fit + holdout run under the SAME physics as training.
 _PHYSICS_ATTRS = (
     'pulse_config', 'lut_config', '_fnv_families',
-    '_lut_function_families', 'lut_io_mode', 'max_events')
+    '_fnv_readout_mode', '_lut_function_families', 'lut_io_mode', 'max_events')
 
 
 def carry_physics(src_target, dst_target):

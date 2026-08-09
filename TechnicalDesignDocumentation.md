@@ -39,38 +39,35 @@ Designer and Diversity tabs are hidden for SNN and FNV runs.
 
 ### 2.1 Shared developmental core
 
-Every backend follows the same developmental outline
+Every backend follows a developmental outline
 (`substrates/nervous/nervous.py: grow_nervous`,
-`substrates/fnv/growth.py: grow_functional`,
+`substrates/fnv/construction.py: grow_functional`,
 `substrates/lut/lut.py: grow_lut`, and the `substrates/snn` equivalents):
 
-1. **Seed.** Current Nervous and FNV genomes carry their own relative input-pad
-   layouts; LUT chooses evolved internal pads or one neutral germline for
-   exterior-edge I/O. SNN and compatibility placement modes resolve their seeds
-   through `io_placement`. Nothing else exists. Nervous, FNV, and LUT grow on an
-   unbounded field; SNN retains a generous outer coordinate wall for its
-   display and fixed-I/O compatibility, while its telomere remains the normal
-   growth limiter.
+1. **Seed/root.** Nervous and FNV genomes carry relative input-pad layouts. FNV
+   also carries role-labelled, writable output sites that act as remote
+   developmental roots. LUT chooses evolved internal pads or one neutral
+   germline for exterior-edge I/O. Nervous, FNV, and LUT grow on an unbounded
+   field; SNN retains a generous display wall.
 
-2. **Lookup.** Each live cell and each empty frontier cell builds a context (its
-   neighbours' states plus its own) and finds the closest gene. The original
-   substrates use Hamming distance. FNV uses a categorical physical distance,
-   because its permanent type numbers are labels rather than bit fields. The
-   winning gene's `self_out` becomes the cell's next state.
-   `self_out == 0` means death, or a dead direction.
+2. **Lookup.** Each live cell and each empty frontier cell builds a context from
+   its neighbours and itself. Nervous and LUT use Hamming distance. FNV uses
+   exact matching for reserved states and summed positive component-ID distance,
+   bounded by the acting arm's tolerance. Its rules are scoped to their arm's
+   territory; only that arm's assigned unwritten `OUT` site may establish new
+   territory. The winner's `self_out` becomes the cell's next state, and zero
+   means death or an unconfigured direction.
 
-3. **Division is Hayflick-limited.** Every chromosome carries an evolvable
-   telomere. Seed cells start at the germline length `L = germline_telomere(genome)`
-   (the maximum across chromosomes); a daughter inherits parent - 1. At 0 a cell
-   is senescent: alive and functional, but unable to birth a neighbour. Growth
-   halts at radius `L` from the seeds, so the genome bounds its own body size.
+3. **Growth is genetically bounded.** Nervous uses a germline division limit:
+   daughters inherit one less until cells become senescent. FNV instead carries
+   one `ControlGene` per occupied arm and spends its telomere on every birth,
+   retype, or erasure made by that arm. LUT birth rules expire under their
+   chromosome telomeres.
 
-4. **Settle.** Lookups continue until the state map reaches a fixed point or a
-   2-cycle ("the growth stops due to the fact that all queries return the same
-   value out as was passed in"). Nervous and FNV derive the entire iteration
-   budget from `L` (`_grow_budget(L) = 3L + 6`) and accept `grid_size`/`iters`
-   only for old callers. LUT chromosomes still use telomeres to expire birth
-   rules, but `grow_lut` also honors the target's `iters` as a safety cap.
+4. **Settle.** Nervous derives an iteration budget from its germline limit. FNV
+   updates every living arm synchronously until no cell changes or every arm has
+   spent its lifespan. Both accept `grid_size`/`iters` only for old callers. LUT
+   also honors the target's `iters` as a safety cap.
 
 The mature grid is then interpreted into hardware, which is where the
 architectures diverge.
@@ -558,7 +555,7 @@ checkpoints with a missing/null layout retain their target-declared pads.
 
 FNV is its own substrate rather than another nervous-net node model. It retains
 the degree-3 honeycomb, local L/R/D orientation, and unbounded physical field.
-Its mature hardware, state alphabet, and constructive genome are independent.
+Its mature hardware, state alphabet, and developmental genome are independent.
 Ordinary nervous net remains the Edwards associative-development experiment;
 FNV is the fixed-component evolvable-routing control arm.
 
@@ -588,8 +585,8 @@ separate type ID so a future physical realization can map a genotype directly
 to a component inventory. Checkpoints carry a SHA-256 catalogue hash; changing
 the type-to-ID mapping makes them fail to load rather than silently becoming a
 different circuit. They also carry an FNV development version. Fresh runs write
-constructive v3; associative-v2 checkpoints load under their original
-interpreter instead of being translated or silently reinterpreted.
+output-rooted `branched_v6`; older FNV development formats are rejected rather
+than translated or silently reinterpreted.
 
 `FunctionalSim` is a continuous-time event engine. Logic transitions are
 inertial; delays transport both edges; stateful elements retain only their
@@ -600,80 +597,117 @@ internal component evaluations and changes state only when its corresponding
 external pulse is injected. It may therefore drive adjacent receivers but
 neighbouring logic can never feed back into or reactivate it.
 
-New FNV genomes carry one discrete relative honeycomb coordinate per logical
-input. Input 0 is anchored at `(0, 0)` as a coordinate gauge because absolute
-translation has no behavioral meaning on the unbounded field. Other pads begin
-in a compact collision-free neighbourhood and mutate by one physical edge at a
-time inside a bounded placement domain. Crossover inherits the entire layout as
-one co-adapted module rather than recombining individual pads and manufacturing
-collisions. The pad positions are germline seeds, so they affect development as
-well as runtime injection. Legacy checkpoints that lack this field continue to
-use the target-declared fixed inputs.
+New FNV genomes carry two non-developmental I/O chromosomes in addition to the
+growth chromosomes. `input_chromosome` stores one `InputGene(distance, bearing)`
+for every logical input after input zero. Input zero is anchored at `(0, 0)` as a
+coordinate gauge because absolute translation has no behavioral meaning on the
+unbounded field. Other pads begin compact and distinct; mutation slides a pad
+around a honeycomb ring or moves it one ring inward/outward. Crossover inherits
+the complete input chromosome as one shared environmental module.
 
-Input pads retain fixed, distinct display component identities. Runtime source
-membership overrides their printed ports and drives all three adjacent wires;
-the constructive genome names each logical source directly with permanent
-negative IDs, so input roles do not rely on component-state symmetry breaking.
+`output_chromosome` stores one
+`OutputGene(gene_id, role, distance, bearing, branch_id)` for every target output.
+Roles are stable target identities, not desired values. Coordinates use the same
+origin and ring geometry as inputs; resolution nudges collisions against every
+pad and earlier output without rewriting the allele. `branch_id` binds each role
+to one stable growth-arm slot. One arm per output is active in v6; spare arms are
+dormant, and a run must provide at least as many arms as output roles.
 
-FNV output terminals are fitted read-only probes. The fitter scores every mature
-non-input component rather than a radius-limited neighbourhood around the
-target's display coordinate. For multiple roles, a dynamic-programming
-assignment maximizes their joint score subject to using distinct components;
-this avoids a greedy early role consuming the only strong cell for a later
-role. Training fixes both the evolved input layout and the selected output
-cells, and held-out certification reuses those exact bindings without refitting.
+Input pads are permanently read-only developmental `PAD_STATE = -1` sites and
+source-only electrical nodes. They ignore component feedback and change only
+when their corresponding external signal is injected. An unoccupied output site
+is developmental `OUT_STATE = -2`. It is writable only by the arm it owns. After
+that arm installs a component, `_state_of` exposes the real component state; if
+later development erases it, the OUT niche becomes visible again. PAD may appear
+in neighbour contexts but never grants territory, so reaching a pad completes a
+backward-grown path rather than starting a second input-rooted branch.
+
+The FNV control row selects one of two output policies. `fitted` is the control:
+development is output-rooted, but every mature non-input component remains a
+candidate and a global injective assignment maximizes joint role score. `genetic`
+reads each role at its OutputGene coordinate. A genetic site without a component
+is a silent zero; it is never relocated, repaired, or replaced with a fitted
+probe. Static and temporal evaluation use the same switch, and certification
+freezes whichever physical positions training used.
 
 An FNV run enables whole component families, never individual types or
 parameters. Initialization chooses a family before a member so the 36 oscillator
-routes do not outweigh a three-entry family. Mutation normally stays in the
-current family and favors the nearest routing/timing form; rarer cross-family
-changes preserve exploration. The native one-component baseline shown in the
+routes do not outweigh a three-entry family. Component-changing mutation uses
+the same family-first draw, while context tolerance separately makes nearby
+permanent type numbers partially substitutable. The native one-component baseline shown in the
 report is informational only: it never rejects a target or prevents evolution
 from discovering a harder emergent circuit.
 
-Fresh FNV chromosomes contain `PlacementGene` records. Each record has a unique
-positive ID, one permanent catalogue component ID, an ordered tuple of
-`BranchRef(node_id, direction)` inputs, and a branch-block ID. Negative node IDs
-name logical input pads. Positive IDs may name earlier or later placement genes;
-list position is never an anchor. A component is placed only when all named
-source ports exist, drive the named direction, face the component's fixed input
-pins, and converge on one empty honeycomb cell.
+Each growth chromosome has two arms around a fixed centromere. An arm contains
+`ContextGene(ctx_l, ctx_r, ctx_d, self_in, self_out, branch_id, depth)` rules and
+exactly one `ControlGene(tolerance, telomere)` while occupied. A rule may act only
+on cells already owned by its arm or their frontier. The one exception is a
+`self_in == OUT_STATE` rule at that arm's assigned output site, which establishes
+depth zero. At most one such rule survives per arm. PAD is no exception.
 
-The interpreter repeatedly resolves dependency-ready genes by stable ID. A
-collision leaves the existing occupant in place and suppresses only the losing
-placement. Its explicitly dependent descendants remain dormant; independent
-branches continue. Invalid or missing dependencies are not relocated, clamped,
-or repaired. Electrical feedback remains possible because a newly placed
-component may drive an already occupied neighbour even though the placement
-dependency graph itself is acyclic.
+Development is synchronous. Every living arm compares its rules against the
+same prior frame. `EMPTY`, `PAD`, and `OUT` match exactly; positive component IDs
+are compared by physical input/output interface rather than numeric-ID distance,
+and their summed mismatch must fit the arm's evolvable tolerance. A rule
+may specialize to one of four branch-depth bands or apply at every depth.
+Contested cells go to minimum context distance and then stable arm/gene priority.
+A cell with no match persists. One rule may differentiate every matching cell in
+one synchronous expression cohort, then is spent; it cannot fire again on the
+next frame to extrude an unbounded chain. Birth, retype, and erasure each spend
+one unit of the winning arm's telomere. The total phenotype is bounded by 128
+placements and an arm lifespan is capped at 32 cell changes.
 
-Initialization assembles a compact target-blind inventory outward from the
-evolved source pads. Combinational runs seed from LOGIC plus DELAY when both
-families are enabled because degree-3 gates require physical routing and
-fan-out; the complete user-selected bank remains reachable during mutation.
-Mutation can extend a live output tip, join two converging tips, switch to a
-compatible fixed component, construct an explicit DELAY-plus-LOGIC bridge, or
-reroute/duplicate/delete a connected labelled branch block. Bridge search
-samples both short and long empty-cell routes; equal single-source ancestry is
-discarded as redundant, but equal multi-source ancestry remains composable
-because structurally identical input cones can carry different intermediate
-functions. Plateau rescue reserves candidates for these routes and may compose
-two bridges in one bounded, target-blind proposal. A block move changes its root
-references while internal stable IDs preserve the descendant structure.
-Matching-layout crossover allocates new IDs and transplants an entire sink
-dependency cone; a different component at an overlapping site displaces only
-that local target subtree, while identical components may be shared. Parents
-with different layouts retain the recipient's co-adapted pads and use the
-physically re-anchored single-block fallback. Fan-out
-is never virtual: it exists only at source pads and fixed unary components with
-two output ports. Input-layout mutations move one pad by one honeycomb edge and
-therefore translate only branches that name that source.
+Initialization first creates compact input geometry and angularly separated
+output niches, then grows the role-owned arms round-robin so the first role
+cannot consume every shared niche. For contracts with three or more inputs, a
+gate crown retains several shared upstream buds before terminal tropism takes
+over; existing two-output DELAY types can occupy those buds as real fan-out.
+New rules are sampled from neighbourhood/depth pairs that
+the arm can currently reach, and are retained only when they change development
+without erasing the fresh arm's sole root. Combinational runs seed from LOGIC
+plus DELAY when available; ordinary mutation continues to use every family the
+run enabled. Mutation may alter a context, output component, depth, arm control,
+input geometry, output geometry, or delete/add rules and branches. Ordinary
+mutation never reads expected answers.
 
-None of these operators reads expected outputs, target names, fitted probes, or
-desired component coordinates. There is no automatic route search,
-phenotype-to-genome conversion, target scaffold, or inverse development.
-Incomplete phenotypes still emit a zero for every declared contract case, keeping FNV case
-vectors rectangular and making epsilon-lexicase safe. `tools/benchmark.py` runs
+Crossover first chooses the whole input chromosome. It then chooses each role
+module independently: the OutputGene and its assigned arm—including the control
+gene—come from the same parent. Context and control genes receive fresh stable
+IDs in the child. This atomic pairing is the central experimental claim of v6:
+recombination exchanges "everything that develops output X" rather than an arm
+detached from the root geometry to which it adapted. Fan-out remains physical:
+it exists only at source pads and fixed components with two output ports. One
+unmutated best specialist per output role is retained in each offspring cohort.
+A small assembly cohort combines compatible role specialists that share an
+input layout without applying the ordinary post-crossover mutation burst; this
+gives the atomic role module one evaluated opportunity to work as an inherited
+unit rather than damaging the join before selection sees it.
+
+There is no automatic route search, phenotype-to-genome conversion, target
+scaffold, or inverse development. Static combinational runs add one explicit,
+bounded exception after a sustained plateau: role rescue regrows an ordinary
+output arm toward only the pads that can influence that role (measured by paired
+contract rows), using a compact random crown scaled to that role's input arity,
+and searches only route-preserving AND/OR/XOR/VETO alleles. Complete shared-gene
+assignments are evaluated in packed bitsets in the target's actual row order;
+the closest samples seed a bounded allele beam, and the physically attainable
+signature with minimum truth-table Hamming distance is retained. This stage may
+read the declared contract, but it cannot move terminals, prescribe a route or
+gate tree, add a function family, or assign two values to one shared gene.
+Static regrowth draws morphology from the enabled LOGIC and DELAY construction
+palette rather than diluting it with temporal components. Its crown checks for
+the shared upstream buds required by multi-input functions and continues only
+to a small arity-scaled ceiling when those physical fan-out niches have not yet
+appeared.
+The deep search cohort is activated after four generations without contract
+progress. Before that point the same reserve uses inexpensive single-gate,
+route-preserving mutations; the larger archive rescue still begins at the
+shared twelve-generation stress threshold. Thus an improving run does not pay
+for nested arm regrowth and packed beam search on every generation.
+Incomplete fitted phenotypes still emit a zero for every declared contract case.
+Under genetic readout, each missing role site emits zero independently while
+other live roles remain observable. This keeps FNV case vectors rectangular and
+makes epsilon-lexicase safe. `tools/benchmark.py` runs
 deterministic, process-isolated target and seed comparisons through the real
 controller; it can survey every FNV-supported temporal target, select tournament
 or lexicase, and show case vectors.
@@ -683,11 +717,16 @@ telomere cost. Behavioral fitness comes first; FNV currently leaves the
 optional robustness and juvenile-development tiers inactive. Exact fitness
 ties are separated by `FunctionalTopology`, computed from the same effective
 directed wires as `FunctionalSim`. A graph traversal starts at every source-only
-input pad. Selection lexicographically rewards maximum and distinct input
-convergence, real multi-input junctions, reachable feedback, reachable edges,
-and reachable nodes. These physical counts are uncapped within the 128-placement
-genome ceiling: FNV intentionally has no hidden small-body preference, allowing
-long connected routes to persist as neutral construction material. Unreachable components,
+input pad. Selection lexicographically rewards input convergence at every
+genetic output, real multi-input junctions, terminal contact, reachable
+feedback, and distinct convergence cones. Raw reachable node, edge, and chain
+length do not enter the rank: an equivalent longer route ties rather than
+winning or losing for its size. Role reserves additionally keep both the best
+physically consistent sampled basic-gate repertoire and the best measured
+complete behavior for each output, so a useful specialist is not discarded
+merely because a sibling output is weak.
+The functional physical counts are uncapped within the 128-placement genome
+ceiling; FNV still has no hidden small-body preference. Unreachable components,
 disconnected islands, and loops that no input can activate contribute zero. No truth table, expected event,
 component family, fitted output, or target name enters this topology objective.
 Tournament selection and survivor ranking use it as their final key; epsilon-lexicase
@@ -720,25 +759,25 @@ feedback fail deterministically. The GA constants remain SNN-specific.
 ## 3. Genome translation for all models
 
 Genotype to phenotype always ends in a physical state map and interpreted
-hardware. Nervous/LUT use associative growth; constructive FNV resolves named
-port dependencies.
+hardware. Nervous/LUT use associative growth; FNV uses arm-scoped,
+output-rooted context development.
 
 |  | Nervous net | FNV | LUT array |
 | :---- | :---- | :---- | :---- |
-| Gene | `HexGene(ctx_l, ctx_r, ctx_d, self_in, self_out)`: five state-valued fields; 5-bit under `single`, 15-bit under `tri3` | `PlacementGene(gene_id, component_id, inputs, branch_id)`: stable labelled physical placement | `LutGene(ctx_n, ctx_e, ctx_s, ctx_w, self_in, self_out)`: five 16-bit LUT-valued fields |
-| State alphabet | 0-31 (5-bit): 0 dead, 1-15 paper routing, 16-31 OR twins. Under `tri3`, 15-bit: three packed 5-bit AND/OR-capable configurations (0 = dead channel). | 0-117: 0 empty, 117 fixed component-and-routing types | 0-65535 (16-bit table): 0 = dead direction. A run may restrict executable values to permanent gate banks while CAM inputs retain the full alphabet. |
-| Context match | min Hamming over (L, R, D, self) | none; named source ports must physically converge on one empty cell | min Hamming over the full 80-bit rotated context |
-| Growth rule | `self_in == 0` matches empty cells, the only kind that can birth a cell | dependency-ready placements resolve by stable ID; collisions fail locally | same convention; roughly 1 in 65536 by chance, so random genomes are seeded with them explicitly |
+| Gene | `HexGene(ctx_l, ctx_r, ctx_d, self_in, self_out)`: five state-valued fields; 5-bit under `single`, 15-bit under `tri3` | `ContextGene(ctx_l, ctx_r, ctx_d, self_in, self_out, branch_id, depth)` plus per-arm `ControlGene`; separate I/O chromosomes contain `InputGene` and `OutputGene` | `LutGene(ctx_n, ctx_e, ctx_s, ctx_w, self_in, self_out)`: five 16-bit LUT-valued fields |
+| State alphabet | 0-31 (5-bit): 0 dead, 1-15 paper routing, 16-31 OR twins. Under `tri3`, 15-bit: three packed 5-bit AND/OR-capable configurations (0 = dead channel). | 0 empty, -1 PAD, -2 OUT, and 1-117 fixed component-and-routing types | 0-65535 (16-bit table): 0 = dead direction. A run may restrict executable values to permanent gate banks while CAM inputs retain the full alphabet. |
+| Context match | min Hamming over (L, R, D, self) | reserved states exact; summed positive component-ID distance must fit the arm's tolerance | min Hamming over the full 80-bit rotated context |
+| Growth rule | `self_in == 0` matches empty cells, the only kind that can birth a cell | rules act on their arm's territory/frontier; `self_in == OUT` at the assigned output establishes depth zero | same convention; roughly 1 in 65536 by chance, so random genomes are seeded with them explicitly |
 | Interpretation | `interpret_nervous`: state -> `ROUTING_HEX[state & 0x1F]` -> `(E1, E2, I1, op)` | catalogue ID directly names the physical component and ports | the four tables are the hardware; no decode step |
 | Extra vectors | `state_delays` (32 floats, model-gated, not read during growth) | - | - |
 | Tile architecture | `Genome.arch`: `'single'` (one Fig. 3 circuit per tile) or `'tri3'` (three independent L/R/D circuits). Part of the genome signature, so the two never share a cache slot. | one component per honeycomb vertex | - |
 
 **Chromosomes.** Nervous/LUT chromosomes retain split points, tags, and
-telomeres. FNV chromosomes are hereditary containers for labelled branches;
-crossover exchanges complete dependency modules (or a re-anchored branch when
-input layouts differ) rather than list suffixes. FNV is
-capped at 64 placements per container and 128 across the constructive genome.
-Old version-2 checkpoints retain their original rule containers.
+telomeres. Every FNV growth chromosome has two arms around its centromere;
+crossover exchanges one role's OutputGene together with the assigned arm and
+control gene. Its input chromosome crosses whole. FNV is capped at 64 genes per
+container and 128 across the growth genome. Older FNV development versions are
+rejected.
 Chromosome count is capped at 32. The app's "Chroms" field is a structural
 constraint that reproduction enforces exactly, not an initial-population hint.
 
@@ -751,8 +790,8 @@ Nervous, LUT, and SNN offspring share immutable-by-convention gene objects and
 copy only the mutable container structure; their mutation operators therefore
 replace genes and vectors rather than editing shared objects in place.
 `_mutate_state_delay` builds a fresh vector every time. FNV mutations edit
-placement objects, so `clone_genome` shallow-copies every placement while its
-frozen `BranchRef` tuples remain safely shared.
+context, control, and I/O gene objects, so `clone_genome` shallow-copies every
+gene before mutation.
 
 ## 4. How the genetic algorithm works
 
@@ -805,9 +844,16 @@ submitted once and their result is fanned back to every matching individual.
 **Evaluation hot paths preserve semantics while reusing invariant work.**
 Nervous and SNN compile each developmental rule context into one packed integer,
 so a lookup is one XOR plus `int.bit_count()`. FNV precomputes its complete
-124-by-124 categorical distance matrix, flattens a genome's rule program once
-per growth, compiles the mature component wiring once, and reuses that wiring
-across output fitting, trials, truth-table cases, and topology. Ordinary Nervous
+118-by-118 component-interface distance matrix and memoizes each non-snapshot
+developmental trace under a tuple containing every rule, arm control, pad, and
+output site read by the interpreter. In-place mutation changes the key
+automatically; local clones may share an unchanged trace, while `Genome.__getstate__`
+removes it from multiprocessing and checkpoint payloads. Honeycomb direction
+maps are coordinate-cached, and the four-input allele beam resolves its fixed
+physical sources once per cell/state rather than once per candidate assignment.
+Deep beam/regrowth cohorts activate after four flat generations instead of on
+every improving generation. FNV also compiles the mature component wiring once
+and reuses it across output fitting, trials, truth-table cases, and topology. Ordinary Nervous
 selection grows once and shares the mature phenotype between behavior and its
 structural tie-break. LUT temporal scoring resets one compiled `AsyncLutSim`
 between timing replicates. Combinational scoring batches every independent
@@ -1121,7 +1167,7 @@ placement menu:
 | Backend | Inputs | Outputs |
 | :---- | :---- | :---- |
 | Nervous | Evolved relative honeycomb pads; pad 0 is the origin gauge, other pads move one edge, and every pad is a developmental germline plus source-only runtime member. | Globally fitted distinct read-only probes over every mature non-input tile. |
-| FNV | Evolved honeycomb source pads are permanent negative-ID branch anchors; moving one pad translates only its dependent branches. | Globally fitted distinct read-only component probes. |
+| FNV | Evolved honeycomb source pads are read-only PAD terminal cues and source-only runtime members. | One genetic writable root per role; runs choose globally fitted probes as the control or read the genetic sites directly. |
 | LUT `source_pads` | Evolved relative square-lattice pads; non-anchor pads move by cardinal edges. | Globally fitted distinct read-only LUT-cell probes. |
 | LUT `exterior_edges` | Fixed round-robin buses cover every true outside-facing boundary link after growth from one neutral germline (A/B/A/B for two inputs). | The same global fitter as `source_pads`; exterior drivers are never candidates. |
 
@@ -1130,10 +1176,11 @@ Malformed, colliding, wrong-length, or unanchored internal layouts are
 unbindable; evaluation does not repair the genotype. Input membership, not a
 component or routing-state number, enforces source-only physics. Nervous, FNV,
 and internal-pad LUT held-out scoring freeze the resolved layout and fitted
-probes together. Exterior LUT training/checkpoint/playback are implemented, but
+probes together. FNV freezes its input and selected fitted/genetic output sites.
+Exterior LUT training/checkpoint/playback are implemented, but
 its outside-facing links still need a dedicated frozen-certification adapter.
-Fixed-input Nervous/FNV and legacy LUT checkpoints without a layout continue to
-use their target-declared pads.
+Fixed-input Nervous and legacy LUT checkpoints without a layout continue to use
+their target-declared pads; FNV v6 always carries both I/O chromosomes.
 
 ### 4.5.2 Compatibility `io_placement` strategies
 
@@ -1617,17 +1664,19 @@ Above the tabs, and shared by all of them:
   and shows or hides the analog constants row (Vth / Step / Tau leak /
   Hysteresis), which appears only under the analog profile and locks while a run
   is in flight.
-* **I/O binding row**: a read-only description for Nervous/FNV
-  (**Evolved inputs / fitted outputs**); a two-choice selector for LUT
+* **I/O binding row**: a read-only native-I/O description for Nervous/FNV; FNV
+  reflects its fitted-control or genetic-output choice. LUT has a two-choice selector
   (**Evolved internal source pads** or **Alternating exterior perimeter buses**); and
   the retained fixed/tag/wiring/spatial choices for SNN. Loading a legacy
   fixed-input Nervous checkpoint changes the description to make that fallback
   visible rather than pretending its pads evolved.
-* **FNV family row**: whole-family switches for binary logic, ternary logic, delay, normalizer, hold,
+* **FNV family row**: whole-family switches for logic, delay, normalizer, hold,
   C-element, toggle, and gated oscillator, plus a scrollable **Node number
   dictionary** decoding all 118 permanent IDs into names, routes, and timing.
   At least one family remains enabled; timing and routing variants are never
-  exposed as numeric parameters.
+  exposed as numeric parameters. The same row selects **Genetic output sites**
+  (the fresh-run default) or **Fitted probes (control)**. Checkpoints predating
+  the setting load in fitted mode to preserve their historical phenotype.
 * **LUT function-bank row**: whole-bank switches for routing, AND, OR, XOR,
   veto, threshold, mux, and arbitrary LUTs. OFF remains implicit and always
   available. The row appears only for LUT runs, locks with the other run
@@ -1719,8 +1768,9 @@ never presented without saying what evolution actually judged.
   but shows recurrent LIF membrane voltage and a spike raster in contract
   seconds. Nervous, FNV, and LUT views show their native pulse/level activity;
   FNV draws the permanent function types and the directed wires the simulator
-  actually accepts, while nervous nodes charge and discharge like capacitors
-  during playback (6.8).
+  actually accepts. Purple rings mark genetic output roots even when a root is
+  dead (and therefore silent), while orange rings mark the selected readouts.
+  Nervous nodes charge and discharge like capacitors during playback (6.8).
 * **Output pulse edges**: nervous/FNV/LUT leading edges in real time. The SNN
   equivalent is the output-highlighted spike raster.
 * **Output pulse widths (level view)**: directly below the edge strip: each
@@ -1731,10 +1781,10 @@ never presented without saying what evolution actually judged.
 * **Step / Run / Reset**: playback in real, sub-tick continuous time.
 
 FNV playback is constructed from `prepare_functional(...)`, so the displayed
-input pads and globally fitted output probes are the exact ones fitness used.
+input pads and selected fitted/genetic outputs are the exact ones fitness used.
 Temporal runs use the contract's scorer observation horizon. Static truth-table
 cases hold asserted inputs from time zero through the same
-`2 * germline_telomere + 4` settling window as `_run_logic_case`; the
+`2 * constructive_depth + 4` settling window as `_run_logic_case`; the
 Interactive tab does not substitute a generic display pulse.
 
 ### 6.7 Designer tab
@@ -1849,7 +1899,7 @@ than loop-bonus-shaped fitness. Four numbers are reported:
 ## 7. Verification
 
 `py tests/run_tests.py` runs the whole suite with bare Python; the current
-collection is **533 tests across 28 files**. Tests are organised by the claim
+collection is **579 tests across 29 files**. Tests are organised by the claim
 they defend rather than by module.
 
 | File | Claim it defends |
@@ -1872,12 +1922,13 @@ they defend rather than by module.
 | `test_lut_input_layout.py` / `test_lut_exterior_io.py` | Internal LUT pads evolve and round-trip as source-only germlines; fixed exterior buses cover every true outer face in alternating logical-input order, drive only the facing LUT input, obey propagation delay, and ignore retired point-layout alleles. |
 | `test_lut_function_banks.py` | Permanent gate-table catalogues and direction indexing; OFF/quiescence rules; old-checkpoint and unrestricted bit-identical compatibility; restricted initialization, mutation, breeding, and mature-grid invariants. |
 | `test_benchmark_cli.py` | Local benchmark architecture-set expansion, terminal listing, no-write dry runs, worker/diversification defaults, the absence of version-control or remote-publication hooks and CI-only flags, and the budget caveat: that it fires on a truncated sweep and a zero-solve cell, and stays silent when every seed solved or when unsolved seeds sit behind only early solves. |
-| `test_fnv.py` | The permanent component catalogue, physical simulation, indirect development, evolved pads, global fitted probes, family controls, forward-only initialization, interactive preparation, and checkpoint compatibility. |
+| `test_fnv.py` | The permanent component catalogue, physical simulation, evolved source-only pads, fitted/genetic readouts, target-coordinate independence, family controls, interactive preparation, and checkpoint compatibility. |
+| `test_fnv_branched.py` | Output-rooted FNV ontogeny: writable role roots, terminal PAD cues, arm territory/depth/lifespan, synchronous priority, live fresh roots, dormant spare arms, atomic output-plus-arm crossover, mutation, and v6 checkpoint round-tripping. |
 | `test_topology.py` | Nervous and FNV use the same target-blind topology aggregation over their own physical graphs; only source-reachable connectivity and feedback count, correctness ranks first, and gradient-jitter probe helpers remain deterministic. |
 | `test_performance_equivalence.py` | Packed SNN lookup, vectorized LUT steady duty, batched internal/exterior LUT lattice trials, and compiled FNV wiring are exactly equivalent to their straightforward reference paths; nervous overflow short-circuiting, target-window caching, and interval-derived samples retain their contracts. |
 | `test_null_models.py` | The gauntlet of idealised cheats: a run is only a result if a trivial strategy could not have produced it. |
 | `test_certification.py` | The held-out verdict rule. |
-| `test_designer_runtime.py` | GUI-free controller checks: playback loops, physics precedence, the Interactive case dropdown, the width strip, the capacitor charge model. |
+| `test_designer_runtime.py` | GUI-free controller checks: playback loops, physics precedence, the Interactive case dropdown, the width strip, the capacitor charge model, and FNV context/control/dead-root rendering. |
 | `test_engine_semantics.py` | Engine-level scoring and dynamics semantics. |
 
 Two disciplines are worth stating, because both were learned from defects.

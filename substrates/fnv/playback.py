@@ -27,7 +27,8 @@ class FunctionalPlayer(AsyncPlayer):
 
 
 def prepare_functional_playback(genome, target):
-    """Return the exact grown pads/probes and horizon used by FNV fitness."""
+    """The exact grown pads/probes and horizon used by FNV fitness, plus the
+    branch that built each cell so a view can colour by provenance."""
     prepared = prepare_functional(genome, target)
     if prepared is None:
         return None
@@ -37,7 +38,9 @@ def prepare_functional_playback(genome, target):
         if getattr(target, "temporal", False)
         else functional_logic_horizon(genome)
     )
-    return grid, inputs, outputs, float(horizon)
+    from .construction import develop_constructive
+    owners = develop_constructive(genome, tuple(inputs)).owners
+    return grid, inputs, outputs, float(horizon), owners
 
 
 def functional_case_pulses(target, n_inputs, horizon, case_index=0):
