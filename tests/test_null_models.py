@@ -201,7 +201,12 @@ KNOWN_WEAK = {
 # solve here as evidence that anything was evolved, or that memory was needed.
 FEEDFORWARD_BY_CONSTRUCTION = {
     'Burst x3': 1.00,
-    'Period halver (1/2x)': 0.90,
+    # 'Period halver (1/2x)' used to sit here at 0.90. It left when event
+    # scoring gained a causal floor and started counting startup edges against
+    # precision: the delay-line cheat's free early alignment went away and it
+    # now peaks at 0.842, under the ceiling. The construction argument still
+    # holds in principle - a 2-tap line does halve a period - but the target no
+    # longer needs an exception, and a stale one would hide a real regression.
 }
 
 

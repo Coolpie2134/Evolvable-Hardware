@@ -359,6 +359,15 @@ def _event_counts(actual, expected, exp, shift=0.0, tolerance=0.5,
         (bisect_left(actual, hi + shift - tick_eps)
          - bisect_left(actual, lo + shift - tick_eps))
         for lo, hi in scored_ranges)
+    # Everything the circuit emits BEFORE the first scored range counts against
+    # precision too. That leading region is the startup grace, which exists so
+    # a trace view can show a settling transient - not so that a spurious edge
+    # there is free. Without this, adding a spurious event at t=0 to an
+    # otherwise perfect trace still scored 1.0, and a fitted shift could slide
+    # the scored window past real clutter. Interior don't-care holes stay
+    # genuinely unscored.
+    if scored_ranges:
+        n_actual += bisect_left(actual, scored_ranges[0][0] + shift - tick_eps)
     cursor = matches = 0
     limit = tolerance + 1e-9
     for wanted in expected:
@@ -380,40 +389,144 @@ def _event_counts(actual, expected, exp, shift=0.0, tolerance=0.5,
 
 
 def _event_pairs(traces, ttarget):
-    pairs = []
+    """Comparison pairs GROUPED BY OUTPUT ROLE, in target terminal order.
+
+    Grouping is what keeps per-role slack honest: an offset is chosen once for
+    a role and then applies to every one of its trials. Were it chosen per
+    (trial, role) instead, each trial could slide on its own, which is not a
+    routing delay - it is re-fitting the latency for every case.
+    """
+    order = [terminal.role for terminal in getattr(ttarget, 'outputs', ())]
+    groups = {}
     for ti, trial in enumerate(ttarget.trials):
         for role, exp in trial.expected.items():
             frozen_exp = tuple(exp)
-            pairs.append((tuple(sorted(_role_events(traces, role, ti))),
-                          tuple(sorted(_expected_events(trial, role))),
-                          frozen_exp, _scored_ranges(frozen_exp)))
-    return pairs
+            groups.setdefault(role, []).append(
+                (tuple(sorted(_role_events(traces, role, ti))),
+                 tuple(sorted(_expected_events(trial, role))),
+                 frozen_exp, _scored_ranges(frozen_exp)))
+    ranked = sorted(groups, key=lambda role: (
+        order.index(role) if role in order else len(order), role))
+    return tuple((role, tuple(groups[role])) for role in ranked)
 
 
-def _event_candidate_shifts(pairs, ttarget):
+def _all_pairs(groups):
+    return [pair for _role, pairs in groups for pair in pairs]
+
+
+def _min_event_shift(ttarget):
+    """Causal floor on the fitted offset.
+
+    Expected edges sit at ``cause + ttarget.latency``, so a fitted shift of
+    ``s`` means the circuit answered ``latency + s`` after its cause. Allowing
+    ``s < -latency`` lets a response precede the input that provokes it - which
+    is how a Watchdog alarm could be credited before the quiet interval it is
+    meant to detect had even elapsed. Nothing physical can do that, so no
+    circuit should be scored as if it had.
+    """
+    return -float(getattr(ttarget, 'latency', 0) or 0)
+
+
+def _role_slack(ttarget):
+    """EXTRA per-output wiggle room, in ticks, for MULTI-output targets.
+
+    This is an offset ON TOP OF the matching tolerance, not the whole window.
+    Event matching already accepts an edge within ``event_tolerance`` of where
+    it is wanted, so at the default 0.5 a role that is half a tick adrift is
+    already credited. Adding another 0.5 makes the window a robust whole tick
+    either side of the anchor - the asked-for +-1 - while an output two ticks
+    out of step still fails. Setting this to a full tick instead would quietly
+    make that two-tick case free.
+
+    One global shift is the right model for pipeline latency, but it also
+    forced every output of a multi-output target to answer on exactly the same
+    tick. Real asynchronous circuits reach their outputs through different path
+    lengths, so a full adder whose sum and carry are one tick apart was being
+    marked down for routing, not for logic.
+
+    The FIRST output terminal is the anchor and never moves; the others may sit
+    up to ``slack`` ticks either side of it. Relative divergence between any two
+    outputs is therefore bounded by the slack itself. Letting every role float
+    freely would have doubled that, and would also have re-introduced a second
+    free global offset on top of the shared shift. Single-output targets are
+    unaffected: an isolated role's slack is indistinguishable from the global
+    shift it already gets.
+    """
+    if len(getattr(ttarget, 'outputs', ()) or ()) < 2:
+        return 0.0
+    if getattr(ttarget, 'event_role_slack', None) is not None:
+        return float(ttarget.event_role_slack)
+    window = float(getattr(ttarget, 'event_role_window', 1.0))
+    return max(0.0, window - float(getattr(ttarget, 'event_tolerance', 0.5)))
+
+
+def _role_deltas(slack, tolerance):
+    """Offsets covering [-slack, +slack] at the matching resolution."""
+    if slack <= 0.0:
+        return (0.0,)
+    step = max(1e-9, min(float(tolerance), slack))
+    count = int(math.ceil(slack / step - 1e-9))
+    values = {0.0}
+    for index in range(1, count + 1):
+        offset = min(slack, index * step)
+        values.add(round(offset, 9))
+        values.add(round(-offset, 9))
+    return tuple(sorted(values, key=lambda value: (abs(value), value < 0.0)))
+
+
+def _event_candidate_shifts(groups, ttarget):
     """All exact/boundary alignments that can change tolerant matching."""
     if not getattr(ttarget, 'fit_latency', True):
         return [0.0]
     tol = float(getattr(ttarget, 'event_tolerance', 0.5))
     limit = float(getattr(ttarget, 'event_max_shift', ttarget.T))
-    shifts = {0.0}
-    for actual, expected, _, _ in pairs:
-        for a in actual:
-            for e in expected:
-                centre = float(a) - float(e)
-                for value in (centre - tol, centre, centre + tol):
-                    if -limit <= value <= limit:
-                        shifts.add(round(value, 9))
+    floor = _min_event_shift(ttarget)
+    slack = _role_slack(ttarget)
+    shifts = {0.0} if floor <= 0.0 <= limit else {max(floor, -limit)}
+    for index, (_role, pairs) in enumerate(groups):
+        # The anchor role never takes a delta, so only the others contribute
+        # sheared alignments.
+        deltas = (0.0,) if index == 0 else _role_deltas(slack, tol)
+        for actual, expected, _, _ in pairs:
+            for a in actual:
+                for e in expected:
+                    centre = float(a) - float(e)
+                    for value in (centre - tol, centre, centre + tol):
+                        for delta in deltas:
+                            shifted = value - delta
+                            if floor <= shifted <= limit:
+                                shifts.add(round(shifted, 9))
     # Deterministic ties: smallest magnitude, with causal/non-negative first.
     return sorted(shifts, key=lambda s: (abs(s), s < 0.0, s))
 
 
-def _pooled_event_f1(pairs, tolerance, shift):
+def _group_counts(pairs, tolerance, shift):
     tr = ne = tp = na = 0
     for actual, expected, exp, ranges in pairs:
         a, b, c, d = _event_counts(
-            actual, expected, exp, shift, tolerance, presorted=True,
-            scored_ranges=ranges)
+            actual, expected, exp, shift, tolerance,
+            presorted=True, scored_ranges=ranges)
+        tr += a; ne += b; tp += c; na += d
+    return tr, ne, tp, na
+
+
+def _pooled_event_f1(groups, tolerance, shift, slack=0.0, floor=None):
+    tr = ne = tp = na = 0
+    for index, (_role, pairs) in enumerate(groups):
+        deltas = (0.0,) if index == 0 else _role_deltas(slack, tolerance)
+        best = None
+        for delta in deltas:
+            if floor is not None and shift + delta < floor - 1e-9:
+                continue
+            counts = _group_counts(pairs, tolerance, shift + delta)
+            # More hits first, then fewer spurious edges. Ties keep the
+            # smallest delta because _role_deltas is ordered by magnitude.
+            key = (counts[2], -counts[3])
+            if best is None or key > best[0]:
+                best = (key, counts)
+        if best is None:      # every delta violated the causal floor
+            best = (None, _group_counts(pairs, tolerance, shift))
+        a, b, c, d = best[1]
         tr += a; ne += b; tp += c; na += d
     return _f1(tr, ne, tp, na)
 
@@ -426,9 +539,10 @@ def _best_event_shift(traces, ttarget):
         return 0.0, 0.0
     pairs = _event_pairs(traces, ttarget)
     tolerance = float(getattr(ttarget, 'event_tolerance', 0.5))
+    slack, floor = _role_slack(ttarget), _min_event_shift(ttarget)
     best_shift, best_score = 0.0, -1.0
     for shift in _event_candidate_shifts(pairs, ttarget):
-        score = _pooled_event_f1(pairs, tolerance, shift)
+        score = _pooled_event_f1(pairs, tolerance, shift, slack, floor)
         if score > best_score + 1e-12:
             best_shift, best_score = shift, score
     return best_shift, max(0.0, best_score)
@@ -439,11 +553,24 @@ def _event_case_score(traces, ttarget, trial_index, role, shift):
         return 0.0
     trial = ttarget.trials[trial_index]
     exp = trial.expected[role]
-    counts = _event_counts(
-        _role_events(traces, role, trial_index),
-        _expected_events(trial, role), exp, shift,
-        float(getattr(ttarget, 'event_tolerance', 0.5)))
-    return _f1(*counts)
+    actual = tuple(sorted(_role_events(traces, role, trial_index)))
+    expected = tuple(sorted(_expected_events(trial, role)))
+    tolerance = float(getattr(ttarget, 'event_tolerance', 0.5))
+    floor = _min_event_shift(ttarget)
+    ranges = _scored_ranges(tuple(exp))
+    best = 0.0
+    # Report the same per-role slack the pooled fit granted, so the case
+    # breakdown in the GUI cannot disagree with the score it explains. The
+    # anchor terminal takes no delta there, and takes none here either.
+    order = [terminal.role for terminal in getattr(ttarget, 'outputs', ())]
+    slack = 0.0 if (order and role == order[0]) else _role_slack(ttarget)
+    for delta in _role_deltas(slack, tolerance):
+        if shift + delta < floor - 1e-9:
+            continue
+        best = max(best, _f1(*_event_counts(
+            actual, expected, exp, shift + delta, tolerance,
+            presorted=True, scored_ranges=ranges)))
+    return best
 
 
 def event_score(traces, ttarget, shift=None):
@@ -457,7 +584,8 @@ def event_score(traces, ttarget, shift=None):
         return cached[1]
     pairs = _event_pairs(traces, ttarget)
     return _pooled_event_f1(
-        pairs, float(getattr(ttarget, 'event_tolerance', 0.5)), shift)
+        pairs, float(getattr(ttarget, 'event_tolerance', 0.5)), shift,
+        _role_slack(ttarget), _min_event_shift(ttarget))
 
 
 # -- complete physical-waveform scoring ---------------------------------------
@@ -524,6 +652,21 @@ def _waveform_expected(ttarget, trial, role):
     return expected
 
 
+def _min_waveform_shift(ttarget):
+    """How much earlier than nominal a waveform response may legitimately be.
+
+    A contract target's expected rise sits one propagation delay after the
+    input pulse, so that delay is exactly the room a faster-than-nominal
+    circuit is entitled to. Stored (non-contract) intervals fall back to the
+    target's declared latency.
+    """
+    if getattr(ttarget, 'waveform_contract', ''):
+        config = (getattr(ttarget, 'pulse_config', None)
+                  or pulse_engine.PulseConfig())
+        return -abs(config.delay * float(ttarget.waveform_delay_multiplier))
+    return -abs(float(getattr(ttarget, 'latency', 0) or 0))
+
+
 def _waveform_at_shift(traces, ttarget, shift):
     cases = []
     tolerance = float(getattr(ttarget, 'waveform_tolerance', 0.25))
@@ -546,7 +689,13 @@ def _best_waveform_shift(traces, ttarget):
         score, cases = _waveform_at_shift(traces, ttarget, 0.0)
         return 0.0, score, cases
     limit = float(getattr(ttarget, 'event_max_shift', ttarget.T))
-    candidates = {0.0}
+    # Same causal floor as event scoring: the expected intervals already sit a
+    # propagation delay after their input pulse, so an alignment that pulls the
+    # response earlier than its own cause is not a latency - it is a circuit
+    # answering before it was asked. This is what let an "Odd pulse selector"
+    # trace starting a second BEFORE its input pulse score 1.0.
+    floor = min(0.0, _min_waveform_shift(ttarget))
+    candidates = {max(floor, min(0.0, limit))}
     for ti, trial in enumerate(ttarget.trials):
         for role in trial.expected:
             actual = _role_intervals(traces, role, ti)
@@ -554,7 +703,7 @@ def _best_waveform_shift(traces, ttarget):
             for a_start, _ in actual:
                 for e_start, _ in expected:
                     shift = a_start - e_start
-                    if -limit <= shift <= limit:
+                    if floor <= shift <= limit:
                         candidates.add(round(shift, 9))
     best = (0.0, -1.0, ())
     for shift in sorted(candidates, key=lambda value: (abs(value), value < 0.0)):

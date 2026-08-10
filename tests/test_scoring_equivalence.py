@@ -22,7 +22,8 @@ from substrates.nervous.scoring import (TemporalTraces, contract_relations,     
                             score_contract, score_report_lines,
                             transition_score, _expected_events,
                             _expected_state_changes, _expected_windows,
-                            _input_edges, _waveform_expected)
+                            _input_edges, _waveform_expected,
+                            _min_waveform_shift)
 from substrates.nervous.targets import periodic_combinational_target            # noqa: E402
 from substrates.snn.targets import gate_target, get_target                 # noqa: E402
 
@@ -453,6 +454,102 @@ def test_every_registered_event_target_uses_one_alignment():
             assert shifted < 1.0, (name, shifted)
 
 
+def _event_target_trace_offsets(target, offsets, spurious=()):
+    """Trace built from the expected edges, with a PER-ROLE time offset."""
+    roles = [terminal.role for terminal in target.outputs]
+    events = {role: [] for role in roles}
+    for index, trial in enumerate(target.trials):
+        for role in roles:
+            sequence = [float(time) + offsets.get(role, 0.0)
+                        for time in _expected_events(trial, role)]
+            if index == 0:
+                sequence += [float(time) for time in spurious]
+            events[role].append(sorted(sequence))
+    return TemporalTraces(
+        {role: [[] for _ in target.trials] for role in roles},
+        events=events)
+
+
+def _fitted_event_targets():
+    return {
+        name: target for name, target in TEMPORAL_TARGETS.items()
+        if contract_relations(target) == ('event_correspondence',)
+        and target.fit_latency}
+
+
+def test_event_targets_declare_the_latency_baked_into_their_edges():
+    """Without this metadata a causal floor cannot even be expressed.
+
+    Every one of these targets generates its expected edges at
+    ``cause + latency``, so a target reporting latency 0 while expecting a
+    response a second later is simply lying about itself - and the scorer,
+    trusting it, would allow a full second of acausal alignment.
+    """
+    for name, target in _fitted_event_targets().items():
+        first = min((time for trial in target.trials
+                     for role in trial.expected
+                     for time in _expected_events(trial, role)), default=None)
+        if first is None:
+            continue
+        assert target.latency > 0, (name, target.latency)
+
+
+def test_a_response_cannot_be_fitted_earlier_than_its_own_cause():
+    """The fitted shift is a latency, not a licence to answer in advance.
+
+    This is the flaw that let a Watchdog alarm score 1.0 while firing before
+    the quiet interval it detects had finished elapsing: the trace was simply
+    slid backwards until it lined up. A circuit may be FASTER than the nominal
+    latency - down to answering simultaneously with its cause - and no faster.
+    """
+    checked = 0
+    for name, target in _fitted_event_targets().items():
+        roles = [terminal.role for terminal in target.outputs]
+        tolerance = float(target.event_tolerance)
+        # One tolerance width past the causal floor: unmistakably acausal.
+        early = -(float(target.latency) + 2.0 * tolerance)
+        offsets = {role: early for role in roles}
+        assert score_contract(
+            _event_target_trace_offsets(target, {}), target)[0] == 1.0, name
+        acausal = score_contract(
+            _event_target_trace_offsets(target, offsets), target)[0]
+        assert acausal < 1.0, (name, acausal)
+        checked += 1
+    assert checked
+
+
+def test_a_spurious_startup_edge_is_not_free():
+    """Precision must count what the circuit emits before the scored window.
+
+    The leading unscored region is startup grace for the trace view. It was
+    also, accidentally, a place to dump edges for free - an extra event at t=0
+    left every delayed event target scoring a perfect 1.0.
+    """
+    for name, target in _fitted_event_targets().items():
+        cluttered = score_contract(
+            _event_target_trace_offsets(target, {}, spurious=(0.0,)), target)[0]
+        assert cluttered < 1.0, (name, cluttered)
+
+
+def test_multi_output_targets_tolerate_one_tick_of_skew_between_outputs():
+    """Different pads sit at different path lengths; that is routing, not logic.
+
+    A full adder whose carry lands a tick after its sum has the logic right.
+    Two ticks apart is a different claim, and still costs score.
+    """
+    targets = {name: target for name, target in _fitted_event_targets().items()
+               if len(target.outputs) > 1}
+    assert targets
+    for name, target in targets.items():
+        roles = [terminal.role for terminal in target.outputs]
+        skewed = score_contract(
+            _event_target_trace_offsets(target, {roles[1]: 1.0}), target)[0]
+        wide = score_contract(
+            _event_target_trace_offsets(target, {roles[1]: 2.0}), target)[0]
+        assert skewed == 1.0, (name, skewed)
+        assert wide < 1.0, (name, wide)
+
+
 def _waveform_target_trace(target, shift=0.0, jitter=False):
     roles = [terminal.role for terminal in target.outputs]
     events = {role: [] for role in roles}
@@ -489,6 +586,30 @@ def test_every_registered_waveform_target_uses_one_alignment():
         assert exact == 1.0, (name, exact)
         assert shifted == 1.0, (name, shifted)
         assert 0.0 < jittered < 1.0, (name, jittered)
+
+
+def test_a_waveform_cannot_be_fitted_earlier_than_its_own_cause():
+    """The same causal floor, for complete-interval scoring.
+
+    An "Odd pulse selector" trace whose first interval began a second BEFORE
+    the input pulse it selects used to score 1.0, because interval alignment
+    searched arbitrarily far backwards. A response is allowed to be as fast as
+    zero delay, and no faster.
+    """
+    targets = {
+        name: target for name, target in TEMPORAL_TARGETS.items()
+        if contract_relations(target) == ('pulse_intervals',)}
+    assert targets
+    for name, target in targets.items():
+        floor = _min_waveform_shift(target)
+        assert floor < 0.0, (name, floor)
+        # At the floor the circuit answers simultaneously with its input:
+        # unrealistically quick, but not acausal, so it still scores.
+        assert score_contract(
+            _waveform_target_trace(target, shift=floor), target)[0] == 1.0, name
+        acausal = score_contract(
+            _waveform_target_trace(target, shift=floor - 1.0), target)[0]
+        assert acausal < 1.0, (name, acausal)
 
 
 def _cadence_target_trace(target, latency=0.0, jitter=False):

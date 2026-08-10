@@ -130,6 +130,7 @@ class TemporalTarget:
         aliases = {
             'tolerance': ('event_tolerance', 'waveform_tolerance'),
             'max_shift': ('event_max_shift',),
+            'role_window': ('event_role_window',),
             'fit_latency': ('fit_latency',),
             'period': ('cadence_period',),
             'settle': ('cadence_settle', 'stepper_settle'),
@@ -141,6 +142,11 @@ class TemporalTarget:
         defaults = {
             'event_tolerance': 0.5, 'waveform_tolerance': 0.25,
             'event_max_shift': 12.0, 'fit_latency': True,
+            # How far apart the outputs of a MULTI-output target may drift from
+            # each other, in ticks, before it costs score. Different physical
+            # path lengths to different output pads are routing, not a logic
+            # error. Ignored by single-output targets.
+            'event_role_window': 1.0, 'event_role_slack': None,
             'cadence_period': 0.0, 'cadence_tolerance': 0.5,
             'cadence_settle': 5.0, 'cadence_min_events': 4,
             'stepper_min_period': 2, 'stepper_max_period': 6,
@@ -529,6 +535,14 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
         trials.append(Trial(streams, expected, events))
     return TemporalTarget(name, list(inputs), terminals, T, trials,
                           grid_size=grid_size, iters=iters,
+                          # The expected edges above were generated at
+                          # input + `latency`, so that offset is part of the
+                          # target, not something the scorer should rediscover.
+                          # Storing it is what lets event scoring impose a
+                          # causal floor on the fitted shift (an output may be
+                          # earlier than nominal, but never earlier than its
+                          # own cause).
+                          latency=int(latency),
                           contract=event_contract(),
                           description=description or describe_target(
         'Produce exactly the requested output-edge pattern.',
@@ -736,6 +750,7 @@ def coincidence_detector(grid_size=5, latency=1):
                                    if streams[t][0] and streams[t][1]]}))
     return TemporalTarget('Coincidence (2-in)', [A, B], [out], T, trials,
                           grid_size=grid_size, iters=30,
+                          latency=int(latency),
                           contract=event_contract(),
                           description=describe_target(
         'Emit one Q edge only when inputs A and B arrive together.',
