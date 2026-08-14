@@ -67,17 +67,18 @@ _LEGACY_CHAN_MASK = (1 << _LEGACY_CHAN_BITS) - 1         # 0xF
 def channel_configs(state):
     """(chanL, chanR, chanD): the three 5-bit channel configs packed in a tile
     state. Each indexes ROUTING_HEX (0 = off, 1-15 paper AND, 16-31 OR twin)."""
-    return tuple((state >> _DIR_SHIFT[d]) & _CHAN_MASK for d in TRI_DIRS)
+    st = int(state)
+    return (st & _CHAN_MASK, (st >> _CHAN_BITS) & _CHAN_MASK, (st >> (2 * _CHAN_BITS)) & _CHAN_MASK)
 
 
 def pack_channels(chan_l, chan_r, chan_d):
     """Pack three routing configurations into one 15-bit tile state."""
-    values = (int(chan_l), int(chan_r), int(chan_d))
-    if any(value < 0 or value > _CHAN_MASK for value in values):
+    l, r, d = int(chan_l), int(chan_r), int(chan_d)
+    if not (0 <= l <= _CHAN_MASK and 0 <= r <= _CHAN_MASK and 0 <= d <= _CHAN_MASK):
         raise ValueError('tri-tile channel configurations must be in 0..%d'
                          % _CHAN_MASK)
-    return (values[0] | (values[1] << _CHAN_BITS)
-            | (values[2] << (2 * _CHAN_BITS)))
+    return l | (r << _CHAN_BITS) | (d << (2 * _CHAN_BITS))
+
 
 
 def widen_legacy_state(state):

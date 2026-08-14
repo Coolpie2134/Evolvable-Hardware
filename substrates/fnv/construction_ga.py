@@ -466,7 +466,14 @@ def _observed_context_occurrences(genome, seeds, label=None):
                 cell, label, depth, grid, trace.owners, trace.branch_depths)
             if label is not None else ())
         found.add((context, band, directions))
-    return found
+    # SORTED, not the raw set. Every element carries `directions`, a tuple of
+    # direction STRINGS, and CPython randomises string hashing per process - so
+    # iterating the set yields a different order in every run. That order
+    # becomes the candidate list handed to random.choice in _random_gene, which
+    # made a fixed seed produce a different evolution on each invocation
+    # (Majority-3 solved at generation 7, 24, 17, 22 and 30 on one seed).
+    # The contents were always identical; only the order moved.
+    return sorted(found)
 
 
 def _compatible_component_id(families, directions=(), min_inputs=0):

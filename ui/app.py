@@ -58,7 +58,7 @@ from substrates.fnv import (
     functional_case_outputs, functional_input_positions, functional_report,
     grow_functional_snapshots, prepare_functional,
 )
-from substrates.fnv.viz import draw_functional_net
+from substrates.fnv.viz import body_extent, draw_functional_net, draw_key
 # Absolute package imports work both for the documented ``python -m ui.app``
 # launch and when this file is invoked directly by an IDE/file association.
 # ROOT is inserted above, so direct execution still resolves the package.
@@ -826,8 +826,19 @@ class App:
         self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL,
                                    beta=1.0, limit=_ML, elite=5,
                                    delay=_D, width=_W, coinc=_C)
-        ctrl3 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        # TWO rows, not one. Packed side by side these controls need about
+        # 2070px on the nervous net, and Tk's packer does not clip an
+        # overflowing row - it silently UNMAPS the widgets that no longer fit.
+        # In one window that quietly cost the NV profile selector, the I/O
+        # binding control and the Reset tuning button, with nothing on screen to
+        # suggest anything was missing. Splitting GA search from substrate
+        # physics keeps each row near 1000px, so every control survives on a
+        # laptop-width window.
+        ctrl3 = ttk.Frame(self.root, padding=(6, 0, 6, 0))
         ctrl3.pack(fill='x', side='top')
+        ctrl3b = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        ctrl3b.pack(fill='x', side='top')
+        self._substrate_row = ctrl3b
 
         ga_frame = ttk.Frame(ctrl3); ga_frame.pack(side='left')
         ttk.Label(ga_frame, text='GA:').pack(side='left', padx=(2, 0))
@@ -859,9 +870,14 @@ class App:
         self._lexicase_chk.pack(side='left', padx=(6, 0))
         self._ga_entries.append(self._lexicase_chk)
         ttk.Separator(ctrl3, orient='vertical').pack(side='left', fill='y', padx=8)
+        self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
+                                          command=self._reset_tuning)
+        self._tune_reset_btn.pack(side='left', padx=4)
 
-        # pulse-physics group (nervous net only)
-        self._pulse_frame = ttk.Frame(ctrl3)
+        # pulse-physics group (nervous net only). 'Substrate:' is already the
+        # SNN group's label on the row above, so this row is left unlabelled
+        # rather than carrying a second, differently-scoped one.
+        self._pulse_frame = ttk.Frame(ctrl3b)
         self._pulse_frame.pack(side='left')
         ttk.Label(self._pulse_frame, text='Pulse:').pack(side='left', padx=(2, 0))
         self._pulse_entries = []
@@ -900,7 +916,7 @@ class App:
         # evolved-pad/fitted-probe architecture, LUT chooses between internal
         # pads and exterior-edge drivers, and SNN exposes the compatible legacy
         # placement strategies. The frame remains visible for every backend.
-        self._io_frame = ttk.Frame(ctrl3)
+        self._io_frame = ttk.Frame(ctrl3b)
         self._io_frame.pack(side='left')
         ttk.Label(self._io_frame, text='I/O binding:').pack(
             side='left', padx=(6, 2))
@@ -923,11 +939,10 @@ class App:
         self._io_placement_cb.pack(side='left')
         self._io_placement_cb.bind('<<ComboboxSelected>>',
                                    self._on_io_placement_change)
-        self._pulse_sep = ttk.Separator(ctrl3, orient='vertical')
-        self._pulse_sep.pack(side='left', fill='y', padx=8)
-        self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
-                                           command=self._reset_tuning)
-        self._tune_reset_btn.pack(side='left', padx=4)
+        # Separates the nervous pulse group from the I/O control. It lives in
+        # the same frame as _io_frame so it can still be packed relative to it.
+        self._pulse_sep = ttk.Separator(ctrl3b, orient='vertical')
+        self._pulse_sep.pack(side='left', fill='y', padx=8, before=self._io_frame)
 
         # Analog node constants (paper_analog profile only). Their own row so
         # the pulse row cannot overflow; packed/hidden before the notebook by
@@ -1363,12 +1378,17 @@ class App:
         # probe policy as a disabled description; SNN keeps the strategy choice.
         if hasattr(self, '_pulse_frame'):
             if backend == 'nervous':
-                self._pulse_frame.pack(side='left', before=self._io_frame)
+                # Separator first: it is the anchor the pulse group packs
+                # against, and an unpacked widget cannot be one.
                 self._pulse_sep.pack(side='left', fill='y', padx=8,
-                                     before=self._tune_reset_btn)
+                                     before=self._io_frame)
+                self._pulse_frame.pack(side='left', before=self._pulse_sep)
                 self._sync_nv_profile_controls()   # analog row follows profile
             else:
                 self._pulse_frame.pack_forget()
+                # The separator only divides the pulse group from I/O binding;
+                # with no pulse group it would be a rule against nothing.
+                self._pulse_sep.pack_forget()
                 if hasattr(self, '_analog_row'):
                     self._analog_row.pack_forget()
         if hasattr(self, '_fnv_row'):
@@ -1624,12 +1644,84 @@ class App:
     def _build_genome_tab(self, nb):
         frame = ttk.Frame(nb)
         nb.add(frame, text='Genome')
+        # A genome runs to dozens of genes. In a fixed-height figure they were
+        # either crushed together or, past a cap, silently dropped with a
+        # "N more genes not shown" note - so the tab could not answer the one
+        # question it exists for. The figure now grows downward with the gene
+        # count and the tab scrolls.
+        self._genome_view = tk.Canvas(frame, highlightthickness=0,
+                                      background='#f5f5f5')
+        scrollbar = ttk.Scrollbar(frame, orient='vertical',
+                                  command=self._genome_view.yview)
+        self._genome_view.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y', pady=4)
+        self._genome_view.pack(side='left', fill='both', expand=True,
+                               padx=(4, 0), pady=4)
         self._genome_fig = plt.figure(figsize=(11, 7.5))
         self._genome_fig.patch.set_facecolor('#f5f5f5')
-        self._genome_canvas = FigureCanvasTkAgg(self._genome_fig, master=frame)
-        self._genome_canvas.get_tk_widget().pack(fill='both', expand=True, padx=4, pady=4)
+        self._genome_canvas = FigureCanvasTkAgg(self._genome_fig,
+                                                master=self._genome_view)
+        self._genome_window = self._genome_view.create_window(
+            (0, 0), anchor='nw',
+            window=self._genome_canvas.get_tk_widget())
+        self._genome_last = None            # (genome, fitness) for a re-render
+        self._genome_resize_job = None
+        self._genome_view.bind('<Configure>', self._on_genome_resize)
+        # Tk does not route wheel events to a scrollable widget by hover, so
+        # bind them while the pointer is over the viewport.
+        self._genome_view.bind(
+            '<Enter>', lambda _e: self._genome_view.bind_all(
+                '<MouseWheel>', self._on_genome_wheel))
+        self._genome_view.bind(
+            '<Leave>', lambda _e: self._genome_view.unbind_all('<MouseWheel>'))
         self._draw_placeholder(self._genome_fig, self._genome_canvas,
                                'Run the GA or Load Saved to see the evolved genome.')
+        self._sync_genome_scroll()
+
+    def _genome_view_width_inches(self):
+        """Figure width that exactly fills the viewport, so only Y scrolls.
+
+        Falls back to the historical width where there is no viewport - the
+        drawing code is also driven headlessly by the tests and by PNG export,
+        and rendering a genome must not depend on a Tk container existing.
+        """
+        view = getattr(self, '_genome_view', None)
+        pixels = view.winfo_width() if view is not None else 0
+        if pixels <= 1:                       # before the first layout pass
+            pixels = 1100
+        return max(6.0, pixels / float(self._genome_fig.dpi))
+
+    def _sync_genome_scroll(self):
+        """Match the embedded widget and the scroll region to the figure."""
+        if getattr(self, '_genome_view', None) is None:
+            return
+        width, height = self._genome_fig.get_size_inches() * self._genome_fig.dpi
+        width, height = int(round(width)), int(round(height))
+        self._genome_canvas.get_tk_widget().configure(width=width,
+                                                      height=height)
+        self._genome_view.itemconfigure(self._genome_window, width=width)
+        self._genome_view.configure(scrollregion=(0, 0, width, height))
+
+    def _on_genome_resize(self, _event=None):
+        """Re-render at the new width, debounced - a drag fires continuously."""
+        if self._genome_resize_job is not None:
+            try:
+                self.root.after_cancel(self._genome_resize_job)
+            except tk.TclError:
+                pass
+        self._genome_resize_job = self.root.after(150, self._genome_rerender)
+
+    def _genome_rerender(self):
+        self._genome_resize_job = None
+        if self._genome_last is None:
+            self._sync_genome_scroll()
+            return
+        self._draw_genome(*self._genome_last)
+
+    def _on_genome_wheel(self, event):
+        self._genome_view.yview_scroll(
+            int(-1 * (event.delta / 120)) or (-1 if event.delta > 0 else 1),
+            'units')
 
     @staticmethod
     def _draw_placeholder(fig, canvas, msg):
@@ -2948,17 +3040,27 @@ class App:
         rows = math.ceil(count / columns)
         axes = fig.subplots(rows, columns, squeeze=False)
         flat = [axis for row in axes for axis in row]
+        # One scale for the whole series, so a cell that does not move between
+        # iterations stays in the same place on the page. Per-panel limits
+        # magnified the two-cell seed to fill its panel and shrank the grown
+        # body, which made the sequence unreadable as growth.
+        extent = body_extent(snapshots, inputs, outputs.values(),
+                             roots.values())
         for index, snapshot in enumerate(snapshots):
             draw_functional_net(
                 flat[index], snapshot, input_positions=inputs,
                 output_positions=(outputs if index == count - 1 else {}),
                 root_positions=roots,
                 show_edges=(index == count - 1),
+                legend=False,          # one figure-level key, drawn below
+                extent=extent,
                 title=('Seed (%d)' % len(snapshot) if index == 0 else
                        'Iter %d (%d)' % (index, len(snapshot))))
         for index in range(count, len(flat)):
             flat[index].set_visible(False)
-        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        fig.tight_layout(rect=(0, 0.03, 1, 0.96))
+        # One key for the series, clear of every panel.
+        draw_key(fig, snapshots[-1])
         self._growth_canvas.draw_idle()
 
     def _draw_growth_hex(self, genome, target, fitness):
@@ -3423,12 +3525,18 @@ class App:
                     getattr(genome, 'output_layout', ()) or ()),
                 activity=case['node_outputs'],
                 show_edges=True,
+                # Every case panel shows the SAME body, so one figure-level key
+                # explains all of them. Putting it on a panel would reserve
+                # space there and render that case's circuit smaller than its
+                # neighbours, which reads as a difference in the circuit.
+                legend=False,
                 title='in=%s\n%s  %s' % (
                     ''.join(map(str, case['in_bits'])), result,
                     'OK' if correct else 'FAIL'))
             axes[index].set_title(
                 axes[index].get_title(),
                 color='green' if correct else 'red', fontsize=7)
+        draw_key(self._volt_fig, grid)
         self._volt_canvas.draw_idle()
 
     def _draw_activity(self, genome):
@@ -3598,9 +3706,12 @@ class App:
     def _draw_genome(self, genome, fitness):
         fig = self._genome_fig
         fig.clf()
+        # Remembered so a pane resize can re-render at the new width.
+        self._genome_last = (genome, fitness)
         chroms = list(getattr(genome, 'chromosomes', []) or [])
         if not chroms:
             self._draw_placeholder(fig, self._genome_canvas, '(empty genome)')
+            self._sync_genome_scroll()
             return
         n_total = sum(len(c.genes) for c in chroms)
         title = 'Genome :  %d chromosome%s,  %d genes' % (
@@ -3616,17 +3727,27 @@ class App:
             or any(isinstance(gene, (FnvContextGene, ControlGene))
                    for chromosome in chroms for gene in chromosome.genes))
         lutmode = g0 is not None and hasattr(g0, 'ctx_n')
-        CARD_CAP = 24
+        # The tab scrolls now, so the cap is only a backstop against a
+        # pathological genome rendering into a figure metres tall. It is no
+        # longer what decides whether you can see your own genes: 24 used to
+        # hide most of an ordinary FNV genome behind a "not shown" note.
+        CARD_CAP = 400
+        # Above this a dense LUT genome switches to the vocabulary summary
+        # instead of one card per gene - hundreds of near-identical cards are
+        # noise however much room they are given.
+        LUT_SUMMARY_CAP = 24
         # A dense LUT genome (hundreds of ontogeny genes) can't be shown as one
         # card per gene - they overlap into noise. Show its VOCABULARY instead:
         # the distinct output lookup tables it installs, most-common first, the
         # way the Growth tab summarises the grown organism.
-        if lutmode and n_total > CARD_CAP:
+        if lutmode and n_total > LUT_SUMMARY_CAP:
+            fig.set_size_inches(self._genome_view_width_inches(), 7.5)
             self._draw_genome_lut_summary(fig, chroms, n_total, title)
             binding = self._io_binding_text(genome)
             if binding:
                 fig.text(0.01, 0.02, binding, fontsize=7.5, color='#a03070',
                          va='bottom', family='monospace')
+            self._sync_genome_scroll()
             self._genome_canvas.draw_idle()
             return
 
@@ -3705,7 +3826,17 @@ class App:
         ax.set_ylim(0, y + 1.4)
         ax.invert_yaxis()
         ax.set_aspect('equal', adjustable='box')
+        # Size the PAGE to the content instead of squeezing the content onto a
+        # fixed page. The axis is equal-aspect, so the height that renders the
+        # cards at their true size follows directly from the data aspect; the
+        # extra inch is the title and the footer text.
+        width_inches = self._genome_view_width_inches()
+        x_span = per_row * CW + 0.4
+        fig.set_size_inches(
+            width_inches,
+            max(4.0, min(200.0, width_inches * (y + 1.4) / x_span + 1.0)))
         fig.tight_layout()
+        self._sync_genome_scroll()
         self._genome_canvas.draw_idle()
 
     def _draw_genome_lut_summary(self, fig, chroms, n_total, title):

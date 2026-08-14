@@ -212,6 +212,9 @@ CANONICAL_STATES_WITH_TERMINALS = tuple(sorted(
 DEAD_STATE = 0
 
 
+_IS_ALIAS_TABLE = tuple(s in _CANONICAL_ALIAS for s in range(32))
+
+
 def canonical_state(state, terminals=False):
     """The stored form of one configuration: itself, or DEAD if it is redundant.
 
@@ -220,10 +223,11 @@ def canonical_state(state, terminals=False):
     there they are real node types rather than redundant encodings, and killing
     them would erase every terminal an organism grew.
     """
-    state = int(state) & 0x1F
-    if terminals and state in (IO_STATE_INPUT, IO_STATE_OUTPUT):
-        return state
-    return DEAD_STATE if state in _CANONICAL_ALIAS else state
+    st = int(state) & 0x1F
+    if terminals and (st == IO_STATE_INPUT or st == IO_STATE_OUTPUT):
+        return st
+    return DEAD_STATE if _IS_ALIAS_TABLE[st] else st
+
 
 
 def canonical_states(terminals=False):

@@ -119,8 +119,15 @@ def wait_for_resume(pause_event, stop_event, messages):
 def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                   stop_event, base_seed=None, backend='snn', run_config=None,
                   results_dir='results', pause_event=None,
-                  recombination_event=None):
-    """Backend-neutral evolution worker used by the desktop application."""
+                  recombination_event=None, budget=None):
+    """Backend-neutral evolution worker used by the desktop application.
+
+    ``budget`` is an optional ``callable(best_fit) -> reason or None`` consulted
+    once per generation. Returning a reason ends the run early, in the same
+    orderly way as running out of generations: the champion is kept and the
+    certification gate still runs. It is deliberately NOT ``stop_event``, which
+    means "the user aborted" and suppresses certification.
+    """
     from substrates.snn.genome import random_genome
     from substrates.snn.ga import (_eval_batch as eval_snn,
                             next_population as next_snn,
@@ -532,6 +539,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 chromosome_count)
 
     best_fit, best_genome, best_rank = 0.0, None, None
+    budget_reason = None
     population, fitnesses = [], []
     latest_population, latest_fitnesses = [], []
     latest_try, latest_generation = None, None
@@ -719,7 +727,20 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     stats['mean_rate'] = population_mutation_rate(
                         population, actual_rate)
                     messages.put(('escape', stats))
-            if best_fit >= 1.0:
+                # A spent budget ends the run the same way exhausting the
+                # generations does - NOT the way Stop does. The distinction
+                # matters: stop_event suppresses the certification gate below,
+                # because a user abort leaves a half-finished run that must not
+                # be credited. A run that ends because it hit its time cap or
+                # reached fitness 1.0 is a complete result and still has to be
+                # certified, or every early solve would report as uncertified.
+                if budget is not None:
+                    spent = budget(best_fit)
+                    if spent:
+                        budget_reason = spent
+                        messages.put(('budget', spent, try_i, generation))
+                        break
+            if best_fit >= 1.0 or budget_reason:
                 break
 
         # Credibility gate: a high training fitness is not a claim. For temporal

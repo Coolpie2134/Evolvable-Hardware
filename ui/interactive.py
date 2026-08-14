@@ -139,6 +139,10 @@ class InteractiveTab:
         self._circuit    = None                # current loaded circuit context
         self._state      = {}                  # nervous activity map
         self._running    = False
+        # Sticky across reloads: the control is rebuilt with every circuit, so
+        # without this the view would silently snap back to branch colouring
+        # every time a new solution is loaded.
+        self._fnv_color_mode = 'branch'
         self._build_ui()
 
     # -- UI ----------------------------------------------------------------------
@@ -388,12 +392,36 @@ class InteractiveTab:
         self._status.set('Loaded %s [%s] - drive the inputs.%s'
                          % (target.name, backend, note))
 
+    #: What the FNV body view colours and labels each node by. Branch answers
+    #: "which arm built this?", function answers "what part is this?".
+    _FNV_COLOR_MODES = {
+        'Colour: branch (which arm built it)': 'branch',
+        'Colour: function (component type)':   'function',
+    }
+
     def _playback_controls(self, hint):
         ttk.Button(self._ctrl, text='Step', command=self._step).pack(side='left', padx=3)
         self._run_btn = ttk.Button(self._ctrl, text='Run', command=self._toggle_run)
         self._run_btn.pack(side='left', padx=3)
         ttk.Button(self._ctrl, text='Reset', command=self._reset).pack(side='left', padx=3)
+        if self._backend == 'fnv':
+            self._fnv_color_var = tk.StringVar(
+                value=next(label for label, mode
+                           in self._FNV_COLOR_MODES.items()
+                           if mode == self._fnv_color_mode))
+            box = ttk.Combobox(
+                self._ctrl, textvariable=self._fnv_color_var, state='readonly',
+                width=34, values=list(self._FNV_COLOR_MODES))
+            box.pack(side='left', padx=(10, 3))
+            box.bind('<<ComboboxSelected>>', self._on_fnv_color_mode)
         ttk.Label(self._ctrl, text=hint, foreground='#888').pack(side='left', padx=6)
+
+    def _on_fnv_color_mode(self, _evt=None):
+        """Repaint only - the colouring is a view, never part of the physics."""
+        self._fnv_color_mode = self._FNV_COLOR_MODES.get(
+            self._fnv_color_var.get(), 'branch')
+        if self._circuit:
+            self._draw_async()
 
     def _setup_snn_temporal(self, target):
         """Build an editable seconds-based timeline for recurrent LIF runs."""
@@ -691,9 +719,11 @@ class InteractiveTab:
                          arch=getattr(self, '_nv_arch', 'single'),
                          title=title)
         elif self._backend == 'fnv':
-            # Coloured by BRANCH, not by component family: the question this
-            # view has to answer is which arm built what, and whether the arms
-            # are doing separate work at all. Inputs and outputs stay ringed.
+            # Branch colouring answers "which arm built what, and are the arms
+            # doing separate work"; function colouring answers "what parts is
+            # this circuit actually made of". Both are needed, so the mode is a
+            # control rather than a hardcoded choice. Inputs and outputs stay
+            # ringed either way.
             draw_functional_net(
                 self._axg, self._grid,
                 input_positions=self._in_pos,
@@ -702,6 +732,7 @@ class InteractiveTab:
                     self._circuit.get('genome'), 'output_layout', ()) or ()),
                 activity=self._player.activity(),
                 branches=getattr(self, '_fnv_branches', {}) or {},
+                color_by=getattr(self, '_fnv_color_mode', 'branch'),
                 show_edges=True, title=title)
         else:
             draw_lut_net(self._axg, self._grid, activity=self._player.nibbles(),

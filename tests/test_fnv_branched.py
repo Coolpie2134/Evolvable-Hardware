@@ -569,3 +569,55 @@ def test_moving_an_output_changes_its_genetic_root_without_repairing_the_gene():
     assert genome.output_layout != before_layout
     assert (gene.distance, gene.bearing) != before_allele
     assert branched_signature(genome) != before_signature
+
+
+def test_context_occurrences_are_ordered_not_hash_ordered():
+    """A fixed seed must give a fixed evolution, in every process.
+
+    `_observed_context_occurrences` used to return its raw `set`. Every element
+    carries `directions`, a tuple of direction STRINGS, and CPython randomises
+    string hashing per process - so the set iterated in a different order each
+    run, and that order is what `_random_gene` hands to `random.choice`. The
+    contents were always right; only the order moved. It made a seeded FNV run
+    unreproducible (Majority-3 solved at generation 7, 24, 17, 22 and 30 on one
+    seed), which silently turns every benchmark number into a lottery ticket.
+    """
+    from substrates.fnv.construction_ga import (
+        _observed_context_occurrences, _seeds)
+
+    random.seed(31)
+    genome = random_branched_genome(2, FAMILIES, 3)
+    occurrences = _observed_context_occurrences(genome, _seeds(genome))
+    assert not isinstance(occurrences, (set, frozenset)), (
+        'a set has no stable iteration order across processes')
+    assert list(occurrences) == sorted(occurrences)
+    # The string-keyed part is what made the order unstable, so prove the
+    # ordering really is total over it rather than accidentally stable.
+    assert len(set(occurrences)) == len(list(occurrences))
+
+
+def test_a_seeded_genome_is_identical_under_any_string_hash_seed():
+    """The property the fix exists to protect, checked end to end."""
+    import json
+    import subprocess
+
+    script = (
+        'import random, json, sys;'
+        'sys.path.insert(0, %r);'
+        'from substrates.fnv.construction_ga import random_branched_genome;'
+        'from substrates.fnv.catalogue import DEFAULT_FAMILIES;'
+        'from runtime.checkpoint import genome_to_dict;'
+        'random.seed(4242);'
+        'print(json.dumps(genome_to_dict('
+        'random_branched_genome(2, DEFAULT_FAMILIES, 3), "fnv"),'
+        ' sort_keys=True))' % ROOT)
+    digests = set()
+    for hash_seed in ('0', '1', '2'):
+        environment = dict(os.environ, PYTHONHASHSEED=hash_seed)
+        out = subprocess.run([sys.executable, '-c', script], env=environment,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr[-400:]
+        digests.add(out.stdout.strip())
+    assert len(digests) == 1, (
+        'the same seed produced %d different genomes across hash seeds'
+        % len(digests))

@@ -328,6 +328,10 @@ def config_record(args, architectures):
             'restarts': args.tries, 'chromosomes': args.chroms,
             'workers': args.workers,
             'graded': args.graded, 'input_high': args.input_high,
+            # Both change what a cell can reach, so they belong in the
+            # fingerprint: resuming a capped sweep into an uncapped one would
+            # mix incomparable rows.
+            'time_cap': args.time_cap, 'stop_on_solve': args.stop_on_solve,
         },
         'ga': {
             'mutations': args.mutations, 'immigrants': args.immigrants,
@@ -426,20 +430,39 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
     messages = queue.Queue()
     stop_event = threading.Event()
     state = {'certification': None, 'error': None, 'best': 0.0,
-             'first_solved_gen': None, 'last_gen': 0, 'done': False}
+             'first_solved_gen': None, 'last_gen': 0, 'done': False,
+             'stopped_early': None}
+
+    started = time.time()
+    time_cap = float(getattr(args, 'time_cap', 0) or 0)
+    stop_on_solve = bool(getattr(args, 'stop_on_solve', False))
+
+    def budget(best_fit):
+        """Why this run should end early, or None to keep going.
+
+        Checked once per generation by the controller. Ending here is an
+        ORDINARY end-of-run - the champion is kept and still certified - unlike
+        the stop_event, which means the user aborted.
+        """
+        if stop_on_solve and best_fit >= 1.0:
+            return 'solved'
+        if time_cap and (time.time() - started) >= time_cap:
+            return 'time cap %gs' % time_cap
+        return None
 
     def worker():
         try:
             run_evolution(
                 args.gens, args.pop, args.chroms, args.tries, live_target,
                 arch, messages, stop_event, base_seed=seed, backend=backend,
-                run_config=run_config, results_dir=snapshot_dir)
+                run_config=run_config, results_dir=snapshot_dir,
+                budget=(budget if (time_cap or stop_on_solve) else None))
         except BaseException:                       # noqa: BLE001 - recorded
             import traceback
             messages.put(('error', traceback.format_exc(limit=5)))
             messages.put(('done', None, 0.0))
 
-    started = time.time()
+    # `started` is set above, before the budget closure that reads it.
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
 
@@ -467,6 +490,8 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
                         generation % args.progress_every == 0):
                     print('      gen %4d  best %.3f  mean %.3f'
                           % (generation, best_fit, message[4]), flush=True)
+            elif kind == 'budget':
+                state['stopped_early'] = message[1]
             elif kind == 'certified':
                 state['certification'] = message[1]
             elif kind == 'error':
@@ -499,6 +524,10 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
         'trained': state['best'] >= SOLVER_VALID,
         'first_solved_gen': state['first_solved_gen'],
         'generations': state['last_gen'],
+        # Why the run ended before its generation budget, if it did. A
+        # capped run is NOT evidence the target is unreachable, so the
+        # reason has to survive into the report.
+        'stopped_early': state['stopped_early'],
         'elapsed_s': round(time.time() - started, 2),
         'error': state['error'],
     }
@@ -1060,6 +1089,14 @@ def build_parser():
                      help='print the planned cells and exit')
     out.add_argument('--quiet', action='store_true',
                      help='suppress per-generation progress')
+    out.add_argument('--time-cap', type=float, default=0.0, metavar='SECONDS',
+                     help='abandon the remaining generations once one run has '
+                          'spent this long (0 = no cap). The champion is kept '
+                          'and still certified; the reason is recorded so a '
+                          'capped run is not mistaken for an unreachable target')
+    out.add_argument('--stop-on-solve', action='store_true',
+                     help='end a run as soon as training fitness reaches 1.0 '
+                          'instead of exhausting the generation budget')
     out.add_argument('--progress-every', type=int, default=10,
                      help='print a progress line every N generations (0 = off)')
     out.add_argument('--list-targets', action='store_true',

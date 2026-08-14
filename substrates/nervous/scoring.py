@@ -1782,15 +1782,29 @@ def _expected_activation_changes(expected, lap, width):
 
 def _merge_activity_epochs(intervals, allowed_gap):
     """Merge physical pulses into logical active epochs."""
+    if not intervals:
+        return []
+    is_sorted = True
+    for i in range(len(intervals) - 1):
+        if intervals[i][0] > intervals[i + 1][0]:
+            is_sorted = False
+            break
+    if not is_sorted:
+        intervals = sorted(intervals, key=lambda x: x[0])
+    tol = allowed_gap + 1e-9
     merged = []
-    for start, end in sorted(
-            (float(start), float(end)) for start, end in intervals
-            if float(end) > float(start)):
-        if merged and start - merged[-1][1] <= allowed_gap + 1e-9:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    for start, end in intervals:
+        s, e = float(start), float(end)
+        if e <= s:
+            continue
+        if merged and s - merged[-1][1] <= tol:
+            m_last = merged[-1]
+            if e > m_last[1]:
+                merged[-1] = (m_last[0], e)
         else:
-            merged.append((start, end))
+            merged.append((s, e))
     return merged
+
 
 
 def _logical_transition_pairs(traces, target):
@@ -2172,27 +2186,45 @@ PASS         = 0.90    # a case passes iff worst-interval score >= PASS
 
 def _cov_gap(pulses, lo, hi):
     """Covered length and largest uncovered gap of `pulses` within [lo, hi]."""
-    segs = []
-    for (s, e) in pulses:
-        s2, e2 = (s if s > lo else lo), (e if e < hi else hi)
-        if e2 > s2:
-            segs.append((s2, e2))
-    segs.sort()
+    if not pulses:
+        return 0.0, hi - lo
+    is_sorted = True
+    for i in range(len(pulses) - 1):
+        if pulses[i][0] > pulses[i + 1][0]:
+            is_sorted = False
+            break
+    if not is_sorted:
+        pulses = sorted(pulses, key=lambda x: x[0])
     merged = []
-    for s, e in segs:
-        if merged and s <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], e if e > merged[-1][1] else merged[-1][1])
+    for s, e in pulses:
+        if e <= lo:
+            continue
+        if s >= hi:
+            break
+        s2 = s if s > lo else lo
+        e2 = e if e < hi else hi
+        if e2 <= s2:
+            continue
+        if merged and s2 <= merged[-1][1]:
+            m_last = merged[-1]
+            if e2 > m_last[1]:
+                merged[-1] = (m_last[0], e2)
         else:
-            merged.append((s, e))
-    covered = sum(e - s for s, e in merged)
-    cur, max_gap = lo, 0.0
+            merged.append((s2, e2))
+    covered = 0.0
+    cur = lo
+    max_gap = 0.0
     for s, e in merged:
-        if s - cur > max_gap:
-            max_gap = s - cur
+        covered += e - s
+        gap = s - cur
+        if gap > max_gap:
+            max_gap = gap
         cur = e
-    if hi - cur > max_gap:
-        max_gap = hi - cur
+    gap = hi - cur
+    if gap > max_gap:
+        max_gap = gap
     return covered, max_gap
+
 
 
 def parity_intervals(edges, horizon):
