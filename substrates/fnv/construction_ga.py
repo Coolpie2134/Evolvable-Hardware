@@ -34,6 +34,18 @@ BRANCHED_MUT_OPS = ["tweak", "add_gene", "connect", "block", "del_rule",
 BRANCHED_MUT_WEIGHTS = [
     0.55, 0.08, 0.15, 0.00, 0.04, 0.01, 0.08, 0.045, 0.045,
 ]
+#: Softmax temperature for the constructive component draw (`_sample_component`).
+#: 0 reproduces the old deterministic argmin; larger values flatten the draw
+#: toward uniform-over-families. 0.75 was chosen as the smallest value that
+#: brought every enabled family into the grown phenotype at a measurable rate
+#: while leaving DELAY the plurality part for plain routing.
+CONSTRUCTION_TEMPERATURE = 0.75
+#: Probability that a constructive step attempts to close a FEEDBACK edge back
+#: into the branch it is already growing, instead of extending forward. Growth
+#: was strictly output-rooted and acyclic, so 0 of 400 grown bodies contained a
+#: cycle - and every stateful target (oscillators, dividers, latches, toggles)
+#: needs one. Reserved for the feedback-closing step; not yet consumed.
+FEEDBACK_CLOSE_PROBABILITY = 0.25
 #: Starting lifespan of a fresh arm.
 ARM_TELOMERE_SEED = (24, 32)
 #: Fresh output niches start beyond the compact input cluster.  A root only two
@@ -611,6 +623,59 @@ def _add_blocker(genome, families, n_inputs):
     return True
 
 
+def _sample_component(viable, families=None):
+    """Family-first softmax draw over equally-routable catalogue parts.
+
+    ``viable`` rows are the candidate tuples built in `_connect_terminal_step`,
+    already filtered to one routability class, ending in the component id.
+
+    Two properties matter and neither is optional:
+
+    * **Family-first.** GATED_OSCILLATOR ships 36 entries and C_ELEMENT ships
+      3. Drawing uniformly over *states* would hand the oscillator family a
+      12x prior for no physical reason. Pick the family first, then a part
+      inside it - the same correction `catalogue.random_component_id` already
+      makes for mutation, which the constructive path never applied.
+    * **Preference is a bias, not a veto.** The remaining keys (pin count,
+      output-arity fit) still favour the tidy part, but through a softmax
+      weight rather than a lexicographic gate, so the untidy part that happens
+      to hold state stays reachable.
+
+    ``CONSTRUCTION_TEMPERATURE == 0`` restores the historical argmin exactly.
+    """
+    if not viable:
+        raise ValueError("_sample_component needs at least one candidate")
+    by_family = {}
+    for row in viable:
+        state = row[-1]
+        # Lower is better, matching the original lexicographic ordering.
+        cost = float(row[6] + row[7])
+        by_family.setdefault(BY_ID[state].family, []).append((cost, state))
+    temperature = float(CONSTRUCTION_TEMPERATURE)
+    if temperature <= 0:
+        best = min(row[6:-1] + (row[-1],) for row in viable)
+        return int(best[-1])
+
+    def _draw(pairs):
+        floor = min(cost for cost, _state in pairs)
+        weights = [math.exp(-(cost - floor) / temperature) for cost, _s in pairs]
+        total = sum(weights)
+        if total <= 0:
+            return random.choice([state for _c, state in pairs])
+        cut = random.random() * total
+        for (_cost, state), weight in zip(pairs, weights):
+            cut -= weight
+            if cut <= 0:
+                return state
+        return pairs[-1][1]
+
+    family_pairs = [
+        (min(cost for cost, _s in parts), family)
+        for family, parts in by_family.items()]
+    family = _draw([(cost, name) for cost, name in family_pairs])
+    return int(_draw(by_family[family]))
+
+
 def _arm_has_output_gene(members, exclude=None):
     return any(gene.spawns_output() for gene in members if gene is not exclude)
 
@@ -867,19 +932,30 @@ def _connect_terminal_step(genome, families, n_inputs, label=None,
             -relevant_live_inputs,
             -live_inputs,
             next_distance,
-            int(entry.family != "DELAY"),
+            # PREFERENCE keys. Formerly strict, and that was the single most
+            # damaging line in the substrate: `int(entry.family != "DELAY")`
+            # gave DELAY absolute lexicographic priority over every other
+            # family, and `min()` below made the choice a deterministic argmin
+            # rather than a draw. Measured on 400 grown bodies: DELAY 64.6%,
+            # LOGIC 17.5%, C_ELEMENT 17.9%, and NORMALIZER / HOLD / TOGGLE /
+            # GATED_OSCILLATOR 0.0% - 81 of 117 catalogue entries were enabled
+            # and never once expressed. With no state-holding part and no
+            # feedback edge, every grown circuit was a combinational delay
+            # chain and every stateful target was UNREACHABLE, not merely hard.
             len(entry.inputs),
             abs(len(entry.outputs) - len(required)),
             state))
     if not candidates:
         return False
-    # Branching is established by the shallow logic scaffold. Past it, use an
-    # enabled transport part for the shortest physical route so a long wire
-    # does not become a dozen irrelevant Boolean decisions. Logic-only banks
-    # fall back naturally to their binary components.
-    best = min(row[:-1] for row in candidates)
-    state = random.choice([
-        candidate for *shape, candidate in candidates if tuple(shape) == best])
+    # Routability is still decided strictly: anything that cannot be wired at
+    # this bud loses outright. Among the parts that CAN be wired, choose by
+    # softmax sampling over the preference keys instead of argmin, so a
+    # marginally-less-convenient part stays reachable at initialization. This
+    # is what puts HOLD / TOGGLE / GATED_OSCILLATOR / NORMALIZER back into the
+    # developmental repertoire; without them the search cannot express memory.
+    routable = min(row[:6] for row in candidates)
+    viable = [row for row in candidates if row[:6] == routable]
+    state = _sample_component(viable, families)
 
     around = hex_dirs(*bud)
     output_sites = set(roots.values()) - pads

@@ -236,7 +236,7 @@ class TriSim:
     """
 
     def __init__(self, grid, inputs, config=None, max_events=None,
-                 outputs=None):
+                 outputs=None, taus=None):
         from .simulation import create_simulator
         self.grid = grid
         info = interpret_tri(grid, inputs)
@@ -252,11 +252,20 @@ class TriSim:
         base_cap = (getattr(config, 'event_cap', None)
                     if max_events is None else max_events)
         inner_cap = None if base_cap is None else 3 * int(base_cap)
+        # One capacitor per TILE, shared by the three circuits inside it: the
+        # three sub-nodes are one physical node's three output stages, not three
+        # independently fabricated devices, so they leak on the same constant.
+        sub_taus = None
+        if taus:
+            sub_taus = {}
+            for tile, value in taus.items():
+                for node in info['tile_nodes'].get(tile, ()):
+                    sub_taus[node] = value
         self._sim = create_simulator(
             info['nodes'], info['routing'], max_events=inner_cap,
             config=config, sources=info['sources'],
             input_nodes=set(info['in_nodes'].values()),
-            output_nodes=output_nodes)
+            output_nodes=output_nodes, taus=sub_taus)
         self.config = self._sim.config
         self.rise_times = _MergedView(self._sim.pulse_intervals, self._tile_nodes,
                                       'rises')

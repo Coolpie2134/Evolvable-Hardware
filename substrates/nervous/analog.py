@@ -120,10 +120,21 @@ class AnalogPulseSim:
 
     def __init__(self, grid, routing, max_events=None, config=None,
                  sources=None, inputs=None, input_nodes=None,
-                 output_nodes=None):
+                 output_nodes=None, taus=None):
         self.grid    = grid
         self.routing = routing
         self.config  = config or AnalogConfig()
+        # PER-NODE LEAK TIME CONSTANT. One capacitor per node, so one tau per
+        # node: tau = R_leak * C_node, and no two fabricated nodes share a
+        # capacitor. Absent, every node uses the config's single value and the
+        # engine behaves exactly as before.
+        #
+        # This is the ONE timing trait a node carries. It is not a node TYPE -
+        # the routing configuration is untouched and evolves separately - and it
+        # sets three things at once, the way one physical capacitor does:
+        # the coincidence window, the output pulse width, and (through
+        # _node_delay) how long the comparator takes to swing.
+        self.tau = dict(taus or {})
         self.max_events = (self.config.event_cap if max_events is None
                            else max(1, int(max_events)))
         self.event_count = 0
@@ -186,22 +197,42 @@ class AnalogPulseSim:
         self._prev = {c: 0 for c in grid}
 
     # -- voltage helpers ------------------------------------------------------
+    def _tau(self, c):
+        """This node's leak time constant."""
+        return self.tau.get(c, self.config.tau_leak)
+
+    def _node_delay(self, c):
+        """This node's comparator swing time, scaled by its own capacitance.
+
+        A larger C_node holds the comparator input longer at any given overdrive,
+        so the stage takes proportionally longer to swing. Linear in C to first
+        order, which is all the portable model can claim.
+
+        This is also what makes the substrate genuinely ASYNCHRONOUS rather than
+        a unit-delay array in disguise: with one global delay every event lands
+        on an integer tick (measured: 0 of 257 edges off-grid), so path lengths
+        were countable in whole hops and no circuit could ever be a fraction of
+        a hop out of step.
+        """
+        return self.config.delay_prop * (self._tau(c) / self.config.tau_leak)
+
     def _refresh(self, c, t):
         """Leak v[c] up toward rest to absolute time t."""
         dt = t - self.v_time[c]
         if dt > 0:
             rest = self.config.rest
-            self.v[c] = rest + (self.v[c] - rest) * math.exp(-dt / self.config.tau_leak)
+            self.v[c] = rest + (self.v[c] - rest) * math.exp(-dt / self._tau(c))
             self.v_time[c] = t
 
-    def _recover_time(self, v_now, level):
+    def _recover_time(self, v_now, level, cell=None):
         """deltat for v to leak from ``v_now`` up to ``level`` (both < rest)."""
         rest = self.config.rest
         num = rest - v_now
         den = rest - level
         if num <= den:                     # already at/above level
             return 0.0
-        return self.config.tau_leak * math.log(num / den)
+        tau = self.config.tau_leak if cell is None else self._tau(cell)
+        return tau * math.log(num / den)
 
     def _high(self, c, t):
         return self.pulse_start.get(c, _NEG) <= t < self.pulse_until.get(c, _NEG)
@@ -288,7 +319,7 @@ class AnalogPulseSim:
         True on a genuine new rise."""
         end = self._pending_end[v]
         if end is None or end <= t:
-            end = t + self.config.delay_prop
+            end = t + self._node_delay(v)
         if self._high(v, t):
             if end > self.pulse_until[v]:
                 self.pulse_until[v] = end
@@ -332,10 +363,11 @@ class AnalogPulseSim:
         self.out_high[v] = True
         cfg = self.config
         d_rel = self._recover_time(
-            self.v[v], cfg.threshold + cfg.hysteresis)
-        self._pending_end[v] = (t + d_rel) + cfg.delay_prop
+            self.v[v], cfg.threshold + cfg.hysteresis, v)
+        delay = self._node_delay(v)
+        self._pending_end[v] = (t + d_rel) + delay
         self._fall_seq[v] += 1
-        self._push(t + cfg.delay_prop, 'wire_rise', v, None)   # None => circuit
+        self._push(t + delay, 'wire_rise', v, None)   # None => circuit
         self._push(t + d_rel, 'release', v, self._fall_seq[v])
 
     def _reschedule_release(self, v, t):
@@ -345,8 +377,8 @@ class AnalogPulseSim:
         self._refresh(v, t)
         cfg = self.config
         d_rel = self._recover_time(
-            self.v[v], cfg.threshold + cfg.hysteresis)
-        end = (t + d_rel) + cfg.delay_prop
+            self.v[v], cfg.threshold + cfg.hysteresis, v)
+        end = (t + d_rel) + self._node_delay(v)
         self._pending_end[v] = end
         self._fall_seq[v] += 1
         if self._high(v, t) and self.pulse_intervals[v] and end > self.pulse_until[v]:

@@ -221,6 +221,12 @@ def grow_lut(genome, seeds, grid_size, iters):
     """Grow on the unbounded field to the attractor (fixed point or 2-cycle);
     `grid_size` is only the target's I/O layout scale; `iters` is a safety cap.
     Returns {(x,y): (Ln, Ls, Le, Lw)}."""
+    from .branched import BranchedLutGenome
+    if isinstance(genome, BranchedLutGenome):
+        # Branched development grows backward from the arm roots, so the passed
+        # seeds are the read-only input pads rather than germlines.
+        from .branched import grow_branched_lut
+        return grow_branched_lut(genome, seeds)
     garr = _genome_lut_arrays(genome)
     track_terminals = any(_genome_io_kinds(genome))
     seed_state = genome_seed_state(genome)
@@ -277,6 +283,15 @@ def cell_io_tags(genome, grid):
 
 
 def grow_lut_snapshots(genome, seeds, grid_size, iters):
+    from .branched import BranchedLutGenome
+    if isinstance(genome, BranchedLutGenome):
+        # One frame per synchronous differentiation cohort; pads are present in
+        # every frame because the arms grow back toward them.
+        from .branched import develop_branched_lut, materialise_pads
+        pads = tuple(tuple(seed) for seed in seeds)
+        trace = develop_branched_lut(genome, pads, snapshots=True)
+        frames = trace.snapshots or [trace.grid]
+        return [materialise_pads(frame, pads) for frame in frames]
     garr = _genome_lut_arrays(genome)
     track_terminals = any(_genome_io_kinds(genome))
     seed_state = genome_seed_state(genome)

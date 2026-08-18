@@ -676,9 +676,14 @@ def test_controller_invokes_lut_rescue_only_after_plateau_patience():
 
     assert rescue.call_count == 1
     assert rescue.call_args.kwargs['limit'] == 1
-    # The configured default exceeds this tiny population; the controller
-    # should not start idle processes.
-    assert pool_factory.call_args.kwargs['max_workers'] == 2
+    # The controller should not start idle processes: the pool is capped by the
+    # population. Assert the RULE rather than the literal 2 - the configured
+    # default is derived from the host's CPU count, so hard-coding the expected
+    # width made this test fail on any machine with fewer than 3 cores (it read
+    # 1 == 2 on a 2-core CI box) while testing nothing extra on a large one.
+    expected_workers = max(1, min(config.ga.evaluation_workers, 2))
+    assert pool_factory.call_args.kwargs['max_workers'] == expected_workers
+    assert pool_factory.call_args.kwargs['max_workers'] <= 2
 
 
 def test_controller_uses_row_lexicase_for_combinational_nervous_targets():
@@ -1261,3 +1266,46 @@ def test_timing_assimilation_clones_parent_before_writing_learned_delays():
     assert population[0].state_delays is None
     assert parents[1] is population[1]
     assert tune.call_args.kwargs['step'] == 0.08
+
+
+def test_fnv_plateau_rescue_limit_is_the_measured_value_not_pop_half():
+    """Rescue volume stays at pop//2 until a FULL-BUDGET ablation says otherwise.
+
+    A 90-second ablation favoured 8 candidates (12-3 over pop//2, sign
+    p=0.035). It did not replicate: Full adder needs 561-869s to solve and
+    never solved inside that budget under any variant, so the experiment was
+    blind to solve behaviour on expensive targets. Re-tested at the real
+    200-generation budget on one seed, pop//2 certified 2/4 while 8 certified
+    0/4, every run parked on the 0.9062 best-wrong ceiling. Speed is not worth
+    solves, so the default must NOT be lowered on the short-budget result.
+    """
+    from runtime.config import GAConfig
+    from runtime.controller import FNV_PLATEAU_RESCUE_LIMIT
+
+    assert FNV_PLATEAU_RESCUE_LIMIT is None
+    # None means "ask the backend", which is what keeps nervous/LUT on their
+    # historical pop//2 while FNV takes the measured value.
+    assert GAConfig().plateau_rescue_limit is None
+
+
+def test_rescue_limit_resolution_is_per_backend_and_overridable():
+    """The resolution rule itself, without running an evolution.
+
+    Every backend currently resolves to pop//2; the hook exists so the FNV
+    default can be moved once a full-budget ablation supports it, and so a
+    sweep can set the limit explicitly without editing code.
+    """
+    from runtime.controller import FNV_PLATEAU_RESCUE_LIMIT
+
+    def resolve(configured, backend, pop):
+        if configured is None and backend == 'fnv':
+            configured = FNV_PLATEAU_RESCUE_LIMIT
+        return (int(configured) if configured is not None
+                else min(48, max(1, pop // 2)))
+
+    assert resolve(None, 'fnv', 60) == 30
+    assert resolve(None, 'nervous', 60) == 30
+    assert resolve(None, 'lut', 60) == 30
+    assert resolve(None, 'nervous', 200) == 48        # historical cap
+    assert resolve(0, 'fnv', 60) == 0                 # 0 disables rescue
+    assert resolve(24, 'nervous', 60) == 24           # explicit wins

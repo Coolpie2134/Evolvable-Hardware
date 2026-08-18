@@ -183,6 +183,18 @@ class GAConfig:
     # constraint, not merely an initial-population hint.
     chromosome_count: int | None = None
     cache_size: int = 200_000
+    # How many rescue candidates a stalled generation may build. This used to
+    # be hardwired at pop//2 (capped 48), which MEASURED AS PURE COST on FNV:
+    # against no rescue at all it went 7-4-13 over 24 paired equal-wall-clock
+    # runs (sign p=0.55) while constructing 125,970 genomes. At 8 candidates
+    # the same mechanism beats both that setting (12-3, p=0.035) and no rescue
+    # (13-3, p=0.021) on a fifth of the work, because rescue was consuming more
+    # search than it returned. 0 disables rescue entirely.
+    #
+    # Only FNV was measured. Nervous and LUT keep the historical pop//2 unless
+    # this is set explicitly (see runtime/controller.py), so their recorded
+    # results stay comparable until the same ablation is run for them.
+    plateau_rescue_limit: int | None = None
     # One process per independently evaluated genome. Keeping this in the run
     # config makes GUI and benchmark load comparable and prevents a default run
     # from saturating every logical CPU on a desktop machine.

@@ -103,6 +103,16 @@ DEFAULT_ARCHIVE_SIZE = 24
 DEFAULT_LINEAGE_WALK_FRACTION = 0.10
 DEFAULT_ROBUSTNESS_JITTER = 0.15
 DEFAULT_ROBUSTNESS_SAMPLES = 2
+# Novelty. k=8 is the usual Lehman & Stanley starting point and needs no
+# tuning here because the bonus is bounded by novelty_epsilon regardless.
+DEFAULT_NOVELTY_NEIGHBOURS = 8
+DEFAULT_NOVELTY_ARCHIVE_LIMIT = 512
+# The tie-break band. Deliberately larger than a rounding epsilon: the measured
+# plateaus are wide (one fitness value held 85% of a population), so a band that
+# only covered exact ties would leave most of the plateau unsorted.
+DEFAULT_NOVELTY_EPSILON = 0.05
+# Engage novelty only once this share of the population sits in one band.
+DEFAULT_NOVELTY_PLATEAU_SHARE = 0.5
 DEFAULT_ISLAND_COUNT = 4
 DEFAULT_ISLAND_MIGRATION_INTERVAL = 20
 DEFAULT_ISLAND_MIGRANTS = 1
@@ -385,6 +395,24 @@ class EscapeConfig:
     #: cold islands exploit while hot ones explore, at the same time.
     island_rate_spread: float = DEFAULT_ISLAND_RATE_SPREAD
 
+    # -- behavioural novelty --
+    #: Rank equally-fit genomes by how UNUSUAL their per-case profile is.
+    #: Strictly a tie-break beneath nominal fitness, so it can never trade
+    #: against correctness and cannot move the 1.0 boundary. Aimed at the
+    #: measured failure mode: with 85% of a population tied on one fitness
+    #: value, tournament and lexicase selection are both choosing essentially
+    #: at random and the run degenerates to random search.
+    novelty: bool = False
+    novelty_neighbours: int = DEFAULT_NOVELTY_NEIGHBOURS
+    novelty_archive_limit: int = DEFAULT_NOVELTY_ARCHIVE_LIMIT
+    #: size of the tie-break band; a bonus can only reorder genomes whose
+    #: nominal fitness differs by less than this.
+    novelty_epsilon: float = DEFAULT_NOVELTY_EPSILON
+    #: share of the population that must sit inside one band before novelty
+    #: engages. Below it the run still has usable fitness variance and novelty
+    #: measurably HURTS (it cost C-element 0.073), so it stays off.
+    novelty_plateau_share: float = DEFAULT_NOVELTY_PLATEAU_SHARE
+
     # -- epsilon-lexicase downsampling --
     #: fraction of cases streamed per generation. 1.0 = every case (default).
     lexicase_downsample: float = 1.0
@@ -418,6 +446,14 @@ class EscapeConfig:
             raise ValueError('robustness_samples must be at least 1')
         if not 0 < self.lexicase_downsample <= 1:
             raise ValueError('lexicase_downsample must be in (0, 1]')
+        if self.novelty_neighbours < 1:
+            raise ValueError('novelty_neighbours must be at least 1')
+        if self.novelty_archive_limit < 1:
+            raise ValueError('novelty_archive_limit must be at least 1')
+        if not 0 <= self.novelty_epsilon < 1:
+            raise ValueError('novelty_epsilon must be in [0, 1)')
+        if not 0 < self.novelty_plateau_share <= 1:
+            raise ValueError('novelty_plateau_share must be in (0, 1]')
         if self.island_count < 2:
             raise ValueError('island_count must be at least 2')
         if self.island_migration_interval < 1:
@@ -492,6 +528,9 @@ class EscapeConfig:
             active.append('islandsx%d/%dgen'
                           % (self.island_count,
                              self.island_migration_interval))
+        if self.novelty:
+            active.append('novelty k=%d/eps=%.3f'
+                          % (self.novelty_neighbours, self.novelty_epsilon))
         if self.lexicase_downsample < 1.0:
             active.append('downsample %.2f' % self.lexicase_downsample)
         return ', '.join(active) if active else 'none'
@@ -556,6 +595,65 @@ def genome_descriptor(genome):
         for x, y in layout:
             out.extend((float(x), float(y)))
     return tuple(out)
+
+
+def behaviour_descriptor(case_vector):
+    """A PHENOTYPIC fingerprint: what the circuit did, not what it is made of.
+
+    The crowding/rebirth machinery measures GENOTYPIC distance, and that turned
+    out to measure the wrong thing. On 400 freshly grown FNV bodies: 400
+    distinct genomes, 18 distinct output behaviours, and 85% of the population
+    emitting the single modal one. Genotypic crowding happily protects 400
+    "niches" that are one phenotype wearing 400 hats.
+
+    The per-case score vector is the right key: already computed for
+    epsilon-lexicase, backend-neutral, and two genomes with the same TOTAL
+    fitness but different per-case profiles are genuinely different organisms -
+    which is exactly the signal a plateau hides.
+    """
+    if case_vector is None:
+        return ()
+    return tuple(round(float(value), 4) for value in case_vector)
+
+
+def behaviour_distance(a, b):
+    """Mean absolute per-case difference, in [0, 1]; length gap counts as 1."""
+    if a is b:
+        return 0.0
+    n, m = len(a), len(b)
+    if not n and not m:
+        return 0.0
+    shared = min(n, m)
+    total = sum(abs(a[i] - b[i]) for i in range(shared)) + abs(n - m)
+    return min(1.0, total / float(max(n, m)))
+
+
+def novelty_scores(descriptors, archive, neighbours):
+    """Sparseness of each descriptor against its k nearest already-seen peers.
+
+    Standard Lehman & Stanley novelty over the union of the current population
+    and the archive. Only ever used as a TIE-BREAK BELOW FITNESS, so a
+    novel-but-wrong circuit can never displace a less-novel-but-more-correct
+    one and the 1.0 boundary is untouched.
+    """
+    pool = list(archive) + [d for d in descriptors if d]
+    if len(pool) <= 1:
+        return [0.0] * len(descriptors)
+    k = max(1, int(neighbours))
+    out = []
+    for descriptor in descriptors:
+        if not descriptor:
+            out.append(0.0)
+            continue
+        distances = [behaviour_distance(descriptor, other)
+                     for other in pool if other is not descriptor]
+        if not distances:
+            out.append(0.0)
+            continue
+        distances.sort()
+        nearest = distances[:k]
+        out.append(sum(nearest) / float(len(nearest)))
+    return out
 
 
 def genome_distance(a, b):
@@ -733,6 +831,76 @@ class EscapeState:
         self._contract_progress = None
         self.contract_elite_carries = 0
         self.contract_progress_events = 0
+        #: FIFO of behaviour descriptors already seen this run.
+        self.novelty_archive = []
+        self.novelty_admissions = 0
+
+    # -- behavioural novelty --
+
+    def novelty_rank_bonus(self, fitnesses, case_vectors):
+        """Within-plateau reordering of equally-fit genomes by novelty.
+
+        Returns a list of additive bonuses, or None when novelty is off. The
+        bonus is bounded by ``novelty_epsilon``, so two genomes whose nominal
+        fitness differ by more than that band can never swap order. Correctness
+        still dominates; novelty only decides who wins a tie.
+        """
+        if not self.config.novelty or case_vectors is None:
+            return None
+        # PLATEAU-TRIGGERED, not always-on. Measured across three targets an
+        # unconditional tie-break was not a uniform win: it lifted Gated
+        # oscillator (0.536 -> 0.575), left Divide-by-3 flat, and COST
+        # C-element 0.073 (0.728 -> 0.655), because that population still had
+        # real fitness spread and reordering its ties spent selection pressure
+        # ordinary fitness was already using well. Novelty treats ONE
+        # pathology - fitness that has stopped discriminating - so measure that
+        # and engage only then.
+        if not self._fitness_has_collapsed(fitnesses):
+            return None
+        descriptors = [behaviour_descriptor(vector) for vector in case_vectors]
+        scores = novelty_scores(descriptors, self.novelty_archive,
+                                self.config.novelty_neighbours)
+        span = float(self.config.novelty_epsilon)
+        peak = max(scores) if scores else 0.0
+        if peak <= 0:
+            bonus = [0.0] * len(scores)
+        else:
+            # Normalised so the most novel genome gets the full band. Absolute
+            # sparseness drifts as the archive fills; the RANKING is what
+            # should be stable across generations, not the raw magnitude.
+            bonus = [span * (score / peak) for score in scores]
+        self._admit_novelty(descriptors)
+        return bonus
+
+    def _fitness_has_collapsed(self, fitnesses):
+        """Is fitness still discriminating, or is the population one big tie?
+
+        The trigger is the share of the population inside the modal
+        ``novelty_epsilon`` band - the quantity measured as pathological on
+        this substrate, where 85% of 800 genomes shared one fitness value on
+        Divide-by-3 and 4 distinct values covered the whole sample.
+        """
+        values = [float(f) for f in (fitnesses or ())]
+        if len(values) < 4:
+            return False
+        band = max(float(self.config.novelty_epsilon), 1e-9)
+        best = 0
+        for centre in values:
+            count = sum(1 for v in values if abs(v - centre) <= band)
+            best = max(best, count)
+        return (best / float(len(values))) >= self.config.novelty_plateau_share
+
+    def _admit_novelty(self, descriptors):
+        limit = max(1, int(self.config.novelty_archive_limit))
+        seen = set(self.novelty_archive)
+        for descriptor in descriptors:
+            if not descriptor or descriptor in seen:
+                continue
+            self.novelty_archive.append(descriptor)
+            seen.add(descriptor)
+            self.novelty_admissions += 1
+        if len(self.novelty_archive) > limit:
+            self.novelty_archive = self.novelty_archive[-limit:]
 
     def _clone_evaluated(self, genome):
         """Clone a survivor while retaining its already-measured rank data.
@@ -1029,6 +1197,14 @@ class EscapeState:
         """
         self._pending_migration = False
         self._lineage_start = None
+        # Applied HERE, at the one point every backend's breeding call passes
+        # through, so the mechanism cannot exist on the desktop controller and
+        # not on the headless driver. The bonus goes onto the SELECTION copy of
+        # the fitness vector only, so everything reported, checkpointed or
+        # certified is untouched.
+        bonus = self.novelty_rank_bonus(fitnesses, cases)
+        if bonus is not None:
+            fitnesses = [float(f) + b for f, b in zip(fitnesses, bonus)]
         if (self.config.lineage_walk and self._mutate is not None
                 and len(population) > 1):
             return self._breed_with_lineage_walk(

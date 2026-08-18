@@ -57,8 +57,133 @@ def _fnv_gene_document(gene):
             'out': int(gene.self_out), 'depth': int(gene.depth)}
 
 
+#: Stamp on a nervous/LUT document written by the branched, output-rooted
+#: encoding. Its genes mean something the native reader would misparse (contexts
+#: hold sentinels, an arm carries a control gene, telomere is a lifespan not a
+#: radius), so the loader dispatches on this rather than guessing from shape.
+BRANCHED_FORMAT = 'branched_v1'
+
+
+def _branched_gene_document(gene, fields):
+    return {
+        'id': int(gene.gene_id),
+        'branch': int(gene.branch_id),
+        'context': [_json_cell(getattr(gene, name)) for name in fields],
+        'out': _json_cell(gene.self_out),
+        'depth': int(gene.depth),
+        # Per-node leak time constant allele. Absent from documents written
+        # before it existed; those load as index 0, the base constant, which is
+        # exactly how they behaved.
+        'tau': int(getattr(gene, 'tau_index', 0)),
+    }
+
+
+def _json_cell(value):
+    """A cell state as JSON. Hex tiles are ints; LUT cells are 4-table tuples."""
+    if isinstance(value, (tuple, list)):
+        return [int(table) for table in value]
+    if isinstance(value, str):
+        return value                      # the PAD / OUT sentinels
+    return int(value)
+
+
+def _branched_document(genome, backend):
+    fields = (('ctx_l', 'ctx_r', 'ctx_d', 'self_in') if backend == 'nervous'
+              else ('ctx_n', 'ctx_s', 'ctx_e', 'ctx_w', 'self_in'))
+    return {
+        'format_encoding': BRANCHED_FORMAT,
+        'gene_fields': list(fields),
+        'next_gene_id': int(genome.next_gene_id),
+        'arch': getattr(genome, 'arch', None),
+        'families': list(getattr(genome, 'families', ()) or ()),
+        'chromosomes': [
+            {'genes': [_branched_gene_document(gene, fields)
+                       for gene in chromosome.genes],
+             'controls': [[int(control.tolerance), int(control.telomere)]
+                          for control in chromosome.controls]}
+            for chromosome in genome.chromosomes],
+        'inputs': [[int(gene.bearing), int(gene.distance)]
+                   for gene in genome.inputs],
+        'outputs': [[str(gene.role), int(gene.bearing), int(gene.distance),
+                     int(gene.branch_id)] for gene in genome.outputs],
+    }
+
+
+def _branched_genome(data, backend):
+    """Rebuild a branched nervous / LUT genome from its document."""
+    if backend == 'nervous':
+        from substrates.nervous.branched import (
+            BranchedHexChromosome, BranchedHexGenome, HexContextGene,
+            HexControlGene, HexInputGene, HexOutputGene)
+        Chromosome, Genome = BranchedHexChromosome, BranchedHexGenome
+        ContextGene, ControlGene = HexContextGene, HexControlGene
+        InputGene, OutputGene = HexInputGene, HexOutputGene
+    else:
+        from substrates.lut.branched import (
+            BranchedLutChromosome, BranchedLutGenome, LutContextGene,
+            LutControlGene, LutInputGene, LutOutputGene)
+        Chromosome, Genome = BranchedLutChromosome, BranchedLutGenome
+        ContextGene, ControlGene = LutContextGene, LutControlGene
+        InputGene, OutputGene = LutInputGene, LutOutputGene
+
+    def cell(value):
+        # A LUT cell round-trips through JSON as a list and must come back as a
+        # tuple: it is a dictionary key and a comparison operand throughout
+        # development, and a list is neither hashable nor equal to the tuple.
+        return tuple(int(item) for item in value) if isinstance(
+            value, list) else value
+
+    fields = tuple(data.get('gene_fields') or ())
+    chromosomes = []
+    for item in data.get('chromosomes', ()):
+        genes = []
+        for row in item.get('genes', ()):
+            values = dict(zip(fields, (cell(v) for v in row['context'])))
+            # The per-node leak time constant is a NERVOUS trait: it is one
+            # capacitor per node on the paper's analog node. The LUT array has
+            # no such device (its timing is inertial delay on a lookup table),
+            # so its gene carries no such allele and none is restored.
+            if 'tau_index' in getattr(ContextGene, '__dataclass_fields__', {}):
+                values['tau_index'] = int(row.get('tau', 0))
+            genes.append(ContextGene(
+                gene_id=int(row['id']), self_out=cell(row['out']),
+                branch_id=int(row['branch']), depth=int(row['depth']),
+                **values))
+        chromosomes.append(Chromosome(
+            genes=genes,
+            controls=[ControlGene(tolerance=int(tolerance),
+                                  telomere=int(telomere))
+                      for tolerance, telomere in item.get('controls', ())]))
+    ports = dict(
+        inputs=[InputGene(bearing=int(bearing), distance=int(distance))
+                for bearing, distance in data.get('inputs', ())],
+        outputs=[OutputGene(role=str(role), bearing=int(bearing),
+                            distance=int(distance), branch_id=int(branch))
+                 for role, bearing, distance, branch in data.get('outputs', ())])
+    # Ports live on their own placement chromosome, read before growth; the
+    # genome exposes them as .inputs / .outputs.
+    if backend == 'nervous':
+        from substrates.nervous.branched import IoChromosome as Ports
+    else:
+        from substrates.lut.branched import LutIoChromosome as Ports
+    genome = Genome(
+        chromosomes=chromosomes,
+        io_chromosome=Ports(**ports),
+        next_gene_id=int(data.get('next_gene_id') or 1))
+    if backend == 'lut':
+        genome.families = tuple(data.get('families') or ())
+    elif data.get('arch'):
+        genome.arch = str(data['arch'])
+    return genome
+
+
 def genome_to_dict(genome, backend):
     from substrates.nervous.tritile import _CHAN_BITS
+    if backend in ('nervous', 'lut'):
+        from substrates.lut.branched import BranchedLutGenome
+        from substrates.nervous.branched import BranchedHexGenome
+        if isinstance(genome, (BranchedHexGenome, BranchedLutGenome)):
+            return _branched_document(genome, backend)
     # FNV has exactly one encoding, so its growth genes are always context rules.
     constructive_fnv = backend == 'fnv'
     fields = (() if constructive_fnv else _FIELDS[backend])
@@ -158,6 +283,8 @@ def genome_to_dict(genome, backend):
 
 
 def genome_from_dict(data, backend):
+    if data.get('format_encoding') == BRANCHED_FORMAT:
+        return _branched_genome(data, backend)
     if backend == 'fnv':
         from substrates.fnv.catalogue import verify_catalogue_hash
         from substrates.fnv.genome import (

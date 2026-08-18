@@ -28,7 +28,16 @@ import tkinter as tk
 from tkinter import ttk
 
 import matplotlib
-matplotlib.use('TkAgg')
+import os as _os
+import sys as _sys
+# Force the interactive backend only when a display is actually available; an
+# unconditional use('TkAgg') breaks headless test runs. See ui/app.py.
+if _os.environ.get('MPLBACKEND'):
+    pass
+elif _os.environ.get('DISPLAY') or _sys.platform in ('win32', 'darwin'):
+    matplotlib.use('TkAgg')
+else:
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np

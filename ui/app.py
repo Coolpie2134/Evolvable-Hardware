@@ -31,7 +31,18 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext
 
 import matplotlib
-matplotlib.use('TkAgg')
+# Force the interactive backend only when a display is actually available.
+# Unconditional `use('TkAgg')` made importing this module poison the process
+# for every LATER test in a headless run: matplotlib stays on TkAgg, and the
+# next `pyplot` call raises "Cannot load backend 'TkAgg' ... as 'headless' is
+# currently running". The failure surfaced in a different test file than the
+# one that caused it, which is the worst shape of CI flake.
+if os.environ.get('MPLBACKEND'):
+    pass                      # honour an explicit choice (CI sets Agg)
+elif os.environ.get('DISPLAY') or sys.platform in ('win32', 'darwin'):
+    matplotlib.use('TkAgg')
+else:
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.patches as mpatches
@@ -358,6 +369,105 @@ def _split_display(chromosome):
     return str(max(1, min(int(chromosome.split), count - 1)))
 
 
+def _branched_cell_text(value, backend):
+    """One context slot of a branched genome, named rather than numbered."""
+    if backend == 'lut':
+        from substrates.lut.branched import (EMPTY_CELL, OUT_CELL, PAD_CELL,
+                                             table_family)
+        if value == PAD_CELL:
+            return 'PAD'
+        if value == OUT_CELL:
+            return 'OUT'
+        if tuple(value) == EMPTY_CELL:
+            return '.'
+        # Per output direction: the bank the table belongs to, or its raw value
+        # when it sits outside the enabled catalogue.
+        return '/'.join(
+            '-' if not table else (table_family(table) or '%04x' % table)[:4]
+            for table in value)
+    from substrates.nervous.branched import EMPTY_STATE, OUT_STATE, PAD_STATE
+    from substrates.nervous.tritile import channel_configs
+    value = int(value)
+    if value == PAD_STATE:
+        return 'PAD'
+    if value == OUT_STATE:
+        return 'OUT'
+    if value == EMPTY_STATE:
+        return '.'
+    # The three circuits of the tile, in L/R/D order - the thing the rule
+    # actually names. The packed integer is not shown because it is not what a
+    # mutation moves.
+    return '%d:%d:%d' % channel_configs(value)
+
+
+def _branched_lines(genome, backend, fitness=None):
+    """The branched, output-rooted genome as a readable table.
+
+    Laid out by ARM rather than by chromosome half, because an arm is the unit
+    that owns a territory, a tolerance and a lifespan - reading the rules in
+    storage order would hide the only grouping that means anything.
+    """
+    cell = lambda value: _branched_cell_text(value, backend)
+    fields = (('L', 'R', 'D', 'self') if backend == 'nervous'
+              else ('N', 'S', 'E', 'W', 'self'))
+    names = (('ctx_l', 'ctx_r', 'ctx_d', 'self_in') if backend == 'nervous'
+             else ('ctx_n', 'ctx_s', 'ctx_e', 'ctx_w', 'self_in'))
+    total = sum(len(c.genes) for c in genome.chromosomes)
+    lines = ['Genome  -  branched, output-rooted:  %d chromosome%s,  %d arms,  '
+             '%d rules' % (len(genome.chromosomes),
+                           '' if len(genome.chromosomes) == 1 else 's',
+                           2 * len(genome.chromosomes), total)]
+    if fitness is not None:
+        lines[0] += '   (fitness = %.4f)' % fitness
+    lines += [
+        '',
+        'An arm grows BACKWARD from its output root toward the input pads. A',
+        'rule fires only on ground its own arm holds or touches, only within its',
+        "arm's tolerance, only in its depth band, and only ONCE - then it is",
+        'spent. The telomere is the arm\'s LIFESPAN in changed cells, not a radius.',
+        '']
+    for label in genome.arm_labels:
+        members, control = genome.arm(label)
+        if members is None:
+            continue
+        root = next((gene for gene in genome.outputs
+                     if int(gene.branch_id) == label), None)
+        header = 'Arm %d  (chromosome %d, %s half)  -  reach %d, life %d' % (
+            label, (label - 1) // 2 + 1,
+            'first' if label % 2 else 'second',
+            int(control.tolerance), int(control.telomere))
+        if root is not None:
+            header += '   root: role %s at bearing %d distance %d' % (
+                root.role, int(root.bearing), int(root.distance))
+        lines.append(header)
+        if not members:
+            lines += ['    (no rules - this arm builds nothing)', '']
+            continue
+        lines.append('      id | ' + ' | '.join('%-8s' % f for f in fields)
+                     + ' | depth | builds')
+        lines.append('    -----+-' + '-+-'.join('-' * 8 for _ in fields)
+                     + '-+-------+--------')
+        for gene in members:
+            depth = 'any' if int(gene.depth) < 0 else str(int(gene.depth))
+            lines.append(
+                '    %4d | ' % gene.gene_id
+                + ' | '.join('%-8s' % cell(getattr(gene, name))
+                             for name in names)
+                + ' | %5s | %s' % (depth, cell(gene.self_out)))
+        lines.append('')
+    lines += ['Input chromosome  -  pad 0 anchors the organism at (0, 0)',
+              '      # | bearing | distance | cell',
+              '    ----+---------+----------+-------']
+    layout = list(genome.input_layout)
+    lines.append('    %3s | %7s | %8s | %s' % ('-', '-', '-', layout[0]))
+    for index, gene in enumerate(genome.inputs):
+        site = layout[index + 1] if index + 1 < len(layout) else '(unplaced)'
+        lines.append('    %3d | %7d | %8d | %s'
+                     % (index, int(gene.bearing), int(gene.distance), site))
+    lines.append('')
+    return lines
+
+
 def build_genome_text(genome, fitness=None, binding=None):
     """Render the genome as a readable, aligned chromosome/gene table.
 
@@ -365,6 +475,11 @@ def build_genome_text(genome, fitness=None, binding=None):
     substrates/nervous/io_placement.describe_binding) appended as a footer, so a genome
     evolved under an evolvable io_placement strategy shows exactly which tag
     each port selected and where it attached."""
+    from substrates.lut.branched import BranchedLutGenome
+    from substrates.nervous.branched import BranchedHexGenome
+    if isinstance(genome, (BranchedHexGenome, BranchedLutGenome)):
+        backend = 'lut' if isinstance(genome, BranchedLutGenome) else 'nervous'
+        return '\n'.join(_branched_lines(genome, backend, fitness))
     chroms  = list(getattr(genome, 'chromosomes', []) or [])
     n_total = sum(len(c.genes) for c in chroms)
     # I/O tags only matter (and are only shown) when some gene carries one -
@@ -3077,10 +3192,21 @@ class App:
             # cells the scorer actually drives/reads.
             from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
             bound = None
-            if io_strategy(target) != 'fixed':
+            from substrates.nervous.branched import BranchedHexGenome
+            if isinstance(genome, BranchedHexGenome):
+                # Output-rooted: show the arm ROOTS the scorer reads, never
+                # probes fitted to the grown body.
+                from substrates.nervous.branched import output_root_sites
+                in_pos = list(genome.input_layout)
+                roots = output_root_sites(genome, in_pos)
+                out_pos = {gene.role: roots.get(int(gene.branch_id))
+                           for gene in genome.outputs}
+            elif io_strategy(target) != 'fixed':
                 bound = bind_io(genome, snaps[-1], target)
             if bound is not None:
                 in_pos, out_pos = flat_inputs(bound[0]), bound[1]
+            elif isinstance(genome, BranchedHexGenome):
+                pass
             elif getattr(target, 'temporal', False):
                 from substrates.nervous import place_outputs_by_trace
                 out_pos, _ = place_outputs_by_trace(
@@ -3147,7 +3273,17 @@ class App:
             # the ports - mark the SAME cells the scorer drives/reads.
             from substrates.nervous.io_placement import io_strategy, bind_io, flat_inputs
             bound = None
-            if (not exterior and not evolved_layout
+            from substrates.lut.branched import BranchedLutGenome
+            branched = isinstance(genome, BranchedLutGenome)
+            if branched:
+                # Output-rooted: the arm roots ARE the outputs, and the pads are
+                # the genome's own input genes.
+                from substrates.lut.branched import output_root_sites
+                in_pos = list(genome.input_layout)
+                roots = output_root_sites(genome, in_pos)
+                out_pos = {gene.role: roots.get(int(gene.branch_id))
+                           for gene in genome.outputs}
+            if (not branched and not exterior and not evolved_layout
                     and io_strategy(target) != 'fixed'
                     and final):
                 from substrates.lut.lut import cell_io_tags
@@ -3155,6 +3291,8 @@ class App:
                                 tags=cell_io_tags(genome, final))
             if bound is not None:
                 in_pos, out_pos = flat_inputs(bound[0]), bound[1]
+            elif branched:
+                pass
             elif getattr(target, 'temporal', False):
                 out_pos, _ = place_outputs_by_trace(
                     final, list(resolved_inputs), target,

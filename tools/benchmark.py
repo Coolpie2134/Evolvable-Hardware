@@ -282,6 +282,8 @@ def build_run_config(args, backend, chromosome_count):
             chromosome_count=chromosome_count,
             evaluation_workers=args.workers,
             diversify_solvers=args.diversify_solvers,
+            plateau_rescue_limit=(None if args.rescue_limit < 0
+                                  else args.rescue_limit),
             escape=build_escape_config(args),
             **extra),
         pulse=pulse,
@@ -332,6 +334,7 @@ def config_record(args, architectures):
             # fingerprint: resuming a capped sweep into an uncapped one would
             # mix incomparable rows.
             'time_cap': args.time_cap, 'stop_on_solve': args.stop_on_solve,
+            'rescue_limit': args.rescue_limit,
         },
         'ga': {
             'mutations': args.mutations, 'immigrants': args.immigrants,
@@ -984,6 +987,11 @@ def build_parser():
     ga.add_argument('--tournament', type=int, default=TOURNAMENT_K,
                     help='Tournament')
     ga.add_argument('--elites', type=int, default=5, help='Elites')
+    ga.add_argument('--rescue-limit', type=int, default=-1, metavar='N',
+                    help='plateau-rescue candidates per stalled generation '
+                         '(0 disables rescue, -1 = the backend default: 8 '
+                         'for FNV from the measured ablation, pop//2 '
+                         'elsewhere)')
     ga.add_argument('--anneal', type=float, default=MUT_DECAY,
                     help='Anneal alpha')
     ga.add_argument('--plateau-beta', type=float, default=1.0,

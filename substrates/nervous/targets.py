@@ -392,7 +392,29 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1,
         target.name, inputs, outputs, T, trials,
         grid_size=grid_size, iters=30, contract=combinational_contract(),
         latency=latency,
-        supported_backends=('nervous', 'lut'),
+        # LUT ONLY, and not because the nervous net is too weak to compute the
+        # table - it is because a HELD LEVEL IS NOT A SIGNAL to that substrate.
+        # The paper's node couples its inputs CAPACITIVELY (substrates/nervous/
+        # analog.py): a series capacitor has no DC path, so holding an input
+        # high delivers exactly one edge and then nothing. Measured: a
+        # hand-built coincidence tile - a perfect AND gate, firing on precisely
+        # the right rows - emits a 0.53-tick spike where this contract demands
+        # the output SIT high for 5 ticks, and scores 0.5000, the silent
+        # baseline. The same tile scores 1.0000 on the edge-timed twin.
+        #
+        # So a nervous run on this target measures the encoding of the stimulus,
+        # not the circuit. Every truth table has a "<name> (temporal)" twin
+        # (coincident_temporal_target) that poses the same function in edges,
+        # which is the form this hardware actually reads; that is what nervous
+        # runs instead.
+        #
+        # This is a STIMULUS-ENCODING restriction, not a claim about capability.
+        # The alternative - delivering the held level as a chopped carrier, the
+        # way real AC-coupled links carry DC - was measured to work at stock
+        # physics (a 1-tick chop holds the output high across the whole 15-tick
+        # window). It needs a per-substrate stimulus builder, so it is not what
+        # this target does today.
+        supported_backends=('lut',),
         category='Combinational logic',
         combinational_cases=[
             (tuple(input_bits), tuple(output_bits))
@@ -1107,6 +1129,12 @@ ORACLE_KEY_TO_SPEC = {
     'A-count multiple-of-3 queried by B': 'A modulo-3 query (oracle)',
     'Odd A batch closed by B': 'A batch parity query (oracle)',
     'SR latch':              'SR latch (oracle)',
+    # One target per substrate, each sited where that substrate's physics is an
+    # advantage rather than an obstacle. See the docstrings in oracle.py for why
+    # each belongs where it does.
+    'Gap band-pass (A->B gap 2-4)': 'Gap band-pass (oracle)',
+    'Resettable divide-by-4': 'Resettable divide-by-4 (oracle)',
+    'Gated D latch': 'Gated D latch (oracle)',
     'C-element (2-in join)': 'C-element (oracle)',
     'Refractory filter (3 seconds)': 'Refractory filter (oracle)',
     'A-first rendezvous':     'A-first rendezvous (oracle)',

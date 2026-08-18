@@ -131,7 +131,7 @@ def _inject_physical_events(sim, in_pos, input_events):
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
                  max_events=None, sample=True, config=None, input_events=None,
                  delays=None, arch='single', terminal_inputs=None,
-                 terminal_outputs=None):
+                 terminal_outputs=None, taus=None):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -152,7 +152,8 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         # Tri sub-node fan-out makes routing/hex_dirs pruning inapplicable and
         # the graph is small anyway, so simulate the whole grown organism.
         sim = TriSim(grid, flat_inputs(in_pos), config=config,
-                     max_events=max_events, outputs=terminal_outputs)
+                     max_events=max_events, outputs=terminal_outputs,
+                     taus=taus)
     else:
         sub = grid
         if prune:
@@ -162,7 +163,7 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         sim    = create_simulator(sub, routing, max_events=max_events,
                                   config=config, delays=delays,
                                   input_nodes=terminal_inputs,
-                                  output_nodes=terminal_outputs)
+                                  output_nodes=terminal_outputs, taus=taus)
     # Queue one physical schedule for both sampled and event scoring. The
     # width-preserving engine transports rising and falling edges causally, so
     # it also agrees with incremental ``step`` input; pre-queuing here simply
@@ -221,7 +222,7 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                        max_events=None, sample=True, config=None,
                        input_events=None, delays=None,
                        arch='single', terminal_inputs=None,
-                       terminal_outputs=None):
+                       terminal_outputs=None, taus=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
     ``rise_times`` maps every simulated cell to its continuous leading-edge
@@ -230,6 +231,7 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
                         config=config, input_events=input_events, delays=delays,
+                        taus=taus,
                         arch=arch, terminal_inputs=terminal_inputs,
                         terminal_outputs=terminal_outputs)
 
@@ -310,7 +312,7 @@ def _local_output_candidates(grid, in_set, term, radius=LEGACY_OUT_RADIUS):
 
 def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
                            arch='single', source_nodes=None,
-                           sink_nodes=None):
+                           sink_nodes=None, taus=None):
     """Assign every role jointly over all mature non-input cells.
 
     Candidate scores use the expected behavior across ALL trials. The global
@@ -353,7 +355,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
             sample=False, config=config,
             input_events=getattr(trial, 'input_events', None), delays=delays,
             arch=arch, terminal_inputs=source_nodes,
-            terminal_outputs=sink_nodes)
+            terminal_outputs=sink_nodes, taus=taus)
         runs.append(run)
         # Overflow invalidates the complete behavioral contract. Continuing
         # the remaining schedules and then fitting every output candidate can
@@ -440,7 +442,8 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
 
 
 def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
-                        delays=None, arch='single', source_nodes=None):
+                        delays=None, arch='single', source_nodes=None,
+                        taus=None):
     """Run target trials at already-selected nervous-net output cells.
 
     Unlike :func:`place_outputs_by_trace`, this function performs no search.
@@ -479,7 +482,7 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
             input_events=getattr(trial, 'input_events', None),
             delays=delays, arch=arch,
             terminal_inputs=terminal_inputs,
-            terminal_outputs=terminal_outputs)
+            terminal_outputs=terminal_outputs, taus=taus)
         if run[3]:
             return TemporalTraces(overflow=True)
         runs.append(run)
@@ -514,6 +517,12 @@ def prepare_net(genome, ttarget):
     Current genomes grow from ``input_layout`` and fit global probes. Legacy
     fixed-input genomes use target pads; direct compatibility strategies may
     instead bind cells through ``substrates.nervous.io_placement``."""
+    from .branched import BranchedHexGenome
+    if isinstance(genome, BranchedHexGenome):
+        # Output-rooted: the role sites come from the genome's own arm roots,
+        # not from probes fitted to the grown body. Same return contract.
+        from .branched_ga import prepare_branched_net
+        return prepare_branched_net(genome, ttarget)
     strategy = io_strategy(ttarget)
     # Native layouts take precedence inside growth_seeds. Without one, fixed
     # binding uses target pads, spatial compatibility uses inherited anchors,
@@ -525,7 +534,7 @@ def prepare_net(genome, ttarget):
 
 
 def prepare_net_grid(genome, ttarget, grid, strategy=None,
-                     record_progress=True):
+                     record_progress=True, taus=None):
     """``prepare_net`` for a body that has ALREADY been grown.
 
     Split out so lifespan scoring (runtime/escape.py) can interpret several
@@ -570,7 +579,7 @@ def prepare_net_grid(genome, ttarget, grid, strategy=None,
         if any(cell not in grid for cell in flat_inputs(in_pos)):
             return None
         traces = trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
-                                     delays=delays, arch=arch)
+                                     delays=delays, arch=arch, taus=taus)
         if traces is None:
             return None
         return grid, routing, in_pos, out_pos, traces
@@ -582,7 +591,8 @@ def prepare_net_grid(genome, ttarget, grid, strategy=None,
     out_pos, traces = place_outputs_by_trace(grid, routing, in_pos, ttarget,
                                              delays=delays,
                                              arch=arch,
-                                             source_nodes=source_nodes)
+                                             source_nodes=source_nodes,
+                                             taus=taus)
     if any(out_pos[t.role] is None for t in ttarget.outputs):
         return None
     return grid, routing, in_pos, out_pos, traces

@@ -64,6 +64,18 @@ from .genome import (MAX_STATE, TRI_STATE_MAX, MAX_GENES, MAX_CHROMS, MAX_TELOME
 from .hexgrid import hex_frontier_cells
 
 
+def is_branched(genome):
+    """True for the branched, output-rooted encoding (substrates/nervous/branched).
+
+    The GA's population machinery - elitism, lexicase, immigrants, the escape
+    mechanisms - is encoding-agnostic; only five primitives are not (copy,
+    signature, mutate, cross, rank). Those five dispatch on this, which is why
+    the branched encoding needed no second copy of next_population.
+    """
+    from .branched import BranchedHexGenome
+    return isinstance(genome, BranchedHexGenome)
+
+
 def clone_genome(genome):
     """Fast structural copy: new Genome/Chromosome objects with fresh gene LISTS
     but SHARED gene objects. Safe because genes are never mutated in place -
@@ -71,6 +83,16 @@ def clone_genome(genome):
     gene objects is equivalent to deep-copying them. copy.deepcopy dominated
     reproduction (~90% of next_population's time); this replaces it on the hot
     path with an identical-behaviour, ~10x cheaper copy."""
+    if is_branched(genome):
+        # Branched genes ARE mutated in place (mutate_branched_hex edits the
+        # fields of a chosen rule), so the shared-gene trick above would corrupt
+        # the parent. This encoding pays for a real copy.
+        from .branched_ga import clone_branched_hex
+        clone = clone_branched_hex(genome)
+        for attribute in ('_io_binding_progress', '_mut_rate'):
+            if hasattr(genome, attribute):
+                setattr(clone, attribute, getattr(genome, attribute))
+        return clone
     sd = getattr(genome, 'state_delays', None)
     clone = Genome(
         chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
@@ -282,7 +304,14 @@ def _evaluate_nv_selection_record(genome, target):
     lifetime_samples = int(
         getattr(target, '_lifetime_samples', 0) or 0)
     developed = None
-    if not lifespan and lifetime_samples <= 0:
+    if is_branched(genome):
+        # Deliberately NOT pre-grown. The grow-once optimisation hands the body
+        # to prepare_net_grid, which fits output probes to the whole organism -
+        # and a branched genome's outputs are its arm ROOTS. Routing it through
+        # the shared path would silently turn an output-rooted encoding into a
+        # branched one with fitted probes, which is a different experiment.
+        pass
+    elif not lifespan and lifetime_samples <= 0:
         # Behavioral evaluation and the final topology tie-break inspect the
         # same mature phenotype. Grow once and pass that body to both.
         from .nervous import grow_nervous
@@ -306,10 +335,38 @@ def _evaluate_nv_selection_record(genome, target):
             topology, topology.score)
 
 
+def branched_signature(genome):
+    """Cache identity of a branched genome.
+
+    Gene IDs are part of it, not incidental bookkeeping: development breaks a
+    contested cell by (distance, arm label, gene id), so two rule sets that
+    differ only in their IDs really can grow different bodies.
+    """
+    chroms = tuple(
+        (tuple((gene.gene_id, gene.ctx_l, gene.ctx_r, gene.ctx_d,
+                gene.self_in, gene.self_out, gene.branch_id, gene.depth,
+                # The tau allele is PHYSICAL identity: two rule sets differing
+                # only here grow the same shape with different timing and score
+                # differently, so omitting it would let one cache entry answer
+                # for both.
+                getattr(gene, 'tau_index', 0))
+               for gene in chromosome.genes),
+         tuple((control.tolerance, control.telomere)
+               for control in chromosome.controls))
+        for chromosome in genome.chromosomes)
+    inputs = tuple((gene.bearing, gene.distance) for gene in genome.inputs)
+    outputs = tuple((gene.role, gene.bearing, gene.distance, gene.branch_id)
+                    for gene in genome.outputs)
+    return ('branched', chroms, inputs, outputs,
+            getattr(genome, 'arch', 'tri3'))
+
+
 def genome_signature(genome):
     """Hashable identity of a genome's evolvable content (for the fitness cache).
     Includes native input geometry, timing, architecture, and routing patches
     so physically different genomes are never cache-aliased."""
+    if is_branched(genome):
+        return branched_signature(genome)
     chroms = tuple(
         (c.tag, c.split, getattr(c, 'telomere', 0), getattr(c, 'wiring', False),
          tuple((g.ctx_l, g.ctx_r, g.ctx_d, g.self_in, g.self_out,
@@ -811,6 +868,19 @@ def mutate_nv(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
                          (chromosome_count, len(genome.chromosomes)))
+    if is_branched(genome):
+        # The branched operator owns its own I/O alleles and arm controls, so
+        # the native layout / delay / patch arguments have nothing to act on
+        # here; they are accepted and ignored rather than raising, because the
+        # breeding loop passes them uniformly for every encoding.
+        from .branched_ga import MAX_TELOMERE as BRANCHED_MAX_TELOMERE
+        from .branched_ga import mutate_branched_hex
+        child = mutate_branched_hex(
+            genome, MEAN_MUTATIONS if mean_mutations is None else mean_mutations,
+            max_telomere=min(int(max_telomere), BRANCHED_MAX_TELOMERE))
+        if hasattr(genome, '_mut_rate'):
+            child._mut_rate = genome._mut_rate
+        return child
     g = clone_genome(genome)
     # Under terminal_nodes binding, states 16/17 are the dedicated input and
     # output NODE TYPES rather than aliases of dead/buffer-D, so canonical
@@ -869,6 +939,13 @@ def crossover_nv(pa, pb, io_placement=None):
     arch_b = getattr(pb, 'arch', 'single')
     if arch_a != arch_b:
         raise ValueError('cannot crossover different tile architectures')
+    if is_branched(pa) or is_branched(pb):
+        # Branched recombination trades whole ARMS, and its operator returns one
+        # child, so the reciprocal cross supplies the second. Tag matching does
+        # not apply: an arm's homolog is the arm at the same chromosome and half.
+        from .branched_ga import crossover_branched_hex
+        return (crossover_branched_hex(pa, pb),
+                crossover_branched_hex(pb, pa))
     ca, cb = clone_genome(pa), clone_genome(pb)
     used_b = set()
     for i, chrom_a in enumerate(ca.chromosomes):
@@ -1531,6 +1608,21 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         'spatial_chromosome')
     n_ports = target.n_inputs + len(target.outputs)
     def make_genome():
+        if strategy == 'fixed':
+            # The live encoding: branched and output-rooted, exactly what the
+            # desktop controller breeds. The two drive paths have drifted apart
+            # before (see the two-GA-drive-paths note); this keeps them on one
+            # encoding. The retired compatibility placements below still build
+            # native genomes because they bind I/O through gene tags, which the
+            # branched genome does not have.
+            from .branched_ga import (random_branched_hex_genome,
+                                       select_developmental_seed)
+            return select_developmental_seed(
+                lambda: random_branched_hex_genome(
+                    n_chroms, max_telomere=ga_config.max_telomere,
+                    n_inputs=target.n_inputs,
+                    output_roles=tuple(terminal.role
+                                       for terminal in target.outputs)))
         genome = random_hex_genome(
             n_chroms, arch=tile_arch,
             wiring_chromosome=(strategy == 'wiring_chromosome'),

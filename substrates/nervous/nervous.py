@@ -248,6 +248,13 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
     """Grow on the unbounded field until the attractor (fixed point or 2-cycle).
     Size and duration are bounded by the genome's telomere ALONE - `grid_size`
     and `iters` are ignored (see note above)."""
+    from .branched import BranchedHexGenome
+    if isinstance(genome, BranchedHexGenome):
+        # Branched development is output-rooted and grows backward from the arm
+        # roots, so it ignores the passed seeds' role as germlines and uses them
+        # only as the read-only input pads.
+        from .branched import grow_branched_hex
+        return grow_branched_hex(genome, seeds)
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
     program = _compile_lookup(genome)
@@ -277,6 +284,16 @@ def grow_nervous(genome, seeds, grid_size=None, iters=None):
 
 
 def grow_nervous_snapshots(genome, seeds, grid_size=None, iters=None):
+    from .branched import BranchedHexGenome
+    if isinstance(genome, BranchedHexGenome):
+        # One frame per synchronous differentiation cohort. Pads are present in
+        # every frame, including the first, because they are the interface the
+        # arms grow back toward rather than something development builds.
+        from .branched import develop_branched_hex, materialise_pads
+        pads = tuple(tuple(seed) for seed in seeds)
+        trace = develop_branched_hex(genome, pads, snapshots=True)
+        frames = trace.snapshots or [trace.grid]
+        return [materialise_pads(frame, pads) for frame in frames]
     L = germline_telomere(genome)
     seed_state = _seed_state(genome)
     program = _compile_lookup(genome)

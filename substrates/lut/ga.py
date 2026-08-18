@@ -37,10 +37,29 @@ from .lut import SEED_LUT, grow_lut, grow_lut_tracked
 from .pulse import AsyncLutSim
 
 
+def is_branched(genome):
+    """True for the branched, output-rooted encoding (substrates/lut/branched).
+
+    The population machinery is encoding-agnostic; only copy, signature,
+    mutate, cross and grow are not. Those dispatch on this.
+    """
+    from .branched import BranchedLutGenome
+    return isinstance(genome, BranchedLutGenome)
+
+
 def clone_genome(genome):
     """Fast structural copy (shared, never-in-place-mutated gene objects; fresh
     structure) - an identical-behaviour, ~10x cheaper replacement for
     copy.deepcopy on the reproduction hot path. See substrates.nervous.ga.clone_genome."""
+    if is_branched(genome):
+        # Branched genes ARE edited in place by mutation, so the shared-gene
+        # trick would corrupt the parent; this encoding pays for a real copy.
+        from .branched_ga import clone_branched_lut
+        clone = clone_branched_lut(genome)
+        for attribute in ('_io_binding_progress', '_mut_rate'):
+            if hasattr(genome, attribute):
+                setattr(clone, attribute, getattr(genome, attribute))
+        return clone
     clone = Genome(
         chromosomes=[Chromosome(genes=c.genes[:], split=c.split, tag=c.tag,
                                 telomere=getattr(c, 'telomere', MAX_TELOMERE),
@@ -322,6 +341,11 @@ def prepare_lut(genome, ttarget):
     heritable input coordinates. Exterior mode and the tag/type compatibility
     strategies use a neutral germline."""
     from substrates.nervous.io_placement import io_strategy, growth_seeds
+    if is_branched(genome):
+        # Output-rooted: the role sites are the genome's own arm roots, not
+        # probes fitted to the grown body. Same return contract.
+        from .branched_ga import prepare_branched_lut_net
+        return prepare_branched_lut_net(genome, ttarget)
     strategy = io_strategy(ttarget)
     mode = lut_io_mode(ttarget)
     if mode == 'exterior_edges':
@@ -1139,7 +1163,31 @@ def _evaluate_lut_selection_record(genome, target):
     return fitness, cases, progress, juvenile, robust
 
 
+def branched_signature(genome):
+    """Cache identity of a branched LUT genome.
+
+    Gene IDs are included because development breaks a contested cell by
+    (distance, arm label, gene id): two rule sets differing only in their IDs
+    really can grow different bodies. The enabled banks are included because
+    they are what the tolerance metric measures against.
+    """
+    chroms = tuple(
+        (tuple((gene.gene_id, gene.ctx_n, gene.ctx_s, gene.ctx_e, gene.ctx_w,
+                gene.self_in, gene.self_out, gene.branch_id, gene.depth)
+               for gene in chromosome.genes),
+         tuple((control.tolerance, control.telomere)
+               for control in chromosome.controls))
+        for chromosome in genome.chromosomes)
+    return ('branched', chroms,
+            tuple((gene.bearing, gene.distance) for gene in genome.inputs),
+            tuple((gene.role, gene.bearing, gene.distance, gene.branch_id)
+                  for gene in genome.outputs),
+            tuple(genome.families or ()))
+
+
 def genome_signature(genome):
+    if is_branched(genome):
+        return branched_signature(genome)
     layout = (
         None if getattr(genome, 'input_layout', None) is None
         else tuple(tuple(cell) for cell in genome.input_layout))
@@ -1469,6 +1517,18 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
             and len(genome.chromosomes) != chromosome_count):
         raise ValueError('expected %d chromosomes, got %d' %
                          (chromosome_count, len(genome.chromosomes)))
+    if is_branched(genome):
+        # The branched operator owns its own I/O alleles and arm controls; the
+        # native layout / tag arguments have nothing to act on and are accepted
+        # and ignored, because the breeding loop passes them for every encoding.
+        from .branched_ga import MAX_TELOMERE as BRANCHED_MAX_TELOMERE
+        from .branched_ga import mutate_branched_lut
+        child = mutate_branched_lut(
+            genome, MEAN_MUTATIONS if mean_mutations is None else mean_mutations,
+            max_telomere=min(int(max_telomere), BRANCHED_MAX_TELOMERE))
+        if hasattr(genome, '_mut_rate'):
+            child._mut_rate = genome._mut_rate
+        return child
     g = clone_genome(genome)
     for chromosome in g.chromosomes:
         _normalize_split(chromosome)
@@ -1511,6 +1571,12 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
 
 def crossover_lut(pa, pb):
     """Tag-matched hierarchical crossover, including one-rule chromosomes."""
+    if is_branched(pa) or is_branched(pb):
+        # Branched recombination trades whole ARMS and returns one child, so the
+        # reciprocal cross supplies the second.
+        from .branched_ga import crossover_branched_lut
+        return (crossover_branched_lut(pa, pb),
+                crossover_branched_lut(pb, pa))
     ca, cb = clone_genome(pa), clone_genome(pb)
     layout_a = getattr(pa, 'input_layout', None)
     layout_b = getattr(pb, 'input_layout', None)
@@ -2188,13 +2254,23 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
             return genome
     else:
         def make_genome():
-            genome = constrain_genome_functions(
-                make_seed_genome(n_chroms), function_families)
             if lut_io_mode(target) != 'exterior_edges':
-                genome.input_layout = random_input_layout(
-                    target.n_inputs,
-                    ga_config.max_telomere)
-            return genome
+                # The live encoding: branched and output-rooted, exactly what
+                # the desktop controller breeds. Keeping both drive paths on one
+                # encoding is the point (see the two-GA-drive-paths note);
+                # exterior-edge I/O still seeds natively because its inputs are
+                # drivers outside the body, not pads the arms grow toward.
+                from .branched_ga import (random_branched_lut_genome,
+                                           select_developmental_seed)
+                return select_developmental_seed(
+                    lambda: random_branched_lut_genome(
+                        n_chroms, max_telomere=ga_config.max_telomere,
+                        n_inputs=target.n_inputs,
+                        output_roles=tuple(terminal.role
+                                           for terminal in target.outputs),
+                        families=function_families))
+            return constrain_genome_functions(
+                make_seed_genome(n_chroms), function_families)
     # Escape mechanisms, resolved and attached exactly as the desktop
     # controller does it, so this headless driver and the app agree.
     escape_cfg = ga_config.escape or OFF

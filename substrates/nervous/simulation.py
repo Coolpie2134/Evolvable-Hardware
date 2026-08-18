@@ -24,7 +24,8 @@ from .pulse import PulseSim
 
 
 def create_simulator(grid, routing, max_events=None, config=None, delays=None,
-                     sources=None, input_nodes=None, output_nodes=None):
+                     sources=None, input_nodes=None, output_nodes=None,
+                     taus=None):
     """Construct the configured simulator used by every Nervous consumer.
 
     ``delays`` ({cell: delay}) is consumed only by width-preserving transport;
@@ -49,7 +50,8 @@ def create_simulator(grid, routing, max_events=None, config=None, delays=None,
         return AnalogPulseSim(grid, routing, max_events=max_events,
                               config=acfg, sources=sources,
                               input_nodes=input_nodes,
-                              output_nodes=output_nodes)
+                              output_nodes=output_nodes,
+                              taus=taus)
     return PulseSim(grid, routing, max_events=max_events, config=config,
                     delays=delays, sources=sources,
                     input_nodes=input_nodes, output_nodes=output_nodes)

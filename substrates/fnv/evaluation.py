@@ -475,30 +475,56 @@ def native_component_baseline(target, families=None):
                         if (bit,) in table)):
             return "DELAY"
 
+    # Name matching below was EXACT equality against strings that several
+    # targets do not actually have, so most of this function was dead code and
+    # the app printed "no enabled single FNV component is a full solution" for
+    # targets it had simply failed to check. Measured before this fix: 2 of 46
+    # targets got a baseline. Specifically
+    #   "Veto gate"    != target.name "Veto gate (B blocks A)"   -> never fired
+    #   "Temporal XOR" != target.name "Temporal XOR (2-in)"      -> never fired
+    # and HOLD / C_ELEMENT / GATED_OSCILLATOR had no branch at all despite
+    # shipping 18 / 3 / 36 catalogue entries against targets named after them.
+    # Prefix matching plus an explicit family table fixes both classes.
     name = str(getattr(target, "name", ""))
-    if name == "Toggle flip-flop" and "TOGGLE" in enabled:
-        return "TOGGLE"
-    if name.startswith("Echo (delay ") and "DELAY" in enabled:
-        try:
-            duration = int(name.removeprefix("Echo (delay ").split(")")[0])
-        except ValueError:
-            duration = 0
-        if duration in (1, 2):
-            return f"DELAY{duration}"
-    if name.startswith("One-shot (") and "NORMALIZER" in enabled:
-        try:
-            duration = int(name.removeprefix("One-shot (").split()[0])
-        except ValueError:
-            duration = 0
-        if duration in (1, 2):
-            return f"NORMALIZER{duration}"
-    if name in ("Coincidence (2-in)", "Temporal XOR", "Veto gate"):
-        if "LOGIC" in enabled:
-            return {
-                "Coincidence (2-in)": "AND",
-                "Temporal XOR": "XOR",
-                "Veto gate": "VETO",
-            }[name]
+
+    def _named(prefix):
+        return name == prefix or name.startswith(prefix + " (")
+
+    #: target-name prefix -> (required family, reported part)
+    STATEFUL_BASELINES = (
+        ("Toggle flip-flop", "TOGGLE", "TOGGLE"),
+        ("Resettable toggle", "TOGGLE", "TOGGLE (reset unmodelled)"),
+        ("SR latch", "HOLD", "HOLD"),
+        ("C-element", "C_ELEMENT", "C_ELEMENT"),
+        ("Gated oscillator", "GATED_OSCILLATOR", "GATED_OSCILLATOR"),
+        ("Oscillator", "GATED_OSCILLATOR", "GATED_OSCILLATOR (free-run)"),
+        ("Coincidence", "LOGIC", "AND"),
+        ("Temporal XOR", "LOGIC", "XOR"),
+        ("Veto gate", "LOGIC", "VETO"),
+    )
+    for prefix, family, reported in STATEFUL_BASELINES:
+        if _named(prefix) and family in enabled:
+            return reported
+
+    # Duration-parameterised families. The catalogue ships durations 1 and 2;
+    # anything longer needs a chain and is genuinely not a one-component match,
+    # but say so by MEASURING the catalogue rather than hard-coding (1, 2).
+    from .catalogue import COMPONENTS
+
+    def _durations(family):
+        return {int(entry.duration) for entry in COMPONENTS
+                if entry.family == family and entry.duration}
+
+    for prefix, family, label in (("Echo (delay ", "DELAY", "DELAY"),
+                                  ("One-shot (", "NORMALIZER", "NORMALIZER")):
+        if name.startswith(prefix) and family in enabled:
+            tail = name[len(prefix):].replace(")", " ").split()
+            try:
+                duration = int(tail[0])
+            except (IndexError, ValueError):
+                continue
+            if duration in _durations(family):
+                return f"{label}{duration}"
     return None
 
 

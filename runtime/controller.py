@@ -19,6 +19,26 @@ from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
 SOLVER_VALID = 0.999
+#: Rescue candidates per stalled generation. Deliberately still pop//2.
+#:
+#: A 90-second-budget ablation said 8 was better: over 24 paired runs across 8
+#: targets it beat pop//2 (12-3, sign p=0.035) and beat no rescue (13-3,
+#: p=0.021), while pop//2 looked indistinguishable from no rescue at all
+#: (7-4-13, p=0.55) despite building 125,970 genomes. Solve counts were equal
+#: at 6/24 under every setting, so 8 looked like a free ~80% saving.
+#:
+#: IT DID NOT REPLICATE AT FULL BUDGET. Full adder needs 561-869s to solve and
+#: never solved inside the 90s ablation under ANY variant, so that experiment
+#: could not see solve behaviour on the expensive targets at all. Re-tested on
+#: one seed at the real 200-generation budget: pop//2 certified 2/4, limit 8
+#: certified 0/4 - all four parked on the 0.9062 best-wrong ceiling - for a
+#: ~26% wall saving. Trading solves for speed is the wrong trade here.
+#:
+#: The knob (GAConfig.plateau_rescue_limit) stays so the experiment can be
+#: finished properly at full budget across the stall-prone targets. Until then
+#: the measured-at-90s value is NOT the default.
+#: See results/fnv_rescue_ablation.md.
+FNV_PLATEAU_RESCUE_LIMIT = None
 LATEST_POPULATION_NAME = 'latest_population.json'
 SOLVER_POPULATION_NAME = 'solver_generation.json'
 
@@ -222,7 +242,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     workers = max(1, min(config.ga.evaluation_workers, pop))
 
     if backend == 'nervous':
-        from substrates.nervous import random_hex_genome
+        from substrates.nervous.branched_ga import (
+            random_branched_hex_genome, select_developmental_seed)
         from substrates.nervous.ga import (eval_batch_cases, next_population, diversify,
                                consolidate_population,
                                adaptive_mutation_rate, rank_key)
@@ -236,11 +257,20 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         cache = LRUCache(config.ga.cache_size)
         pool = ProcessPoolExecutor(max_workers=workers)
         def make_genome():
-            return random_hex_genome(
-                chromosome_count, max_telomere=config.ga.max_telomere,
-                arch=getattr(config.ga, 'tile_arch', 'single'),
-                n_inputs=target.n_inputs, n_outputs=len(target.outputs),
-                input_layout=True)
+            # Branched, output-rooted development is the nervous encoding now
+            # (substrates/nervous/branched.py). Arms start at genetic output
+            # roots and grow backward to the evolved input pads, so the genome
+            # names parts rather than describing neighbourhoods - the ceiling
+            # the min-Hamming lookup could not get past.
+            # Richest of a few random starts, judged only on whether the
+            # inputs can reach the outputs - most random starts have an output
+            # nothing can drive, and those are all the same score to selection.
+            return select_developmental_seed(
+                lambda: random_branched_hex_genome(
+                    chromosome_count, max_telomere=config.ga.max_telomere,
+                    n_inputs=target.n_inputs,
+                    output_roles=tuple(terminal.role
+                                       for terminal in target.outputs)))
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         selection_mode = (
@@ -348,6 +378,9 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             make_seed_genome,
             adaptive_mutation_rate, rank_key,
             plateau_rescue_candidates)
+        from substrates.lut.branched_ga import (
+            random_branched_lut_genome,
+            select_developmental_seed as select_lut_seed)
         from substrates.lut.genome import random_input_layout
         from substrates.nervous.io_placement import seed_io_metadata
         # Evolvable I/O binding (see the nervous branch): body priorities or a
@@ -368,16 +401,25 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             else config.ga)
         pool = ProcessPoolExecutor(max_workers=workers)
         def make_genome():
+            # Branched, output-rooted development is the LUT encoding now
+            # (substrates/lut/branched.py): arms start at genetic output roots
+            # and grow backward to the evolved input pads, installing named
+            # gates from the enabled banks rather than nearest-match tables.
+            if io_strategy == 'fixed' and getattr(
+                    config.ga, 'lut_io_mode',
+                    'source_pads') != 'exterior_edges':
+                return select_lut_seed(
+                    lambda: random_branched_lut_genome(
+                        chromosome_count, max_telomere=config.ga.max_telomere,
+                        n_inputs=target.n_inputs,
+                        output_roles=tuple(terminal.role
+                                           for terminal in target.outputs),
+                        families=function_families))
             genome = constrain_genome_functions(
                 make_seed_genome(chromosome_count), function_families)
             for chromosome in genome.chromosomes:
                 chromosome.telomere = min(
                     chromosome.telomere, config.ga.max_telomere)
-            if io_strategy == 'fixed':
-                if getattr(config.ga, 'lut_io_mode',
-                           'source_pads') != 'exterior_edges':
-                    genome.input_layout = random_input_layout(
-                        target.n_inputs, config.ga.max_telomere)
             if evolve_io:
                 seed_io_metadata(
                     genome,
@@ -540,6 +582,17 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
 
     best_fit, best_genome, best_rank = 0.0, None, None
     budget_reason = None
+    # How many candidates a stalled generation may build. FNV's default comes
+    # from a measured ablation (see GAConfig.plateau_rescue_limit): 8 beats the
+    # historical pop//2 on a fifth of the work. Nervous and LUT were NOT part
+    # of that experiment, so they keep pop//2 until it is repeated for them -
+    # cheaper is not automatically better, and their recorded results have to
+    # stay comparable.
+    configured_rescue = config.ga.plateau_rescue_limit
+    if configured_rescue is None and backend == 'fnv':
+        configured_rescue = FNV_PLATEAU_RESCUE_LIMIT
+    rescue_limit = (int(configured_rescue) if configured_rescue is not None
+                    else min(48, max(1, pop // 2)))
     population, fitnesses = [], []
     latest_population, latest_fitnesses = [], []
     latest_try, latest_generation = None, None
@@ -620,9 +673,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 parents, parent_fitnesses, parent_cases = population, fitnesses, cases
                 rescue = ()
                 if (plateau_rescue_fn is not None and run_fit < 1.0
-                        and stagnation >= STRESS_PATIENCE):
-                    rescue = plateau_rescue_fn(
-                        champion, min(48, max(1, pop // 2)))
+                        and stagnation >= STRESS_PATIENCE and rescue_limit):
+                    rescue = plateau_rescue_fn(champion, rescue_limit)
                 elif run_fit >= 1.0 and consolidate_fn is not None:
                     # Terminal consolidation exists so perfect circuits can
                     # ACCUMULATE and the mean can converge to 1. It could not:

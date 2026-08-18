@@ -1469,7 +1469,335 @@ def watchdog_oracle(seed=20260702, timeout=5):
             'multiple timeout/re-arm rounds, and never-armed silence.'))
 
 
+# -- substrate-characteristic targets -------------------------------------------
+# One target per substrate, each chosen to sit where that substrate's physics is
+# a genuine advantage rather than an obstacle, and each harder than the existing
+# members of its family.
+
+def make_gap_bandpass(low=2, high=4):
+    """Fire only when B follows A after a gap INSIDE a band. NERVOUS.
+
+    Why this substrate: the answer is a function of nothing but elapsed time
+    between two edges, and the circuit is judged on a band with BOTH a floor and
+    a ceiling. A too-early B must be rejected as firmly as a too-late one, so a
+    solver cannot be a plain coincidence detector (that gets the ceiling for
+    free and fails the floor) nor a plain delay line (the reverse). It needs an
+    internal delay of its own, opened by A, plus something that closes the
+    window again - which on this hardware is exactly what the inhibitory input
+    is for. No clock is involved anywhere; this is the asynchronous timing
+    discrimination the substrate exists to do.
+
+    Harder than 'Pair detector (gap 2)': that accepts one exact spacing on one
+    input, where this spans a band across two inputs and must reject on both
+    sides of it.
+    """
+    low, high = int(low), int(high)
+
+    def f(inb, st):
+        since = st
+        # AGE FIRST, then judge. Ageing after the check made ``since`` report
+        # one tick less than the elapsed time, so this device silently
+        # implemented the band [low+1, high+1] while claiming [low, high] - and
+        # the mis-specification was invisible until a hand-written "gap in band"
+        # reference disagreed with the oracle on every single trial.
+        if since is not None:
+            since = since + 1 if since < high + 3 else None
+        fire = 0
+        # B is judged against the window opened by the LAST A. A simultaneous
+        # A+B is judged against the PREVIOUS A, then opens a fresh window, so it
+        # is never a gap of zero.
+        if inb[1] and since is not None and low <= since <= high:
+            fire = 1
+        if inb[0]:
+            since = 0
+        return (fire,), since
+    return f
+
+
+def make_resettable_divider(divisor=4):
+    """Emit one event per N input events; a second input clears the count. FNV.
+
+    Why this substrate: N=4 needs TWO bits of state plus a decode plus a reset
+    path, and FNV is the encoding that can NAME parts individually - a genome
+    here places a toggle, another toggle, a join and a reset route as distinct
+    components, which is precisely what a context-addressed genome cannot do
+    (identical neighbourhoods are forced to become identical cells). It is the
+    compositional case the FNV catalogue was assembled for: TOGGLE for the
+    counter bits, LOGIC for the decode, DELAY to line them up.
+
+    Harder than 'Resettable toggle' (one bit) and than 'Divide-by-3' (no reset):
+    this needs modular counting AND asynchronous clearing in the same circuit,
+    and a reset arriving mid-count must not emit.
+    """
+    divisor = int(divisor)
+    if divisor < 2:
+        raise ValueError('divisor must be at least 2')
+
+    def f(inb, st):
+        count = int(st or 0)
+        if inb[1]:                       # reset clears, and never emits
+            return (0,), 0
+        if inb[0]:
+            count += 1
+            if count >= divisor:
+                return (1,), 0
+        return (0,), count
+    return f
+
+
+def orc_d_latch(inb, st):
+    """Transparent D latch: Q follows D while Enable is high, holds when low. LUT.
+
+    Why this substrate: this is a LEVEL device, not an edge device. While Enable
+    is high the output must track D continuously - not respond to its edges -
+    and when Enable falls the output must sit at whatever D last was. The LUT
+    array is level logic that holds natively, so this is its home ground; the
+    nervous net cannot express it at all, because a capacitively-coupled node
+    has no stable high (see nv-held-level-not-a-signal) and 'follow this level'
+    is not a signal it can read.
+
+    Harder than 'SR latch': set/reset are two edge commands, where this has to
+    distinguish a data line from a control line and be transparent to one of
+    them only while the other permits it.
+    """
+    q = int(st or 0)
+    if inb[1]:
+        q = 1 if inb[0] else 0
+    return (q,), q
+
+
+def _bandpass_streams(rng, T, low, high, n_trials):
+    """Schedules with a BALANCED spread of A->B gaps.
+
+    The first version drew random pulse trains, which produced gaps 2 and 3
+    thirty-odd times each but the two gaps that DEFINE the band - the accept
+    edge at ``high`` and the reject edge at ``high + 1`` - only eight or nine
+    times between them. A circuit could then score well by handling the common
+    gaps and ignoring the edges, and that is exactly what evolution did: 1800
+    generations reached 0.95 on training and 0.03 to 0.57 held out, memorising
+    timings rather than learning the band.
+
+    So every gap from 1 to ``high + 3`` gets equal billing, at varied phases and
+    in varied order, with several pairs per trial.
+    """
+    span = list(range(1, high + 4))
+    streams = []
+    for index in range(n_trials):
+        rows = [(0, 0)] * T
+        order = list(span)
+        rng.shuffle(order)
+        tick = 2 + (index % 3)
+        for gap in order:
+            if tick + gap >= T - 1:
+                break
+            rows[tick] = (1, rows[tick][1])
+            rows[tick + gap] = (rows[tick + gap][0], 1)
+            # Clear of the next pair so one pair's B cannot be read against the
+            # next pair's A.
+            tick += gap + rng.randint(high + 2, high + 5)
+        streams.append(rows)
+    return streams
+
+
+def gap_bandpass_oracle(seed=20260817, low=2, high=4):
+    oracle = make_gap_bandpass(low, high)
+    rng = random.Random(seed)
+    T = 64
+    trials = []
+    for stream in _bandpass_streams(rng, T, low, high, 18):
+        expected = label_trace(oracle, stream, T, 2)
+        trials.append(Trial(
+            stream, {'Q': expected},
+            {'Q': [float(t) for t, v in enumerate(expected) if v == 1]}))
+    # Degenerate inputs, which no balanced schedule guarantees.
+    for name in ('lone_a', 'lone_b', 'together'):
+        stream = [(0, 0)] * T
+        for tick in (6, 20, 34, 48):
+            if name == 'lone_a':
+                stream[tick] = (1, 0)
+            elif name == 'lone_b':
+                stream[tick] = (0, 1)
+            else:
+                stream[tick] = (1, 1)
+        expected = label_trace(oracle, stream, T, 2)
+        trials.append(Trial(
+            stream, {'Q': expected},
+            {'Q': [float(t) for t, v in enumerate(expected) if v == 1]}))
+    target = TemporalTarget(
+        'Gap band-pass (oracle)', [(0, 1), (0, 3)],
+        [OutputTerminal('Q', (2, 2))], T, trials, grid_size=5, iters=30,
+        contract=event_contract(fit_latency=False), latency=2,
+        category='Pulse width & duration',
+        description=describe_target(
+            'Emit one event when input B arrives %d to %d seconds after input '
+            'A, and stay silent when it arrives sooner, later, or alone.'
+            % (low, high),
+            'Eighteen schedules give every gap from 1 to %d equal billing at '
+            'varied phases and orders, so the accept edge at %d and the reject '
+            'edge at %d are as well represented as the easy middle of the '
+            'band. Lone-A, lone-B and simultaneous arrivals are tested '
+            'explicitly.' % (high + 3, high, high + 1)))
+    return target
+
+
+def _divider_streams(rng, T, n_trials, divisor):
+    """Dense count events with OCCASIONAL resets.
+
+    ``sample_streams`` gives every input the same pulse rate, which is fatal
+    here: with A and B equally likely, a run of ``divisor`` counts survives to
+    completion about (1/2)**divisor of the time, so the schedule emits almost
+    nothing. Measured on the first version - 2 expected events across 17 trials,
+    15 of them completely silent - a target with no positive evidence in it.
+
+    So the count input runs densely and the reset arrives every few counts,
+    which is the duty cycle the device is actually for.
+    """
+    streams = []
+    for index in range(n_trials):
+        rows = [(0, 0)] * T
+        spacing = 3 + (index % 3)
+        tick = rng.randint(2, 4)
+        counts = []
+        while tick < T - 1:
+            counts.append(tick)
+            tick += spacing + rng.randint(0, 1)
+        for tick in counts:
+            rows[tick] = (1, 0)
+        if index % 3 != 2 and len(counts) > divisor:
+            pos = rng.randrange(divisor // 2, len(counts) - 1)
+            reset_tick = counts[pos] + 1
+            if 0 <= reset_tick < T and rows[reset_tick] == (0, 0):
+                rows[reset_tick] = (0, 1)
+        streams.append(rows)
+    return streams
+
+
+def resettable_divider_oracle(seed=20260817, divisor=4):
+    oracle = make_resettable_divider(divisor)
+    rng = random.Random(seed)
+    T = 64
+    trials = [
+        Trial(stream, {'Q': label_trace(oracle, stream, T, 2)},
+              {'Q': [float(t) for t, v in enumerate(
+                  label_trace(oracle, stream, T, 2)) if v == 1]})
+        for stream in _divider_streams(rng, T, 14, divisor)]
+    target = TemporalTarget(
+        'Resettable divide-by-%d (oracle)' % divisor, [(0, 1), (0, 3)],
+        [OutputTerminal('Q', (2, 2))], T, trials, grid_size=5, iters=30,
+        contract=event_contract(fit_latency=False), latency=2,
+        category='Memory & state',
+        description=describe_target(
+            'Emit one event for every %d events on input A; an event on input '
+            'B clears the running count without emitting.' % divisor,
+            'Fourteen seeded schedules with dense counts and occasional '
+            'resets, plus explicit runs of exactly %d, one short of %d, a '
+            'reset landing mid-count, back-to-back full cycles, and '
+            'reset-only silence.' % (divisor, divisor)))
+    extra = []
+    # Exactly one full cycle, then one short of a second: emits once only.
+    run = [(0, 0)] * target.T
+    for index, tick in enumerate(range(4, 4 + 3 * (2 * divisor - 1), 3)):
+        if tick < target.T:
+            run[tick] = (1, 0)
+    extra.append(run)
+    # A reset arriving mid-count must discard the partial count entirely.
+    mid = [(0, 0)] * target.T
+    for tick in (4, 7, 10):
+        mid[tick] = (1, 0)
+    mid[13] = (0, 1)
+    for tick in range(16, 16 + 3 * divisor, 3):
+        if tick < target.T:
+            mid[tick] = (1, 0)
+    extra.append(mid)
+    # Resets alone: never emit.
+    resets = [(0, 0)] * target.T
+    for tick in (5, 15, 25, 35):
+        resets[tick] = (0, 1)
+    extra.append(resets)
+    for stream in extra:
+        expected = label_trace(oracle, stream, target.T, 2)
+        target.trials.append(Trial(
+            stream, {'Q': expected},
+            {'Q': [float(t) for t, v in enumerate(expected) if v == 1]}))
+    return target
+
+
+def _d_latch_streams(rng, T, n_trials):
+    """Held D levels with Enable windows - a level stimulus, not a pulse train.
+
+    ``sample_streams`` emits single-tick pulses, which is the wrong stimulus for
+    a level device: a transparent latch has to see D SUSTAINED across an enable
+    window, and be tested on whether it keeps that value after the window
+    closes. So this builds its own schedule.
+    """
+    streams = []
+    for _ in range(n_trials):
+        rows = [(0, 0)] * T
+        data, tick = rng.randint(0, 1), 0
+        segments = []
+        while tick < T:
+            span = rng.randint(4, 9)
+            segments.append((tick, min(T, tick + span), data))
+            data ^= 1 if rng.random() < 0.65 else 0
+            tick += span
+        enables = []
+        tick = rng.randint(2, 5)
+        while tick < T - 3:
+            width = rng.randint(2, 4)
+            enables.append((tick, min(T - 1, tick + width)))
+            tick += width + rng.randint(3, 8)
+        for start, end, value in segments:
+            for t in range(start, end):
+                rows[t] = (value, 0)
+        for start, end in enables:
+            for t in range(start, end):
+                rows[t] = (rows[t][0], 1)
+        streams.append(rows)
+    return streams
+
+
+def d_latch_oracle(seed=20260817):
+    rng = random.Random(seed)
+    T = 56
+    inputs = [(0, 1), (0, 3)]
+    out = OutputTerminal('Q', (2, 2))
+    trials = []
+    for stream in _d_latch_streams(rng, T, 12):
+        trials.append(Trial(
+            stream, {'Q': label_trace(orc_d_latch, stream, T, 2)}))
+    # Retention is the whole point: D changes AFTER the window closes and Q must
+    # ignore it. A latch that is permanently transparent passes everything else
+    # and fails exactly here.
+    hold = [(0, 0)] * T
+    for t in range(4, 9):
+        hold[t] = (1, 1 if t < 7 else 0)      # load 1, then enable drops
+    for t in range(9, 30):
+        hold[t] = (0, 0)                       # D goes low; Q must stay high
+    for t in range(30, 34):
+        hold[t] = (0, 1)                       # re-enable: now Q follows to 0
+    trials.append(Trial(hold, {'Q': label_trace(orc_d_latch, hold, T, 2)}))
+    never = [(1, 0)] * T                       # D high, never enabled: stay low
+    trials.append(Trial(never, {'Q': label_trace(orc_d_latch, never, T, 2)}))
+    return TemporalTarget(
+        'Gated D latch (oracle)', inputs, [out], T, trials,
+        grid_size=5, iters=30, contract=state_contract(), latency=2,
+        # LEVEL device: the nervous net's capacitively-coupled node cannot read
+        # a held input at all (see nv-held-level-not-a-signal), so this is a LUT
+        # target by construction rather than by preference.
+        supported_backends=('lut',),
+        category='Memory & state',
+        description=describe_target(
+            'Output Q follows input D while input E is high, and holds its last '
+            'value when E is low.',
+            'Twelve seeded schedules of held D levels and enable windows, plus '
+            'an explicit retention test where D changes after the window closes '
+            'and Q must ignore it, and a never-enabled trial that must stay low.'))
+
+
 ORACLE_SPECS = {
+    'Gap band-pass (oracle)':     gap_bandpass_oracle,
+    'Resettable divide-by-4 (oracle)': resettable_divider_oracle,
+    'Gated D latch (oracle)':     d_latch_oracle,
     'Pulse width sum (oracle)':    pulse_width_sum_oracle,
     'Odd pulse selector (oracle)': odd_pulse_selector_oracle,
     'A parity query (oracle)':     a_parity_query_oracle,
