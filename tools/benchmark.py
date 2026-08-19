@@ -282,6 +282,7 @@ def build_run_config(args, backend, chromosome_count):
             chromosome_count=chromosome_count,
             evaluation_workers=args.workers,
             diversify_solvers=args.diversify_solvers,
+            pure_evolution=args.pure_evolution,
             plateau_rescue_limit=(None if args.rescue_limit < 0
                                   else args.rescue_limit),
             escape=build_escape_config(args),
@@ -978,6 +979,9 @@ def build_parser():
     run.add_argument('--max-telomere', type=int, default=None,
                      help='Genome: Max telomere (default: per-backend, '
                      'nervous 24, snn 20, fnv 32, lut 18)')
+    run.add_argument('--pure-evolution', action='store_true',
+                     help='Disable target-specific developmental seeds and '
+                          'witness rescue for an unbiased evolution run')
     run.add_argument('--graded', action='store_true',
                      help='Graded logic fitness (SNN combinational only)')
     run.add_argument('--input-high', type=float, default=None,

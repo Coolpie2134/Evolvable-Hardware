@@ -13,7 +13,6 @@ from .checkpoint import save_population
 from .config import (RunConfig, MAX_CHROMOSOME_COUNT, nv_run_config,
                      validate_new_nv_profile)
 from .escape import build_escape_state, population_mutation_rate
-from .mutation import STRESS_PATIENCE
 from .mutation import adaptive_mutation_rate as snn_adaptive_mutation_rate
 from .parallel import EvolutionCancelled   # re-exported for back-compat
 
@@ -257,7 +256,15 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         setattr(target, 'io_placement', io_strategy)
         evolve_io = False
         cache = LRUCache(config.ga.cache_size)
-        pool = ProcessPoolExecutor(max_workers=workers)
+        from substrates.nervous.ga import init_eval_worker
+        setattr(target, '_worker_target_installed', True)
+        pool = ProcessPoolExecutor(max_workers=workers,
+                                   initializer=init_eval_worker,
+                                   initargs=(target,))
+        # Target-specific developmental selection is an injection mechanism,
+        # not part of an unbiased evolutionary run. Keep initialization purely
+        # random; reusable generic mutation operators remain available.
+        pure_evolution = True
         def make_genome(input_genes=None):
             # Branched, output-rooted development is the nervous encoding now
             # (substrates/nervous/branched.py). Arms start at genetic output
@@ -267,14 +274,14 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             # Richest of a few random starts, judged only on whether the
             # inputs can reach the outputs - most random starts have an output
             # nothing can drive, and those are all the same score to selection.
-            return select_developmental_seed(
-                lambda: random_branched_hex_genome(
-                    chromosome_count, max_telomere=config.ga.max_telomere,
-                    n_inputs=target.n_inputs,
-                    output_roles=tuple(terminal.role
-                                       for terminal in target.outputs),
-                    input_genes=input_genes),
-                attempts=make_genome.developmental_seed_candidates)
+            factory = lambda: random_branched_hex_genome(
+                chromosome_count, max_telomere=config.ga.max_telomere,
+                n_inputs=target.n_inputs,
+                output_roles=tuple(terminal.role
+                                   for terminal in target.outputs),
+                input_genes=input_genes)
+            return factory() if pure_evolution else select_developmental_seed(
+                factory, attempts=make_genome.developmental_seed_candidates)
         make_genome.developmental_seed_candidates = 6
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
@@ -547,6 +554,10 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     # One construction point for the escape machinery, shared with the headless
     # driver (substrates.nervous.ga.evolve_nervous) so the two drive paths
     # cannot breed, crowd or rebirth under different rules.
+    # Target-specific witness/rescue candidates are diagnostic tools only and
+    # must never enter production evolution or benchmark populations.
+    plateau_rescue_fn = None
+
     def new_escape_state():
         # Restarts are independent searches. Reusing this mutable object leaked
         # rebirth archives, cooldowns, pending island migrations, and now walker
@@ -597,17 +608,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
 
     best_fit, best_genome, best_rank = 0.0, None, None
     budget_reason = None
-    # How many candidates a stalled generation may build. FNV's default comes
-    # from a measured ablation (see GAConfig.plateau_rescue_limit): 8 beats the
-    # historical pop//2 on a fifth of the work. Nervous and LUT were NOT part
-    # of that experiment, so they keep pop//2 until it is repeated for them -
-    # cheaper is not automatically better, and their recorded results have to
-    # stay comparable.
-    configured_rescue = config.ga.plateau_rescue_limit
-    if configured_rescue is None and backend == 'fnv':
-        configured_rescue = FNV_PLATEAU_RESCUE_LIMIT
-    rescue_limit = (int(configured_rescue) if configured_rescue is not None
-                    else min(48, max(1, pop // 2)))
     population, fitnesses = [], []
     latest_population, latest_fitnesses = [], []
     latest_try, latest_generation = None, None
@@ -673,17 +673,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     genome = make_genome(
                         cohort_inputs[(index - cohort_count) % cohort_count])
                 population.append(genome)
-            # Deterministic physical witnesses belong in the initial genetic
-            # repertoire, not behind a long stagnation timer.  The backend
-            # compiler returns only ordinary genomes that it has already grown
-            # and scored at exactly 1.0; unsupported targets return nothing.
-            # Seeding one slot makes short runs reproducible and avoids paying
-            # dozens of generations before admitting a known reachable motif.
-            if (backend in ('nervous', 'lut')
-                    and plateau_rescue_fn is not None and population):
-                witnesses = plateau_rescue_fn(population[0], 1)
-                if witnesses:
-                    population[-1] = witnesses[0]
             # Initial cohorts pay for the strongest target-blind connectivity
             # filter. Immigrants exist to inject diversity every generation;
             # rebuilding up to six complete organisms for each one dominated
@@ -725,10 +714,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     config.ga.stagnation_beta, config.ga.mutation_limit)
                 parents, parent_fitnesses, parent_cases = population, fitnesses, cases
                 rescue = ()
-                if (plateau_rescue_fn is not None and run_fit < 1.0
-                        and stagnation >= STRESS_PATIENCE and rescue_limit):
-                    rescue = plateau_rescue_fn(champion, rescue_limit)
-                elif run_fit >= 1.0 and consolidate_fn is not None:
+                if run_fit >= 1.0 and consolidate_fn is not None:
                     # Terminal consolidation exists so perfect circuits can
                     # ACCUMULATE and the mean can converge to 1. It could not:
                     # every offspring is mutated, mutation almost always breaks

@@ -62,6 +62,20 @@ from .genome import (MAX_STATE, TRI_STATE_MAX, MAX_GENES, MAX_CHROMS, MAX_TELOME
                      random_input_layout)
 from .hexgrid import hex_frontier_cells
 
+# Process workers keep the current target in their process.  Passing a wide
+# target (decoder/multiplier/comparator) through a ProcessPool partial for every
+# genome repeatedly pickles all trials and expected traces.
+_WORKER_TARGET = None
+
+
+def init_eval_worker(target):
+    global _WORKER_TARGET
+    _WORKER_TARGET = target
+
+
+def _evaluate_worker(genome):
+    return _evaluate_nv_selection_record(genome, _WORKER_TARGET)
+
 
 def is_branched(genome):
     """True for the branched, output-rooted encoding (substrates/nervous/branched).
@@ -407,7 +421,12 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
             if sigs[i] in cache:
                 out[i] = cache[sigs[i]]
     if todo:
-        fn = partial(_evaluate_nv_selection_record, target=target)
+        # The controller-installed worker target avoids serializing the same
+        # wide target once per genome.  Keep the explicit-target fallback for
+        # direct API callers and tests that supply an uninitialised executor.
+        fn = (_evaluate_worker if getattr(target, '_worker_target_installed', False)
+              else
+              partial(_evaluate_nv_selection_record, target=target))
         # A generation can contain the same genome more than once (especially
         # around a strong parent).  The old code submitted every occurrence
         # before any result reached the cache, wasting whole worker slots on

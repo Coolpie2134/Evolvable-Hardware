@@ -66,7 +66,10 @@ MAX_TOLERANCE = 3
 # steps made the exact Full Adder's Cin pad (10) and Sum root (11) genetically
 # unreachable even though MAX_PLACEMENTS and arm lifespans could hold the body.
 # Random starts remain compact; this is the mutation/compiled-placement ceiling.
-MAX_IO_DISTANCE = 16
+# Keep I/O distance evolvable beyond the old compact layout.  Mutation still
+# changes distance by only one ring at a time, so this is capacity, not a
+# pressure to make every network large.
+MAX_IO_DISTANCE = 32
 INITIAL_OUTPUT_DISTANCE = 6
 #: Chance a growth rule erases instead of building. Pruning has to be reachable
 #: or a body can only ever accrete.

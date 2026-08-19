@@ -208,6 +208,9 @@ class GAConfig:
     # Useful for an interactive solver bank, but not part of measuring whether
     # a target was solved. Benchmarks disable this extra post-solve search.
     diversify_solvers: bool = True
+    # Unbiased benchmark mode: random/generic initialization only, with no
+    # target-specific developmental selection or witness rescue.
+    pure_evolution: bool = False
     # Reserved / no-op: evaluation now runs one saturated, cancellation-aware
     # pool pass per generation (runtime.parallel.map_ordered) instead of
     # chunked barriers, so this multiplier is no longer consumed. Kept as a

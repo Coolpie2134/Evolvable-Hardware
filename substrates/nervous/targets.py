@@ -291,29 +291,22 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1,
     n_inputs = data_inputs + int(has_strobe)
     span = max(n_inputs, n_outputs, 2)
     grid_size = max(5, 2 * span + 1)
-    # The row is held long enough to SETTLE and then be READ as a level:
-    # one grid diameter (~2G here) for the level to cross the body and the
-    # answer to stabilise, then a read window the output must sit at its value
-    # through. Both halves are recorded on the target so the scorer reads the
-    # same window the stimulus guarantees.
-    settle = 2 * grid_size
-    measure = max(4, grid_size)
+    # The row only needs one crossing of the grid before it is read.  The old
+    # 2G settle plus another full-G measurement held every input level for
+    # 3G, then added a 4G release gap.  That was excessive for the nervous
+    # combinational encoding: it multiplied every truth-table row and repeat
+    # into long mostly-idle traces, especially for decoder/multiplier targets.
+    # Keep a full-G propagation margin and a half-G read window instead.
+    settle = grid_size
+    measure = max(3, (grid_size + 1) // 2)
     if hold is None:
         hold = settle + measure
     hold = max(2, int(hold))
     settle = min(settle, hold - 1)
     if spacing is None:
-        # After the level is released, each window must still outlast the
-        # substrate's settling transient, which grows with the grid: a
-        # circulating nervous pulse - and especially the LUT array, which often
-        # rings for several passes before it stabilises - can take multiple
-        # traversals of a G-wide grid to die out. Four grid-widths sits
-        # comfortably above the ~2G grid diameter and scales up automatically
-        # for the larger grids that back the multi-bit targets, so no case
-        # bleeds into the next even on the slow-settling LUT backend. Counting
-        # that gap from the RELEASE rather than the onset keeps the old margin
-        # intact instead of spending it on the hold.
-        spacing = max(hold + 4 * grid_size, hold + latency + 8)
+        # Leave a 2G release gap, enough for a pulse to clear the body without
+        # making each truth-table schedule dominated by idle ticks.
+        spacing = max(hold + 2 * grid_size, hold + latency + 8)
     spacing = int(spacing)
     if spacing < hold + latency + 2 or repeats < 1 or latency < 0:
         # A row must fall silent before the next one rises, or two rows that
