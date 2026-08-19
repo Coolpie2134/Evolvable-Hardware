@@ -160,6 +160,41 @@ def test_event_contract_requires_one_to_one_edges_and_silence():
     assert score_contract(always, target)[0] < 1.0
 
 
+def test_temporal_logic_balances_outputs_in_scalar_and_alignment():
+    """An event-rich Sum arm must not hide a completely dead Carry arm."""
+    target = TEMPORAL_TARGETS['Full adder (temporal)']
+    roles = [terminal.role for terminal in target.outputs]
+
+    easy_only = TemporalTraces(
+        {role: [[] for _trial in target.trials] for role in roles},
+        events={
+            roles[0]: [list(trial.expected_events[roles[0]])
+                       for trial in target.trials],
+            roles[1]: [[] for _trial in target.trials],
+        })
+    easy_score, easy_cases, _ = score_contract(easy_only, target)
+    assert easy_score == 0.25
+
+    balanced = TemporalTraces(
+        {role: [[] for _trial in target.trials] for role in roles},
+        events={
+            role: [list(trial.expected_events[role][::2])
+                   for trial in target.trials]
+            for role in roles})
+    balanced_score, balanced_cases, _ = score_contract(balanced, target)
+    assert balanced_score > easy_score
+
+    by_role = {role: [] for role in roles}
+    case_index = 0
+    for trial in target.trials:
+        for role in trial.expected:
+            by_role[role].append(balanced_cases[case_index])
+            case_index += 1
+    output_scores = [sum(by_role[role]) / len(by_role[role]) for role in roles]
+    assert abs(balanced_score - 0.5 * (
+        sum(output_scores) / len(output_scores) + min(output_scores))) < 1e-12
+
+
 def test_periodic_truth_table_reports_the_exact_row_level_selection_score():
     target = periodic_combinational_target(get_target('Half adder'))
     assert not target.combinational_strobe

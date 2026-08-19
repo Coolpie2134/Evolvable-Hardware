@@ -130,6 +130,44 @@ def _static_combinational_holdout_target(target, seed):
     return carry_physics(target, dataclasses.replace(target, cases=cases))
 
 
+def _temporal_logic_holdout_target(target, seed):
+    """Fresh row ordering for an edge-timed truth-table twin.
+
+    The event target is not a periodic level wrapper, so it must not populate
+    ``combinational_cases`` (that would select a different scorer).  Rebuild it
+    from its retained source table instead: same physical spacing and ports,
+    shuffled independent row order and a frozen training readout.
+    """
+    from substrates.snn.targets import OutputTerminal, Target
+    from .targets import coincident_temporal_target
+
+    source_cases = [
+        (tuple(input_bits), tuple(output_bits))
+        for input_bits, output_bits in target.temporal_logic_cases]
+    cases = list(source_cases)
+    random.Random(int(seed)).shuffle(cases)
+    # A shuffle may (rarely) leave a small table unchanged. Certification must
+    # still present a genuinely new schedule for every declared holdout seed.
+    if len(cases) > 1 and cases == source_cases:
+        cases = cases[1:] + cases[:1]
+    n_inputs = int(getattr(target, 'temporal_logic_data_inputs', 0))
+    base = Target(
+        getattr(target, 'name', 'temporal truth table'),
+        [(0, index) for index in range(n_inputs)],
+        [OutputTerminal(terminal.role, tuple(terminal.pos))
+         for terminal in target.outputs],
+        cases)
+    return carry_physics(
+        target,
+        coincident_temporal_target(
+            base, name=getattr(target, 'name', None),
+            gap=int(getattr(target, 'temporal_logic_gap', 0) or 0) or None,
+            latency=int(getattr(target, 'latency', 1)),
+            schedules=max(1, int(getattr(target, 'temporal_logic_schedules', 0)
+                                 or 1)),
+            tail=int(getattr(target, 'temporal_logic_tail', 0) or 0) or None))
+
+
 def certify(genome, target, train=None, backend='nervous',
             seeds=DEFAULT_HOLDOUT_SEEDS, threshold=0.90, kind='certify'):
     """Certify a winning genome against fresh held-out stimulus.
@@ -153,21 +191,21 @@ def certify(genome, target, train=None, backend='nervous',
             'implemented)')
         return result
     periodic_logic = bool(getattr(target, 'combinational_cases', ()))
+    temporal_logic = bool(getattr(target, 'temporal_logic_cases', ()))
     static_logic = (
         not getattr(target, 'temporal', False)
         and bool(getattr(target, 'cases', ())))
-    if periodic_logic or static_logic:
+    if periodic_logic or temporal_logic or static_logic:
         fitted = fit_readout(genome, target, backend=backend)
         if fitted is None:
             holdouts = [0.0] * len(seeds)
         else:
+            holdout_builder = (
+                _combinational_holdout_target if periodic_logic else
+                (_temporal_logic_holdout_target if temporal_logic else
+                 _static_combinational_holdout_target))
             holdouts = [
-                score_frozen(
-                    genome, (
-                        _combinational_holdout_target(target, seed)
-                        if periodic_logic else
-                        _static_combinational_holdout_target(target, seed)),
-                    fitted)
+                score_frozen(genome, holdout_builder(target, seed), fitted)
                 for seed in seeds]
         mean_ho = sum(holdouts) / len(holdouts) if holdouts else 0.0
         # A complete truth table has no statistical 90% notion of correctness:

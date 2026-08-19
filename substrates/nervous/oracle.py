@@ -576,6 +576,22 @@ def sr_latch_oracle(seed=20260702):
         Trial(streams, {'Q': label_trace(orc_sr_latch, streams, target.T, 2)})
         for streams in (silent, cycle, short, long_hold)
     ])
+    # A LUT level latch has one state stage and one feedback stage.  A command
+    # that vanishes after a single lattice tick disappears on the same wave the
+    # feedback first arrives, producing a forced phase swap rather than either
+    # stable fixed point.  Keep each logical command high for the minimum two
+    # stages.  This is still ONE leading-edge event to the nervous substrate,
+    # so its command semantics are unchanged; it merely gives the level device
+    # a physically meaningful input aperture.
+    for trial in target.trials:
+        # Keep the logical stream as one command tick so schedule audits and
+        # the oracle still see exactly one command.  The physical schedule is
+        # where that level receives its two-stage aperture.
+        trial.input_events = [
+            [(float(tick), 2.0) for tick, row in enumerate(trial.streams)
+             if row[lane] and (
+                 tick == 0 or not trial.streams[tick - 1][lane])]
+            for lane in range(2)]
     return target
 
 
@@ -591,7 +607,10 @@ def toggle_oracle(seed=20260702):
 
 def echo_oracle(seed=20260702, delay=3):
     return oracle_target('Echo (oracle)', make_echo(delay), [(0, 2)], 'Q',
-                         T=22, n_trials=10, seed=seed, latency=delay, min_gap=3,
+                         # ``make_echo`` already shifts the state-machine
+                         # output by ``delay`` samples. Adding it again in
+                         # label_trace judged a stated 3-second echo at 6.
+                         T=22, n_trials=10, seed=seed, latency=0, min_gap=3,
                          contract=event_contract(fit_latency=False),
                          description=describe_target(
         'Reproduce every input edge exactly %d seconds later.' % delay,
@@ -1752,6 +1771,19 @@ def _d_latch_streams(rng, T, n_trials):
         for start, end in enables:
             for t in range(start, end):
                 rows[t] = (rows[t][0], 1)
+        # A physical transparent latch cannot sample a data transition at the
+        # exact instant Enable falls.  The LUT implementation has two causal
+        # stages (state and feedback), so give D the corresponding two-tick
+        # setup/hold aperture around every closing edge.  Previously almost
+        # every generated trial changed D at or next to that edge; an otherwise
+        # exact latch then scored 0.555 because the oracle demanded zero-time
+        # capture, while the same circuit scores 1.0 once this ordinary timing
+        # requirement is respected.
+        for _start, end in enables:
+            stable_from = max(0, end - 2)
+            held_data = rows[stable_from][0]
+            for t in range(stable_from, min(T, end + 2)):
+                rows[t] = (held_data, rows[t][1])
         streams.append(rows)
     return streams
 
@@ -1794,7 +1826,235 @@ def d_latch_oracle(seed=20260817):
             'and Q must ignore it, and a never-enabled trial that must stay low.'))
 
 
+# -- rhythmic and pattern targets ------------------------------------------------
+# One per substrate, each sited so the substrate's own physics is the reason the
+# task is natural rather than incidental, and each legible when watched.
+
+def label_multi(oracle, streams, T, latency, roles):
+    """``label_trace`` for a MULTI-OUTPUT oracle.
+
+    ``label_trace`` keeps only ``ob[0]``, silently discarding every output past
+    the first. These targets are about the RELATIONSHIP between several
+    outputs, so the whole tuple has to survive.
+    """
+    raw, state = [], None
+    for tick in range(T):
+        observed, state = oracle(streams[tick], state)
+        raw.append(tuple(observed))
+    shifted = [None] * latency + raw[:max(0, T - latency)]
+    return {role: [None if row is None else int(row[index]) for row in shifted]
+            for index, role in enumerate(roles)}
+
+
+def make_rhythm_cascade():
+    """Divide one clock three ways at once: every pulse, every 2nd, every 4th.
+
+    FNV, and visually the point: three outputs beating at nested rates is a
+    rhythm you can watch, not a truth table. Structurally it is a TOGGLE chain -
+    the family that ships 18 catalogue entries and, until the constructive draw
+    was unlocked, was expressed in 0.0% of grown bodies.
+
+    Unlike the nervous ring, the three outputs need genuinely DIFFERENT
+    structure (a tap, one toggle, two toggles), which is what a genome that
+    names its parts individually is supposed to be good at.
+    """
+    def f(inb, st):
+        count = int(st or 0)
+        if not inb[0]:
+            return (0, 0, 0), count
+        count += 1
+        return (1,
+                1 if count % 2 == 0 else 0,
+                1 if count % 4 == 0 else 0), count
+    return f
+
+
+def make_ring_pattern(period=3, phases=3):
+    """One kick, then a travelling wave around N outputs, indefinitely.
+
+    NERVOUS, and it asks for the exact behaviour that has been sabotaging every
+    other target on this substrate. Measured: a two-cell nervous loop given ONE
+    input edge fires every 2 ticks indefinitely, and emits the identical train
+    whether the input is held 5 ticks or 40 - it latches on the first edge and
+    cannot be switched off. For a latch that is a liability; for "pulse once,
+    then pulsate" it is the mechanism.
+
+    The outputs are taps on one circulating structure rather than three
+    separate computations, which also side-steps the open multi-output defect:
+    an organism that gets the ring turning gets every phase at once.
+    """
+    def f(inb, st):
+        started, tick = st if st is not None else (False, 0)
+        if inb[0]:
+            started, tick = True, 0
+        elif started:
+            tick += 1
+        out = [0] * phases
+        if started and tick % period == 0:
+            out[(tick // period) % phases] = 1
+        return tuple(out), (started, tick)
+    return f
+
+
+def make_count_to(limit=4):
+    """Count input pulses; hold the output HIGH once the count reaches ``limit``.
+
+    LUT. Each pulse adds one, and the readout is a HELD LEVEL - exactly what
+    this substrate does natively and what the nervous net physically cannot do
+    at all, its node being capacitively coupled with no stable high. One
+    output, so it does not depend on the unresolved multi-output defect.
+    """
+    def f(inb, st):
+        count = int(st or 0)
+        if inb[0]:
+            count += 1
+        return (1 if count >= limit else 0,), count
+    return f
+
+
+def rhythm_cascade_oracle(seed=20260818):
+    # THE SEED MUST DO SOMETHING. `holdout_score` builds its validation set by
+    # calling spec(seed=...), so a spec that ignores its seed hands back the
+    # TRAINING schedules and certification becomes a no-op - held-out equals
+    # train by construction, and a memorising circuit certifies. The first
+    # version of this target did exactly that and reported "generalises
+    # exactly" on every seed, which meant nothing at all.
+    rng = random.Random(seed)
+    T, latency = 72, 2
+    roles = ('R1', 'R2', 'R4')
+    outs = [OutputTerminal('R1', (2, 2)), OutputTerminal('R2', (2, 3)),
+            OutputTerminal('R4', (3, 2))]
+    oracle = make_rhythm_cascade()
+    schedules = []
+    # Steady clocks at several rates and phases. A cascade must divide whatever
+    # it is handed, so the rate has to vary or a fixed delay chain would pass.
+    periods = rng.sample([3, 4, 5, 6, 7, 8], 4)
+    for period in periods:
+        for phase in (rng.randint(1, 3), rng.randint(4, 6)):
+            schedules.append([(1,) if t >= phase and (t - phase) % period == 0
+                              else (0,) for t in range(T)])
+    # An interrupted clock: the division must survive a gap without resetting.
+    gap_period = rng.choice((4, 5))
+    stop = rng.randint(26, 34)
+    resume = stop + rng.randint(12, 18)
+    rows = [(0,)] * T
+    for t in list(range(3, stop, gap_period)) + list(
+            range(resume, T - 1, gap_period)):
+        rows[t] = (1,)
+    schedules.append(rows)
+    schedules.append([(0,)] * T)                  # silence
+    built = []
+    for rows in schedules:
+        expected = label_multi(oracle, rows, T, latency, roles)
+        built.append(Trial(
+            rows, expected,
+            {role: [float(t) for t, v in enumerate(expected[role]) if v == 1]
+             for role in roles}))
+    return TemporalTarget(
+        'Rhythm cascade (oracle)', [(0, 2)], outs, T, built,
+        grid_size=7, iters=30, contract=event_contract(fit_latency=False),
+        latency=latency, category='Rhythm & cadence',
+        description=describe_target(
+            'Divide one input clock three ways at once: R1 on every pulse, R2 '
+            'on every second pulse, R4 on every fourth.',
+            'Eight steady clocks spanning four rates and two phases, plus an '
+            'interrupted clock whose division must survive the gap, plus '
+            'silence. A fixed delay chain cannot pass, because the rate '
+            'varies between trials.'))
+
+
+def ring_pattern_oracle(seed=20260818, period=3, phases=3):
+    # See rhythm_cascade_oracle: a spec that ignores its seed makes its own
+    # held-out set a copy of its training set.
+    rng = random.Random(seed)
+    T, latency = 64, 2
+    roles = tuple('P%d' % (index + 1) for index in range(phases))
+    outs = [OutputTerminal(role, (2, 2 + index))
+            for index, role in enumerate(roles)]
+    oracle = make_ring_pattern(period, phases)
+    schedules = []
+    # One kick, at a different tick each time. Nothing else ever arrives, so a
+    # circuit that needs continued input scores nothing. The kick ticks are
+    # drawn from the seed and SPREAD WIDELY: clustering them (the first version
+    # used 3, 5, 8, 11, 14) lets a free-running oscillator that ignores the
+    # input line up with all of them at once, which is phase-locking to the
+    # clock rather than being started by the kick.
+    kicks = sorted(rng.sample(range(2, T // 2), 5))
+    for kick in kicks:
+        rows = [(0,)] * T
+        rows[kick] = (1,)
+        schedules.append(rows)
+    schedules.append([(0,)] * T)                  # never kicked: stay silent
+    restart = [(0,)] * T                          # kicked twice: wave restarts
+    first = rng.randint(3, 8)
+    restart[first] = (1,)
+    restart[first + rng.randint(24, 32)] = (1,)
+    schedules.append(restart)
+    built = []
+    for rows in schedules:
+        expected = label_multi(oracle, rows, T, latency, roles)
+        built.append(Trial(
+            rows, expected,
+            {role: [float(t) for t, v in enumerate(expected[role]) if v == 1]
+             for role in roles}))
+    return TemporalTarget(
+        'Ring pattern (oracle)', [(0, 2)], outs, T, built,
+        grid_size=7, iters=30, contract=event_contract(fit_latency=False),
+        latency=latency, category='Rhythm & cadence',
+        description=describe_target(
+            'A single input pulse starts a travelling wave: P1, P2 and P3 fire '
+            'in turn, %d seconds apart, and keep going with no further input.'
+            % period,
+            'Five trials kick at different ticks, one never kicks at all and '
+            'must stay silent, and one kicks twice so the wave restarts from '
+            'the first phase.'))
+
+
+def count_to_oracle(seed=20260818, limit=4):
+    rng = random.Random(seed)
+    T, latency = 56, 2
+    oracle = make_count_to(limit)
+    schedules = []
+    for index in range(10):
+        rows = [(0,)] * T
+        spacing = 3 + (index % 4)
+        tick = 2 + (index % 3)
+        while tick < T - 1:
+            rows[tick] = (1,)
+            tick += spacing + rng.randint(0, 1)
+        schedules.append(rows)
+    # One short of the limit: must NEVER go high. This is the trial that a
+    # circuit merely responding to input, rather than counting, fails.
+    short = [(0,)] * T
+    for step in range(limit - 1):
+        short[4 + step * 5] = (1,)
+    schedules.append(short)
+    exact = [(0,)] * T                            # reaches it exactly, late
+    for step in range(limit):
+        exact[6 + step * 6] = (1,)
+    schedules.append(exact)
+    schedules.append([(0,)] * T)                  # silent: never high
+    built = [Trial(rows, {'Q': label_trace(oracle, rows, T, latency)})
+             for rows in schedules]
+    return TemporalTarget(
+        'Count to %d (oracle)' % limit, [(0, 2)],
+        [OutputTerminal('Q', (2, 2))], T, built, grid_size=5, iters=30,
+        contract=state_contract(), latency=latency,
+        # LEVEL readout: the nervous node cannot hold one at all.
+        supported_backends=('lut',),
+        category='Memory & state',
+        description=describe_target(
+            'Each input pulse adds one to a stored count; the output goes high '
+            'once the count reaches %d, and stays high.' % limit,
+            'Ten seeded pulse trains at varied spacing, plus a run stopping '
+            'one short of the limit that must never go high, a run reaching it '
+            'exactly, and silence.'))
+
+
 ORACLE_SPECS = {
+    'Rhythm cascade (oracle)':    rhythm_cascade_oracle,
+    'Ring pattern (oracle)':      ring_pattern_oracle,
+    'Count to 4 (oracle)':        count_to_oracle,
     'Gap band-pass (oracle)':     gap_bandpass_oracle,
     'Resettable divide-by-4 (oracle)': resettable_divider_oracle,
     'Gated D latch (oracle)':     d_latch_oracle,

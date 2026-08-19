@@ -1871,27 +1871,19 @@ def random_branched_genome(chromosome_count, families, n_inputs,
 def crossover_branched(parent_a, parent_b, families=None):
     """Cross role modules: each output gene travels with its assigned arm.
 
-    The input chromosome remains a whole-organism module. Output geometry is
-    selected per role together with the rules, reach, and lifespan that grew
-    from it, so crossover does not tear apart the unit it is meant to exchange.
+    Output geometry is selected per role together with the rules, reach, and
+    lifespan that grew from it.  The input pads are the shared environment of
+    *all* those modules, so a layout mismatch is not a legal arm graft: retain
+    parent A intact and let ordinary mutation explore from it instead.
     """
     child = clone_constructive(parent_a)
     shared = min(len(child.chromosomes), len(parent_b.chromosomes))
     if shared < 1:
         return child
-    donor_inputs = getattr(parent_b, "input_chromosome", None)
-    own_inputs = getattr(child, "input_chromosome", None)
-    if (donor_inputs is not None and own_inputs is not None
-            and len(donor_inputs.genes) == len(own_inputs.genes)
-            and random.random() < 0.5):
-        # Input geometry is one co-adapted module and every branch starts on it,
-        # so the whole chromosome crosses rather than individual pads.
-        child.input_chromosome = copy.copy(donor_inputs)
-        child.input_chromosome.genes = [
-            InputGene(int(gene.gene_id), int(gene.distance),
-                      int(gene.bearing), int(gene.branch_id))
-            for gene in donor_inputs.genes]
-        sync_input_layout(child)
+    own_layout = tuple(getattr(child, "input_layout", ()) or ())
+    donor_layout = tuple(getattr(parent_b, "input_layout", ()) or ())
+    if own_layout != donor_layout:
+        return child
     donors = arm_map(parent_b)
     mine = arm_map(child)
     own_outputs = {

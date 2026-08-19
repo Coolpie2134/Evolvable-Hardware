@@ -20,9 +20,10 @@ All scoring MATH lives in substrates/nervous/scoring.py - the single scoring con
 re-exports every scorer name for the historical `from substrates.nervous.temporal import`
 path; new code should import from substrates.nervous.scoring directly.
 
-Loop analysis feeds the GA's fitness shaping (substrates/nervous/ga.py): memory needs a
-directed cycle in the signal graph, and a cycle only matters if the inputs can
-write into it and it can drive an output.
+Loop analysis supplies a target-blind GA tie-break (substrates/nervous/ga.py):
+memory needs a directed cycle in the signal graph, and a cycle only matters if
+the inputs can write into it and it can drive an output. It never changes the
+behavior-contract fitness itself.
 
 The target types (Trial, TemporalTarget, presets) live in substrates/nervous/targets.py;
 they are re-exported here for back-compat with older imports and pickles.
@@ -443,7 +444,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
 
 def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
                         delays=None, arch='single', source_nodes=None,
-                        taus=None):
+                        taus=None, sink_nodes=None):
     """Run target trials at already-selected nervous-net output cells.
 
     Unlike :func:`place_outputs_by_trace`, this function performs no search.
@@ -464,10 +465,11 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
         # pads it fitted with; re-resolving them here would let validation
         # quietly choose a different input binding from training.
         terminal_inputs = set(source_nodes)
-        # The selected outputs are observation probes, not physical sink
-        # terminals. They must retain their ordinary outgoing connections,
-        # exactly as they did while place_outputs_by_trace fitted them.
-        terminal_outputs = set()
+        # Fitted outputs remain non-invasive probes by default. A native
+        # output-rooted encoding may explicitly pass its genetic role sites as
+        # sinks: those are terminals by construction, not cells selected from
+        # the body after it grew.
+        terminal_outputs = set(sink_nodes or ())
     if arch == 'tri3':
         sub = grid
     else:
@@ -807,7 +809,7 @@ def loop_profile(grid, routing, in_pos, out_pos):
 
 # -- structural topology (selection tie-break, target-agnostic) -----------------
 
-def nervous_topology(grid, routing, in_pos, arch='single'):
+def nervous_topology(grid, routing, in_pos, arch='single', output_nodes=None):
     """Measure this organism's EFFECTIVE routing as a directed graph.
 
     The graph is the physical wiring the engine will actually run, not the
@@ -826,16 +828,21 @@ def nervous_topology(grid, routing, in_pos, arch='single'):
     if not grid:
         return EMPTY
     sources = [tuple(cell) for cell in flat_inputs(in_pos)]
+    output_tiles = {tuple(cell) for cell in (output_nodes or ())}
     if arch == 'tri3':
         from .tritile import interpret_tri
         info = interpret_tri(grid, sources)
         # sources[v] = the sub-nodes feeding v; invert into (u -> v) wires.
+        output_subnodes = {
+            node for tile in output_tiles
+            for node in info['tile_nodes'].get(tile, ())}
         edges = [(feeder, node)
                  for node, feeders in info['sources'].items()
                  for feeder in feeders
-                 if feeder is not None]
+                 if feeder is not None and feeder not in output_subnodes]
         pads = [node for tile, node in info['in_nodes'].items()]
         return measure(edges, pads, nodes=info['nodes'])
     readers = signal_graph(grid, routing)
-    edges = [(u, v) for u, listeners in readers.items() for v in listeners]
+    edges = [(u, v) for u, listeners in readers.items() for v in listeners
+             if u not in output_tiles]
     return measure(edges, sources, nodes=grid)

@@ -83,13 +83,20 @@ def fit_readout(genome, target, backend='nervous'):
     if getattr(traces, 'overflow', False):
         return None
     score, _, alignment = score_contract(traces, target)
+    expected_roles = {terminal.role for terminal in target.outputs}
     if getattr(target, 'io_placement', 'fixed') == 'fixed':
-        outputs = tuple(sorted(out_pos.items()))
+        # A compiled circuit may expose an unscored physical helper sink used
+        # to split one shared cone across developmental arms.  Freeze only the
+        # contract's declared roles; validation requires an exact role match.
+        outputs = tuple(sorted(
+            (role, cell) for role, cell in out_pos.items()
+            if role in expected_roles))
     else:
         from .io_placement import output_groups
         outputs = tuple(sorted(
             (role, tuple(cells))
-            for role, cells in output_groups(out_pos).items()))
+            for role, cells in output_groups(out_pos).items()
+            if role in expected_roles))
     # Only carry the input binding for genuinely evolvable strategies; leave it
     # empty for 'fixed' so input_positions() falls back to the seed pads and
     # nothing about the legacy path changes.
@@ -128,9 +135,27 @@ def score_frozen(genome, target, fitted):
         from .io_placement import growth_seeds
         # Use the same genome-aware developmental origin as training; otherwise
         # validation could grow a different organism from the fitted one.
-        grid = grow_nervous(genome, seeds=growth_seeds(
-                                target, strategy, genome),
-                            grid_size=target.grid_size, iters=target.iters)
+        from .branched import BranchedHexGenome
+        if isinstance(genome, BranchedHexGenome):
+            from .branched import (
+                develop_branched_hex, materialise_pads, tau_of)
+            from .branched_ga import input_pads
+            pads = input_pads(genome)
+            developed = develop_branched_hex(genome, pads)
+            grid = materialise_pads(developed.grid, pads)
+            base_tau = getattr(
+                getattr(target, 'pulse_config', None),
+                'analog_tau_leak', None)
+            taus = ({cell: tau_of(index, base_tau)
+                     for cell, index in developed.taus.items()}
+                    if base_tau else None)
+            sink_nodes = set(out_pos.values())
+        else:
+            grid = grow_nervous(genome, seeds=growth_seeds(
+                                    target, strategy, genome),
+                                grid_size=target.grid_size, iters=target.iters)
+            taus = None
+            sink_nodes = None
         if len(grid) <= target.n_inputs:
             return 0.0
         arch = getattr(genome, 'arch', 'single')
@@ -154,7 +179,7 @@ def score_frozen(genome, target, fitted):
             if getattr(genome, 'input_layout', None) is not None else None)
         traces = trace_fixed_outputs(
             grid, routing, in_pos, out_pos, target, delays=delays, arch=arch,
-            source_nodes=source_nodes)
+            source_nodes=source_nodes, taus=taus, sink_nodes=sink_nodes)
     elif fitted.backend == 'lut':
         from substrates.lut.lut import grow_lut
         from substrates.lut.ga import trace_fixed_outputs

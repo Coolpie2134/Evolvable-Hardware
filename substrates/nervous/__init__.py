@@ -22,8 +22,9 @@ its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
     stopped by application of an inhibitory input" (delay-line memory);
   * temporal scoring retains raw continuous edge timestamps for point-event
     relations, uses cadence invariants for autonomous rhythms, and keeps sampled
-    active/quiet windows only where they express persistence. The GA's fitness
-    shaping favours nets whose signal graph can actually hold state.
+    active/quiet windows only where they express persistence. A target-blind
+    GA tie-break favours signal graphs that can actually hold state without
+    changing the declared behavior score.
 
 Quick start
 -----------

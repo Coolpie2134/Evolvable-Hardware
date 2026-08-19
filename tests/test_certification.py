@@ -122,6 +122,56 @@ def test_combinational_certification_requires_near_perfect_holdout():
     assert res['holdouts'] is None and res['holdout'] is None
 
 
+def test_temporal_logic_twin_certification_replays_fresh_row_orders():
+    """Event-timed Boolean twins need validation, not an oracle exemption."""
+    from substrates.nervous.targets import coincident_temporal_target
+    from substrates.snn.targets import get_target
+
+    target = coincident_temporal_target(get_target('Full adder'))
+    seen_orders = []
+
+    def frozen(_genome, holdout, _fitted):
+        seen_orders.append(tuple(holdout.temporal_logic_cases))
+        return 1.0
+
+    with mock.patch(
+            'substrates.nervous.evaluation.fit_readout',
+            return_value=object()), mock.patch(
+                'substrates.nervous.evaluation.score_frozen',
+                side_effect=frozen):
+        result = certify(
+            object(), target, train=1.0, backend='nervous',
+            seeds=(11, 12, 13))
+    assert result['verdict'] == 'CERTIFIED'
+    assert result['holdouts'] == [1.0, 1.0, 1.0]
+    assert all(set(order) == set(target.temporal_logic_cases)
+               for order in seen_orders)
+    assert len(set(seen_orders)) > 1
+
+
+def test_temporal_logic_holdout_changes_order_not_case_distribution():
+    from substrates.nervous.certification import _temporal_logic_holdout_target
+    from substrates.nervous.targets import coincident_temporal_target
+    from substrates.snn.targets import get_target
+
+    target = coincident_temporal_target(get_target('Full adder'))
+
+    def evidence(entry):
+        trial = entry.trials[0]
+        lane_counts = tuple(
+            sum(int(row[lane]) for row in trial.streams)
+            for lane in range(entry.n_inputs))
+        output_counts = tuple(
+            len(trial.expected_events[terminal.role])
+            for terminal in entry.outputs)
+        return lane_counts, output_counts
+
+    expected = evidence(target)
+    for seed in (11, 12, 13, 4242):
+        holdout = _temporal_logic_holdout_target(target, seed)
+        assert evidence(holdout) == expected
+
+
 def _main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     passed = 0

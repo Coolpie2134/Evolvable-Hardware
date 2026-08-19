@@ -11,6 +11,7 @@ that arm starts at its genetic writable OUT niche and grows toward PAD cues.
 import os
 import random
 import sys
+from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -23,14 +24,15 @@ from substrates.fnv.construction import (
     context_distance, develop_constructive)
 from substrates.fnv.construction_ga import (
     BRANCHED_MUT_OPS, assemble_role_modules, branch_cut, branch_map, branched_signature,
-    chromosome_rules, crossover_branched, mutate_branched,
+    chromosome_rules, clone_constructive, crossover_branched, mutate_branched,
     mutate_branched_once, observed_contexts, placement_genes,
     random_branched_genome, randomize_branch_behavior, relabel_branches,
 )
+from substrates.fnv.ga import _recombination_mate_pool
 from substrates.fnv.genome import (
     BRANCHED_ENCODING, Chromosome, ContextGene, ControlGene, EMPTY_STATE,
     Genome, OUT_STATE, OutputGene, PAD_STATE, is_branched,
-    sync_output_layout, validate_genome,
+    sync_input_layout, sync_output_layout, validate_genome,
 )
 
 FAMILIES = ("LOGIC", "DELAY")
@@ -435,7 +437,7 @@ def test_max_telomere_is_the_arm_lifespan_ceiling():
 
     assert default_max_telomere("fnv") == MAX_ARM_TELOMERE
     assert default_max_telomere("lut") == 8
-    assert default_max_telomere("nervous") == 20
+    assert default_max_telomere("nervous") == 24
 
     random.seed(31)
     for ceiling in (2, 5):
@@ -505,7 +507,9 @@ def test_crossover_keeps_each_output_allele_with_its_arm():
     random.seed(23)
     roles = ('sum', 'carry')
     left = random_branched_genome(2, FAMILIES, 3, roles)
-    right = random_branched_genome(2, FAMILIES, 3, roles)
+    # The arm trade is legal only when both parents share the physical pads.
+    # Start from a structural clone, then make the output modules distinct.
+    right = clone_constructive(left)
     for index, gene in enumerate(left.output_chromosome.genes):
         gene.distance, gene.bearing = 1, index
         arm_control(left.chromosomes[index // 2], index % 2).tolerance = 10 + index
@@ -532,6 +536,43 @@ def test_crossover_keeps_each_output_allele_with_its_arm():
             assert (int(gene.distance), int(gene.bearing),
                     control.tolerance) in expected[gene.role]
         validate_genome(child, FAMILIES)
+
+
+def test_crossover_refuses_to_transplant_arms_into_a_new_input_environment():
+    random.seed(231)
+    left = random_branched_genome(1, FAMILIES, 2)
+    right = random_branched_genome(1, FAMILIES, 2)
+    # Ensure the physical source pads genuinely differ.  These are the shared
+    # environment of every arm, rather than a neutral chromosome that may be
+    # exchanged after an arm has been selected.
+    input_gene = right.input_chromosome.genes[0]
+    for bearing in range(12):
+        input_gene.distance = 6
+        input_gene.bearing = bearing
+        sync_input_layout(right)
+        if right.input_layout != left.input_layout:
+            break
+    else:
+        raise AssertionError('could not construct distinct input layouts')
+
+    left_signature = branched_signature(left)
+    for _ in range(20):
+        child = crossover_branched(left, right, FAMILIES)
+        assert child.input_layout == left.input_layout
+        assert branched_signature(child) == left_signature
+
+
+def test_mate_pool_prioritises_input_layout_over_morphology():
+    population = [
+        SimpleNamespace(input_layout=((0, 0), (1, 0))),
+        # Same morphology, but its arms developed against a different source.
+        SimpleNamespace(input_layout=((0, 0), (0, 1))),
+        # Different morphology, but a legal graft environment.
+        SimpleNamespace(input_layout=((0, 0), (1, 0))),
+    ]
+    pool = _recombination_mate_pool(
+        population, 0, [1, 2], ['a', 'b', 'c'], ['tree', 'tree', 'other'])
+    assert pool == [2]
 
 
 def test_role_assembly_joins_compatible_specialists_without_mutating_modules():

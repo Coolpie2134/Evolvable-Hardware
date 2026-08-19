@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import itertools
+import copy
 import random
 
 import numpy as np
@@ -93,6 +94,31 @@ def test_lut_batched_lattice_matches_independent_simulators():
             for trial in streams
         ])
         assert np.array_equal(actual, expected)
+
+
+def test_lut_fixed_periodic_outputs_batch_matches_serial_trials():
+    from substrates.lut.ga import trace_fixed_outputs
+    from substrates.nervous.targets import periodic_combinational_target
+    from substrates.snn.targets import get_target
+
+    rng = random.Random(20260818)
+    grid = {
+        (x, y): tuple(rng.randrange(1 << 16) for _ in range(4))
+        for x in range(3) for y in range(3)
+    }
+    in_pos = [(0, 0), (0, 1), (0, 2)]
+    out_pos = {'Sum': (2, 0), 'Carry': (2, 2)}
+    target = periodic_combinational_target(get_target('Full adder'))
+    batched = trace_fixed_outputs(
+        grid, in_pos, out_pos, target, source_nodes=set(in_pos))
+
+    serial_target = copy.deepcopy(target)
+    serial_target.combinational_cases = []
+    serial = trace_fixed_outputs(
+        grid, in_pos, out_pos, serial_target, source_nodes=set(in_pos))
+    assert batched == serial
+    assert batched.events == serial.events
+    assert batched.intervals == serial.intervals
 
 
 def test_lut_batched_case_duties_match_serial_reference():

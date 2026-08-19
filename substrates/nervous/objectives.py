@@ -243,6 +243,12 @@ def structural_topology(genome, target, *, _developed=None):
             if not pads or any(cell not in grid for cell in pads):
                 return EMPTY
             in_pos = list(pads)
-        return nervous_topology(grid, routing, in_pos, arch=arch)
+        terminal_outputs = None
+        from .branched import BranchedHexGenome
+        if isinstance(genome, BranchedHexGenome):
+            from .branched import output_root_sites
+            terminal_outputs = set(output_root_sites(genome, in_pos).values())
+        return nervous_topology(
+            grid, routing, in_pos, arch=arch, output_nodes=terminal_outputs)
     except Exception:
         return EMPTY

@@ -391,11 +391,11 @@ component-port extractor and uncapped lexicographic construction rank; its
 details are specified in section 2.4 rather than sharing Nervous's `log1p`
 aggregation.
 
-This final tie-break is separate from Nervous's older `LOOP_WEIGHT = 0.05`
-temporal shaping. On an unsolved non-combinational target, a feedback loop that
-the inputs can write and the fitted outputs can read may add at most 5% of the
-remaining behavioral score. Periodic truth-table wrappers receive no such
-bonus, and a perfect contract score remains exactly 1.0.
+This is a selection tie-break, never a score adjustment: Nervous reported
+fitness is exactly the value returned by the declared behavior contract for
+both temporal and combinational targets. A feedback-rich but behaviorally worse
+organism therefore cannot look closer to a target simply because its topology
+is more suitable for a different task.
 
 #### 2.2.1 The canonical alphabet
 
@@ -602,8 +602,10 @@ growth chromosomes. `input_chromosome` stores one `InputGene(distance, bearing)`
 for every logical input after input zero. Input zero is anchored at `(0, 0)` as a
 coordinate gauge because absolute translation has no behavioral meaning on the
 unbounded field. Other pads begin compact and distinct; mutation slides a pad
-around a honeycomb ring or moves it one ring inward/outward. Crossover inherits
-the complete input chromosome as one shared environmental module.
+around a honeycomb ring or moves it one ring inward/outward. FNV crossover
+keeps the first parent's complete input chromosome and permits role-arm exchange
+only when both parents expose the same resolved pad layout. This avoids
+transplanting an arm into a different physical source environment.
 
 `output_chromosome` stores one
 `OutputGene(gene_id, role, distance, bearing, branch_id)` for every target output.
@@ -670,18 +672,21 @@ run enabled. Mutation may alter a context, output component, depth, arm control,
 input geometry, output geometry, or delete/add rules and branches. Ordinary
 mutation never reads expected answers.
 
-Crossover first chooses the whole input chromosome. It then chooses each role
-module independently: the OutputGene and its assigned arm—including the control
-gene—come from the same parent. Context and control genes receive fresh stable
-IDs in the child. This atomic pairing is the central experimental claim of v6:
-recombination exchanges "everything that develops output X" rather than an arm
-detached from the root geometry to which it adapted. Fan-out remains physical:
-it exists only at source pads and fixed components with two output ports. One
-unmutated best specialist per output role is retained in each offspring cohort.
-A small assembly cohort combines compatible role specialists that share an
-input layout without applying the ordinary post-crossover mutation burst; this
-gives the atomic role module one evaluated opportunity to work as an inherited
-unit rather than damaging the join before selection sees it.
+Crossover first requires a common resolved input layout. It then chooses each
+role module independently: the OutputGene and its assigned arm—including the
+control gene—come from the same parent while the child retains that shared pad
+environment. When no compatible mate exists, it returns the first parent for
+ordinary mutation rather than grafting a module into an unrelated coordinate
+system. Context and control genes receive fresh stable IDs in a genuine child.
+This atomic pairing is the central experimental claim of v6: recombination
+exchanges "everything that develops output X" rather than an arm detached from
+the root geometry to which it adapted. Fan-out remains physical: it exists only
+at source pads and fixed components with two output ports. One unmutated best
+specialist per output role is retained in each offspring cohort. A small
+assembly cohort combines compatible role specialists that share an input layout
+without applying the ordinary post-crossover mutation burst; this gives the
+atomic role module one evaluated opportunity to work as an inherited unit rather
+than damaging the join before selection sees it.
 
 There is no automatic route search, phenotype-to-genome conversion, target
 scaffold, or inverse development. Static combinational runs add one explicit,
@@ -775,7 +780,8 @@ output-rooted context development.
 **Chromosomes.** Nervous/LUT chromosomes retain split points, tags, and
 telomeres. Every FNV growth chromosome has two arms around its centromere;
 crossover exchanges one role's OutputGene together with the assigned arm and
-control gene. Its input chromosome crosses whole. FNV is capped at 64 genes per
+control gene, but only between parents with the same resolved input pads; the
+child retains that shared input chromosome. FNV is capped at 64 genes per
 container and 128 across the growth genome. Older FNV development versions are
 rejected.
 Chromosome count is capped at 32. The app's "Chroms" field is a structural
@@ -810,8 +816,10 @@ it wires up one backend's routines and runs the same loop. Per generation:
    genome finishes.
 
 2. **Select and reproduce.** `next_population(...)` builds the whole next
-   generation: immigrants, then children from selected parents via
-   `crossover_nv` (unless recombination is off) and `mutate_nv`.
+   generation: immigrants, a bounded 10% cohort of crossover-only children,
+   then the mutation-led majority of children from selected parents.  The
+   cohort is evaluated, not protected: it only survives the following
+   environmental selection if the inherited combination earns it.
 
 3. **Survive.** Before a solution exists, offspring replace the parents, so the
    population's best can regress; that is intended exploration. Once any genome
@@ -976,7 +984,12 @@ paired with their nearest homolog by tag distance, and multi-gene homologs cross
 at a genuine interior gene boundary (the split). When the common homolog has only
 one gene, the rule's fields are recombined instead, so a minimal chromosome still
 gets useful sexual recombination. Recombination can be disabled at runtime
-without disabling mutation or immigration.
+without disabling mutation or immigration. A fixed 10% of the available
+offspring slots evaluate this crossover without a subsequent mutation; the
+remaining offspring follow the ordinary crossover-then-mutation path. This is
+needed for selection to observe whether a pair of inherited modules works before
+several fresh edits obscure the result, while leaving mutation as the dominant
+source of local variation.
 
 ### 4.5 Plateau response (SOS) and annealing
 

@@ -71,14 +71,18 @@ def _direction(start, end):
 
 
 def _truth_table(target):
+    source_rows = (
+        getattr(target, 'combinational_cases', ())
+        or getattr(target, 'temporal_logic_cases', ()))
     rows = [
         (tuple(map(int, input_bits)), tuple(map(int, output_bits)))
         for input_bits, output_bits in
-        getattr(target, 'combinational_cases', ())]
+        source_rows]
     if not rows:
-        raise SynthesisError('target does not retain a combinational truth table')
+        raise SynthesisError('target does not retain a truth table')
     n_inputs = int(
         getattr(target, 'combinational_data_inputs', 0)
+        or getattr(target, 'temporal_logic_data_inputs', 0)
         or target.n_inputs)
     n_outputs = len(target.outputs)
     if n_inputs > 4 or n_outputs > 4:
@@ -92,7 +96,10 @@ def _truth_table(target):
     zero = next(
         output_bits for input_bits, output_bits in rows
         if not any(input_bits))
-    if any(zero) and not getattr(target, 'combinational_strobe', False):
+    has_strobe = bool(
+        getattr(target, 'combinational_strobe', False)
+        or int(target.n_inputs) > n_inputs)
+    if any(zero) and not has_strobe:
         raise SynthesisError(
             'the all-zero row requests an output event but supplies no input '
             'event; add an explicit case-valid/strobe lane to make silence '
@@ -113,9 +120,11 @@ def synthesize_grid(target, seed_pos=(0, 0)):
             target, rows, seed_pos)
     data_inputs = int(
         getattr(target, 'combinational_data_inputs', 0)
+        or getattr(target, 'temporal_logic_data_inputs', 0)
         or n_inputs)
     has_strobe = bool(
-        getattr(target, 'combinational_strobe', False))
+        getattr(target, 'combinational_strobe', False)
+        or n_inputs > data_inputs)
     states = {}
     inputs = []
 
@@ -203,9 +212,11 @@ def _synthesize_strobed_four_input_grid(target, rows, seed_pos):
     matched.
     """
     data_inputs = int(
-        getattr(target, 'combinational_data_inputs', 0))
+        getattr(target, 'combinational_data_inputs', 0)
+        or getattr(target, 'temporal_logic_data_inputs', 0))
     if (data_inputs != 4
-            or not getattr(target, 'combinational_strobe', False)
+            or not (getattr(target, 'combinational_strobe', False)
+                    or int(target.n_inputs) > data_inputs)
             or int(target.n_inputs) != 5 or len(target.outputs) > 3):
         raise SynthesisError(
             'five-port synthesis supports four data inputs, one strobe, '

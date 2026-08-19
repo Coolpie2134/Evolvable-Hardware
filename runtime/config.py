@@ -9,7 +9,8 @@ from .limits import MAX_CHROMOSOME_COUNT
 from .mutation import DEFAULT_MUTATION_LIMIT, DEFAULT_STAGNATION_BETA
 
 DEFAULT_MAX_TELOMERE = 20
-DEFAULT_LUT_MAX_TELOMERE = 8
+DEFAULT_NERVOUS_MAX_TELOMERE = 24
+DEFAULT_LUT_MAX_TELOMERE = 18
 # FNV Max telomere is the ceiling on an ARM's lifespan - how many placements one
 # branch may make before it dies - and never a growth radius. A genome has two
 # arms per chromosome, so this bounds the body directly.
@@ -97,6 +98,9 @@ def nv_run_config(**ga):
     ga.setdefault('tile_arch', arch)
     ga.setdefault('node_model', model)
     ga.setdefault('evolve_delay', evolve_delay)
+    # The live tri-tile Full Adder's balanced two-arm partition is 23/21 tiles.
+    # Twenty made that valid body impossible before fitness was consulted.
+    ga.setdefault('max_telomere', DEFAULT_NERVOUS_MAX_TELOMERE)
     return RunConfig(ga=GAConfig(**ga), pulse=PulseConfig(model=model))
 
 
@@ -107,6 +111,8 @@ def default_max_telomere(backend):
         return DEFAULT_LUT_MAX_TELOMERE
     if name == 'fnv':
         return DEFAULT_FNV_MAX_TELOMERE
+    if name == 'nervous':
+        return DEFAULT_NERVOUS_MAX_TELOMERE
     return DEFAULT_MAX_TELOMERE
 
 

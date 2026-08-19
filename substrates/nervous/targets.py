@@ -16,6 +16,8 @@ passed in by the GUI, so nothing here needs to import them.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from itertools import permutations
+import random
 from typing import Dict, List, Optional, Tuple
 
 from .contracts import (BehaviorContract, cadence_contract,
@@ -123,6 +125,16 @@ class TemporalTarget:
     # that hold is a settling allowance before the output level is read.
     combinational_hold: int = 0
     combinational_settle: int = 0
+    # Edge-timed truth-table twins deliberately do not use ``combinational_*``:
+    # their contract scores one pulse per asserted row, not a held level.  They
+    # retain the source table separately so certification can replay genuinely
+    # fresh row orders without changing their event-scoring semantics.
+    temporal_logic_cases: List[
+        Tuple[Tuple[int, ...], Tuple[int, ...]]] = field(default_factory=list)
+    temporal_logic_data_inputs: int = 0
+    temporal_logic_gap: int = 0
+    temporal_logic_schedules: int = 0
+    temporal_logic_tail: int = 0
 
     def __post_init__(self):
         # The established scoring primitives still read these names. They are
@@ -481,7 +493,7 @@ def _hold_trace(T, events):
 
 def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
                  inputs=None, out_pos=(2, 2), grid_size=5, iters=30,
-                 description='', outputs=None):
+                 description='', outputs=None, event_max_shift=12.0):
     """Describe a temporal function purely as SPIKE EVENTS - the easy path to a
     new target. Each case in `cases` is ``(input_spikes, output_spikes)``:
 
@@ -565,7 +577,7 @@ def spike_target(name, cases, T, n_inputs=None, output_role='Q', latency=1,
                           # earlier than nominal, but never earlier than its
                           # own cause).
                           latency=int(latency),
-                          contract=event_contract(),
+                          contract=event_contract(max_shift=event_max_shift),
                           description=description or describe_target(
         'Produce exactly the requested output-edge pattern.',
         'Each supplied case contributes its input schedule, required edges, and '
@@ -944,7 +956,7 @@ def divide_by_3(grid_size=5, latency=1):
 
 
 def coincident_temporal_target(target, name=None, gap=None, latency=1,
-                               schedules=3, tail=None):
+                               schedules=12, tail=None):
     """Turn a static truth table into a COINCIDENT-EDGE temporal target.
 
     This is the event-timed twin of `periodic_combinational_target`, and the
@@ -1027,16 +1039,54 @@ def coincident_temporal_target(target, name=None, gap=None, latency=1,
         filled = sum(asserted[row] * weight for row, weight in weights.items())
         if filled * 2 <= total_slots:
             break
-        quietest = min(visible, key=lambda row: asserted[row])
+        # Certification rebuilds the same table after shuffling its source
+        # rows.  A row INDEX is therefore not a stable tie-break: Full Adder
+        # has several equally quiet rows, and choosing the first index made
+        # train repeat 001->Sum while a holdout might repeat 011->Carry.  That
+        # silently changed the class/input distribution instead of merely the
+        # schedule.  Break ties on the Boolean row itself so every rebuild has
+        # exactly the same multiset of presentations.
+        quietest = min(
+            visible,
+            key=lambda row: (
+                asserted[row], tuple(cases[row][0]), tuple(cases[row][1])))
         weights[quietest] += 1
 
     ordered = [row for row in visible for _ in range(weights[row])]
-    schedule_orders = []
-    for index in range(max(1, int(schedules))):
-        # Deterministic, seed-free permutations: rotate then reverse alternate
-        # schedules. Reproducible across processes, unlike random.shuffle.
-        rotated = ordered[index:] + ordered[:index]
-        schedule_orders.append(rotated if index % 2 == 0 else rotated[::-1])
+    # A rotated/reversed row list still exposes a short, fixed clock pattern:
+    # the old temporal AND "solvers" fit those three schedules perfectly and
+    # scored 0.0 under one actually shuffled order. Use distinct permutations
+    # instead.  Small tables enumerate their available orders directly; wider
+    # tables use a deterministic local RNG so target construction remains
+    # reproducible across processes without leaking a global random state.
+    wanted_schedules = max(1, int(schedules))
+    schedule_orders, seen_orders = [], set()
+
+    def add_order(candidate):
+        frozen = tuple(candidate)
+        if frozen not in seen_orders and len(schedule_orders) < wanted_schedules:
+            seen_orders.add(frozen)
+            schedule_orders.append(list(frozen))
+
+    if len(ordered) <= 6:
+        for candidate in permutations(ordered):
+            add_order(candidate)
+            if len(schedule_orders) >= wanted_schedules:
+                break
+    seed = 0xC0FFEE
+    for index, row in enumerate(ordered):
+        seed = (seed * 1_103_515_245 + (index + 1) * (int(row) + 17)) & 0xFFFFFFFF
+    for attempt in range(max(32, wanted_schedules * 16)):
+        if len(schedule_orders) >= wanted_schedules:
+            break
+        candidate = list(ordered)
+        random.Random(seed + attempt).shuffle(candidate)
+        add_order(candidate)
+    # Constant-output tables can have fewer unique permutations than requested.
+    # Duplicating the sole schedule there is harmless; it does not create a new
+    # timing recipe or conceal a missing input dependency.
+    while len(schedule_orders) < wanted_schedules:
+        schedule_orders.append(list(ordered))
 
     T = latency + gap * len(ordered) + tail
     spike_cases = []
@@ -1063,10 +1113,15 @@ def coincident_temporal_target(target, name=None, gap=None, latency=1,
         ' A case-valid strobe lane pulses on every row, because the all-zero '
         'row carries evidence that silence alone cannot express.'
         if has_strobe else '')
-    return spike_target(
+    entry = spike_target(
         name or ('%s (temporal)' % base),
         spike_cases, T=T, n_inputs=n_inputs, latency=latency,
         grid_size=grid_size, outputs=outputs,
+        # A valid combinational pipeline may traverse almost one whole row
+        # interval before emitting its answer. The generic 12-tick cap made
+        # the real 13.5-tick Full Adder physically exact yet unscorable. Fresh
+        # row permutations still reject a whole-row phase slip.
+        event_max_shift=float(gap),
         description=describe_target(
             'Compute %s from coincident input edges, emitting one output edge '
             'per asserted bit.' % base,
@@ -1075,6 +1130,14 @@ def coincident_temporal_target(target, name=None, gap=None, latency=1,
             'rather than hold one answer. Quiet rows repeat where a table is '
             'lopsided, so firing on everything cannot score well.%s'
             % (len(ordered), gap, len(schedule_orders), strobe_note)))
+    entry.temporal_logic_cases = [
+        (tuple(input_bits), tuple(output_bits))
+        for input_bits, output_bits in cases]
+    entry.temporal_logic_data_inputs = data_inputs
+    entry.temporal_logic_gap = int(gap)
+    entry.temporal_logic_schedules = len(schedule_orders)
+    entry.temporal_logic_tail = int(tail)
+    return entry
 
 
 def register_temporal_logic_targets():
@@ -1129,6 +1192,9 @@ ORACLE_KEY_TO_SPEC = {
     'A-count multiple-of-3 queried by B': 'A modulo-3 query (oracle)',
     'Odd A batch closed by B': 'A batch parity query (oracle)',
     'SR latch':              'SR latch (oracle)',
+    'Rhythm cascade': 'Rhythm cascade (oracle)',
+    'Ring pattern': 'Ring pattern (oracle)',
+    'Count to 4': 'Count to 4 (oracle)',
     # One target per substrate, each sited where that substrate's physics is an
     # advantage rather than an obstacle. See the docstrings in oracle.py for why
     # each belongs where it does.

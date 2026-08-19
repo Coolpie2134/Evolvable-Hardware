@@ -66,14 +66,25 @@ EMPTY_CELL = (0, 0, 0, 0)
 PAD_CELL = 'PAD'
 OUT_CELL = 'OUT'
 
-DEPTH_BANDS = 4
+# Four bands collapsed every cell beyond depth three onto the same allele.
+# Repeated relay contexts then became indistinguishable: the earlier rule won
+# at every later site, so neither mutation nor an exact reverse compiler could
+# extend an arm to a third/fourth input.  Sixteen still keeps depth a small
+# categorical locus while covering the longest useful route in the live
+# 32-cell telomere budget.
+DEPTH_BANDS = 16
 DEPTH_ANY = -1
 MAX_PLACEMENTS = 128
 
 #: Output directions of a cell, in the order the grid stores them.
 DIRECTIONS = ('N', 'S', 'E', 'W')
 #: Which neighbour lies in each direction, on the square lattice.
-STEP = {'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0)}
+# Match the production LUT engines exactly: both ``LutSim`` and
+# ``AsyncLutSim`` read N from (x, y + 1) and S from (x, y - 1).  Reversing
+# these here makes reverse development grow away from every vertical source:
+# a table that physically listens north exposes a bud to its south, and the
+# reachability filter then declares the real northern wire disconnected.
+STEP = {'N': (0, 1), 'S': (0, -1), 'E': (1, 0), 'W': (-1, 0)}
 OPPOSITE = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
 
 
@@ -467,10 +478,17 @@ def drives_toward_root(cell, state, label, depth, owners, depths):
     """
     if int(depth) <= 0:
         return True
-    required = set(
-        required_output_directions(cell, label, depth, owners, depths))
-    outputs = cell_outputs(state)
-    return any(direction in outputs for direction in required)
+    # Geometric depth is only a growth ordering hint, not electrical
+    # direction.  Two routes can pass beside one another, and then the nearest
+    # same-arm cell may have a smaller depth even though the real wire must
+    # drive a different (equal/deeper) neighbour.  Requiring a depth decrease
+    # rejected those valid crossings and every local feedback edge.  A new
+    # cell is already arm-scoped by ``arm_reach``; driving any existing
+    # same-arm neighbour is the exact local connectivity invariant we need.
+    around = neighbours(cell)
+    return any(
+        owners.get(around[direction]) == label
+        for direction in cell_outputs(state))
 
 
 def growth_candidates(grid, owners, pads, output_sites):
@@ -512,6 +530,12 @@ def develop_branched_lut(genome, seeds, *, snapshots=False):
     owners: Dict[Tuple[int, int], int] = {}
     depths: Dict[Tuple[int, int], int] = {}
     frames = [dict(grid)] if snapshots else []
+    # The same rule/context pair is compared at the same site over many growth
+    # rounds.  A Full Adder seed previously recomputed its four table-interface
+    # distances millions of times.  Keep this cache local to one development:
+    # it captures that repetition without retaining an unbounded cross-run set
+    # of randomly generated LUT cells.
+    context_distances = {}
 
     arms = []
     for label in genome.arm_labels:
@@ -559,9 +583,14 @@ def develop_branched_lut(genome, seeds, *, snapshots=False):
                         depth = reach[label]
                         if depth is None:
                             continue
-                        distance = sum(
-                            cell_distance(wanted, found, families)
-                            for wanted, found in zip(gene.context, context))
+                        distance_key = (gene.context, context)
+                        distance = context_distances.get(distance_key)
+                        if distance is None:
+                            distance = sum(
+                                cell_distance(wanted, found, families)
+                                for wanted, found in zip(
+                                    gene.context, context))
+                            context_distances[distance_key] = distance
                         if distance > arm['reach']:
                             continue
                     if not gene.applies_at(min(depth, DEPTH_BANDS - 1)):
@@ -615,7 +644,7 @@ def develop_branched_lut(genome, seeds, *, snapshots=False):
                             snapshots=frames)
 
 
-def firing_outputs(grid, pads):
+def firing_outputs(grid, pads, active_pads=None, sink_nodes=None):
     """(cell, direction) output wires the inputs can ever drive. Target-blind.
 
     A least-fixed-point over the lattice: every pad drives all four of its
@@ -628,17 +657,22 @@ def firing_outputs(grid, pads):
     back at C, which is N's table for the OPPOSITE direction. Getting that
     backwards would silently report every organism as connected.
     """
-    live = {(cell, direction) for cell in pads for direction in DIRECTIONS}
+    pad_set = {tuple(cell) for cell in pads}
+    sinks = {tuple(cell) for cell in (sink_nodes or ())}
+    active = (pad_set if active_pads is None
+              else {tuple(cell) for cell in active_pads})
+    live = {(cell, direction) for cell in active for direction in DIRECTIONS}
     changed = True
     while changed:
         changed = False
         for cell, state in grid.items():
-            if cell in pads:
+            if cell in pad_set:
                 continue
             around = neighbours(cell)
             fed = {
                 direction for direction in DIRECTIONS
-                if (around[direction], OPPOSITE[direction]) in live}
+                if (around[direction] not in sinks
+                    and (around[direction], OPPOSITE[direction]) in live)}
             if not fed:
                 continue
             for index, direction in enumerate(DIRECTIONS):
@@ -674,9 +708,49 @@ def _can_go_high(table, fed):
 
 def driven_roots(grid, pads, roots):
     """Which output roots the inputs can actually drive."""
-    live = firing_outputs(grid, pads)
+    live = firing_outputs(grid, pads, sink_nodes=set(roots.values()))
     return {label for label, cell in roots.items()
             if cell in grid and any((cell, d) in live for d in DIRECTIONS)}
+
+
+def root_source_counts(grid, pads, roots):
+    """How many distinct logical source pads can influence each output root.
+
+    This is DEPENDENCY reachability, not whether one pad alone can make the
+    root high: each input of an AND influences its result even though neither
+    can assert it alone.  Running it one pad at a time keeps three wires from
+    one injected source from masquerading as three logical inputs.  Other pads
+    remain source-only and cannot relay a neighbour, matching ``AsyncLutSim``.
+    """
+    pad_set = {tuple(cell) for cell in pads}
+    sinks = {tuple(cell) for cell in roots.values()}
+    counts = {label: 0 for label in roots}
+    for pad in pads:
+        live = {(tuple(pad), direction) for direction in DIRECTIONS}
+        changed = True
+        while changed:
+            changed = False
+            for cell, state in grid.items():
+                if cell in pad_set:
+                    continue
+                around = neighbours(cell)
+                fed = {
+                    direction for direction in DIRECTIONS
+                    if (around[direction] not in sinks
+                        and (around[direction], OPPOSITE[direction]) in live)}
+                if not fed:
+                    continue
+                for direction, table in zip(DIRECTIONS, state):
+                    wire = (cell, direction)
+                    if (wire not in live
+                            and table_support(table).intersection(fed)):
+                        live.add(wire)
+                        changed = True
+        for label, cell in roots.items():
+            if cell in grid and any(
+                    (cell, direction) in live for direction in DIRECTIONS):
+                counts[label] += 1
+    return counts
 
 
 def materialise_pads(grid, pads):

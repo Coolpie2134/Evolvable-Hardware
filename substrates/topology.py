@@ -7,10 +7,11 @@ target name, fitted output, component family, gene count or telomere may reach
 it. Otherwise it stops being a structural preference and becomes a second,
 weaker copy of the fitness function.
 
-This module owns the Nervous AGGREGATION and graph measurement. FNV keeps a
+This module owns the Nervous/LUT AGGREGATION and graph measurement. FNV keeps a
 parallel result type and physical graph extractor because its component-port
 wiring is different; ``tests/test_topology.py`` pins the two aggregation
-formulas to identical arithmetic. LUT and SNN do not use this final topology
+formulas to identical arithmetic. LUT supplies its own directional-wire graph
+extractor to this shared measurement. SNN does not use this final topology
 tier.
 
 The measurements, all counted only over hardware REACHABLE FROM THE SOURCE PADS:

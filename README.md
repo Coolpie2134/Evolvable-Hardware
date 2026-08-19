@@ -81,7 +81,10 @@ is what keeps partial solutions available to recombine.
   the population is currently worst at. The rest of the slots turn over
   normally. When lexicase is active, the second parent is chosen for covering
   the first parent's weak cases, rather than drawing two parents independently
-  and often getting two specialists in the same rows.
+  and often getting two specialists in the same rows. A bounded 10% cohort
+  evaluates the crossover before the ordinary multi-edit mutation transaction,
+  so selection can actually observe whether the two inherited modules work
+  together; those children receive no survival privilege.
 - **FNV starting components**: when logic gates are in the selected component
   bank, exhaustive truth-table runs build their starting population from gates
   plus the delay/fan-out routing parts. Mutation still draws on the complete
@@ -290,9 +293,10 @@ evolved input pads. Four backends interpret and score the resulting lattice:
   mutations are target-blind. New rules are sampled from neighbourhoods their arm
   currently presents so exact matching remains evolvable. Output roots start
   separated and role arms initialize round-robin; three-plus-input crowns retain
-  shared buds for real two-output delay fan-out. Crossover inherits the whole
-  input chromosome, while each role's `OutputGene` crosses atomically with its
-  assigned arm and control gene.
+  shared buds for real two-output delay fan-out. Crossover requires matching
+  input-pad geometry, then moves each role's `OutputGene` atomically with its
+  assigned arm and control gene. A pad mismatch is mutation-only reproduction,
+  rather than an arm transplant into the wrong environment.
 
   Static truth-table plateaus also have a bounded allele rescue. It packs many
   complete assignments of the arm's existing AND/OR/XOR/VETO genes into bitsets,

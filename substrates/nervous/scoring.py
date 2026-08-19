@@ -573,6 +573,62 @@ def _event_case_score(traces, ttarget, trial_index, role, shift):
     return best
 
 
+def _temporal_logic_event_score(traces, ttarget, shift):
+    """Balance coincident truth-table twins by output, not event volume.
+
+    The ordinary event contract pools every expected/actual edge.  That is the
+    right statistic for one physical event stream, but it is a bad scalar for a
+    multi-output truth table: the role with more expected edges contributes
+    more mass, so a Full Adder with a completely dead Carry arm can outrank a
+    circuit making useful progress on both outputs.  Static and periodic logic
+    already use mean-and-worst output aggregation; their edge-timed twins need
+    the same semantics.
+
+    Cases stay one ``(trial, role)`` F1 each for lexicase and diagnostics.  Only
+    the scalar aggregation changes, and a perfect score still requires every
+    declared event on every output.
+    """
+    roles = tuple(str(terminal.role)
+                  for terminal in getattr(ttarget, 'outputs', ()))
+    by_role = {role: [] for role in roles}
+    cases = []
+    for trial_index, trial in enumerate(getattr(ttarget, 'trials', ())):
+        for role in trial.expected:
+            case = _event_case_score(
+                traces, ttarget, trial_index, role, float(shift))
+            cases.append(case)
+            if role in by_role:
+                by_role[role].append(case)
+    output_scores = [
+        (sum(by_role[role]) / len(by_role[role])
+         if by_role[role] else 0.0)
+        for role in roles]
+    score = (
+        0.5 * (sum(output_scores) / len(output_scores) + min(output_scores))
+        if output_scores else 0.0)
+    return score, tuple(cases)
+
+
+def _best_temporal_logic_shift(traces, ttarget):
+    """Fit latency against the balanced objective it will actually report."""
+    cached = getattr(traces, '_temporal_logic_event_result', None)
+    if cached is not None:
+        return cached
+    if getattr(traces, 'overflow', False):
+        return 0.0, 0.0, tuple(
+            0.0 for trial in getattr(ttarget, 'trials', ())
+            for _role in trial.expected)
+    pairs = _event_pairs(traces, ttarget)
+    best_shift, best_score, best_cases = 0.0, -1.0, ()
+    for shift in _event_candidate_shifts(pairs, ttarget):
+        score, cases = _temporal_logic_event_score(traces, ttarget, shift)
+        if score > best_score + 1e-12:
+            best_shift, best_score, best_cases = shift, score, cases
+    result = best_shift, max(0.0, best_score), tuple(best_cases)
+    traces._temporal_logic_event_result = result
+    return result
+
+
 def event_score(traces, ttarget, shift=None):
     """Exact sparse point-event F1 under one shared continuous-time latency."""
     if getattr(traces, 'overflow', False):
@@ -2058,6 +2114,15 @@ def _score_constraint(traces, target, relation, alignment):
             else:
                 used = float(alignment)
                 score, cases = _combinational_event_score(traces, target, used)
+            return score, cases, used
+        if getattr(target, 'temporal_logic_cases', ()):
+            if alignment is _REFIT_ALIGNMENT:
+                used, score, cases = _best_temporal_logic_shift(
+                    traces, target)
+            else:
+                used = float(alignment)
+                score, cases = _temporal_logic_event_score(
+                    traces, target, used)
             return score, cases, used
         if alignment is _REFIT_ALIGNMENT:
             used, score = _best_event_shift(traces, target)

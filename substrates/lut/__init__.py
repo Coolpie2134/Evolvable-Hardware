@@ -41,5 +41,19 @@ from .ga import (mutate_lut, crossover_lut,
                  score_lut_combinational, lut_case_outputs, lut_truth_table,
                  genome_signature, diversify, compact_genome,
                  constrain_genome_functions)
-from .viz import draw_lut_net, draw_lut_table
+# The array and GA are usable headlessly.  Keep optional plotting from making a
+# benchmark or worker process fail merely because the desktop-only Matplotlib
+# dependency is absent from its runtime.
+try:
+    from .viz import draw_lut_net, draw_lut_table
+except ModuleNotFoundError as _plot_error:
+    if _plot_error.name != 'matplotlib':
+        raise
+
+    def _plotting_unavailable(*_args, _error=_plot_error, **_kwargs):
+        raise RuntimeError(
+            'LUT visualization requires the optional matplotlib dependency') \
+            from _error
+
+    draw_lut_net = draw_lut_table = _plotting_unavailable
 from .boolfn import lut_sop, minterms, popcount, INPUT_NAMES

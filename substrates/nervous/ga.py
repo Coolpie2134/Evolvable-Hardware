@@ -16,11 +16,10 @@ differs from substrates/snn's in seven ways:
      state, cadence, interval, and logic contracts use their own declared
      semantics through the shared ``score_contract`` evaluator.
 
-  2. Loop-aware shaping: a small bonus, scaled by (1 - score) so a perfect
-     score is still exactly 1.0, rewards nets whose signal graph contains
-     directed cycles - especially "relevant" cycles that inputs can write and
-     outputs can read (loop_profile). Among equally scoring nets, the ones
-     structurally *capable* of memory win the tie.
+  2. Contract-honest selection: reported fitness is exactly the declared
+     behavior-contract score. Among equally scoring nets, a target-blind
+     topology tie-break still prefers structures capable of carrying signal,
+     integrating inputs, or closing feedback loops.
 
   3. Gene duplication as a mutation operator: loops are built from repeated
      local routing motifs (two cells buffering each other), and duplicating a
@@ -117,20 +116,25 @@ def clone_genome(genome):
         # the key would give one circuit several fitness-cache entries.
         clone._mut_rate = genome._mut_rate
     return clone
-from .temporal import (prepare_net, score_contract, loop_profile,
-                       cycle_nodes, _reachable)
+from .temporal import prepare_net, score_contract
 from .scoring import contract_case_count
 from .objectives import total_case_count
-from .tritile import interpret_tri
 
 POPSIZE        = 120
 ELITE_FRAC     = 0.10        # elites = this fraction of pop, UNLESS ELITE_COUNT set
 ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELITE_FRAC
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
-# Preserve specialist lineages: small elite pools otherwise produce nearly
-# exclusive champion x champion reproduction.
+# Preserve specialist lineages: small elite pools otherwise overuse one
+# champion lineage.
 EXPLORATION_PARENT_FRAC = 0.30
+# Recombination has no effect if every hybrid is immediately subjected to a
+# separate multi-edit mutation transaction.  Reserve a small, fixed cohort for
+# evaluating the crossover itself.  This is not elitism (the cohort still has
+# to earn a survivor slot next generation), nor a target-specific seed: it is
+# the only chance for selection to see whether two inherited modules work
+# together before a third operation changes them.
+RECOMBINATION_EVALUATION_FRACTION = 0.10
 MEAN_MUTATIONS = 4.0         # HOT-START mutation rate for simulated annealing:
                             # broad early exploration, cooled each generation by
                             # MUT_DECAY toward ~0 as the genes self-organise.
@@ -141,7 +145,6 @@ MUT_DECAY      = 0.997       # slow cooldown: hard recurrent tasks need late
                              # PER-GENERATION, so tie it to run length - for very
                              # long runs use alpha close to 1 (e.g. 0.9999); alpha = 1.0
                              # disables annealing.
-LOOP_WEIGHT    = 0.05          # max shaping bonus, as a fraction of (1 - score)
 # Population evaluation is embarrassingly parallel; the old min(cpu, 8) left
 # most cores idle on many-core machines (a 20-core box used 8). Scale with the
 # machine, leave 2 cores for the GUI/OS, and cap at 16 where returns flatten
@@ -156,42 +159,6 @@ FITNESS_CACHE_MAX = 200_000
 
 
 # -- evaluation -----------------------------------------------------------------
-
-def _loop_bonus(grid, routing, in_pos, out_pos):
-    """[0,1] structural credit for memory capability. Any cycle earns a little;
-    cycles that inputs can write and outputs can read (a latch's skeleton)
-    earn the rest, saturating at 4 relevant cycle nodes."""
-    prof = loop_profile(grid, routing, in_pos, out_pos)
-    if not prof['n_cycle']:
-        return 0.0
-    return 0.3 + 0.7 * min(1.0, prof['n_relevant'] / 4.0)
-
-
-def _loop_bonus_tri(grid, in_pos, out_pos):
-    """The tri-tile twin of _loop_bonus, measured on the expanded sub-node graph
-    (a tile's three circuits form loops the tile-level routing can't express)."""
-    from .io_placement import flat_inputs, flat_outputs
-    info = interpret_tri(grid, flat_inputs(in_pos))
-    edges = {n: set() for n in info['nodes']}
-    for v, (s1, s2, si) in info['sources'].items():
-        for u in (s1, s2, si):
-            if u is not None and u in edges:
-                edges[u].add(v)
-    cyc = cycle_nodes(edges)
-    if not cyc:
-        return 0.0
-    in_nodes = list(info['in_nodes'].values())
-    out_nodes = [node for tile in flat_outputs(out_pos)
-                 for node in info['tile_nodes'].get(tile, ())]
-    from_in = _reachable(edges, in_nodes)
-    rev = {c: set() for c in edges}
-    for u, vs in edges.items():
-        for v in vs:
-            rev[v].add(u)
-    to_out = _reachable(rev, out_nodes)
-    n_relevant = len(cyc & from_in & to_out)
-    return 0.3 + 0.7 * min(1.0, n_relevant / 4.0)
-
 
 def evaluate_nv_full(genome, target, *, _developed=None):
     """(scalar fitness, per-case score vector). Cases are the individual
@@ -223,19 +190,6 @@ def evaluate_nv_full(genome, target, *, _developed=None):
             genome, target, samples=samples, seed=seed, step=step)
         if tuned is not None:
             s, cases = tuned
-            # Keep the same loop-shaping objective used by ordinary temporal
-            # evaluation. prepare_net selects the same inherited readout that the
-            # local tuner freezes before testing delay nudges.
-            if (s < 1.0
-                    and not getattr(target, 'combinational_cases', ())):
-                prep = prepare_net(genome, target)
-                if prep is not None:
-                    grid, routing, in_pos, out_pos, _ = prep
-                    bonus = (_loop_bonus_tri(grid, in_pos, out_pos)
-                             if getattr(genome, 'arch', 'single') == 'tri3'
-                             else _loop_bonus(
-                                 grid, routing, in_pos, out_pos))
-                    s = s + (1.0 - s) * LOOP_WEIGHT * bonus
             # Lifetime timing plasticity re-tunes delays inside its own session,
             # so it owns the whole evaluation. Lifespan checkpoints would have to
             # re-run that session per stage; instead the juvenile slots inherit
@@ -268,14 +222,6 @@ def evaluate_nv_full(genome, target, *, _developed=None):
     if getattr(traces, 'overflow', False):
         return 0.0, (0.0,) * n_cases
     s, cases, _ = score_contract(traces, target)
-    # Feedback is useful scaffolding for memory/rhythm targets, but a periodic
-    # truth table is still a combinational task. Rewarding cycles there selects
-    # recurrent tangles that the requested function neither needs nor declares.
-    if s < 1.0 and not getattr(target, 'combinational_cases', ()):
-        bonus = (_loop_bonus_tri(grid, in_pos, out_pos)
-                 if getattr(genome, 'arch', 'single') == 'tri3'
-                 else _loop_bonus(grid, routing, in_pos, out_pos))
-        s = s + (1.0 - s) * LOOP_WEIGHT * bonus
     if lifespan:
         from .objectives import juvenile_scores
         cases = tuple(cases or ()) + juvenile_scores(
@@ -287,6 +233,58 @@ def evaluate_nv_full(genome, target, *, _developed=None):
 def evaluate_nv(genome, target):
     """Scalar fitness (back-compat wrapper around evaluate_nv_full)."""
     return evaluate_nv_full(genome, target)[0]
+
+
+def _output_module_scores(cases, target):
+    """Per-output behavior scores used only to retain interchangeable arms.
+
+    The executable contract still owns the reported score.  This extracts the
+    already-evaluated cells belonging to each output so a good Sum arm is not
+    discarded merely because Carry is still incomplete.  Static tables retain
+    their level-balanced view; event-only temporal targets have one scored cell
+    per ``(trial, role)`` in the order emitted by ``score_contract``.
+    """
+    base = tuple(float(value) for value in (cases or ()))
+    outputs = tuple(getattr(target, 'outputs', ()) or ())
+    roles = tuple(str(output.role) for output in outputs)
+    if len(roles) < 2:
+        return ()
+    if not getattr(target, 'temporal', False):
+        rows = tuple(getattr(target, 'cases', ()) or ())
+        if len(base) != len(rows) * len(roles):
+            return ()
+        scores = []
+        for output_index in range(len(roles)):
+            levels = {0: [], 1: []}
+            for row_index, (_inputs, expected) in enumerate(rows):
+                if len(expected) <= output_index:
+                    return ()
+                levels[int(bool(expected[output_index]))].append(
+                    base[row_index * len(roles) + output_index])
+            means = [sum(values) / len(values)
+                     for values in levels.values() if values]
+            scores.append(sum(means) / len(means) if means else 0.0)
+        return tuple(scores)
+
+    constraints = tuple(getattr(
+        getattr(target, 'contract', None), 'constraints', ()) or ())
+    if (len(constraints) != 1
+            or getattr(constraints[0], 'relation', '') != 'event_correspondence'):
+        return ()
+    by_role = {role: [] for role in roles}
+    case_index = 0
+    for trial in getattr(target, 'trials', ()):
+        for role in getattr(trial, 'expected', {}):
+            if case_index >= len(base):
+                return ()
+            if role in by_role:
+                by_role[role].append(base[case_index])
+            case_index += 1
+    if case_index == 0:
+        return ()
+    return tuple(
+        sum(by_role[role]) / len(by_role[role]) if by_role[role] else 0.0
+        for role in roles)
 
 
 def _evaluate_nv_selection_record(genome, target):
@@ -322,6 +320,7 @@ def _evaluate_nv_selection_record(genome, target):
         developed = (grid, strategy)
     fitness, cases = evaluate_nv_full(
         genome, target, _developed=developed)
+    output_scores = _output_module_scores(cases, target)
     total = target.n_inputs + len(target.outputs)
     juvenile, robust = escape_objectives(genome, target, 'nervous', cases)
     topology = structural_topology(
@@ -329,10 +328,10 @@ def _evaluate_nv_selection_record(genome, target):
     if io_strategy(target) not in (
             'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
         return (fitness, cases, (total, total), juvenile, robust,
-                topology, topology.score)
+                topology, topology.score, output_scores)
     progress = getattr(genome, '_io_binding_progress', (total, total))
     return (fitness, cases, progress, juvenile, robust,
-            topology, topology.score)
+            topology, topology.score, output_scores)
 
 
 def branched_signature(genome):
@@ -439,6 +438,8 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
             target.n_inputs + len(target.outputs),) * 2
         record_binding_progress(genome, progress)
         record_escape_objectives(genome, record)
+        genome._output_scores = (
+            tuple(record[7]) if len(record) > 7 else ())
     return [r[0] for r in out], [r[1] for r in out]
 
 
@@ -591,6 +592,14 @@ def _recombination_signature(genome):
             (int(patch.x), int(patch.y), int(patch.state))
             for patch in (getattr(genome, 'routing_patches', None) or ())),
     )
+
+
+def _recombination_environment(genome):
+    """Physical context that branched arms must share before they can mix."""
+    if not is_branched(genome):
+        return None
+    from .branched_ga import input_pads
+    return tuple(input_pads(genome))
 
 
 def _canonicalise(value, bits=_STATE_BITS, terminals=False):
@@ -940,6 +949,11 @@ def crossover_nv(pa, pb, io_placement=None):
     if arch_a != arch_b:
         raise ValueError('cannot crossover different tile architectures')
     if is_branched(pa) or is_branched(pb):
+        if not (is_branched(pa) and is_branched(pb)):
+            # Native chromosomes and output-rooted arms have no homologous
+            # unit.  Treat this as mutation-only reproduction rather than
+            # passing a native genome to the branched arm operator.
+            return clone_genome(pa), clone_genome(pb)
         # Branched recombination trades whole ARMS, and its operator returns one
         # child, so the reciprocal cross supplies the second. Tag matching does
         # not apply: an arm's homolog is the arm at the same chromosome and half.
@@ -1191,6 +1205,63 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
             ([cases[i] for i in keep] if cases is not None else None))
 
 
+def _append_role_module_candidates(children, population, fitnesses,
+                                   recombination):
+    """Keep and join measured output specialists in compatible pad cohorts."""
+    if (not population or not is_branched(population[0])
+            or len(getattr(population[0], 'outputs', ())) < 2):
+        return
+    from .branched_ga import assemble_role_modules, input_pads
+    roles = tuple(getattr(population[0], 'outputs', ()))
+    groups = {}
+    for index, genome in enumerate(population):
+        groups.setdefault(tuple(input_pads(genome)), []).append(index)
+
+    assemblies = []
+    if recombination:
+        for indices in groups.values():
+            donors, donor_scores = {}, []
+            for role_index, role in enumerate(roles):
+                eligible = [index for index in indices
+                            if len(getattr(population[index], '_output_scores', ()))
+                            > role_index]
+                if not eligible:
+                    break
+                best = max(eligible, key=lambda index: (
+                    population[index]._output_scores[role_index],
+                    rank_key(population[index], fitnesses[index])))
+                donors[int(role.branch_id)] = population[best]
+                donor_scores.append(population[best]._output_scores[role_index])
+            else:
+                if len(set(id(donor) for donor in donors.values())) > 1:
+                    base = max(indices, key=lambda index: rank_key(
+                        population[index], fitnesses[index]))
+                    assemblies.append(((min(donor_scores), sum(donor_scores)),
+                                       assemble_role_modules(
+                                           population[base], donors)))
+    if assemblies and len(children) < len(population):
+        children.append(max(assemblies, key=lambda item: item[0])[1])
+
+    # These retain already evaluated behavior; they neither change fitness nor
+    # prescribe a circuit. A specialist must survive until a later crossover
+    # has a chance to join it with a different role specialist.
+    seen = {genome_signature(genome) for genome in children}
+    for role_index, _role in enumerate(roles):
+        if len(children) >= len(population):
+            break
+        eligible = [index for index, genome in enumerate(population)
+                    if len(getattr(genome, '_output_scores', ())) > role_index]
+        if not eligible:
+            continue
+        best = max(eligible, key=lambda index: (
+            population[index]._output_scores[role_index],
+            rank_key(population[index], fitnesses[index])))
+        signature = genome_signature(population[best])
+        if signature not in seen:
+            children.append(clone_genome(population[best]))
+            seen.add(signature)
+
+
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, selection=None, ga_config=None,
                     chromosome_count=None, recombination=True,
@@ -1218,6 +1289,10 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     if mutation_limit is None:
         mutation_limit = (getattr(ga_config, 'mutation_limit', 8.0)
                           if ga_config is not None else 8.0)
+    recombination = (
+        recombination and
+        (getattr(ga_config, 'recombination_enabled', True)
+         if ga_config is not None else True))
     population_archs = {getattr(genome, 'arch', 'single')
                         for genome in population}
     if len(population_archs) > 1:
@@ -1343,6 +1418,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     and bool(getattr(
                         archive_parent, 'routing_patches', None))
                     and index < max(1, archive_count // 2))))
+    _append_role_module_candidates(new_pop, population, fitnesses,
+                                   recombination)
     # epsilon-lexicase (when selected) must stream over the WHOLE population; the elite-only
     # breeding pool would otherwise mask it whenever elites>0, so bypass the pool then.
     selection = ((SELECTION if ga_config is None else ga_config.selection)
@@ -1371,6 +1448,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     residual = order[n_elite:] if n_elite < pop else order
     recombination_signatures = [
         _recombination_signature(genome) for genome in population]
+    recombination_environments = [
+        _recombination_environment(genome) for genome in population]
 
     def parent():
         # A low-scoring specialist can carry the missing later-period behavior;
@@ -1396,6 +1475,21 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         if pop == 1:
             return population[0], population[0]
 
+        def mate_pool(first, candidates):
+            distinct = [
+                index for index in candidates
+                if recombination_signatures[index]
+                != recombination_signatures[first]]
+            pool = distinct or candidates
+            environment = recombination_environments[first]
+            if environment is not None:
+                compatible = [
+                    index for index in pool
+                    if recombination_environments[index] == environment]
+                if compatible:
+                    pool = compatible
+            return pool
+
         def choose(exclude=None):
             if use_lexicase:
                 # Lexicase must see every specialist. Restricting it to the
@@ -1412,29 +1506,17 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             return pick_index(candidates)
 
         first = choose()
+        candidates = [i for i in range(pop) if i != first]
+        parent_pool = mate_pool(first, candidates)
         if use_lexicase:
             from runtime.escape import complementary_parent_index
-            candidates = [i for i in range(pop) if i != first]
-            distinct = [
-                i for i in candidates
-                if recombination_signatures[i]
-                != recombination_signatures[first]]
             second = complementary_parent_index(
-                first, distinct or candidates, case_vecs, fitnesses,
+                first, parent_pool, case_vecs, fitnesses,
                 case_subset)
         else:
             second = choose(first)
-        if recombination_signatures[second] == recombination_signatures[first]:
-            # Different population slots can still be the same genotype.  If
-            # any genuinely different breeding material exists, use it; this is
-            # parent selection, not an after-the-fact child rejection loop.
-            distinct = [
-                i for i in range(pop)
-                if i != first
-                and recombination_signatures[i] != recombination_signatures[first]
-            ]
-            if distinct:
-                second = pick_index(distinct)
+            if second not in parent_pool:
+                second = pick_index(parent_pool)
         return population[first], population[second]
 
     # ``mean_mutations`` is None on the direct-API path, where mutate_nv falls
@@ -1495,6 +1577,29 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         for genome in new_pop:
             if not hasattr(genome, '_mut_rate'):
                 seed_mutation_rate(genome, adaptive_base, mutation_limit)
+
+    # A child whose crossover is always followed by several random edits cannot
+    # reveal whether the two parental modules were complementary.  Evaluate a
+    # small crossover-only cohort first; it remains ordinary offspring, so the
+    # next environmental selection can reject it just like any other child.
+    # Keeping this bounded preserves the mutation-led exploratory majority.
+    crossover_slots = min(
+        pop - len(new_pop),
+        max(1, int(round(pop * RECOMBINATION_EVALUATION_FRACTION))))
+    while recombination and pop > 1 and crossover_slots > 0:
+        pa, pb = parent_pair()
+        ca, cb = crossover_nv(pa, pb, io_placement=strategy)
+        if escape.self_adaptive_mutation:
+            from runtime.escape import inherit_mutation_rate
+            inherit_mutation_rate(ca, pa, pb, escape, adaptive_base,
+                                  mutation_limit)
+            inherit_mutation_rate(cb, pb, pa, escape, adaptive_base,
+                                  mutation_limit)
+        new_pop.append(ca)
+        crossover_slots -= 1
+        if crossover_slots > 0 and len(new_pop) < pop:
+            new_pop.append(cb)
+            crossover_slots -= 1
     while len(new_pop) < pop:
         pa, pb = parent_pair()
         ca, cb = (crossover_nv(pa, pb, io_placement=strategy)
@@ -1599,7 +1704,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
     strategy = io_strategy(target)
     if (selection is None
             and (not getattr(target, 'temporal', False)
-                 or getattr(target, 'combinational_cases', ()))):
+                 or getattr(target, 'combinational_cases', ())
+                 or getattr(target, 'temporal_logic_cases', ()))):
         selection = 'lexicase'
     if uses_port_chromosome(strategy) and n_chroms < 3:
         raise ValueError('chromosome-based I/O requires n_chroms >= 3')
@@ -1607,7 +1713,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         'terminal_nodes', 'tag_rank', 'wiring_chromosome',
         'spatial_chromosome')
     n_ports = target.n_inputs + len(target.outputs)
-    def make_genome():
+    def make_genome(input_genes=None):
         if strategy == 'fixed':
             # The live encoding: branched and output-rooted, exactly what the
             # desktop controller breeds. The two drive paths have drifted apart
@@ -1622,7 +1728,9 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                     n_chroms, max_telomere=ga_config.max_telomere,
                     n_inputs=target.n_inputs,
                     output_roles=tuple(terminal.role
-                                       for terminal in target.outputs)))
+                                       for terminal in target.outputs),
+                    input_genes=input_genes),
+                attempts=make_genome.developmental_seed_candidates)
         genome = random_hex_genome(
             n_chroms, arch=tile_arch,
             wiring_chromosome=(strategy == 'wiring_chromosome'),
@@ -1640,6 +1748,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                 grid_size=target.grid_size, iters=target.iters)
             seed_wiring_from_phenotype(genome, grid, target)
         return genome
+    if strategy == 'fixed':
+        make_genome.developmental_seed_candidates = 6
     cache       = LRUCache(FITNESS_CACHE_MAX)
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
     try:                                                       # (avoids per-gen respawn)
@@ -1651,8 +1761,23 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             raise ValueError('warm-start genomes must match n_chroms')
         if any(getattr(g, 'arch', 'single') != tile_arch for g in seeds):
             raise ValueError('warm-start genomes must match tile_arch')
-        population  = [clone_genome(g) for g in seeds]
-        population += [make_genome() for _ in range(pop - len(population))]
+        population = [clone_genome(g) for g in seeds]
+        if not population and strategy == 'fixed':
+            cohort_inputs = []
+            cohort_count = min(4, max(1, pop // 8))
+            for index in range(pop):
+                if index < cohort_count:
+                    genome = make_genome()
+                    cohort_inputs.append(list(genome.inputs))
+                else:
+                    genome = make_genome(
+                        cohort_inputs[(index - cohort_count) % cohort_count])
+                population.append(genome)
+            make_genome.developmental_seed_candidates = 2
+        else:
+            population += [make_genome() for _ in range(pop - len(population))]
+            if strategy == 'fixed':
+                make_genome.developmental_seed_candidates = 2
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)
         escape_state = build_escape_state(
             'nervous', ga_config, chromosome_count=n_chroms,
@@ -1697,7 +1822,14 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             parents = list(population)
             parent_fitnesses, parent_cases = fitnesses, cases
             rescue = ()
-            if (strategy == 'spatial_chromosome'
+            if (strategy == 'fixed'
+                    and best_fitness < 1.0
+                    and stagnation >= STRESS_PATIENCE):
+                from .branched_ga import plateau_rescue_candidates
+                rescue = plateau_rescue_candidates(
+                    best_genome, target, limit=min(48, max(1, pop // 2)),
+                    max_telomere=ga_config.max_telomere)
+            elif (strategy == 'spatial_chromosome'
                     and best_fitness < 1.0
                     and stagnation >= STRESS_PATIENCE):
                 from .io_placement import (

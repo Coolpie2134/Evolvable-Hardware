@@ -36,7 +36,7 @@ def prepare_functional_playback(genome, target):
     horizon = (
         _obs_len(target)
         if getattr(target, "temporal", False)
-        else functional_logic_horizon(genome)
+        else functional_logic_horizon(genome, grid=grid, inputs=inputs)
     )
     from .construction import develop_constructive
     owners = develop_constructive(genome, tuple(inputs)).owners

@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from substrates.lut.branched import (                              # noqa: E402
     DEPTH_ANY, EMPTY_CELL, OUT_CELL, PAD_CELL,
     BranchedLutChromosome, BranchedLutGenome, LutContextGene, LutControlGene,
-    LutOutputGene, catalogue, cell_distance, cell_sources,
+    LutIoChromosome, LutOutputGene, catalogue, cell_distance, cell_sources,
+    driven_roots,
     develop_branched_lut, neighbours, output_root_sites, square_ring,
     table_family, table_support)
 from substrates.lut.functions import FUNCTION_FAMILIES             # noqa: E402
@@ -99,7 +100,77 @@ def test_four_neighbours_are_the_square_lattice_not_the_honeycomb():
     around = neighbours((0, 0))
     assert set(around) == {'N', 'S', 'E', 'W'}
     assert len(set(around.values())) == 4
-    assert around['N'] != around['S'] and around['E'] != around['W']
+    assert around['N'] == (0, 1) and around['S'] == (0, -1)
+    assert around['E'] == (1, 0) and around['W'] == (-1, 0)
+
+
+def test_vertical_development_uses_the_same_north_as_the_lut_simulator():
+    """A root reading its physical north pad is structurally driven.
+
+    The LUT engines define north as y+1.  The branched encoding once used y-1,
+    so this exact one-cell buffer simulated correctly but development's own
+    liveness test called it disconnected and selected against it.
+    """
+    route_n = next(
+        table for _family, table in catalogue(('ROUTING',))
+        if table_support(table) == {'N'})
+    genome = BranchedLutGenome(
+        chromosomes=[BranchedLutChromosome(
+            genes=[LutContextGene(
+                1, self_in=OUT_CELL, self_out=(route_n, 0, 0, 0),
+                branch_id=1)],
+            controls=[LutControlGene(tolerance=0, telomere=2),
+                      LutControlGene()])],
+        # square_ring(1)[3] == (0, -1), immediately south of input pad 0.
+        io_chromosome=LutIoChromosome(outputs=[LutOutputGene(
+            role='Q', bearing=3, distance=1, branch_id=1)]),
+        families=('ROUTING',))
+    pads = ((0, 0),)
+    trace = develop_branched_lut(genome, pads)
+    roots = output_root_sites(genome, pads)
+    assert roots[1] == (0, -1)
+    assert driven_roots(trace.grid, pads, roots) == {1}
+
+
+def test_cohort_construction_reuses_pads_but_grows_fresh_arms():
+    """Compatible crossover needs several independently grown legal mates."""
+    from substrates.lut.branched_ga import (
+        input_pads, random_branched_lut_genome)
+
+    import random
+    random.seed(74)
+    founder = random_branched_lut_genome(2, 3, ('Sum', 'Carry'),
+                                         families=NAMED)
+    peer = random_branched_lut_genome(
+        2, 3, ('Sum', 'Carry'), families=NAMED,
+        input_genes=founder.inputs)
+
+    assert input_pads(peer) == input_pads(founder)
+    assert peer.inputs is not founder.inputs
+    assert all(a is not b for a, b in zip(peer.inputs, founder.inputs))
+
+
+def test_crossover_moves_an_output_root_with_its_arm():
+    from substrates.lut.branched_ga import (
+        crossover_branched_lut, random_branched_lut_genome)
+
+    import random
+    random.seed(76)
+    left = random_branched_lut_genome(2, 3, ('Sum', 'Carry'),
+                                      families=NAMED)
+    right = random_branched_lut_genome(
+        2, 3, ('Sum', 'Carry'), families=NAMED,
+        input_genes=left.inputs)
+    right.outputs[1].bearing = (left.outputs[1].bearing + 2) % 8
+    right.outputs[1].distance = 6
+    for seed in range(100):
+        random.seed(seed)
+        child = crossover_branched_lut(left, right)
+        if child.outputs[1].distance == 6:
+            assert child.outputs[1].bearing == right.outputs[1].bearing
+            break
+    else:
+        raise AssertionError('crossover never selected Carry arm')
 
 
 def test_an_arm_starts_only_at_its_genetic_output_root():
@@ -219,3 +290,23 @@ def test_lut_construction_is_reproducible_and_variation_is_safe():
         alive = sum(1 for genome in pool
                     if develop_branched_lut(genome, input_pads(genome)).grid)
         assert alive >= 6, alive
+
+
+def test_lut_crossover_keeps_an_arm_in_its_input_pad_environment():
+    import random
+    from substrates.lut.branched_ga import (
+        crossover_branched_lut, input_pads, random_branched_lut_genome)
+
+    random.seed(212)
+    left = random_branched_lut_genome(1, 2, ('Q',))
+    right = random_branched_lut_genome(1, 2, ('Q',))
+    for bearing in range(8):
+        right.inputs[0].distance = 6
+        right.inputs[0].bearing = bearing
+        if input_pads(right) != input_pads(left):
+            break
+    else:
+        raise AssertionError('could not construct distinct input layouts')
+
+    child = crossover_branched_lut(left, right)
+    assert child == left

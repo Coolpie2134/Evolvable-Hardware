@@ -83,7 +83,12 @@ PAD_STATE = -1
 OUT_STATE = -2
 
 #: Depth bands a rule may specialise to, and the value meaning "any depth".
-DEPTH_BANDS = 4
+#: Four bands collapsed every site beyond depth three into one address.  The
+#: real Full Adder reaches depth ten, where repeated relay contexts are normal;
+#: those rules could not distinguish their intended cells and either overgrew
+#: or became unreachable. Sixteen covers the placement ceiling's useful limb
+#: depths while remaining a small mutation alphabet.
+DEPTH_BANDS = 16
 DEPTH_ANY = -1
 
 #: Hard ceiling on body size, mirroring FNV. Arms also stop when their own
@@ -521,16 +526,19 @@ def arm_reach(cell, label, owners, depths):
 
 
 def required_output_directions(cell, label, depth, owners, depths):
-    """Source-local ports that would connect this bud toward its arm root.
+    """Source-local ports that connect this bud to its existing arm.
 
-    A part drawn for this site must drive at least one of these, or the limb it
-    joins cannot hear it. Gene PROPOSAL uses this so a fresh rule tends to name
-    a part that can fire, exactly as FNV draws components by their outputs.
+    A part drawn for this site must drive at least one already-built same-arm
+    neighbour, or the limb it joins cannot hear it.  Requiring that neighbour
+    to have a strictly smaller developmental depth quietly reinstated FNV's
+    tree restriction: a useful lateral return in a feedback loop was rejected
+    even though its consumer was already present.  Nervous-net state is
+    topological, so equal/deeper return edges are part of the expressible
+    substrate rather than decorations.
     """
     return tuple(sorted({
         _direction_toward(cell, parent)
-        for parent in _upstream_parents(
-            cell, label, owners, depths, before_depth=int(depth))}))
+        for parent in _upstream_parents(cell, label, owners, depths)}))
 
 
 def drives_toward_root(cell, state, label, depth, grid, owners, depths):
@@ -556,9 +564,9 @@ def drives_toward_root(cell, state, label, depth, grid, owners, depths):
     a memoryless pass-through gate. Forbidding cycles forbids state.
 
     What survives from FNV is the part that earned its place: every cell must
-    still feed the limb it joined. This is polarity, not routing - the local
-    rule still chooses the circuit, and nothing here steers growth toward any
-    particular pad.
+    still feed an already-built member of the limb it joined. This is polarity,
+    not routing - the local rule still chooses the circuit, and nothing here
+    steers growth toward any particular pad.
     """
     if int(depth) <= 0:
         return True                      # the root itself answers to nobody
@@ -754,7 +762,7 @@ def develop_branched_hex(genome, seeds, *, snapshots=False):
                          snapshots=frames, taus=taus)
 
 
-def firing_nodes(grid, pads):
+def firing_nodes(grid, pads, sink_nodes=None):
     """Sub-nodes that can ever fire, from the pads alone. Target-blind.
 
     A least-fixed-point over the tri sub-node graph: a pad's IN node fires; any
@@ -772,6 +780,9 @@ def firing_nodes(grid, pads):
     from .tritile import interpret_tri
     info = interpret_tri(grid, pads)
     nodes, sources = info['nodes'], info['sources']
+    sink_subnodes = {
+        node for tile in (sink_nodes or ())
+        for node in info['tile_nodes'].get(tuple(tile), ())}
     firing = set(info['in_nodes'].values())
     changed = True
     while changed:
@@ -780,8 +791,10 @@ def firing_nodes(grid, pads):
             if node in firing:
                 continue
             feed_a, feed_b, _feed_i = sources.get(node, (None, None, None))
-            live_a = feed_a is not None and feed_a in firing
-            live_b = feed_b is not None and feed_b in firing
+            live_a = (feed_a is not None and feed_a not in sink_subnodes
+                      and feed_a in firing)
+            live_b = (feed_b is not None and feed_b not in sink_subnodes
+                      and feed_b in firing)
             if excite_a is not None and excite_b is not None:
                 # Two named excitatory inputs. A coincidence circuit needs both;
                 # its OR twin needs either. A config naming the same direction
@@ -802,7 +815,7 @@ def driven_roots(grid, pads, roots):
     The readout is a wired-OR of a tile's three output wires, so a root counts
     as driven when ANY of its channels can fire.
     """
-    firing = firing_nodes(grid, pads)
+    firing = firing_nodes(grid, pads, sink_nodes=set(roots.values()))
     driven = set()
     for label, cell in roots.items():
         if cell in grid and any(
@@ -810,6 +823,42 @@ def driven_roots(grid, pads, roots):
                 for direction in TRI_DIRS):
             driven.add(label)
     return driven
+
+
+def root_source_counts(grid, pads, roots):
+    """Distinct logical pads whose wires can influence each output root.
+
+    This is dependency reachability, so inhibitory and coincidence inputs both
+    count even when one source alone cannot make an AND node fire. Declared
+    output roots are physical sinks and therefore never relay that influence
+    into another role.
+    """
+    from .tritile import interpret_tri
+    info = interpret_tri(grid, pads)
+    sink_subnodes = {
+        node for tile in roots.values()
+        for node in info['tile_nodes'].get(tuple(tile), ())}
+    counts = {label: 0 for label in roots}
+    for pad in pads:
+        source = info['in_nodes'].get(tuple(pad))
+        if source is None:
+            continue
+        live = {source}
+        changed = True
+        while changed:
+            changed = False
+            for node, feeders in info['sources'].items():
+                if node in live:
+                    continue
+                if any(feeder is not None and feeder not in sink_subnodes
+                       and feeder in live for feeder in feeders):
+                    live.add(node)
+                    changed = True
+        for label, tile in roots.items():
+            if any(node in live for node in info['tile_nodes'].get(
+                    tuple(tile), ())):
+                counts[label] += 1
+    return counts
 
 
 def materialise_pads(grid, pads):

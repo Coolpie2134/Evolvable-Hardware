@@ -22,9 +22,12 @@ from .genome import (
 
 N_WORKERS = max(1, min((os.cpu_count() or 2) - 2, 16))
 FITNESS_CACHE_MAX = 200_000
-MORPHOLOGY_PARENT_RATE = 0.40
 MORPHOLOGY_ELITE_FRACTION = 0.10
 MODULE_ASSEMBLY_FRACTION = 0.04
+# A recombined child must be evaluated before mutation can tell selection
+# whether its inherited output modules are actually compatible.  This stays
+# small so the normal mutation/search stream remains the majority.
+RECOMBINATION_EVALUATION_FRACTION = 0.10
 FUNCTION_EXPLORER_FRACTION = 0.35
 FUNCTION_EXPLORER_WARM_FRACTION = 0.08
 FUNCTION_EXPLORER_PATIENCE = 4
@@ -49,6 +52,33 @@ def genome_signature(genome):
 def genome_morphology_signature(genome):
     from .construction_ga import branched_morphology_signature
     return branched_morphology_signature(genome)
+
+
+def _recombination_mate_pool(population, first, candidates, signatures,
+                             morphology_signatures):
+    """Return mates whose inherited arms share ``first``'s pad environment.
+
+    An FNV arm is a developmental program anchored to physical input pads.  A
+    morphology match alone is not enough: two otherwise identical branch trees
+    grown against different pad positions do not have interchangeable arms.
+    Prefer the same-layout morphology match, then any same-layout mate.  Only
+    fall back to another environment when the population has no compatible
+    genome at all; ``crossover_branched`` turns that fallback into a clone
+    rather than grafting an arm into the wrong environment.
+    """
+    distinct = [
+        index for index in candidates
+        if signatures[index] != signatures[first]]
+    pool = distinct or list(candidates)
+    first_layout = tuple(getattr(population[first], "input_layout", ()) or ())
+    compatible = [
+        index for index in pool
+        if tuple(getattr(population[index], "input_layout", ()) or ())
+        == first_layout]
+    same_morphology = [
+        index for index in compatible
+        if morphology_signatures[index] == morphology_signatures[first]]
+    return same_morphology or compatible or pool
 
 
 def _topology_tuple(topology):
@@ -107,7 +137,13 @@ def select_developmental_seed(make_genome, attempts=DEVELOPMENTAL_SEED_CANDIDATE
     """Choose the richest of a few random ontogenic starts, target-blindly."""
     from .construction import grow_functional
     from .evaluation import functional_topology, logic_morphology_capacity
-    candidates = [make_genome() for _ in range(max(1, int(attempts)))]
+    count = max(1, int(attempts))
+    # The default is one candidate.  Scoring it would only re-grow the very
+    # same organism before returning it, so skip that target-blind duplicate
+    # work without changing the selected genome or random-number stream.
+    if count == 1:
+        return make_genome()
+    candidates = [make_genome() for _ in range(count)]
 
     def key(genome):
         grid = grow_functional(genome, genome.input_layout)
@@ -774,17 +810,6 @@ def next_population(population, fitnesses, make_genome=None,
         children.append(make_genome())
 
     def parent_index():
-        # A small morphology niche keeps source cones that have actually begun
-        # to meet. Without it, Full Adder populations grew hundreds of nodes
-        # yet repeatedly had zero multi-input convergence, making their best
-        # possible behavior a one-input approximation. This is target-blind:
-        # the same reachable convergence/feedback key is used for every FNV
-        # contract and never changes reported fitness.
-        if random.random() < MORPHOLOGY_PARENT_RATE:
-            sample = random.sample(
-                range(count), min(int(tournament_size), count))
-            return max(sample, key=lambda index: _topology_rank(
-                population[index]))
         if selection == "lexicase":
             selected = _lexicase(population, case_vecs)
             if selected is not None:
@@ -805,23 +830,8 @@ def next_population(population, fitnesses, make_genome=None,
         if count == 1:
             return population[first], population[first]
         candidates = [index for index in range(count) if index != first]
-        distinct = [index for index in candidates
-                    if signatures[index] != signatures[first]]
-        same_morphology = [
-            index for index in distinct
-            if morphology_signatures[index] == morphology_signatures[first]]
-        # Inputs are the shared environment of every output module. Prefer a
-        # matching pad geometry when available; each output root itself travels
-        # atomically with its arm during crossover.
-        first_layout = getattr(population[first], "input_layout", None)
-        compatible = [
-            index for index in (distinct or candidates)
-            if getattr(population[index], "input_layout", None) == first_layout
-        ]
-        # Function variants of one body plan are the highest-value mate: their
-        # intramodule crossover can combine gate alleles without rebuilding a
-        # single wire. Structurally different role modules remain the fallback.
-        parent_pool = same_morphology or compatible or distinct or candidates
+        parent_pool = _recombination_mate_pool(
+            population, first, candidates, signatures, morphology_signatures)
         if selection == "lexicase" and case_vecs:
             from runtime.escape import complementary_parent_index
             second = complementary_parent_index(
@@ -832,6 +842,23 @@ def next_population(population, fitnesses, make_genome=None,
                     or signatures[second] == signatures[first]):
                 second = random.choice(parent_pool)
         return population[first], population[second]
+
+    # The ordinary path below immediately mutates every crossover.  Keep a
+    # bounded cohort intact long enough to measure the recombination itself;
+    # these are not privileged survivors and are filtered by the same next
+    # generation selection as every other child.
+    crossover_slots = min(
+        max(0, count - len(children)),
+        max(1, int(round(count * RECOMBINATION_EVALUATION_FRACTION))))
+    while recombination and count > 1 and crossover_slots > 0:
+        left, right = parent_pair()
+        child = crossover_functional(left, right, enabled)
+        if escape is not None and escape.self_adaptive_mutation:
+            from runtime.escape import inherit_mutation_rate
+            inherit_mutation_rate(
+                child, left, right, escape, mean, mutation_limit)
+        children.append(child)
+        crossover_slots -= 1
 
     while len(children) < count:
         left, right = parent_pair()

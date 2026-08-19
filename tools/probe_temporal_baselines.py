@@ -63,11 +63,16 @@ def _behaviours(streams):
 def _as_traces(target, per_trial):
     """Wrap per-trial 0/1 sequences as the observation object scorers expect.
 
+    EVERY role gets the series, not just the first. Scoring only
+    ``outputs[0]`` and leaving the rest absent made a multi-output target's own
+    ORACLE score 0.7398 and 0.5333 - the probe reporting the perfect answer as
+    wrong, which looks exactly like a broken target and is not.
+
     Events and intervals are derived from the same sequence so event-relation
     and level-relation contracts both see a consistent circuit: a run of 1s is
     one held interval, and its leading edge is one point event.
     """
-    role = target.outputs[0].role
+    roles = [terminal.role for terminal in target.outputs]
     events, intervals = [], []
     for series in per_trial:
         rises, spans, start = [], [], None
@@ -82,9 +87,39 @@ def _as_traces(target, per_trial):
             spans.append((float(start), float(len(series))))
         events.append(rises)
         intervals.append(spans)
-    return TemporalTraces({role: list(per_trial)},
-                          events={role: events},
-                          intervals={role: intervals})
+    return TemporalTraces({role: list(per_trial) for role in roles},
+                          events={role: events for role in roles},
+                          intervals={role: intervals for role in roles})
+
+
+def _oracle_traces(target):
+    """The target's OWN expected output, per role - the perfect-circuit control."""
+    roles = [terminal.role for terminal in target.outputs]
+    series = {role: [] for role in roles}
+    for trial in target.trials:
+        for role in roles:
+            expected = trial.expected.get(role, [])
+            series[role].append(
+                [0 if value is None else int(value) for value in expected])
+    events, intervals = {}, {}
+    for role in roles:
+        role_events, role_spans = [], []
+        for run in series[role]:
+            rises, spans, start = [], [], None
+            for tick, value in enumerate(run):
+                if value and start is None:
+                    start = tick
+                    rises.append(float(tick))
+                elif not value and start is not None:
+                    spans.append((float(start), float(tick)))
+                    start = None
+            if start is not None:
+                spans.append((float(start), float(len(run))))
+            role_events.append(rises)
+            role_spans.append(spans)
+        events[role] = role_events
+        intervals[role] = role_spans
+    return TemporalTraces(series, events=events, intervals=intervals)
 
 
 def probe(target):
@@ -99,21 +134,16 @@ def probe(target):
         for name in names:
             collected[name].append(behaviours[name])
 
-    # The target's own oracle output, as a sanity check that a PERFECT circuit
-    # scores 1.0 through this same synthetic path. If it does not, the probe is
-    # wrong, not the target.
-    role = target.outputs[0].role
-    perfect = []
-    for trial in target.trials:
-        expected = trial.expected[role]
-        perfect.append([0 if v is None else int(v) for v in expected])
-    collected['ORACLE (perfect)'] = perfect
-
     rows = []
     for name, per_trial in collected.items():
         score, _cases, _align = score_contract(_as_traces(target, per_trial),
                                                target)
         rows.append((name, score))
+    # The target's own oracle output, as a sanity check that a PERFECT circuit
+    # scores 1.0 through this same path. If it does not, the probe is wrong,
+    # not the target.
+    score, _cases, _align = score_contract(_oracle_traces(target), target)
+    rows.append(('ORACLE (perfect)', score))
     rows.sort(key=lambda row: -row[1])
     return rows
 

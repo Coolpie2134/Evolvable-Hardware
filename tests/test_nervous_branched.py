@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from substrates.nervous.branched import (                          # noqa: E402
     DEPTH_ANY, EMPTY_STATE, OUT_STATE, PAD_STATE,
     BranchedHexChromosome, BranchedHexGenome, HexContextGene, HexControlGene,
-    HexOutputGene, bearing_cell, develop_branched_hex, output_root_sites,
+    HexOutputGene, IoChromosome, bearing_cell, develop_branched_hex, output_root_sites,
     routing_interface, routing_sources, state_distance)
 from substrates.nervous.hexgrid import ROUTING_HEX, hex_dirs       # noqa: E402
 
@@ -27,8 +27,9 @@ def _genome(genes, tolerance=3, telomere=12, bearing=0, distance=2):
             genes=list(genes),
             controls=[HexControlGene(tolerance=tolerance, telomere=telomere),
                       HexControlGene()])],
-        outputs=[HexOutputGene(role='Q', bearing=bearing, distance=distance,
-                               branch_id=1)])
+        io_chromosome=IoChromosome(outputs=[
+            HexOutputGene(role='Q', bearing=bearing, distance=distance,
+                          branch_id=1)]))
 
 
 # -- substrate mapping ----------------------------------------------------------
@@ -58,8 +59,10 @@ def test_tolerance_measures_circuits_not_integers():
     would let a tolerant rule wander across unrelated circuits.
     """
     assert state_distance(15, 15) == 0
-    assert state_distance(1, 17) == 1        # same source, AND vs OR
-    assert state_distance(15, 16) == 4       # adjacent integers, unrelated
+    # Operation is a mutable function on the same physical interface, so it
+    # costs no context distance; rewiring the interface does.
+    assert state_distance(1, 17) == 0        # same source, AND vs OR
+    assert state_distance(15, 16) == 3       # adjacent integers, unrelated
     assert state_distance(1, 17) < state_distance(15, 16)
     # and it is symmetric, or the budget would depend on match direction
     for a, b in ((1, 5), (15, 16), (0, 31), (7, 23)):
@@ -84,13 +87,51 @@ def test_roots_use_ring_geometry_not_a_repeated_direction():
 def test_roots_never_land_on_a_pad_or_on_each_other():
     genome = BranchedHexGenome(
         chromosomes=[BranchedHexChromosome(), BranchedHexChromosome()],
-        outputs=[HexOutputGene(role='A', bearing=0, distance=1, branch_id=1),
-                 HexOutputGene(role='B', bearing=0, distance=1, branch_id=2)])
+        io_chromosome=IoChromosome(outputs=[
+            HexOutputGene(role='A', bearing=0, distance=1, branch_id=1),
+            HexOutputGene(role='B', bearing=0, distance=1, branch_id=2)]))
     pads = [(0, 0), (-1, 0)]
     roots = output_root_sites(genome, pads)
     assert len(roots) == 2
     assert len(set(roots.values())) == 2
     assert not set(roots.values()).intersection(pads)
+
+
+def test_cohort_construction_reuses_pads_but_grows_fresh_arms():
+    """Compatible crossover needs several independently grown legal mates."""
+    from substrates.nervous.branched_ga import (
+        input_pads, random_branched_hex_genome)
+
+    import random
+    random.seed(73)
+    founder = random_branched_hex_genome(2, 3, ('Sum', 'Carry'))
+    peer = random_branched_hex_genome(
+        2, 3, ('Sum', 'Carry'), input_genes=founder.inputs)
+
+    assert input_pads(peer) == input_pads(founder)
+    assert peer.inputs is not founder.inputs
+    assert all(a is not b for a, b in zip(peer.inputs, founder.inputs))
+
+
+def test_crossover_moves_an_output_root_with_its_arm():
+    from substrates.nervous.branched_ga import (
+        crossover_branched_hex, random_branched_hex_genome)
+
+    import random
+    random.seed(75)
+    left = random_branched_hex_genome(2, 3, ('Sum', 'Carry'))
+    right = random_branched_hex_genome(
+        2, 3, ('Sum', 'Carry'), input_genes=left.inputs)
+    right.outputs[1].bearing = (left.outputs[1].bearing + 2) % 6
+    right.outputs[1].distance = 6
+    for seed in range(100):
+        random.seed(seed)
+        child = crossover_branched_hex(left, right)
+        if child.outputs[1].distance == 6:
+            assert child.outputs[1].bearing == right.outputs[1].bearing
+            break
+    else:
+        raise AssertionError('crossover never selected Carry arm')
 
 
 # -- the four mechanisms --------------------------------------------------------
@@ -315,6 +356,26 @@ def test_crossover_trades_whole_arms():
     assert develop_branched_hex(child, input_pads(child)) is not None
 
 
+def test_crossover_keeps_an_arm_in_its_input_pad_environment():
+    import random
+    from substrates.nervous.branched_ga import (
+        crossover_branched_hex, input_pads, random_branched_hex_genome)
+
+    random.seed(211)
+    left = random_branched_hex_genome(1, 2, ('Q',))
+    right = random_branched_hex_genome(1, 2, ('Q',))
+    for bearing in range(6):
+        right.inputs[0].distance = 6
+        right.inputs[0].bearing = bearing
+        if input_pads(right) != input_pads(left):
+            break
+    else:
+        raise AssertionError('could not construct distinct input layouts')
+
+    child = crossover_branched_hex(left, right)
+    assert child == left
+
+
 def test_a_grown_body_is_directly_simulable_with_genome_derived_io():
     """The point of output rooting: I/O comes from the genome, not from probes
     fitted after growth."""
@@ -353,6 +414,7 @@ def test_an_organism_missing_a_root_is_rejected_not_patched():
     roles = tuple(terminal.role for terminal in target.outputs)
     barren = BranchedHexGenome(
         chromosomes=[BranchedHexChromosome()],
-        outputs=[HexOutputGene(role=roles[0], bearing=0, distance=2,
-                               branch_id=1)])
+        io_chromosome=IoChromosome(outputs=[
+            HexOutputGene(role=roles[0], bearing=0, distance=2,
+                          branch_id=1)]))
     assert prepare_branched_hex(barren, target) is None

@@ -57,6 +57,7 @@ def _certification_permits_diversity(target, certification):
         and bool(getattr(target, 'cases', ())))
     if (oracle_spec_for(target) is None
             and not getattr(target, 'combinational_cases', ())
+            and not getattr(target, 'temporal_logic_cases', ())
             and not static_logic):
         return True
     verdict = str((certification or {}).get('verdict') or '')
@@ -243,7 +244,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
 
     if backend == 'nervous':
         from substrates.nervous.branched_ga import (
-            random_branched_hex_genome, select_developmental_seed)
+            plateau_rescue_candidates, random_branched_hex_genome,
+            select_developmental_seed)
         from substrates.nervous.ga import (eval_batch_cases, next_population, diversify,
                                consolidate_population,
                                adaptive_mutation_rate, rank_key)
@@ -256,7 +258,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         evolve_io = False
         cache = LRUCache(config.ga.cache_size)
         pool = ProcessPoolExecutor(max_workers=workers)
-        def make_genome():
+        def make_genome(input_genes=None):
             # Branched, output-rooted development is the nervous encoding now
             # (substrates/nervous/branched.py). Arms start at genetic output
             # roots and grow backward to the evolved input pads, so the genome
@@ -270,13 +272,17 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     chromosome_count, max_telomere=config.ga.max_telomere,
                     n_inputs=target.n_inputs,
                     output_roles=tuple(terminal.role
-                                       for terminal in target.outputs)))
+                                       for terminal in target.outputs),
+                    input_genes=input_genes),
+                attempts=make_genome.developmental_seed_candidates)
+        make_genome.developmental_seed_candidates = 6
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         selection_mode = (
             'lexicase'
             if (not getattr(target, 'temporal', False)
-                or getattr(target, 'combinational_cases', ()))
+                or getattr(target, 'combinational_cases', ())
+                or getattr(target, 'temporal_logic_cases', ()))
             else config.ga.selection)
         step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
@@ -288,6 +294,10 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
+        plateau_rescue_fn = lambda champion, limit: \
+            plateau_rescue_candidates(
+                champion, target, limit=limit,
+                max_telomere=config.ga.max_telomere)
         # Resolve the delay-mutation toggle once so diversification mutates
         # under exactly the same operator set as the main GA loop.
         evolve_delay = config.ga.timing_mutations()
@@ -336,7 +346,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         selection_mode = (
             'lexicase'
             if (not getattr(target, 'temporal', False)
-                or getattr(target, 'combinational_cases', ()))
+                or getattr(target, 'combinational_cases', ())
+                or getattr(target, 'temporal_logic_cases', ()))
             else config.ga.selection)
         step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: \
             next_population(
@@ -397,10 +408,11 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         selection_ga = (
             dataclasses.replace(config.ga, selection='lexicase')
             if (not getattr(target, 'temporal', False)
-                or getattr(target, 'combinational_cases', ()))
+                or getattr(target, 'combinational_cases', ())
+                or getattr(target, 'temporal_logic_cases', ()))
             else config.ga)
         pool = ProcessPoolExecutor(max_workers=workers)
-        def make_genome():
+        def make_genome(input_genes=None):
             # Branched, output-rooted development is the LUT encoding now
             # (substrates/lut/branched.py): arms start at genetic output roots
             # and grow backward to the evolved input pads, installing named
@@ -414,7 +426,9 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                         n_inputs=target.n_inputs,
                         output_roles=tuple(terminal.role
                                            for terminal in target.outputs),
-                        families=function_families))
+                        families=function_families,
+                        input_genes=input_genes),
+                    attempts=make_genome.developmental_seed_candidates)
             genome = constrain_genome_functions(
                 make_seed_genome(chromosome_count), function_families)
             for chromosome in genome.chromosomes:
@@ -446,6 +460,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 seed_wiring_from_phenotype(
                     genome, grid, target, tags=tags)
             return genome
+        make_genome.developmental_seed_candidates = 6
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_population(
@@ -635,10 +650,48 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             # plain comprehension ignored Stop until the whole population was
             # built (the "stop still grows a generation for LUTs" lag).
             population = []
-            for _ in range(pop):
+            if hasattr(make_genome, 'developmental_seed_candidates'):
+                make_genome.developmental_seed_candidates = 6
+            # Arms are only safe to recombine when they grew against the same
+            # concrete source pads. Independent random starts almost never
+            # meet that condition, so guarded crossover had become a clone
+            # followed by mutation. A few cohorts retain layout exploration,
+            # but give every arm several compatible potential mates.
+            cohort_inputs = []
+            cohort_count = (
+                min(4, max(1, pop // 8))
+                if backend in ('nervous', 'lut') else 0)
+            for index in range(pop):
                 if stop_event.is_set():
                     raise EvolutionCancelled
-                population.append(make_genome())
+                if not cohort_count:
+                    genome = make_genome()
+                elif index < cohort_count:
+                    genome = make_genome()
+                    cohort_inputs.append(list(getattr(genome, 'inputs', ())))
+                else:
+                    genome = make_genome(
+                        cohort_inputs[(index - cohort_count) % cohort_count])
+                population.append(genome)
+            # Deterministic physical witnesses belong in the initial genetic
+            # repertoire, not behind a long stagnation timer.  The backend
+            # compiler returns only ordinary genomes that it has already grown
+            # and scored at exactly 1.0; unsupported targets return nothing.
+            # Seeding one slot makes short runs reproducible and avoids paying
+            # dozens of generations before admitting a known reachable motif.
+            if (backend in ('nervous', 'lut')
+                    and plateau_rescue_fn is not None and population):
+                witnesses = plateau_rescue_fn(population[0], 1)
+                if witnesses:
+                    population[-1] = witnesses[0]
+            # Initial cohorts pay for the strongest target-blind connectivity
+            # filter. Immigrants exist to inject diversity every generation;
+            # rebuilding up to six complete organisms for each one dominated
+            # LUT wall time and selected that diversity back toward the same
+            # morphology. Two candidates still reject most inert starts while
+            # cutting the recurring construction bill by roughly two thirds.
+            if hasattr(make_genome, 'developmental_seed_candidates'):
+                make_genome.developmental_seed_candidates = 2
             validate_population(population)
             fitnesses, cases = evaluate(
                 population, 'Evaluating initial population', try_i, 0)

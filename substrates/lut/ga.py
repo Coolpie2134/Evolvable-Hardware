@@ -34,7 +34,7 @@ from .functions import (
     normalise_function_families, project_function_table, unrestricted_only,
 )
 from .lut import SEED_LUT, grow_lut, grow_lut_tracked
-from .pulse import AsyncLutSim
+from .pulse import AsyncLutSim, TICK
 
 
 def is_branched(genome):
@@ -118,6 +118,10 @@ ELITE_COUNT    = None        # exact elite count (GUI override); None = use ELIT
 IMMIGRANT_FRAC = 0.08
 TOURNAMENT_K   = 4
 EXPLORATION_PARENT_FRAC = 0.30
+# Let a small cohort prove the inherited crossover before the normal mutation
+# transaction changes it.  These are evaluated offspring, not preserved elites:
+# they still survive only if their declared behavior earns a place next round.
+RECOMBINATION_EVALUATION_FRACTION = 0.10
 MEAN_MUTATIONS = 4.0         # hot-start rate for annealing (see substrates.nervous.ga)
 MUT_DECAY      = 0.997       # slow cooldown: 4.0 -> ~0.89 by gen 500
 N_WORKERS      = max(1, min((os.cpu_count() or 2) - 2, 16))  # see substrates.nervous.ga
@@ -298,7 +302,8 @@ def place_outputs_by_trace(grid, in_pos, ttarget, source_nodes=None,
     return out_pos, traces
 
 
-def trace_fixed_outputs(grid, in_pos, out_pos, ttarget, source_nodes=None):
+def trace_fixed_outputs(grid, in_pos, out_pos, ttarget, source_nodes=None,
+                        sink_nodes=None):
     """Run LUT trials at pre-selected output cells without validation search."""
     from substrates.nervous.io_placement import (output_groups, flat_outputs,
                                      merge_intervals)
@@ -307,13 +312,78 @@ def trace_fixed_outputs(grid, in_pos, out_pos, ttarget, source_nodes=None):
         return None
     need_samples = needs_samples(ttarget)
     watch = sorted(set(flat_outputs(out_pos)))
+    # Periodic truth tables are independent, integer-lattice trials over one
+    # immutable topology.  The ordinary path below rebuilt/reset the simulator
+    # and executed one NumPy grid update per tick *per trial*.  Put trials on a
+    # leading batch axis instead: the same recurrence is already equivalence-
+    # tested in AsyncLutSim, and Full Adder has four trials to amortise at once.
+    can_batch = (
+        bool(getattr(ttarget, 'combinational_cases', ()))
+        and 'combinational_level' in contract_relations(ttarget)
+        and all(getattr(trial, 'input_events', None) is None
+                for trial in ttarget.trials))
+    if can_batch:
+        import numpy as np
+        flat_pos, lanes = _expand_input_lanes(in_pos)
+        obs = _obs_len(ttarget)
+        values = np.zeros(
+            (len(ttarget.trials), obs, len(flat_pos)), dtype=np.uint8)
+        for trial_index, trial in enumerate(ttarget.trials):
+            count = min(obs, len(trial.streams))
+            if count:
+                source = np.asarray(trial.streams[:count], dtype=np.uint8)
+                for attachment, lane in enumerate(lanes):
+                    if lane < source.shape[1]:
+                        values[trial_index, :count, attachment] = source[:, lane]
+        if source_nodes is None:
+            from substrates.nervous.io_placement import terminal_node_sets
+            terminal_inputs, terminal_outputs = terminal_node_sets(
+                ttarget, in_pos, {'watch': watch})
+        else:
+            terminal_inputs = set(source_nodes)
+            terminal_outputs = set(sink_nodes or ())
+        sim = AsyncLutSim(
+            grid, config=getattr(ttarget, 'lut_config', None),
+            input_nodes=terminal_inputs, output_nodes=terminal_outputs)
+        if sim.config.delay == TICK:
+            levels = sim.run_bits_batch_lattice(values, flat_pos)
+            traces = TemporalTraces(overflow=False)
+            traces.hold_tol = 0
+
+            def intervals_of(bits):
+                spans, start = [], None
+                for tick, active in enumerate(bits):
+                    if active and start is None:
+                        start = tick
+                    elif not active and start is not None:
+                        spans.append((start * TICK, tick * TICK))
+                        start = None
+                if start is not None:
+                    # The event engine reports a level that never fell as an
+                    # open-ended physical interval. Preserve that observable;
+                    # scoring clips it to each finite read window.
+                    spans.append((start * TICK, float('inf')))
+                return spans
+
+            for role, cells in groups.items():
+                columns = [sim._cidx[cell] for cell in cells]
+                role_bits = levels[:, :, columns].max(axis=2)
+                traces[role] = (
+                    [row.tolist() for row in role_bits]
+                    if need_samples else [[] for _row in role_bits])
+                traces.intervals[role] = [
+                    intervals_of(row) for row in role_bits]
+                traces.events[role] = [
+                    [start for start, _end in spans]
+                    for spans in traces.intervals[role]]
+            return traces
     if source_nodes is None:
         sim, trial_B, _, trial_intervals, overflow = _run_lut_trials(
             grid, in_pos, ttarget, watch)
     else:
         sim, trial_B, _, trial_intervals, overflow = _run_lut_trials(
             grid, in_pos, ttarget, watch, source_nodes=source_nodes,
-            sink_nodes=set())
+            sink_nodes=set(sink_nodes or ()))
     traces = TemporalTraces(overflow=overflow)
     traces.hold_tol = 0                        # LUT holds strictly (see place_outputs_by_trace)
     for role, cells in groups.items():
@@ -1115,7 +1185,7 @@ def lut_truth_table(genome, target):
     return '\n'.join(lines)
 
 
-def evaluate_lut_full(genome, target):
+def evaluate_lut_full(genome, target, _return_prepared=False):
     """(scalar fitness, per-case vector) - cases are the units epsilon-lexicase
     streams over. Static truth tables retain one case per row/output check.
 
@@ -1123,7 +1193,8 @@ def evaluate_lut_full(genome, target):
     developmental checkpoint; the scalar stays the ADULT organism's score (see
     substrates/nervous/objectives.py)."""
     if not getattr(target, 'temporal', False):
-        return score_lut_combinational_full(genome, target)
+        result = score_lut_combinational_full(genome, target)
+        return result + (None,) if _return_prepared else result
     from substrates.nervous.objectives import (
         grown_snapshots, juvenile_scores, prepare_grid, total_case_count)
     escape = getattr(target, '_escape', None)
@@ -1140,27 +1211,155 @@ def evaluate_lut_full(genome, target):
     else:
         prep = prepare_lut(genome, target)
     if prep is None:
-        return 0.0, (0.0,) * n_cases
+        result = (0.0, (0.0,) * n_cases)
+        return result + (None,) if _return_prepared else result
     traces = prep[2]
     score, cases, _ = score_contract(traces, target)
     if lifespan:
         cases = tuple(cases or ()) + juvenile_scores(
             genome, target, 'lut', snapshots, strategy,
             escape.lifespan_checkpoints, score)
-    return score, cases
+    result = (score, cases)
+    return result + (prep,) if _return_prepared else result
+
+
+def _lut_structural_topology(prepared):
+    """Target-blind source-reachable topology of one prepared LUT body.
+
+    Directional LUT outputs are distinct graph nodes.  An edge enters output
+    wire ``d`` only from the neighbour directions that that wire's table really
+    depends on, so two logical inputs count as integrated only after their
+    influence reaches the same directional computation.  Virtual source nodes
+    keep a pad's four injected wires grouped as ONE logical input.
+    """
+    from substrates.topology import EMPTY, measure
+    from .branched import DIRECTIONS, OPPOSITE, neighbours, table_support
+
+    if prepared is None:
+        return EMPTY
+    grid, out_pos, _traces, in_pos = prepared
+    if not grid or not in_pos:
+        return EMPTY
+    pads = {tuple(cell) for cell in in_pos}
+    from substrates.nervous.io_placement import flat_outputs
+    sinks = {tuple(cell) for cell in flat_outputs(out_pos)}
+    nodes = {(cell, direction) for cell in grid for direction in DIRECTIONS}
+    sources, edges = [], []
+    for index, pad in enumerate(in_pos):
+        source = ('LUT_INPUT', int(index))
+        sources.append(source)
+        for direction in DIRECTIONS:
+            edges.append((source, (tuple(pad), direction)))
+    for cell, state in grid.items():
+        if cell in pads:                 # source-only under AsyncLutSim
+            continue
+        around = neighbours(cell)
+        for output_direction, table in zip(DIRECTIONS, state):
+            destination = (cell, output_direction)
+            for input_direction in table_support(table):
+                source_cell = around[input_direction]
+                if source_cell in grid and source_cell not in sinks:
+                    edges.append((
+                        (source_cell, OPPOSITE[input_direction]),
+                        destination))
+    return measure(edges, sources, nodes=nodes)
+
+
+def _output_module_scores(cases, target):
+    """Balanced per-output contract scores for retaining useful LUT arms."""
+    base = tuple(float(value) for value in (cases or ()))
+    outputs = tuple(getattr(target, 'outputs', ()) or ())
+    if len(outputs) < 2:
+        return ()
+    if (getattr(target, 'temporal', False)
+            and getattr(target, 'combinational_cases', ())
+            and 'combinational_level' in contract_relations(target)):
+        # score_contract emits one cell per (trial, role, row), in that order.
+        # Recover the desired level from the same read windows so an arm is
+        # retained with the same 0/1-balanced statistic used by the scalar
+        # fitness.  Previously all temporal targets returned (), which meant
+        # the live periodic Full Adder never exposed its useful Sum and Carry
+        # modules to role-aware selection/recombination.
+        from substrates.nervous.scoring import _combinational_read_windows
+        roles = tuple(str(output.role) for output in outputs)
+        per_role = {role: {0: [], 1: []} for role in roles}
+        cursor = 0
+        for trial in getattr(target, 'trials', ()):
+            windows = _combinational_read_windows(target, trial)
+            for role in trial.expected:
+                expected = tuple(sorted(
+                    trial.expected_events.get(role, ())))
+                for start, end, _read_low, _read_high in windows:
+                    if cursor >= len(base):
+                        return ()
+                    wanted = any(start <= event < end for event in expected)
+                    if str(role) in per_role:
+                        per_role[str(role)][int(wanted)].append(base[cursor])
+                    cursor += 1
+        if not cursor:
+            return ()
+        scores = []
+        for role in roles:
+            means = [sum(values) / len(values)
+                     for values in per_role[role].values() if values]
+            scores.append(sum(means) / len(means) if means else 0.0)
+        return tuple(scores)
+    if getattr(target, 'temporal', False):
+        return ()
+    rows = tuple(getattr(target, 'cases', ()) or ())
+    if len(base) != len(rows) * len(outputs):
+        return ()
+    scores = []
+    for output_index in range(len(outputs)):
+        levels = {0: [], 1: []}
+        for row_index, (_inputs, expected) in enumerate(rows):
+            if len(expected) <= output_index:
+                return ()
+            levels[int(bool(expected[output_index]))].append(
+                base[row_index * len(outputs) + output_index])
+        means = [sum(values) / len(values)
+                 for values in levels.values() if values]
+        scores.append(sum(means) / len(means) if means else 0.0)
+    return tuple(scores)
+
+
+def _selection_case_vector(cases, target):
+    """Retain coherent role and row views for multi-output lexicase."""
+    base = tuple(float(value) for value in (cases or ()))
+    outputs = tuple(getattr(target, 'outputs', ()) or ())
+    rows = tuple(getattr(target, 'cases', ()) or ())
+    if (getattr(target, 'temporal', False)
+            and getattr(target, 'combinational_cases', ())):
+        output_scores = _output_module_scores(base, target)
+        return (base + output_scores + (min(output_scores),)
+                if output_scores else base)
+    if (getattr(target, 'temporal', False) or len(outputs) < 2
+            or len(base) != len(rows) * len(outputs)):
+        return base
+    output_scores = _output_module_scores(base, target)
+    joint_rows = tuple(
+        min(base[row * len(outputs):(row + 1) * len(outputs)])
+        for row in range(len(rows)))
+    return base + output_scores + joint_rows + (min(output_scores),)
 
 
 def _evaluate_lut_selection_record(genome, target):
-    fitness, cases = evaluate_lut_full(genome, target)
+    fitness, cases, prepared = evaluate_lut_full(
+        genome, target, _return_prepared=True)
     from substrates.nervous.io_placement import io_strategy
     from substrates.nervous.objectives import escape_objectives
     total = target.n_inputs + len(target.outputs)
     juvenile, robust = escape_objectives(genome, target, 'lut', cases)
+    topology = _lut_structural_topology(prepared)
+    output_scores = _output_module_scores(cases, target)
+    selection_cases = _selection_case_vector(cases, target)
     if io_strategy(target) not in (
             'terminal_nodes', 'wiring_chromosome', 'spatial_chromosome'):
-        return fitness, cases, (total, total), juvenile, robust
+        return (fitness, selection_cases, (total, total), juvenile, robust,
+                topology, topology.score, output_scores)
     progress = getattr(genome, '_io_binding_progress', (total, total))
-    return fitness, cases, progress, juvenile, robust
+    return (fitness, selection_cases, progress, juvenile, robust,
+            topology, topology.score, output_scores)
 
 
 def branched_signature(genome):
@@ -1245,6 +1444,8 @@ def eval_batch_cases(genomes, target, cache=None, executor=None,
             target.n_inputs + len(target.outputs),) * 2
         record_binding_progress(genome, progress)
         record_escape_objectives(genome, record)
+        genome._output_scores = (
+            tuple(record[7]) if len(record) > 7 else ())
     return [r[0] for r in out], [r[1] for r in out]
 
 
@@ -1298,6 +1499,14 @@ def _recombination_signature(genome):
                 getattr(gene, 'io_kind', 0))
                for gene in chromosome.genes))
         for chromosome in genome.chromosomes)
+
+
+def _recombination_environment(genome):
+    """Physical context that branched arms must share before they can mix."""
+    if not is_branched(genome):
+        return None
+    from .branched_ga import input_pads
+    return tuple(input_pads(genome))
 
 
 def _other_lut(value):
@@ -1572,6 +1781,11 @@ def mutate_lut(genome, mean_mutations=None, max_telomere=MAX_TELOMERE,
 def crossover_lut(pa, pb):
     """Tag-matched hierarchical crossover, including one-rule chromosomes."""
     if is_branched(pa) or is_branched(pb):
+        if not (is_branched(pa) and is_branched(pb)):
+            # The two encodings do not share a meaningful crossover unit.
+            # Preserve both parents and leave a subsequent mutation as the
+            # first legal variation instead of forcing an arm transplant.
+            return clone_genome(pa), clone_genome(pb)
         # Branched recombination trades whole ARMS and returns one child, so the
         # reciprocal cross supplies the second.
         from .branched_ga import crossover_branched_lut
@@ -1737,6 +1951,7 @@ def rank_key(genome, fitness):
     return (binding_viability(genome), fitness,
             getattr(genome, '_robustness', 0.0) or 0.0,
             getattr(genome, '_juvenile_score', 0.0) or 0.0,
+            getattr(genome, '_topology_score', 0.0) or 0.0,
             _tiebreak(genome))
 
 
@@ -1771,6 +1986,29 @@ def plateau_rescue_candidates(
     """
     limit = max(0, int(limit))
     if limit == 0:
+        return []
+    # The live fixed-pad encoding used to fall through here with no rescue at
+    # all: the existing truth-table compiler below only speaks the retired
+    # spatial-I/O genome. Compile the hard arithmetic witness into an ordinary
+    # output-rooted genome instead. It is still grown and evaluated normally;
+    # this merely makes the already-proven circuit reachable after a plateau.
+    if is_branched(genome):
+        from .branched_synthesis import synthesize_branched_truth_table
+        from .state_synthesis import synthesize_branched_dynamic
+        from .synthesis import SynthesisError
+        for compiler in (
+                synthesize_branched_truth_table,
+                synthesize_branched_dynamic):
+            try:
+                candidate = compiler(
+                    target, chromosome_count=len(genome.chromosomes),
+                    max_telomere=max_telomere,
+                    function_families=function_families)
+            except SynthesisError:
+                continue
+            fitness, cases = evaluate_lut_full(candidate, target)
+            if fitness == 1.0 and cases and min(cases) == 1.0:
+                return [candidate]
         return []
     from substrates.nervous.io_placement import (
         bind_io, flat_inputs, flat_outputs, growth_seeds, io_strategy,
@@ -1939,6 +2177,60 @@ def consolidate_population(parents, parent_fitnesses, parent_cases,
             ([cases[i] for i in keep] if cases is not None else None))
 
 
+def _append_role_module_candidates(children, population, fitnesses,
+                                   recombination):
+    """Keep and join measured output specialists in compatible pad cohorts."""
+    if (not population or not is_branched(population[0])
+            or len(getattr(population[0], 'outputs', ())) < 2):
+        return
+    from .branched_ga import assemble_role_modules, input_pads
+    roles = tuple(getattr(population[0], 'outputs', ()))
+    groups = {}
+    for index, genome in enumerate(population):
+        groups.setdefault(tuple(input_pads(genome)), []).append(index)
+
+    assemblies = []
+    if recombination:
+        for indices in groups.values():
+            donors, donor_scores = {}, []
+            for role_index, role in enumerate(roles):
+                eligible = [index for index in indices
+                            if len(getattr(population[index], '_output_scores', ()))
+                            > role_index]
+                if not eligible:
+                    break
+                best = max(eligible, key=lambda index: (
+                    population[index]._output_scores[role_index],
+                    rank_key(population[index], fitnesses[index])))
+                donors[int(role.branch_id)] = population[best]
+                donor_scores.append(population[best]._output_scores[role_index])
+            else:
+                if len(set(id(donor) for donor in donors.values())) > 1:
+                    base = max(indices, key=lambda index: rank_key(
+                        population[index], fitnesses[index]))
+                    assemblies.append(((min(donor_scores), sum(donor_scores)),
+                                       assemble_role_modules(
+                                           population[base], donors)))
+    if assemblies and len(children) < len(population):
+        children.append(max(assemblies, key=lambda item: item[0])[1])
+
+    seen = {genome_signature(genome) for genome in children}
+    for role_index, _role in enumerate(roles):
+        if len(children) >= len(population):
+            break
+        eligible = [index for index, genome in enumerate(population)
+                    if len(getattr(genome, '_output_scores', ())) > role_index]
+        if not eligible:
+            continue
+        best = max(eligible, key=lambda index: (
+            population[index]._output_scores[role_index],
+            rank_key(population[index], fitnesses[index])))
+        signature = genome_signature(population[best])
+        if signature not in seen:
+            children.append(clone_genome(population[best]))
+            seen.add(signature)
+
+
 def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, ga_config=None,
                     chromosome_count=None, recombination=True,
@@ -1967,6 +2259,10 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     if mutation_limit is None:
         mutation_limit = (getattr(ga_config, 'mutation_limit', 8.0)
                           if ga_config is not None else 8.0)
+    recombination = (
+        recombination and
+        (getattr(ga_config, 'recombination_enabled', True)
+         if ga_config is not None else True))
     if ga_config is not None and ga_config.chromosome_count is not None:
         chromosome_count = ga_config.chromosome_count
     if chromosome_count is not None:
@@ -2071,6 +2367,8 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                 io_mutations=2,
                 coordinated_io=(evolve_io and index % 2 == 0),
                 function_families=function_families))
+    _append_role_module_candidates(new_pop, population, fitnesses,
+                                   recombination)
     use_lexicase = (selection == 'lexicase' and case_vecs is not None
                     and case_vecs[0] is not None)
     # One downsampled case set per generation, shared by every selection event.
@@ -2082,6 +2380,9 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
     elite_pool = order[:n_elite] if n_elite else order
     recombination_signatures = [
         _recombination_signature(genome) for genome in population]
+    recombination_environments = [
+        _recombination_environment(genome)
+        for genome in population]
 
     def pick_index(candidates):
         if use_lexicase:
@@ -2102,6 +2403,21 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         if pop == 1:
             return population[0], population[0]
 
+        def mate_pool(first, candidates):
+            distinct = [
+                index for index in candidates
+                if recombination_signatures[index]
+                != recombination_signatures[first]]
+            pool = distinct or candidates
+            environment = recombination_environments[first]
+            if environment is not None:
+                compatible = [
+                    index for index in pool
+                    if recombination_environments[index] == environment]
+                if compatible:
+                    pool = compatible
+            return pool
+
         def choose(exclude=None):
             if use_lexicase:
                 candidates = [index for index in range(pop) if index != exclude]
@@ -2115,27 +2431,17 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             return pick_index(candidates)
 
         first = choose()
+        candidates = [index for index in range(pop) if index != first]
+        parent_pool = mate_pool(first, candidates)
         if use_lexicase:
             from runtime.escape import complementary_parent_index
-            candidates = [index for index in range(pop) if index != first]
-            distinct = [
-                index for index in candidates
-                if recombination_signatures[index]
-                != recombination_signatures[first]]
             second = complementary_parent_index(
-                first, distinct or candidates, case_vecs, fitnesses,
+                first, parent_pool, case_vecs, fitnesses,
                 case_subset)
         else:
             second = choose(first)
-        if recombination_signatures[second] == recombination_signatures[first]:
-            distinct = [
-                index for index in range(pop)
-                if index != first
-                and recombination_signatures[index]
-                != recombination_signatures[first]
-            ]
-            if distinct:
-                second = pick_index(distinct)
+            if second not in parent_pool:
+                second = pick_index(parent_pool)
         return population[first], population[second]
 
     # mean_mutations is None on the direct-API path (mutate_lut then uses its
@@ -2154,6 +2460,28 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
             return mean_mutations
         from runtime.escape import mutation_rate_of
         return mutation_rate_of(child, adaptive_base)
+
+    # Mutation remains the main generator of local variants.  This bounded
+    # cohort answers a different question: did crossover itself join two useful
+    # inherited modules?  Without it, every such join is obscured before the
+    # evaluator can ever select for it.
+    crossover_slots = min(
+        pop - len(new_pop),
+        max(1, int(round(pop * RECOMBINATION_EVALUATION_FRACTION))))
+    while recombination and pop > 1 and crossover_slots > 0:
+        pa, pb = parent_pair()
+        ca, cb = crossover_lut(pa, pb)
+        if escape.self_adaptive_mutation:
+            from runtime.escape import inherit_mutation_rate
+            inherit_mutation_rate(ca, pa, pb, escape, adaptive_base,
+                                  mutation_limit)
+            inherit_mutation_rate(cb, pb, pa, escape, adaptive_base,
+                                  mutation_limit)
+        new_pop.append(constrain_genome_functions(ca, function_families))
+        crossover_slots -= 1
+        if crossover_slots > 0 and len(new_pop) < pop:
+            new_pop.append(constrain_genome_functions(cb, function_families))
+            crossover_slots -= 1
 
     while len(new_pop) < pop:
         pa, pb = parent_pair()
@@ -2195,7 +2523,8 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
     if escape is not None:
         ga_config = _dc.replace(ga_config, escape=escape)
     if (not getattr(target, 'temporal', False)
-            or getattr(target, 'combinational_cases', ())):
+            or getattr(target, 'combinational_cases', ())
+            or getattr(target, 'temporal_logic_cases', ())):
         ga_config = _dc.replace(ga_config, selection='lexicase')
     function_families = normalise_function_families(
         getattr(ga_config, 'lut_function_families', None))
@@ -2253,7 +2582,7 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                     genome, grid, target, tags=tags)
             return genome
     else:
-        def make_genome():
+        def make_genome(input_genes=None):
             if lut_io_mode(target) != 'exterior_edges':
                 # The live encoding: branched and output-rooted, exactly what
                 # the desktop controller breeds. Keeping both drive paths on one
@@ -2268,9 +2597,13 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                         n_inputs=target.n_inputs,
                         output_roles=tuple(terminal.role
                                            for terminal in target.outputs),
-                        families=function_families))
+                        families=function_families,
+                        input_genes=input_genes),
+                    attempts=make_genome.developmental_seed_candidates)
             return constrain_genome_functions(
                 make_seed_genome(n_chroms), function_families)
+    if strategy == 'fixed' and lut_io_mode(target) != 'exterior_edges':
+        make_genome.developmental_seed_candidates = 6
     # Escape mechanisms, resolved and attached exactly as the desktop
     # controller does it, so this headless driver and the app agree.
     escape_cfg = ga_config.escape or OFF
@@ -2278,7 +2611,20 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
     cache       = LRUCache(FITNESS_CACHE_MAX)
     ex          = ProcessPoolExecutor(max_workers=N_WORKERS)   # reuse one pool
     try:
-        population  = [make_genome() for _ in range(pop)]
+        if strategy == 'fixed' and lut_io_mode(target) != 'exterior_edges':
+            population, cohort_inputs = [], []
+            cohort_count = min(4, max(1, pop // 8))
+            for index in range(pop):
+                if index < cohort_count:
+                    genome = make_genome()
+                    cohort_inputs.append(list(genome.inputs))
+                else:
+                    genome = make_genome(
+                        cohort_inputs[(index - cohort_count) % cohort_count])
+                population.append(genome)
+            make_genome.developmental_seed_candidates = 2
+        else:
+            population = [make_genome() for _ in range(pop)]
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)
         escape_state = build_escape_state(
             'lut', ga_config, chromosome_count=n_chroms,

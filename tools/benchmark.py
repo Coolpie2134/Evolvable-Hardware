@@ -344,6 +344,10 @@ def config_record(args, architectures):
             'recombination': not args.no_recombination,
             'diversify_solvers': args.diversify_solvers,
             'max_telomere': args.max_telomere,
+            'resolved_max_telomere': {
+                backend: (default_max_telomere(backend)
+                          if args.max_telomere is None else args.max_telomere)
+                for backend in architectures},
         },
         'substrate': {
             'syn_weight': args.syn_weight, 'vth_min': args.vth_min,
@@ -973,7 +977,7 @@ def build_parser():
     run.add_argument('--chroms', type=int, default=2, help='Genome: Chroms')
     run.add_argument('--max-telomere', type=int, default=None,
                      help='Genome: Max telomere (default: per-backend, '
-                          'nervous/snn/fnv 20, lut 8)')
+                     'nervous 24, snn 20, fnv 32, lut 18)')
     run.add_argument('--graded', action='store_true',
                      help='Graded logic fitness (SNN combinational only)')
     run.add_argument('--input-high', type=float, default=None,

@@ -100,11 +100,10 @@ def test_lifetime_tuning_nudges_one_active_delay_and_keeps_readout_fixed():
     assert all(arch == 'single' for _, _, arch in observed)
 
 
-def test_combinational_targets_receive_no_memory_loop_bonus():
-    from substrates.nervous.targets import periodic_combinational_target
-    from substrates.snn.targets import get_target
-
-    target = periodic_combinational_target(get_target('Half adder'))
+def test_temporal_fitness_stays_equal_to_the_declared_contract_score():
+    """Structural feedback is a rank tie-break, never unreported fitness."""
+    target = SimpleNamespace(
+        temporal=True, combinational_cases=(), trials=())
     traces = SimpleNamespace(overflow=False)
     genome = SimpleNamespace(
         chromosomes=[], state_delays=None, arch='single',
@@ -115,12 +114,8 @@ def test_combinational_targets_receive_no_memory_loop_bonus():
                 {(0, 0): 1}, {}, [[(0, 0)]],
                 {'sum': [(0, 0)], 'carry': [(0, 0)]}, traces)), \
             mock.patch(
-                'substrates.nervous.ga.score_contract',
-                return_value=(0.75, (0.75,), None)), \
-            mock.patch(
-                'substrates.nervous.ga._loop_bonus',
-                side_effect=AssertionError(
-                    'combinational target requested memory shaping')):
+            'substrates.nervous.ga.score_contract',
+                return_value=(0.75, (0.75,), None)):
         score, cases = evaluate_nv_full(genome, target)
     assert score == 0.75
     assert cases == (0.75,)

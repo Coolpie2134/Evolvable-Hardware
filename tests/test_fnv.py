@@ -410,6 +410,21 @@ def test_fnv_input_layouts_are_distinct_relative_genes_with_local_mutation():
     assert moved[0] != 0
     assert changed[moved[0]] in hex_frontier_cells(*original[moved[0]])
 
+
+def test_single_developmental_seed_is_not_regrown_just_to_select_it():
+    from substrates.fnv.ga import select_developmental_seed
+
+    marker = object()
+    calls = []
+
+    def make_genome():
+        calls.append(None)
+        return marker
+
+    assert select_developmental_seed(make_genome, attempts=1) is marker
+    assert len(calls) == 1
+
+
 def test_output_assignment_is_global_distinct_and_not_role_greedy():
     # One implementation, shared by both asynchronous substrates so the probe
     # selection rule cannot drift between them.
@@ -634,6 +649,34 @@ def test_fnv_interactive_logic_cases_use_the_exact_fitness_hold_window():
                     scored[3][case_index]["acts"][terminal.role])
         return
     raise AssertionError("no random FNV genome produced a playable circuit")
+
+
+def test_fnv_logic_horizon_covers_directed_component_delay():
+    """A folded developmental body must not shorten a directed signal path."""
+    from substrates.fnv.evaluation import functional_logic_horizon
+    from substrates.fnv.simulation import FunctionalSim, compile_functional_grid
+
+    # A source followed by four two-tick transports.  The cells are adjacent
+    # along the lattice, but the static window has to follow the directed
+    # wires, not merely use a growth-radius estimate.
+    source = (0, 0)
+    grid = {
+        source: BY_NAME["DELAY1_D_TO_LR"].id,
+        (1, 0): BY_NAME["DELAY2_R_TO_L"].id,
+        (2, 0): BY_NAME["DELAY2_L_TO_R"].id,
+        (3, 0): BY_NAME["DELAY2_R_TO_L"].id,
+        (4, 0): BY_NAME["DELAY2_L_TO_R"].id,
+    }
+    circuit = compile_functional_grid(grid, (source,))
+    horizon = functional_logic_horizon(
+        grid=grid, inputs=(source,), _compiled=circuit)
+    assert horizon >= 10       # four two-tick transport transitions + margin
+
+    sim = FunctionalSim(
+        grid, input_nodes=(source,), max_events=100, compiled=circuit)
+    sim.inject_pulse(source, 0.0, float(horizon))
+    sim.advance_to(float(horizon))
+    assert sim.levels[(4, 0)] == 1
 
 
 def test_parallel_population_evaluation_returns_case_vectors():

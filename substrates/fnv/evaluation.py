@@ -784,21 +784,109 @@ def prepare_functional(genome, target, *, _developed=_UNSET,
     return grid, inputs, output_positions, cases
 
 
-def functional_logic_horizon(genome):
-    """Continuous-time settling window used by FNV logic fitness.
+def functional_logic_horizon(genome=None, *, grid=None, inputs=None,
+                             _compiled=None):
+    """A sufficient continuous-time settling window for static FNV logic.
 
-    It is genotype-derived because FNV growth is bounded by each arm's own
-    telomere rather than by the target's display grid.
+    Developmental distance is a useful lower bound, but it is not a signal
+    delay bound: a grown arm may fold back beside itself, so a long directed
+    route can be physically close to a source pad.  Scoring that route before
+    its final transition arrives made the fast Boolean path and frozen
+    physical validation disagree on the *same* truth table.
+
+    For an acyclic circuit, walk its actual directed wiring and accumulate the
+    component transition delays.  Stateful or cyclic bodies retain the former
+    conservative developmental window because they have no finite DAG settle
+    bound.  ``grid``/``inputs`` let one compiled phenotype share this work over
+    all rows of a truth table.
     """
-    seeds = tuple(getattr(genome, "input_layout", None) or ((0, 0),))
-    return 2 * max(1, constructive_depth(genome, seeds)) + 4
+    if inputs is None:
+        if genome is None:
+            raise ValueError("FNV logic horizon needs a genome or input pads")
+        inputs = tuple(getattr(genome, "input_layout", None) or ((0, 0),))
+    else:
+        inputs = tuple(tuple(cell) for cell in inputs)
+    if grid is None:
+        if genome is None:
+            raise ValueError("FNV logic horizon needs a genome or a grown grid")
+        grid = grow_functional(genome, inputs)
+    circuit = (
+        compile_functional_grid(grid, inputs)
+        if _compiled is None else _compiled)
+
+    # Keep the established, cheap bound as a floor.  Construction is cached on
+    # the genome, so this does not regrow the phenotype in normal evaluation.
+    if genome is not None:
+        legacy = 2 * max(1, constructive_depth(genome, inputs)) + 4
+    else:
+        legacy = 4
+
+    source_nodes = set(inputs)
+    nodes = set(circuit.grid).difference(source_nodes)
+    reachable = set(source_nodes)
+    frontier = list(source_nodes)
+    while frontier:
+        source = frontier.pop()
+        for destination in circuit.watch.get(source, ()):
+            if destination not in reachable:
+                reachable.add(destination)
+                frontier.append(destination)
+    reachable_nodes = nodes.intersection(reachable)
+    if not reachable_nodes:
+        return legacy
+
+    # Kahn's walk is also the cycle test.  A parent outside ``reachable``
+    # cannot transition from the applied input level and does not delay the
+    # settling of this input-driven cone.
+    pending = {
+        node: sum(
+            source in reachable_nodes
+            for source in circuit.inputs.get(node, ()) if source is not None)
+        for node in reachable_nodes
+    }
+    dependents = {node: [] for node in reachable_nodes}
+    for node in reachable_nodes:
+        for source in circuit.inputs.get(node, ()):
+            if source in reachable_nodes:
+                dependents[source].append(node)
+    ready = sorted(node for node, degree in pending.items() if degree == 0)
+    arrival = {source: 0 for source in source_nodes}
+    visited = 0
+    while ready:
+        node = ready.pop()
+        visited += 1
+        parents = [
+            arrival[source]
+            for source in circuit.inputs.get(node, ())
+            if source in arrival]
+        entry = BY_ID[circuit.grid[node]]
+        # DELAY is transport, whose latency is its duration.  The other
+        # components schedule their output transition after ``delay``.
+        latency = (entry.duration if entry.behavior == "DELAY"
+                   else entry.delay)
+        arrival[node] = max(parents, default=0) + max(0, int(latency))
+        for destination in dependents[node]:
+            pending[destination] -= 1
+            if pending[destination] == 0:
+                ready.append(destination)
+
+    if visited != len(reachable_nodes):
+        return legacy
+    # Include a small margin after the final possible input-driven transition;
+    # equality is an event boundary in FunctionalSim, and the margin keeps the
+    # static readout away from it.
+    return max(legacy, max(arrival.values(), default=0) + 2)
 
 
-def _run_logic_case(genome, grid, inputs, bits, target, *, _compiled=None):
+def _run_logic_case(genome, grid, inputs, bits, target, *, _compiled=None,
+                    _horizon=None):
     # FNV growth is unbounded and target.grid_size is ignored. A signal crosses
     # at most the germline telomere in two-tick components, so this is the
     # genotype-derived settling bound rather than a display-grid-derived one.
-    horizon = functional_logic_horizon(genome)
+    horizon = (
+        functional_logic_horizon(
+            genome, grid=grid, inputs=inputs, _compiled=_compiled)
+        if _horizon is None else _horizon)
     sim = FunctionalSim(grid, input_nodes=inputs,
                         max_events=getattr(target, "max_events", 2048),
                         compiled=_compiled)
@@ -917,9 +1005,12 @@ def _logic_runs(genome, grid, inputs, target, compiled=None):
     runs = _bit_parallel_logic_runs(grid, inputs, target, compiled)
     if runs is not None:
         return runs
+    horizon = functional_logic_horizon(
+        genome, grid=grid, inputs=inputs, _compiled=compiled)
     return [
         _run_logic_case(
-            genome, grid, inputs, bits, target, _compiled=compiled)
+            genome, grid, inputs, bits, target, _compiled=compiled,
+            _horizon=horizon)
         for bits, _ in target.cases]
 
 
@@ -947,10 +1038,13 @@ def _logic_cases(runs, positions, target):
 def score_fixed_logic_outputs(genome, grid, inputs, output_positions, target):
     """Return static case rows for an already-fitted FNV readout."""
     circuit = compile_functional_grid(grid, inputs)
+    horizon = functional_logic_horizon(
+        genome, grid=grid, inputs=inputs, _compiled=circuit)
     rows = []
     for bits, _ in target.cases:
         _, levels, overflow = _run_logic_case(
-            genome, grid, inputs, bits, target, _compiled=circuit)
+            genome, grid, inputs, bits, target, _compiled=circuit,
+            _horizon=horizon)
         if overflow:
             return None
         rows.append([

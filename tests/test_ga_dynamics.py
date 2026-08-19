@@ -41,9 +41,9 @@ from substrates.snn.genome import (MAX_CHROMS as SNN_MAX_CHROMS,
                             Genome as SnnGenome, random_genome)
 
 
-def test_lut_uses_a_smaller_fresh_run_telomere_default():
+def test_backends_use_physical_fresh_run_telomere_defaults():
     assert default_max_telomere('lut') == 8
-    assert default_max_telomere('nervous') == 20
+    assert default_max_telomere('nervous') == 24
     assert default_max_telomere('snn') == 20
     assert GAConfig().max_telomere == 20
 
@@ -404,6 +404,88 @@ def test_lut_children_use_distinct_parents_and_a_real_mutation():
     assert all(lut_ga._recombination_signature(first)
                != lut_ga._recombination_signature(second)
                for first, second in pairs)
+
+
+def test_nervous_and_lut_evaluate_a_small_unmutated_crossover_cohort():
+    """A useful parental join must be observable before mutation edits it.
+
+    The cohort remains ordinary offspring; this test only pins the fact that
+    selection gets to score the crossover itself rather than a different,
+    subsequently mutated genome.
+    """
+    for module, factory, breeder, crossover in (
+            (nv_ga, random_hex_genome, nv_ga.next_population,
+             'crossover_nv'),
+            (lut_ga, random_lut_genome, lut_ga.next_population,
+             'crossover_lut')):
+        random.seed(1203)
+        population = [factory(2) for _ in range(10)]
+        fitnesses = [index / 10 for index in range(len(population))]
+        crossed = []
+        real_crossover = getattr(module, crossover)
+
+        def record(left, right, **kwargs):
+            children = real_crossover(left, right, **kwargs)
+            crossed.extend(children)
+            return children
+
+        config = GAConfig(
+            chromosome_count=2, immigrant_fraction=0.0, elite_count=3)
+        with mock.patch.object(module, crossover, side_effect=record):
+            children = breeder(
+                population, fitnesses, mean_mutations=4.0,
+                ga_config=config)
+
+        # With no immigrants/rescue candidates, the crossover-only cohort is
+        # inserted first.  Normal children are returned by a mutation operator
+        # and therefore cannot be this exact crossover object.
+        assert children[0] is crossed[0]
+
+
+def test_fnv_evaluates_a_small_unmutated_crossover_cohort():
+    """FNV's output-arm crossover also reaches the evaluator intact."""
+    import substrates.fnv.ga as fnv_ga
+    from substrates.fnv.genome import random_functional_genome
+
+    random.seed(1204)
+    population = [random_functional_genome(2) for _ in range(10)]
+    crossed = []
+    real_crossover = fnv_ga.crossover_functional
+
+    def record(left, right, families):
+        child = real_crossover(left, right, families)
+        crossed.append(child)
+        return child
+
+    with mock.patch.object(
+            fnv_ga, 'crossover_functional', side_effect=record):
+        children = fnv_ga.next_population(
+            population,
+            [index / 10 for index in range(len(population))],
+            mean_mutations=4.0,
+            ga_config=GAConfig(chromosome_count=2, immigrant_fraction=0.0))
+
+    assert any(child is candidate for child in children for candidate in crossed)
+
+
+def test_ga_config_can_disable_nervous_and_lut_recombination_directly():
+    """The stored GA setting must matter outside the controller path too."""
+    for module, factory, breeder, crossover in (
+            (nv_ga, random_hex_genome, nv_ga.next_population,
+             'crossover_nv'),
+            (lut_ga, random_lut_genome, lut_ga.next_population,
+             'crossover_lut')):
+        population = [factory(2) for _ in range(6)]
+        config = GAConfig(
+            chromosome_count=2, immigrant_fraction=0.0,
+            recombination_enabled=False)
+        with mock.patch.object(
+                module, crossover,
+                side_effect=AssertionError('crossover called despite config')):
+            children = breeder(
+                population, [index / 10 for index in range(len(population))],
+                mean_mutations=1.0, ga_config=config)
+        assert len(children) == len(population)
 
 
 def test_nv_reproduction_preserves_configured_count_for_children_and_immigrants():
