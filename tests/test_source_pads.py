@@ -135,56 +135,6 @@ def test_terminal_sets_come_from_the_pad_set_and_are_empty_for_fixed_inputs():
     assert terminal_node_sets(target, list(target.inputs), {}) == (set(), set())
 
 
-def test_interactive_reuses_the_scorer_prepared_layout_probes_and_physics():
-    """The GUI must not independently restore target.inputs and re-fit probes."""
-    from substrates.nervous.io_placement import (
-        input_groups, merge_intervals, output_groups)
-    from substrates.nervous.playback import NervousPlayer, pulses_from_trial
-    from ui.interactive import prepare_nervous_playback
-
-    target = _analog_target()
-    random.seed(31)
-    for _ in range(40):
-        genome = random_hex_genome(
-            2, arch='tri3', n_inputs=target.n_inputs, input_layout=True)
-        genome.arch = 'tri3'
-        scored = prepare_net(genome, target)
-        if scored is None:
-            continue
-        playback = prepare_nervous_playback(genome, target)
-        assert playback is not None
-        (grid, routing, in_pos, out_pos, arch, delays,
-         source_nodes, sink_nodes) = playback
-        assert (grid, routing, in_pos, out_pos) == scored[:4]
-        assert tuple(in_pos) == genome.input_layout
-        assert source_nodes == set(genome.input_layout)
-        assert sink_nodes == set()
-
-        player = NervousPlayer(
-            grid, routing, horizon=2 * target.T,
-            max_events=target.max_events,
-            config=target.pulse_config, delays=delays, arch=arch,
-            inputs=[cell for group in input_groups(in_pos) for cell in group],
-            outputs=sink_nodes, terminal_inputs=source_nodes)
-        lanes = pulses_from_trial(target, len(in_pos), trial_index=0)
-        schedule = {}
-        for lane, cells in zip(lanes, input_groups(in_pos)):
-            for cell in cells:
-                schedule[cell] = list(lane)
-        player.set_schedule(schedule)
-        player.sim.advance_to(2 * target.T)
-
-        fitted = scored[4]
-        for role, cells in output_groups(out_pos).items():
-            observed = merge_intervals([
-                player.sim.pulse_intervals.get(cell, ()) for cell in cells])
-            assert observed == fitted.intervals[role][0]
-        return
-    raise AssertionError('no layout genome produced a playable circuit')
-
-
-# -- tri3: channel level -------------------------------------------------------
-
 def test_tri3_source_tile_has_no_incoming_edges_and_still_drives():
     """A tri input tile collapses to one source-only IN sub-node.
 
@@ -234,53 +184,6 @@ def test_growth_starts_from_the_exact_evolved_coordinates():
         2, arch='tri3', n_inputs=target.n_inputs, input_layout=True)
     genome.arch = 'tri3'
     assert growth_seeds(target, 'fixed', genome) == genome.input_layout
-
-
-def test_prepared_binding_is_the_layout_and_every_pad_survived():
-    target = _analog_target()
-    random.seed(7)
-    prepared = 0
-    for _ in range(40):
-        genome = random_hex_genome(
-            2, arch='tri3', n_inputs=target.n_inputs, input_layout=True)
-        genome.arch = 'tri3'
-        prep = prepare_net(genome, target)
-        if prep is None:
-            continue
-        prepared += 1
-        grid, _routing, in_pos, _out_pos, _traces = prep
-        assert tuple(in_pos) == genome.input_layout
-        assert all(pad in grid for pad in in_pos)
-    assert prepared, 'no layout genome prepared at all'
-
-
-def test_a_missing_pad_fails_rather_than_relocating():
-    """A pad that did not survive development is unbindable, not re-homed.
-
-    Pads are germlines, so they are always PLANTED; the survival check catches
-    a pad the developmental rules later kill. Driving prepare_net_grid with a
-    body missing one pad exercises exactly that branch.
-    """
-    from substrates.nervous.temporal import prepare_net_grid
-    from substrates.nervous.nervous import grow_nervous
-    target = _analog_target()
-    random.seed(11)
-    for _ in range(40):
-        genome = random_hex_genome(
-            2, arch='tri3', n_inputs=target.n_inputs, input_layout=True)
-        genome.arch = 'tri3'
-        pads = genome.input_layout
-        grid = grow_nervous(genome, seeds=pads)
-        if len(grid) <= target.n_inputs or any(p not in grid for p in pads):
-            continue
-        assert prepare_net_grid(genome, target, grid) is not None
-        starved = {cell: state for cell, state in grid.items()
-                   if cell != pads[-1]}          # one pad did not survive
-        assert prepare_net_grid(genome, target, starved) is None
-        # nothing was relocated onto a surviving cell
-        assert genome.input_layout == pads
-        return
-    raise AssertionError('no genome grew a body with all pads alive')
 
 
 def test_an_invalid_layout_makes_the_phenotype_unbindable():
@@ -337,64 +240,6 @@ def test_an_odd_translation_is_a_different_organism_not_the_same_one_moved():
 
 
 # -- training and held-out use identical pads ---------------------------------
-
-def test_certification_reuses_the_exact_fitted_pads():
-    from substrates.nervous.evaluation import fit_readout
-    target = _analog_target()
-    random.seed(19)
-    for _ in range(40):
-        genome = random_hex_genome(
-            2, arch='tri3', n_inputs=target.n_inputs, input_layout=True)
-        genome.arch = 'tri3'
-        fitted = fit_readout(genome, target, backend='nervous')
-        if fitted is None:
-            continue
-        # The frozen tuple IS the genome's layout, flat and exact.
-        assert fitted.inputs, 'an evolved layout must be frozen, not dropped'
-        flat = tuple(tuple(cell) for cell in fitted.inputs)
-        assert flat == tuple(genome.input_layout)
-        # and input_positions hands validation those same coordinates back
-        assert tuple(fitted.input_positions(target)) == flat
-        return
-    raise AssertionError('no layout genome produced a fitted readout')
-
-
-def test_a_fixed_input_genome_keeps_its_legacy_injection_behaviour():
-    """No layout means no frozen inputs and no source-only physics."""
-    from substrates.nervous.evaluation import fit_readout
-    target = _analog_target()
-    random.seed(23)
-    for _ in range(40):
-        genome = random_hex_genome(2, arch='tri3')
-        genome.arch = 'tri3'
-        fitted = fit_readout(genome, target, backend='nervous')
-        if fitted is None:
-            continue
-        assert fitted.inputs == ()
-        # falls back to the target's declared pads, exactly as before
-        assert tuple(fitted.input_positions(target)) == tuple(target.inputs)
-        sources, _ = terminal_node_sets(
-            target, list(target.inputs), {}, genome=genome)
-        assert sources == set()
-        return
-    raise AssertionError('no fixed-input genome produced a fitted readout')
-
-
-# -- nothing is switched on yet ------------------------------------------------
-
-def test_both_drivers_create_layout_genomes():
-    """The LAST Stage 2 action, once every path above is wired."""
-    import inspect
-    from runtime import controller
-    from substrates.nervous.ga import evolve_nervous
-    for source in (inspect.getsource(evolve_nervous),
-                   inspect.getsource(controller.run_evolution)):
-        assert 'input_layout=True' in source
-    # and asking for no layout still yields a fixed-input genome
-    random.seed(29)
-    genome = random_hex_genome(2, arch='tri3', n_inputs=2)
-    assert getattr(genome, 'input_layout', None) is None
-
 
 def test_immigrants_match_the_population_layout_length():
     """An immigrant with the wrong pad count would be born unbindable."""

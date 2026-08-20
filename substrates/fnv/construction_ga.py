@@ -975,24 +975,13 @@ def _connect_terminal_step(genome, families, n_inputs, label=None,
     gene = ContextGene(
         gene_id, *context, state, gene_id,
         min(int(depth), DEPTH_BANDS - 1))
-    before = trace.grid
     genome.next_gene_id = gene_id + 1
     _extend_arm(chromosome, gene, top=(half == 0))
     _repair_genome(genome, families, n_inputs)
-    after = develop_constructive(genome, seeds).grid
-    if after != before:
-        return True
-    # Context collisions or a higher-priority rule can make the attempted bud
-    # inert. Do not retain a knowingly stale gene.
-    before_cut = branch_cut(chromosome)
-    for position, existing in enumerate(chromosome.genes):
-        if existing is gene:
-            chromosome.genes.pop(position)
-            if position < before_cut:
-                chromosome.split = max(0, int(chromosome.split) - 1)
-            break
-    _repair_genome(genome, families, n_inputs)
-    return False
+    # Do not develop the proposed child to decide whether the gene survives.
+    # The context and bud came from the current body; evaluation and selection
+    # own the consequences of adding it.
+    return True
 
 
 def _add_gene(genome, families, n_inputs):
@@ -1652,7 +1641,7 @@ def randomize_branch_behavior(genome, branch_id, n_inputs, *, limit=100_000,
 
 
 def regrow_branch(genome, branch_id, families, n_inputs,
-                  *, blocks=32, max_telomere=None, required_inputs=None):
+                  *, blocks=8, max_telomere=None, required_inputs=None):
     """Replace one role arm with a fresh output-rooted developmental germline.
 
     The input chromosome, every other output module, and both terminal layouts
@@ -1722,55 +1711,34 @@ def regrow_branch(genome, branch_id, families, n_inputs,
             if not connected:
                 break
             continue
-        landed = False
-        for _attempt in range(8):
-            before = dict(develop_constructive(genome, seeds).grid)
-            arm = branch_growth_order(chromosome)[0 if top else 1]
-            gene_id = int(genome.next_gene_id)
-            gene = _random_gene(
-                genome, gene_id, families, seeds,
-                allow_output=not _arm_has_output_gene(arm),
-                label=label, prefer_growth=True)
-            if gene is None:
-                break
-            genome.next_gene_id = gene_id + 1
-            _extend_arm(chromosome, gene, top)
-            _repair_genome(genome, families, n_inputs)
-            # Four-input cones need several logic junctions plus four physical
-            # terminal routes. Let their fresh germline use the run's full
-            # budget; a random 24-tick short arm was a hidden morphology lottery.
-            if int(n_inputs) >= 4:
-                control = arm_control(chromosome, half)
-                if control is not None:
-                    control.telomere = life_ceiling
-            after = develop_constructive(genome, seeds).grid
-            root = output_branch_sites(genome).get(label)
-            if after != before and root in after:
-                changed = landed = True
-                break
-            before_cut = branch_cut(chromosome)
-            for position, existing in enumerate(chromosome.genes):
-                if existing is gene:
-                    chromosome.genes.pop(position)
-                    if position < before_cut:
-                        chromosome.split = max(
-                            0, int(chromosome.split) - 1)
-                    break
-            _repair_genome(genome, families, n_inputs)
-        if not landed:
+        arm = branch_growth_order(chromosome)[0 if top else 1]
+        gene_id = int(genome.next_gene_id)
+        gene = _random_gene(
+            genome, gene_id, families, seeds,
+            allow_output=not _arm_has_output_gene(arm),
+            label=label, prefer_growth=True)
+        if gene is None:
             break
+        genome.next_gene_id = gene_id + 1
+        _extend_arm(chromosome, gene, top)
+        _repair_genome(genome, families, n_inputs)
+        if int(n_inputs) >= 4:
+            control = arm_control(chromosome, half)
+            if control is not None:
+                control.telomere = life_ceiling
+        changed = True
     _repair_genome(genome, families, n_inputs)
     return changed
 
 
 def random_branched_genome(chromosome_count, families, n_inputs,
                            output_roles=("out0",), input_layout=None,
-                           blocks=32, max_telomere=None):
+                           blocks=8, max_telomere=None):
     """A fresh genome: one output-rooted developmental arm per target role.
 
     Each gene is drawn from a neighbourhood the organism presents at the moment
-    it is added, and kept only if the body actually changes. Matching is exact,
-    so a gene drawn any other way would almost never fire.
+    it is added. The constructor never develops a proposed child to decide
+    whether that gene survives; ordinary evaluation and selection do that.
     """
     from .genome import BRANCHED_ENCODING, Genome
     count = max(1, int(chromosome_count))
@@ -1830,41 +1798,22 @@ def random_branched_genome(chromosome_count, families, n_inputs,
                 if not connected:
                     growing.discard(label)
                 continue
-            attempts = 8
-            while attempts > 0:
-                attempts -= 1
-                before = dict(develop_constructive(genome, seeds).grid)
-                arm = branch_growth_order(chromosome)[0 if top else 1]
-                gene_id = int(genome.next_gene_id)
-                gene = _random_gene(
-                    genome, gene_id, families, seeds,
-                    allow_output=not _arm_has_output_gene(arm),
-                    label=label, prefer_growth=True)
-                if gene is None:
-                    growing.discard(label)
-                    break
-                genome.next_gene_id = gene_id + 1
-                _extend_arm(chromosome, gene, top)
-                _repair_genome(genome, families, n_inputs)
-                if int(n_inputs) >= 4:
-                    control = arm_control(chromosome, half)
-                    if control is not None:
-                        control.telomere = life_ceiling
-                after = develop_constructive(genome, seeds).grid
-                root = output_branch_sites(genome).get(label)
-                if after != before and root in after:
-                    break
-                # A gene that changes nothing, or erases the only writable
-                # root, gives the next one nothing to build on. Fresh-genome
-                # viability only; mutation may still create a dead output.
-                for position, existing in enumerate(chromosome.genes):
-                    if existing is gene:
-                        chromosome.genes.pop(position)
-                        if position < branch_cut(chromosome):
-                            chromosome.split = max(
-                                0, int(chromosome.split) - 1)
-                        break
-                _repair_genome(genome, families, n_inputs)
+            arm = branch_growth_order(chromosome)[0 if top else 1]
+            gene_id = int(genome.next_gene_id)
+            gene = _random_gene(
+                genome, gene_id, families, seeds,
+                allow_output=not _arm_has_output_gene(arm),
+                label=label, prefer_growth=True)
+            if gene is None:
+                growing.discard(label)
+                continue
+            genome.next_gene_id = gene_id + 1
+            _extend_arm(chromosome, gene, top)
+            _repair_genome(genome, families, n_inputs)
+            if int(n_inputs) >= 4:
+                control = arm_control(chromosome, half)
+                if control is not None:
+                    control.telomere = life_ceiling
     return _repair_genome(genome, families, n_inputs)
 
 

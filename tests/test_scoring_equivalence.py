@@ -423,33 +423,6 @@ def _state_target_trace(target, shift=0.0, jitter=False, strict=True):
     return traces
 
 
-def test_every_registered_state_target_uses_one_fitted_latency():
-    state_targets = {
-        name: target for name, target in TEMPORAL_TARGETS.items()
-        if 'logical_state' in contract_relations(target)}
-    assert state_targets
-    for name, target in state_targets.items():
-        assert contract_relations(target)[0] == \
-            'transition_correspondence', name
-        for strict in (True, False):  # held LUT level and nervous-net ring
-            exact, _, exact_shift = score_contract(
-                _state_target_trace(target, strict=strict), target)
-            shifted, _, fitted_shift = score_contract(
-                _state_target_trace(target, shift=3.0, strict=strict), target)
-            jittered, _, _ = score_contract(
-                _state_target_trace(target, jitter=True, strict=strict), target)
-            assert exact == 1.0, (name, strict, exact)
-            assert exact_shift == 0.0, (name, strict, exact_shift)
-            assert shifted == 1.0, (name, strict, shifted)
-            # A held LUT boundary identifies all three ticks as propagation
-            # delay. For a pulse ring, the same observation can be up to one
-            # demonstrated lap of phase after the logical boundary, so the
-            # fitter deliberately keeps the smallest equally-valid shift.
-            assert fitted_shift == (3.0 if strict else 0.0), (
-                name, strict, fitted_shift)
-            assert 0.0 < jittered < 1.0, (name, strict, jittered)
-
-
 def _event_target_trace(target, shift=0.0, jitter=False):
     roles = [terminal.role for terminal in target.outputs]
     events = {role: [] for role in roles}

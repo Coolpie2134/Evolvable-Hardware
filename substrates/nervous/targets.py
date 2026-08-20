@@ -297,7 +297,18 @@ def periodic_combinational_target(target, spacing=None, repeats=2, latency=1,
     # combinational encoding: it multiplied every truth-table row and repeat
     # into long mostly-idle traces, especially for decoder/multiplier targets.
     # Keep a full-G propagation margin and a half-G read window instead.
-    settle = grid_size
+    #
+    # The margin is G+1, not G: grid width is a LOWER bound on propagation, not
+    # an upper one. Measured, a compiled LUT witness raises its output 6 ticks
+    # after the row is applied on every grid size (the path wanders, and the
+    # inertial delay is per cell, not per column), so a bare G budget is one
+    # tick short at G=5. Since the read window is only ``measure`` ticks wide,
+    # that one tick cost a third of every asserting row: AND, XOR and the half
+    # adder capped at 0.8333 with a PERFECT circuit, which is exactly what a
+    # bare wire echoing one input also scored - the contract could not tell a
+    # correct gate from a wire. ``hold`` follows settle, so the read window is
+    # unchanged in width and simply opens one tick later.
+    settle = grid_size + 1
     measure = max(3, (grid_size + 1) // 2)
     if hold is None:
         hold = settle + measure

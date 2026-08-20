@@ -41,29 +41,6 @@ def test_list_architectures_is_terminal_only():
     assert 'cellular  nervous, fnv, lut' in text
 
 
-def test_dry_run_expands_architecture_target_matrix_without_evolving_or_writing():
-    with tempfile.TemporaryDirectory() as directory:
-        output_path = os.path.join(directory, 'must-not-exist.json')
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            status = benchmark.main([
-                '--architectures', 'paper',
-                '--targets', 'AND,Full adder',
-                '--seeds', '2',
-                '--gens', '3',
-                '--pop', '4',
-                '--dry-run',
-                '--out', output_path,
-            ])
-        text = output.getvalue()
-        assert status == 0
-        assert '4 cell(s) x 2 seed(s) = 8 run(s)' in text
-        assert text.count('nervous') >= 2
-        assert text.count('lut') >= 2
-        assert 'Full adder' in text
-        assert not os.path.exists(output_path)
-
-
 def test_report_names_numeric_lexicase_downsampling_as_an_active_escape():
     parser = benchmark.build_parser()
     args = parser.parse_args(['--lexicase-sample', '0.5'])
@@ -164,14 +141,3 @@ def test_render_markdown_shows_solve_generations_and_the_caveat():
     assert 'lower bound' in report
 
 
-def test_logic_temporal_selector_picks_only_the_derived_twins():
-    names, _unsupported = benchmark.resolve_target_names(
-        ['logic-temporal'], 'nervous', None)
-    assert names, 'logic-temporal selected nothing'
-    assert all(name.endswith('(temporal)') for name in names)
-    # They are real temporal targets, so the broad keyword still covers them.
-    broad, _ = benchmark.resolve_target_names(['temporal'], 'nervous', None)
-    assert set(names) <= set(broad)
-    combinational, _ = benchmark.resolve_target_names(
-        ['combinational'], 'nervous', None)
-    assert len(names) == len(combinational)

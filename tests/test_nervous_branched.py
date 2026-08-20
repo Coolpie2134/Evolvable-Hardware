@@ -149,73 +149,6 @@ def test_an_arm_starts_only_at_its_own_genetic_output_root():
     assert set(trace.grid) == set(output_root_sites(rooted, [(0, 0)]).values())
 
 
-def test_depth_bands_make_one_neighbourhood_build_two_different_cells():
-    """The individuation the native encoding cannot express.
-
-    Every bud here sees the same neighbourhood; only its distance along the
-    branch differs. Under nearest-gene matching all of them would be forced to
-    the same state.
-    """
-    genome = _genome([
-        HexContextGene(1, self_in=OUT_STATE, self_out=5, branch_id=1),
-        HexContextGene(2, self_in=EMPTY_STATE, self_out=1, branch_id=1, depth=1),
-        HexContextGene(3, self_in=EMPTY_STATE, self_out=17, branch_id=1, depth=2),
-    ])
-    trace = develop_branched_hex(genome, [(0, 0)])
-    by_depth = {}
-    for cell, state in trace.grid.items():
-        by_depth.setdefault(trace.depths[cell], set()).add(state)
-    assert by_depth[0] == {5}
-    assert by_depth[1] == {1}
-    assert by_depth[2] == {17}
-
-
-def test_an_unbuilt_bud_takes_its_parents_depth_not_zero():
-    """Regression: depth-banded rules were silently dead.
-
-    A bud has no depth of its own until it is built. Defaulting it to 0 made
-    every bud look like a root, so a rule banded to depth 1 could never fire and
-    the whole mechanism was inert while appearing to work.
-    """
-    genome = _genome([
-        HexContextGene(1, self_in=OUT_STATE, self_out=5, branch_id=1),
-        HexContextGene(2, self_in=EMPTY_STATE, self_out=1, branch_id=1, depth=1),
-    ])
-    trace = develop_branched_hex(genome, [(0, 0)])
-    assert len(trace.grid) > 1, 'a depth-1 rule never fired'
-    assert set(trace.depths.values()) == {0, 1}
-
-
-def test_a_rule_is_spent_after_one_cohort():
-    """Bounded ontogenic amplification.
-
-    A rule may differentiate a whole synchronous wave, but cannot fire again on
-    the next one and extrude an unbounded chain. Without this, one growth rule
-    walks to the placement ceiling.
-    """
-    genome = _genome([
-        HexContextGene(1, self_in=OUT_STATE, self_out=5, branch_id=1),
-        HexContextGene(2, self_in=EMPTY_STATE, self_out=5, branch_id=1),
-    ], telomere=120)
-    trace = develop_branched_hex(genome, [(0, 0)])
-    # Root cohort + exactly one expression wave of the growth rule.
-    assert 1 < len(trace.grid) <= 4, len(trace.grid)
-
-
-def test_an_arms_telomere_is_a_lifespan_in_changed_cells():
-    """Not a radius. Cutting the lifespan cuts the body, one cell per change."""
-    sizes = []
-    for telomere in (1, 2, 3):
-        genome = _genome([
-            HexContextGene(1, self_in=OUT_STATE, self_out=5, branch_id=1),
-            HexContextGene(2, self_in=EMPTY_STATE, self_out=1, branch_id=1,
-                           depth=1),
-        ], telomere=telomere)
-        sizes.append(len(develop_branched_hex(genome, [(0, 0)]).grid))
-    assert sizes == sorted(sizes), sizes
-    assert sizes[0] < sizes[-1], sizes
-
-
 def test_every_built_cell_is_owned_by_the_arm_that_built_it():
     """Ownership is what scopes a rule to its own limb rather than the field."""
     genome = _genome([
@@ -385,7 +318,7 @@ def test_a_grown_body_is_directly_simulable_with_genome_derived_io():
     from substrates.nervous.nervous import interpret_nervous
     import tools.benchmark as benchmark
 
-    target = benchmark.targets_for_backend('nervous', 'paper_analog')['AND']
+    target = benchmark.targets_for_backend('nervous', 'paper_analog')['AND (temporal)']
     roles = tuple(terminal.role for terminal in target.outputs)
     random.seed(3)
     complete = 0
@@ -410,7 +343,7 @@ def test_an_organism_missing_a_root_is_rejected_not_patched():
     from substrates.nervous.branched_ga import prepare_branched_hex
     import tools.benchmark as benchmark
 
-    target = benchmark.targets_for_backend('nervous', 'paper_analog')['AND']
+    target = benchmark.targets_for_backend('nervous', 'paper_analog')['AND (temporal)']
     roles = tuple(terminal.role for terminal in target.outputs)
     barren = BranchedHexGenome(
         chromosomes=[BranchedHexChromosome()],

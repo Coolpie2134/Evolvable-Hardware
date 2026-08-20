@@ -129,10 +129,17 @@ def _inject_physical_events(sim, in_pos, input_events):
                 sim.inject_pulse(cell, float(start), float(width))
 
 
+#: Reuse one simulator across a target's trials instead of rebuilding it per
+#: trial. The decoded topology is a pure function of grid/routing/config/taus,
+#: none of which vary between trials, so this is an exactness-preserving
+#: optimisation. Set False to force the per-trial rebuild (A/B measurement).
+REUSE_TRIAL_SIM = True
+
+
 def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
                  max_events=None, sample=True, config=None, input_events=None,
                  delays=None, arch='single', terminal_inputs=None,
-                 terminal_outputs=None, taus=None):
+                 terminal_outputs=None, taus=None, sim=None):
     """
     Run T ticks of the asynchronous pulse simulation. streams[t] = tuple of
     input bits (one per in_pos); a 0->1 transition injects a pulse edge onto
@@ -152,9 +159,12 @@ def _run_nervous(grid, routing, in_pos, out_pos, streams, T, prune=True,
         from .tritile import TriSim
         # Tri sub-node fan-out makes routing/hex_dirs pruning inapplicable and
         # the graph is small anyway, so simulate the whole grown organism.
-        sim = TriSim(grid, flat_inputs(in_pos), config=config,
-                     max_events=max_events, outputs=terminal_outputs,
-                     taus=taus)
+        if sim is not None:
+            sim.reset()               # same organism, next trial's stimulus
+        else:
+            sim = TriSim(grid, flat_inputs(in_pos), config=config,
+                         max_events=max_events, outputs=terminal_outputs,
+                         taus=taus)
     else:
         sub = grid
         if prune:
@@ -223,18 +233,21 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
                        max_events=None, sample=True, config=None,
                        input_events=None, delays=None,
                        arch='single', terminal_inputs=None,
-                       terminal_outputs=None, taus=None):
+                       terminal_outputs=None, taus=None, sim=None):
     """Run once and return ``(states, traces, rise_times, overflow)``.
 
     ``rise_times`` maps every simulated cell to its continuous leading-edge
     timestamps.  No tick quantisation is applied to this event record.
+
+    ``sim`` is an already-built simulator for THIS organism, reset and reused
+    rather than rebuilt (see REUSE_TRIAL_SIM).
     """
     return _run_nervous(grid, routing, in_pos, out_pos, streams, T,
                         prune=prune, max_events=max_events, sample=sample,
                         config=config, input_events=input_events, delays=delays,
                         taus=taus,
                         arch=arch, terminal_inputs=terminal_inputs,
-                        terminal_outputs=terminal_outputs)
+                        terminal_outputs=terminal_outputs, sim=sim)
 
 
 def _sample_intervals(intervals, ticks):
@@ -476,6 +489,15 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
         cone = input_cone(grid, routing, in_pos)
         sub = grid if len(cone) == len(grid) else {c: grid[c] for c in cone}
     runs = []
+    # One simulator for the whole organism: every trial decodes the SAME grid
+    # into the same tile topology, so rebuilding it per trial re-does
+    # interpret_tri and the wiring pass for nothing.
+    shared = None
+    if arch == 'tri3' and REUSE_TRIAL_SIM:
+        from .tritile import TriSim
+        shared = TriSim(sub, flat_inputs(in_pos), config=config,
+                        max_events=getattr(ttarget, 'max_events', 2048),
+                        outputs=terminal_outputs, taus=taus)
     for trial in ttarget.trials:
         run = run_nervous_events(
             sub, routing, in_pos, out_pos, trial.streams, obs,
@@ -484,7 +506,7 @@ def trace_fixed_outputs(grid, routing, in_pos, out_pos, ttarget,
             input_events=getattr(trial, 'input_events', None),
             delays=delays, arch=arch,
             terminal_inputs=terminal_inputs,
-            terminal_outputs=terminal_outputs, taus=taus)
+            terminal_outputs=terminal_outputs, taus=taus, sim=shared)
         if run[3]:
             return TemporalTraces(overflow=True)
         runs.append(run)

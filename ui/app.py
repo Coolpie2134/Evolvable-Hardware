@@ -21,7 +21,7 @@ results/best_genome.json; the two plot tabs can be exported to PNG.
 Usage:
     python -m ui.app
 """
-import sys, os, math, time, random, threading, queue, dataclasses
+import sys, os, math, time, random, threading, queue, dataclasses, zlib
 import multiprocessing
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -76,10 +76,16 @@ from substrates.fnv.viz import body_extent, draw_functional_net, draw_key
 from ui.interactive import InteractiveTab
 from ui.designer import DesignerTab, _Tip
 
-#: Shown, disabled, for the substrates with one native I/O mechanism.
-NATIVE_IO_LABEL = 'Evolved inputs / fitted outputs'
-FNV_FITTED_IO_LABEL = 'Evolved inputs / output-rooted growth / fitted probes'
-FNV_GENETIC_IO_LABEL = 'Evolved inputs / output-rooted growth / genetic outputs'
+#: Shown, disabled, for the substrates with one native I/O mechanism. All of
+#: them run the BRANCHED output-rooted encoding, so the label names it: pads are
+#: the genome's own input genes and the arm grows back from its output site.
+#: The nervous label used to read 'fitted outputs', which described a readout
+#: this substrate no longer uses - prepare_branched_net reads the arm ROOTS
+#: (root_outputs defaults true) and only falls back to fitted probes when a
+#: caller asks for it explicitly, which nothing on the run path does.
+NATIVE_IO_LABEL = 'Branched: evolved pads / arm roots'
+FNV_FITTED_IO_LABEL = 'Branched: evolved pads / fitted probes'
+FNV_GENETIC_IO_LABEL = 'Branched: evolved pads / genetic outputs'
 #: Shown when a legacy fixed-input nervous checkpoint is loaded.
 LEGACY_IO_LABEL = 'Legacy fixed inputs / fitted outputs'
 LUT_PAD_IO_LABEL = 'Evolved internal source pads'
@@ -338,6 +344,52 @@ def _fnv_output_lines(genome):
                         int(gene.distance), layout.get(gene.role, gene.cell())))
     lines.append('')
     return lines
+
+
+def _genome_gene_groups(genome, chroms):
+    """[(header, colour, genes)] - the units the Genome tab draws under.
+
+    A nervous/LUT branched chromosome carries only ``genes`` and ``controls``:
+    it has no ``tag`` and no ``split``, because its two ARMS are the unit that
+    owns a territory, a tolerance and a lifespan. Reading it as an FNV
+    chromosome raised AttributeError on ``chrom.tag`` and left the tab blank.
+    So group those by arm, the same way the text export does, and leave every
+    other substrate on its chromosome header untouched.
+    """
+    branched = bool(chroms) and not hasattr(chroms[0], 'tag')
+    if not branched:
+        groups = []
+        for index, chromosome in enumerate(chroms):
+            tel = _telomere_display(chromosome)
+            wiring = getattr(chromosome, 'wiring', False)
+            groups.append((
+                'Chromosome %s   -   tag %d   -   split %s%s   -   %d genes%s'
+                % (chr(ord('a') + index), chromosome.tag,
+                   _split_display(chromosome),
+                   ('   -   %s' % tel) if tel is not None else '',
+                   len(chromosome.genes),
+                   '   -   WIRING (I/O port map)' if wiring else ''),
+                '#a03070' if wiring else '#334', list(chromosome.genes)))
+        return groups
+    roots = {int(gene.branch_id): gene for gene in getattr(genome, 'outputs', ())}
+    groups = []
+    for label in genome.arm_labels:
+        members, control = genome.arm(label)
+        if members is None:
+            continue
+        header = ('Arm %d  (chromosome %d, %s half)   -   reach %d, life %d'
+                  '   -   %d rules'
+                  % (label, (label - 1) // 2 + 1,
+                     'first' if label % 2 else 'second',
+                     int(control.tolerance), int(control.telomere),
+                     len(members)))
+        root = roots.get(label)
+        if root is not None:
+            header += ('   -   root: role %s at bearing %d distance %d'
+                       % (root.role, int(root.bearing), int(root.distance)))
+        groups.append((header, '#334' if members else '#a03070',
+                       list(members)))
+    return groups
 
 
 def _telomere_display(chromosome):
@@ -1049,7 +1101,7 @@ class App:
         }
         self._io_placement_var = tk.StringVar(value='Fixed (original)')
         self._io_placement_cb = ttk.Combobox(
-            self._io_frame, textvariable=self._io_placement_var, width=31,
+            self._io_frame, textvariable=self._io_placement_var, width=40,
             state='readonly', values=list(self._IO_PLACEMENT_LABELS))
         self._io_placement_cb.pack(side='left')
         self._io_placement_cb.bind('<<ComboboxSelected>>',
@@ -3742,17 +3794,36 @@ class App:
         from substrates.fnv.genome import ContextGene as FnvContextGene, ControlGene
         fnv_context = isinstance(gene, FnvContextGene)
         lut = hasattr(gene, 'ctx_n')                       # 16-bit LUT gene
+        # A branched nervous/LUT slot is not a plain state id. The nervous tile
+        # packs three circuits into one integer; a branched LUT cell is a TUPLE
+        # of four 16-bit tables (one per output direction) with 'PAD'/'OUT'
+        # string sentinels. Both are named by _branched_cell_text, the same
+        # naming the text export uses - and hashing the NAME is what keeps the
+        # colour stable without assuming the slot is an int. (The old code did
+        # ``val * 2654435761`` on every LUT slot, which on a tuple/str slot is
+        # sequence repetition: the branched LUT card raised MemoryError and
+        # took the whole Genome tab down with it.)
+        branched = (not fnv_context
+                    and (isinstance(getattr(gene, 'self_in', None), (tuple, str))
+                         or hasattr(gene, 'tau_index')))
+        branched_backend = 'lut' if lut else 'nervous'
 
         def chip(cx, cy, val, sz=0.92, fs=8.5):
-            face, txt = self._state_color((val * 2654435761) % 20 if lut else val)
+            if branched:
+                label = _branched_cell_text(val, branched_backend)
+                key = zlib.crc32(label.encode('utf-8')) % 20
+            elif lut:
+                label, key = '%04X' % val, (val * 2654435761) % 20
+            else:
+                label = _fnv_state(val) if fnv_context else str(val)
+                key = val
+            face, txt = self._state_color(key)
             ax.add_patch(FancyBboxPatch((cx, cy), sz, sz,
                          boxstyle='round,pad=0,rounding_size=0.14',
                          facecolor=face, edgecolor='#5b6b7d', lw=0.7, zorder=2))
-            label = (('%04X' % val) if lut else
-                     (_fnv_state(val) if fnv_context else str(val)))
             ax.text(cx + sz / 2, cy + sz / 2,
                     label, ha='center', va='center',
-                    fontsize=(fs * 0.55) if lut else fs,
+                    fontsize=(fs * 0.55) if (lut or branched) else fs,
                          fontweight='bold', color=txt, zorder=3)
 
         if isinstance(gene, ControlGene):
@@ -3899,19 +3970,13 @@ class App:
         drawn   = 0
         truncated = False
 
-        for ci, chrom in enumerate(chroms):
-            tel = _telomere_display(chrom)
-            is_wiring = getattr(chrom, 'wiring', False)
-            ax.text(0.0, y, "Chromosome %s   -   tag %d   -   split %s%s   -   %d genes%s"
-                    % (chr(ord('a') + ci), chrom.tag, _split_display(chrom),
-                       ('   -   %s' % tel) if tel is not None else '',
-                       len(chrom.genes),
-                       '   -   WIRING (I/O port map)' if is_wiring else ''),
-                    fontsize=9.5, fontweight='bold',
-                    color='#a03070' if is_wiring else '#334', va='bottom')
+        for header, header_color, group_genes in _genome_gene_groups(
+                genome, chroms):
+            ax.text(0.0, y, header, fontsize=9.5, fontweight='bold',
+                    color=header_color, va='bottom')
             y += 1.0
             drawn_here = 0
-            for gene in chrom.genes:
+            for gene in group_genes:
                 if drawn >= CARD_CAP:
                     truncated = True
                     break

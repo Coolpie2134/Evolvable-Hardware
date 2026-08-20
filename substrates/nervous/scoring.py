@@ -840,16 +840,28 @@ def _cadence_trial_score(events, trial, target, latency):
     before = [e for e in events if e < kick - 1e-9]
     steady = [e for e in events if start <= e < end]
     minimum = int(getattr(target, 'cadence_min_events', 4))
-    if len(steady) < 2:
+    if not steady:
         return 0.0
-    gaps = [b - a for a, b in zip(steady, steady[1:])]
     period = float(getattr(target, 'cadence_period', 0.0))
     tol = float(getattr(target, 'cadence_tolerance', 0.5))
-    regular = sum(1 for gap in gaps if abs(gap - period) <= tol + 1e-9) / len(gaps)
     count = min(1.0, len(steady) / max(1, minimum))
+    quiet = 1.0 / (1.0 + len(before))
+    if len(steady) == 1:
+        # A triggered one-shot is meaningful progress toward a kicked
+        # oscillator.  The former hard two-event gate made every such circuit
+        # indistinguishable from silence, pinning whole populations at zero.
+        # Keep the credit deliberately small so it cannot compete with a loop.
+        return quiet * 0.2 * count
+    gaps = [b - a for a, b in zip(steady, steady[1:])]
+    # Grade near-period gaps continuously.  Exact/in-tolerance gaps retain full
+    # credit; increasingly wrong gaps fade to zero over one target period.
+    scale = max(period, tol, 1e-9)
+    regular = sum(
+        1.0 if abs(gap - period) <= tol + 1e-9 else
+        max(0.0, 1.0 - (abs(gap - period) - tol) / scale)
+        for gap in gaps) / len(gaps)
     required_span = max(period, end - start - period)
     coverage = min(1.0, (steady[-1] - steady[0]) / required_span)
-    quiet = 1.0 / (1.0 + len(before))
     return quiet * regular * count * coverage
 
 

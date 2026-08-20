@@ -196,6 +196,39 @@ class AnalogPulseSim:
         self._tick = 0
         self._prev = {c: 0 for c in grid}
 
+    def reset(self):
+        """Return to the pre-stimulus state, keeping the topology.
+
+        Every trial of a target re-simulates the SAME organism under different
+        stimulus, so ``src``/``watch``/``op``/``tau`` - everything derived from
+        grid and routing - is identical across trials and is deliberately left
+        alone here. Only the dynamic state is cleared.
+
+        The per-cell containers are cleared IN PLACE rather than rebound:
+        TriSim's _MergedView holds references to ``pulse_intervals`` and
+        ``ever``, so rebinding them would leave the views reading a dead dict.
+        """
+        rest = self.config.rest
+        for c in self.grid:
+            self.v[c] = rest
+            self.v_time[c] = 0.0
+            self.armed[c] = True
+            self.out_high[c] = False
+            self._fall_seq[c] = 0
+            self._pending_end[c] = None
+            self.pulse_start[c] = _NEG
+            self.pulse_until[c] = _NEG
+            self.ever[c] = 0
+            self.rise_times[c].clear()
+            self.pulse_intervals[c].clear()
+            self._prev[c] = 0
+        del self._heap[:]
+        self._seq = 0
+        self._now = 0.0
+        self._tick = 0
+        self.event_count = 0
+        self.overflow = False
+
     # -- voltage helpers ------------------------------------------------------
     def _tau(self, c):
         """This node's leak time constant."""

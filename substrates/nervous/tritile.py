@@ -273,6 +273,16 @@ class TriSim:
                                             self._tile_nodes, 'intervals')
         self.ever = _MergedView(self._sim.ever, self._tile_nodes, 'ever')
 
+    def reset(self):
+        """Clear dynamic state, keep the decoded tile topology.
+
+        ``interpret_tri`` and the inner simulator's wiring depend only on the
+        grid, so a genome's trials can share one TriSim instead of rebuilding
+        it per trial (measured: rebuild is 20-27% of a narrow target's whole
+        evaluation).
+        """
+        self._sim.reset()
+
     @property
     def overflow(self):
         return self._sim.overflow

@@ -234,6 +234,39 @@ class PulseSim:
         self._tick = 0                                # next tick index
         self._prev = {}                               # input cell -> previous bit
 
+    def reset(self):
+        """Clear trial state while retaining the decoded network topology."""
+        self.pulse_start = {c: _NEG for c in self.grid}
+        self.pulse_until = {c: _NEG for c in self.grid}
+        self.refr_until = {c: _NEG for c in self.grid}
+        self.last_edge = {c: {} for c in self.grid}
+        # TriSim exposes merged views backed by these three dictionaries.  Keep
+        # their object identity stable across trials; replacing them leaves the
+        # readout views attached to permanently empty, stale objects.
+        self.ever.clear()
+        self.ever.update((c, 0) for c in self.grid)
+        self.rise_times.clear()
+        self.rise_times.update((c, []) for c in self.grid)
+        self.pulse_intervals.clear()
+        self.pulse_intervals.update((c, []) for c in self.grid)
+        self.event_count = 0
+        self.overflow = False
+        self._heap = []
+        self._seq = 0
+        self._edge_heap = []
+        self._drive_seq = 0
+        self._aggregate_seq = 0
+        self._active_drives = {c: set() for c in self.grid}
+        self._aggregate_id = {c: None for c in self.grid}
+        self._drive_owner = {}
+        self._busy_drive = {c: None for c in self.grid}
+        self._followers = {}
+        self._transport_groups = {}
+        self._group_seq = 0
+        self._or_group = {}
+        self._tick = 0
+        self._prev = {}
+
     # -- wires and events -----------------------------------------------------
 
     def _high(self, c, t):

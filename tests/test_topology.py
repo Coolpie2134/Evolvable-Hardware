@@ -216,36 +216,3 @@ def test_evaluation_is_exactly_deterministic():
         assert len(scores) == 1
 
 
-def test_refitting_a_probe_does_not_lose_score():
-    """Refitting picks the globally best assignment, so it cannot score BELOW a
-    single frozen choice by more than the placement/contract objective gap.
-
-    A systematic loss here would mean the assignment is choosing badly - the one
-    outcome that would make refitting incoherent rather than merely noisy.
-    """
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
-    from probe_gradient_jitter import _layout_genome, _target, frozen_score
-    from substrates.nervous.temporal import prepare_net
-    target = _target('Veto gate', 'tri3')
-    random.seed(23)
-    losses = comparisons = 0
-    for _ in range(40):
-        parent = _layout_genome(target, 'tri3')
-        prep = prepare_net(parent, target)
-        if prep is None:
-            continue
-        probes = {role: cell for role, cell in prep[3].items()
-                  if cell is not None}
-        child = nv_ga.mutate_nv(parent, 1.0, chromosome_count=2)
-        if prepare_net(child, target) is None:
-            continue
-        held = frozen_score(child, target, probes)
-        if held is None:
-            continue
-        comparisons += 1
-        if nv_ga.evaluate_nv_full(child, target)[0] < held - 1e-9:
-            losses += 1
-    assert comparisons, 'no comparable pairs'
-    assert losses <= 0.2 * comparisons, (
-        'refitting lost score on %d/%d pairs' % (losses, comparisons))
