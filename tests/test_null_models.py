@@ -201,6 +201,10 @@ KNOWN_WEAK = {
 # solve here as evidence that anything was evolved, or that memory was needed.
 FEEDFORWARD_BY_CONSTRUCTION = {
     'Burst x3': 1.00,
+    # A propagation path whose physical delay is three seconds is the requested
+    # Echo circuit. This target tests delay-line evolution, not stored state;
+    # only an undelayed passthrough is a non-solution.
+    'Echo (delay 3)': 1.00,
     # 'Period halver (1/2x)' used to sit here at 0.90. It left when event
     # scoring gained a causal floor and started counting startup edges against
     # precision: the delay-line cheat's free early alignment went away and it

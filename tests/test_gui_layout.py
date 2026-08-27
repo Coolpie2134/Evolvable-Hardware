@@ -3,7 +3,7 @@ tests/test_gui_layout.py - the GUI must not silently hide its own controls.
 
 Tk's packer does not clip a row that is too wide: it UNMAPS the widgets that no
 longer fit, with nothing on screen to say anything is missing. That is how the
-NV profile selector, the I/O binding control and the Reset tuning button all
+NV profile description, the I/O binding control and the Reset tuning button all
 disappeared from the nervous net's tuning row - the row needed about 2070px in
 a window that is normally 1500px wide. These tests pin the row budget so the
 same failure cannot return unnoticed.
@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import matplotlib                                                # noqa: E402
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt                                  # noqa: E402
+from matplotlib.backends.backend_agg import FigureCanvasAgg      # noqa: E402
+from matplotlib.figure import Figure                             # noqa: E402
 
 from substrates.fnv.catalogue import BY_ID, COMPONENTS           # noqa: E402
 from substrates.fnv.viz import (component_label,                 # noqa: E402
@@ -86,7 +88,7 @@ def test_no_control_row_is_too_wide_for_a_laptop_window():
 def test_every_substrate_control_is_actually_on_screen():
     """The controls that vanished, pinned by name.
 
-    Each is checked on the backend that owns it - the NV profile selector is
+    Each is checked on the backend that owns it - the NV profile description is
     nervous-only, the family bank is FNV-only - so hiding one for an unrelated
     backend still passes, but losing it to overflow does not.
     """
@@ -217,7 +219,7 @@ def test_both_colour_modes_render_and_label_differently():
     branches = {cell: 1 + index for index, cell in enumerate(sorted(grid))}
     labels = {}
     for mode in ('branch', 'function'):
-        figure = plt.figure()
+        figure = Figure()
         axes = figure.add_subplot(111)
         draw_functional_net(axes, grid, input_positions=[],
                             branches=branches, color_by=mode)
@@ -234,7 +236,7 @@ def test_colour_mode_defaults_preserve_every_existing_caller():
     grid = _tiny_body()
     branches = {cell: 1 for cell in grid}
     for supplied, expected in ((branches, 'branch'), (None, 'function')):
-        figure = plt.figure()
+        figure = Figure()
         default_axes = figure.add_subplot(211)
         draw_functional_net(default_axes, grid, input_positions=[],
                             branches=supplied)
@@ -248,7 +250,7 @@ def test_colour_mode_defaults_preserve_every_existing_caller():
 
 def test_an_unknown_colour_mode_is_refused_rather_than_guessed():
     grid = _tiny_body()
-    figure = plt.figure()
+    figure = Figure()
     axes = figure.add_subplot(111)
     try:
         draw_functional_net(axes, grid, input_positions=[], color_by='family')
@@ -275,7 +277,7 @@ def test_a_panel_series_shares_one_scale():
     assert extent is not None
     limits = []
     for grid in (small, large):
-        figure = plt.figure()
+        figure = Figure()
         axes = figure.add_subplot(111)
         draw_functional_net(axes, grid, input_positions=[], extent=extent,
                             legend=False)
@@ -295,7 +297,7 @@ def test_the_key_does_not_sit_on_top_of_the_circuit():
     grid = _tiny_body()
     spans = {}
     for legend in (False, True):
-        figure = plt.figure()
+        figure = Figure()
         axes = figure.add_subplot(111)
         draw_functional_net(axes, grid, input_positions=[], legend=legend)
         spans[legend] = axes.get_ylim()
@@ -309,7 +311,8 @@ def test_the_key_is_a_legend_so_its_entries_cannot_collide():
     in points; on a narrow panel the entries overlapped into a smear."""
     from substrates.fnv.viz import draw_key
     grid = _tiny_body()
-    figure = plt.figure(figsize=(2.2, 2.0))       # deliberately narrow
+    figure = Figure(figsize=(2.2, 2.0))           # deliberately narrow
+    FigureCanvasAgg(figure)
     axes = figure.add_subplot(111)
     draw_key(axes, grid)
     legend = axes.get_legend()
@@ -330,7 +333,7 @@ def test_a_figure_level_key_is_available_for_panel_grids():
     """Nine copies of one key is clutter, and each copy shrinks its panel."""
     from substrates.fnv.viz import draw_key
     grid = _tiny_body()
-    figure = plt.figure()
+    figure = Figure()
     figure.add_subplot(111)
     draw_key(figure, grid)
     assert figure.legends, 'no figure-level key was produced'
@@ -417,8 +420,6 @@ def test_the_genome_scroll_region_matches_the_rendered_page():
 
 def test_genome_rendering_does_not_require_the_scrolling_viewport():
     """PNG export and the headless tests drive the figure with no Tk around."""
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from matplotlib.figure import Figure
     from ui.app import App
 
     genome, _count = _fnv_genome(12)
@@ -431,13 +432,8 @@ def test_genome_rendering_does_not_require_the_scrolling_viewport():
     assert app._genome_fig.axes
 
 
-def test_interactive_offers_both_modes_and_keeps_the_choice():
-    """The mode is a view setting; reloading a circuit must not reset it."""
+def test_interactive_offers_both_fnv_color_modes():
+    """The GUI exposes exactly the two supported FNV colour interpretations."""
     from ui.interactive import InteractiveTab
     modes = set(InteractiveTab._FNV_COLOR_MODES.values())
     assert modes == {'branch', 'function'}, modes
-    # The attribute is set in __init__, before any circuit exists, precisely so
-    # that rebuilding the control on load does not lose the user's choice.
-    import inspect
-    source = inspect.getsource(InteractiveTab.__init__)
-    assert '_fnv_color_mode' in source

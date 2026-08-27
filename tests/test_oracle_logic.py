@@ -137,7 +137,7 @@ def test_binary_truth_tables_become_phase_locked_periodic_targets():
     # A truth table is a LEVEL relation, not an edge relation - the same
     # contract FNV's settled-level readout has always been scored against.
     assert contract_relations(target) == ('combinational_level',)
-    assert target.supported_backends == ('nervous', 'lut')
+    assert target.supported_backends == ('lut',)
     assert len(target.trials) == 4  # two row orders at two phases
     assert 'tick' not in target.description.lower()
 
@@ -182,7 +182,8 @@ def test_binary_truth_tables_become_phase_locked_periodic_targets():
 
     assert 0.5 < score_contract(held(1.0), target)[0] < 1.0
     assert score_contract(held(1.0), target)[0] < score_contract(
-        held(3.0), target)[0] < 1.0
+        held(2.0), target)[0] < 1.0
+    assert score_contract(held(3.0), target)[0] == 1.0
 
     # An edge at the old point-event latency has come and gone long before the
     # level is read, so it earns nothing on the rows that must assert.
@@ -311,7 +312,8 @@ def test_combinational_rows_are_held_levels_and_temporal_twins_are_edges():
 
         # The hold outlasts a crossing of the grid, so a level is still applied
         # when the far side of the array settles ...
-        assert held.combinational_hold >= 2 * held.grid_size
+        assert held.combinational_settle >= held.grid_size + 1
+        assert held.combinational_hold > held.combinational_settle
         for trial in held.trials:
             for tick in _row_onsets(trial):
                 lanes = [lane for lane, bit in enumerate(trial.streams[tick])
@@ -596,43 +598,6 @@ def test_new_interval_targets_reject_direct_wires_and_fixed_oscillators():
 
         assert score(direct) < 0.75, (name, score(direct))
         assert score(oscillator) < 0.70, (name, score(oscillator))
-
-
-def test_pair_gap_two_widths_is_physical_and_relative():
-    """The new target uses float pulses and labels only exact 2w edge gaps."""
-    display = 'Pair detection gap (2x pulse width)'
-    spec = 'Pair gap 2x width (oracle)'
-    assert display in TEMPORAL_TARGETS and spec in ORACLE_SPECS
-    target = ORACLE_SPECS[spec](seed=515, pulse_width=0.75)
-    # both asynchronous backends may run this continuous-time target; clocked
-    # backends (snn) stay excluded so the fractional phases are never quantised
-    assert set(target.supported_backends) == {'nervous', 'lut'}
-    assert _is_event_target(target)
-    assert any(start != int(start)
-               for trial in target.trials
-               for start, _width in trial.input_events[0])
-
-    positives = wrong_gap_negatives = lone_or_silent = 0
-    for trial in target.trials:
-        events = trial.input_events[0]
-        starts = [start for start, width in events if abs(width - 0.75) < 1e-12]
-        expected = trial.expected_events['Q']
-        for event in expected:
-            completion = event - target.latency
-            assert any(abs(start - completion) < 1e-9 for start in starts)
-            assert any(abs(start - (completion - 1.5)) < 1e-9 for start in starts)
-        if expected:
-            positives += 1
-        elif len(starts) >= 2:
-            wrong_gap_negatives += 1
-        else:
-            lone_or_silent += 1
-    assert positives >= 6
-    assert wrong_gap_negatives >= 3
-    assert lone_or_silent >= 2
-    fresh = ORACLE_SPECS[spec](seed=616, pulse_width=0.75)
-    assert [trial.input_events for trial in target.trials] != [
-        trial.input_events for trial in fresh.trials]
 
 
 def test_c_element_registered_as_target():

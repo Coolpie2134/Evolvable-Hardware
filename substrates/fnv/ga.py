@@ -13,8 +13,7 @@ from runtime.parallel import map_ordered
 from substrates.nervous.hexgrid import hex_frontier_cells
 
 from .catalogue import DEFAULT_FAMILIES, normalise_families
-from .evaluation import (
-    evaluate_functional_full, logic_morphology_capacities)
+from .evaluation import evaluate_functional_full
 from .genome import (
     MAX_CHROMS, MAX_GENES, MAX_TELOMERE,
     input_layout_domain, input_layout_radius, random_functional_genome,
@@ -22,15 +21,10 @@ from .genome import (
 
 N_WORKERS = max(1, min((os.cpu_count() or 2) - 2, 16))
 FITNESS_CACHE_MAX = 200_000
-MORPHOLOGY_ELITE_FRACTION = 0.10
-MODULE_ASSEMBLY_FRACTION = 0.04
 # A recombined child must be evaluated before mutation can tell selection
 # whether its inherited output modules are actually compatible.  This stays
 # small so the normal mutation/search stream remains the majority.
 RECOMBINATION_EVALUATION_FRACTION = 0.10
-FUNCTION_EXPLORER_FRACTION = 0.35
-FUNCTION_EXPLORER_WARM_FRACTION = 0.08
-FUNCTION_EXPLORER_PATIENCE = 4
 DEVELOPMENTAL_SEED_CANDIDATES = 1
 
 
@@ -210,38 +204,6 @@ def _selection_case_vector(cases, target):
     return base + tuple(output_scores) + joint_rows + (min(output_scores),)
 
 
-def _contract_input_dependencies(target, output_index):
-    """Inputs that can change one static output in the supplied contract.
-
-    This extracts no gate or circuit recipe. It is only the generic Boolean
-    influence relation used by stalled output-arm regrowth to avoid wiring a
-    role to pads that provably cannot affect it. A partial table falls back to
-    every input when it does not contain enough paired rows to decide safely.
-    """
-    rows = {
-        tuple(int(bit) & 1 for bit in inputs): int(expected[output_index]) & 1
-        for inputs, expected in getattr(target, "cases", ())
-        if len(expected) > int(output_index)}
-    n_inputs = int(getattr(target, "n_inputs", 0))
-    dependencies = set()
-    paired = False
-    for inputs, value in rows.items():
-        if len(inputs) != n_inputs:
-            continue
-        for index in range(n_inputs):
-            other = list(inputs)
-            other[index] ^= 1
-            other = tuple(other)
-            if other not in rows:
-                continue
-            paired = True
-            if rows[other] != value:
-                dependencies.add(index)
-    if not paired:
-        return tuple(range(n_inputs))
-    return tuple(sorted(dependencies))
-
-
 def eval_batch_cases(genomes, target, cache=None, executor=None,
                      should_stop=None, on_progress=None):
     records = [None] * len(genomes)
@@ -328,78 +290,9 @@ def mutate_input_layout(genome, max_telomere=MAX_TELOMERE):
     return False
 
 
-def plateau_rescue_candidates(
-        genome, limit=48, max_telomere=MAX_TELOMERE,
-        families=DEFAULT_FAMILIES, growth_seeds=(), focus_families=(),
-        target=None):
-    """Bounded local neighbours after a long stall.
-
-    A branched rule is not tied to any one live tip - it fires wherever its
-    neighbourhood occurs - so rescue is simply extra mutated descendants, the
-    same thing the other substrates' archive rescue does. Static FNV contracts
-    additionally regrow one role arm and choose the closest physically
-    attainable fixed-gate signature; temporal rescue remains target-blind.
-    """
-    from .construction_ga import (
-        clone_constructive, mutate_branched, randomize_branch_behavior,
-        regrow_branch)
-    limit = max(0, int(limit))
-    if not limit:
-        return []
-    enabled = normalise_families(families)
-    n_inputs = len(
-        getattr(genome, "input_layout", None) or growth_seeds or (1,))
-    proposals, seen = [], {genome_signature(genome)}
-    output_genes = tuple(getattr(
-        getattr(genome, "output_chromosome", None), "genes", ()))
-    regrowth_families = (
-        normalise_families(focus_families)
-        if focus_families else enabled)
-    for attempt_index in range(limit * 3):
-        if len(proposals) >= limit:
-            break
-        candidate = clone_constructive(genome)
-        static_contract = (
-            target is not None
-            and not getattr(target, "temporal", False)
-            and bool(getattr(target, "cases", ()))
-            and bool(output_genes))
-        if static_contract:
-            # Alternate attempted roles even when one candidate is a duplicate.
-            # Keying this to len(proposals) repeatedly retried the same role
-            # after a rejected duplicate and could starve its siblings.
-            output_index = attempt_index % len(output_genes)
-            branch_id = int(output_genes[output_index].branch_id)
-            if (attempt_index // len(output_genes)) % 2 == 0:
-                regrow_branch(
-                    candidate, branch_id, regrowth_families, n_inputs,
-                    max_telomere=max_telomere,
-                    required_inputs=_contract_input_dependencies(
-                        target, output_index))
-            preferred = sum(
-                (int(expected[output_index]) & 1) << row
-                for row, (_inputs, expected) in enumerate(target.cases))
-            randomize_branch_behavior(
-                candidate, branch_id, n_inputs, limit=20_000,
-                preferred_signature=preferred,
-                input_patterns=tuple(inputs for inputs, _expected
-                                     in target.cases))
-        else:
-            mutate_branched(
-                candidate, None, enabled, n_inputs, max_telomere,
-                focus_families=focus_families)
-        signature = genome_signature(candidate)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        proposals.append(candidate)
-    return proposals
-
-
 def mutate_functional(genome, mean_mutations=None, *,
                       max_telomere=MAX_TELOMERE, chromosome_count=None,
-                      families=DEFAULT_FAMILIES, growth_seeds=None,
-                      focus_families=()):
+                      families=DEFAULT_FAMILIES, growth_seeds=None):
     from .construction_ga import mutate_branched, new_branched_chromosome
     enabled = normalise_families(families)
     # Pad placement is the input chromosome's job now (the "inputs" operator),
@@ -407,7 +300,7 @@ def mutate_functional(genome, mean_mutations=None, *,
     mutate_branched(
         genome, mean_mutations, enabled,
         len(getattr(genome, "input_layout", None) or growth_seeds or (1,)),
-        max_telomere, focus_families=focus_families)
+        max_telomere)
     if chromosome_count is not None:
         output_count = len(getattr(
             getattr(genome, "output_chromosome", None), "genes", ()))
@@ -442,17 +335,6 @@ def _topology_rank(genome):
         (0,) * 25))
 
 
-def _role_capacity(genome, role_index, output_genes=()):
-    """Best physically consistent capacity sample available for one role."""
-    if role_index < len(output_genes):
-        label = int(output_genes[role_index].branch_id)
-        sampled = getattr(genome, "_sampled_branch_capacities", {})
-        if label in sampled:
-            return int(sampled[label])
-    capacities = getattr(genome, "_function_capacities", ())
-    return int(capacities[role_index]) if role_index < len(capacities) else 0
-
-
 def rank_key(genome, fitness):
     """Correctness first; FNV topology, never genome size, breaks final ties."""
     return (
@@ -461,29 +343,6 @@ def rank_key(genome, fitness):
         float(getattr(genome, "_juvenile_score", 0.0)),
         _topology_rank(genome),
     )
-
-
-def initialization_families(families, target):
-    """Choose a contract-class seed palette without narrowing evolution.
-
-    Exhaustive Boolean targets need a dense gate scaffold before routing,
-    holds and oscillators become useful. Drawing initial genes uniformly
-    family-first from the entire enabled bank diluted that scaffold and
-    repeatedly stranded Half Adder at one missing output. Seed those runs from
-    LOGIC; focused mutation may then introduce DELAY routing/fan-out while all
-    mutations still receive the complete user-selected bank. Temporal runs and
-    intentionally logic-free banks are unchanged.
-    """
-    enabled = normalise_families(families)
-    logic_contract = (
-        bool(getattr(target, "combinational_cases", ()))
-        or (not getattr(target, "temporal", False)
-            and bool(getattr(target, "cases", ()))))
-    logic_families = tuple(
-        family for family in ("LOGIC", "DELAY") if family in enabled)
-    if logic_contract and "LOGIC" in enabled:
-        return frozenset(logic_families)
-    return enabled
 
 
 def _tournament(population, fitnesses, size=4):
@@ -532,9 +391,8 @@ def next_population(population, fitnesses, make_genome=None,
                     case_vecs=None, mean_mutations=None, selection=None,
                     ga_config=None, chromosome_count=None,
                     recombination=True, archive_parent=None,
-                    stagnation=0, rescue_candidates=None,
-                    families=DEFAULT_FAMILIES, growth_seeds=None,
-                    focus_families=(), target=None, **_ignored):
+                    stagnation=0,
+                    families=DEFAULT_FAMILIES, growth_seeds=None, **_ignored):
     count = len(population)
     if not count:
         return []
@@ -568,242 +426,12 @@ def next_population(population, fitnesses, make_genome=None,
     mutation_limit = getattr(ga_config, "mutation_limit", 8.0)
     mean = 4.0 if mean_mutations is None else mean_mutations
 
-    children = [clone_genome(genome)
-                for genome in list(rescue_candidates or ())[:count]]
+    children = []
     if archive_parent is not None and len(children) < count:
         children.append(mutate_functional(
             clone_genome(archive_parent), mean,
             max_telomere=max_telomere, chromosome_count=chromosome_count,
-            families=enabled, growth_seeds=growth_seeds,
-            focus_families=focus_families))
-    output_genes = tuple(getattr(
-        getattr(population[0], "output_chromosome", None), "genes", ()))
-    # Output-rooted heredity only pays off if independently useful role modules
-    # get a chance to coexist. Ordinary crossover made that join and then
-    # immediately applied ~4 mutations, often destroying Sum or Carry before
-    # the assembled child was ever evaluated. Build a tiny unmutated cohort
-    # from the best role specialists that share one input environment. This is
-    # generic multi-output recombination: it uses measured per-role quality,
-    # never a target name, gate recipe, route, or expected truth-table value.
-    if len(output_genes) > 1 and len(children) < count:
-        from .construction_ga import assemble_role_modules
-        groups = {}
-        for index, genome in enumerate(population):
-            groups.setdefault(
-                tuple(getattr(genome, "input_layout", ()) or ()), []).append(index)
-        assemblies = []
-        for indices in groups.values():
-            if len(indices) < 2:
-                continue
-            donor_indices = []
-            donor_scores = []
-            valid = True
-            for role_index, _output in enumerate(output_genes):
-                eligible = [
-                    index for index in indices
-                    if len(getattr(population[index], "_output_scores", ()))
-                    > role_index]
-                if not eligible:
-                    valid = False
-                    break
-                donor_index = max(
-                    eligible,
-                    key=lambda index: (
-                        population[index]._output_scores[role_index],
-                        rank_key(population[index], fitnesses[index])))
-                donor_indices.append(donor_index)
-                donor_scores.append(
-                    population[donor_index]._output_scores[role_index])
-            if not valid or len(set(donor_indices)) < 2:
-                continue
-            base_index = max(
-                indices,
-                key=lambda index: rank_key(population[index], fitnesses[index]))
-            donors = {
-                int(output_genes[role_index].branch_id): population[donor_index]
-                for role_index, donor_index in enumerate(donor_indices)}
-            candidate = assemble_role_modules(
-                population[base_index], donors, enabled)
-            assemblies.append((
-                (min(donor_scores), sum(donor_scores),
-                 rank_key(population[base_index], fitnesses[base_index])),
-                candidate))
-        assembly_count = min(
-            count - len(children),
-            max(1, int(round(count * MODULE_ASSEMBLY_FRACTION))))
-        for _quality, candidate in sorted(
-                assemblies, key=lambda row: row[0], reverse=True)[:assembly_count]:
-            children.append(candidate)
-    # Preserve the best complete behavior of each inherited output module.
-    # Row-level environmental memory can retain a genome that happens to pass
-    # one Sum row while deleting the only arm that computes Sum coherently over
-    # all rows.  With output-rooted heredity that is equivalent to throwing away
-    # a useful organ before crossover can use it.  One unmutated specialist per
-    # role is small, target-generic, and ordered early enough to survive the
-    # generational merge; it uses the same scored role cells as selection and
-    # does not prescribe a function or morphology.
-    role_elite_signatures = set()
-    for role_index, _output in enumerate(output_genes):
-        eligible = [
-            index for index, genome in enumerate(population)
-            if len(getattr(genome, "_output_scores", ())) > role_index]
-        if not eligible or len(children) >= count:
-            continue
-        index = max(
-            eligible,
-            key=lambda candidate: (
-                population[candidate]._output_scores[role_index],
-                rank_key(population[candidate], fitnesses[candidate])))
-        signature = genome_signature(population[index])
-        if signature in role_elite_signatures:
-            continue
-        children.append(clone_genome(population[index]))
-        role_elite_signatures.add(signature)
-    # A parent selected for computational morphology still vanished under
-    # generational replacement unless it was also a current contract expert.
-    # Preserve a small target-blind repertoire reserve so converged source
-    # cones and internally useful multi-input functions can be extended across
-    # generations. This is deliberately independent of genome size and target
-    # answers; the ordinary contract reserve retains most of the population.
-    morphology_count = min(
-        count - len(children),
-        max(1, int(round(count * MORPHOLOGY_ELITE_FRACTION))))
-    morphology_order = sorted(
-        range(count),
-        key=lambda index: _topology_rank(population[index]),
-        reverse=True)
-    seen_morphologies = set()
-    if morphology_count:
-        role_count = len(output_genes)
-        # A body may devote its available territory to one exceptionally rich
-        # output cone. Preserve the best cone for EACH role before asking for a
-        # balanced organism; crossover/regrowth can then combine specialists.
-        for role_index in range(role_count):
-            index = max(
-                range(count),
-                key=lambda candidate: (
-                    _role_capacity(
-                        population[candidate], role_index, output_genes),
-                    _topology_rank(population[candidate])))
-            signature = genome_morphology_signature(population[index])
-            if signature in seen_morphologies:
-                continue
-            children.append(clone_genome(population[index]))
-            seen_morphologies.add(signature)
-            if len(seen_morphologies) >= morphology_count:
-                break
-        for index in morphology_order:
-            signature = genome_morphology_signature(population[index])
-            if signature in seen_morphologies:
-                continue
-            children.append(clone_genome(population[index]))
-            seen_morphologies.add(signature)
-            if len(seen_morphologies) >= morphology_count:
-                break
-    # A connected output tree can be separated from a better gate assignment
-    # by several individually worse substitutions (Majority-3's familiar 7/8
-    # basin is the small example). Dedicate a bounded cohort to resampling the
-    # fixed components on ONE intact output arm. Static contracts may request
-    # their closest attainable truth signature; physical routes, contexts,
-    # pads and all other role modules stay unchanged.
-    from .construction_ga import (
-        mutate_branch_function, randomize_branch_behavior,
-        randomize_branch_functions, regrow_branch)
-    deep_function_search = int(stagnation) >= FUNCTION_EXPLORER_PATIENCE
-    regrowth_families = (
-        normalise_families(focus_families)
-        if focus_families else enabled)
-    function_fraction = (
-        FUNCTION_EXPLORER_FRACTION if deep_function_search
-        else FUNCTION_EXPLORER_WARM_FRACTION)
-    function_count = min(
-        count - len(children),
-        max(1, int(round(count * function_fraction))))
-    behavior_order = sorted(
-        range(count),
-        key=lambda index: rank_key(population[index], fitnesses[index]),
-        reverse=True)
-    for slot in range(function_count):
-        preserve_index = slot % max(1, len(output_genes))
-        specialists = [
-            index for index, genome in enumerate(population)
-            if len(getattr(genome, "_output_scores", ())) > preserve_index]
-        if specialists and len(output_genes) > 1:
-            preserved_label = int(output_genes[preserve_index].branch_id)
-            mutable = [
-                (index, int(gene.branch_id))
-                for index, gene in enumerate(output_genes)
-                if int(gene.branch_id) != preserved_label]
-            mutable_index, branch_id = random.choice(mutable)
-            preferred_signature = (
-                sum((int(expected[mutable_index]) & 1) << row
-                    for row, (_inputs, expected) in enumerate(target.cases))
-                if (target is not None
-                    and not getattr(target, "temporal", False)
-                    and getattr(target, "cases", ())
-                    and all(len(expected) > mutable_index
-                            for _inputs, expected in target.cases))
-                else None)
-            input_patterns = (
-                tuple(inputs for inputs, _expected in target.cases)
-                if preferred_signature is not None else None)
-            required_inputs = (
-                _contract_input_dependencies(target, mutable_index)
-                if preferred_signature is not None else None)
-            source_index = max(
-                specialists,
-                key=lambda index: (
-                    population[index]._output_scores[preserve_index],
-                    _role_capacity(
-                        population[index], mutable_index, output_genes),
-                    _topology_rank(population[index]),
-                    rank_key(population[index], fitnesses[index])))
-        else:
-            order = morphology_order if slot % 2 == 0 else behavior_order
-            source_index = order[slot % len(order)]
-            branch_id = None
-            preferred_signature = None
-            input_patterns = None
-            required_inputs = None
-        candidate = clone_genome(population[source_index])
-        if not deep_function_search:
-            mutate_branch_function(candidate, branch_id=branch_id)
-        elif branch_id is not None and slot % 4 == 0:
-            from .construction import grow_functional
-            n_inputs = len(getattr(candidate, "input_layout", ()) or (1,))
-            variants = []
-            attempt_count = 2
-            for _attempt in range(attempt_count):
-                variant = clone_genome(candidate)
-                regrow_branch(
-                    variant, branch_id, regrowth_families, n_inputs,
-                    max_telomere=max_telomere,
-                    required_inputs=required_inputs)
-                randomize_branch_behavior(
-                    variant, branch_id, n_inputs, limit=1000,
-                    preferred_signature=preferred_signature,
-                    input_patterns=input_patterns)
-                grid = grow_functional(variant, variant.input_layout)
-                capacities = logic_morphology_capacities(
-                    grid, variant.input_layout,
-                    dict(variant.output_layout))
-                variants.append((
-                    (evaluate_functional_full(variant, target)[0]
-                     if target is not None else 0.0),
-                    _role_capacity(
-                        variant, mutable_index, output_genes),
-                    sum(capacities), variant))
-            candidate = max(variants, key=lambda row: row[:3])[3]
-        elif slot % 7 == 6:
-            randomize_branch_functions(candidate, branch_id=branch_id)
-        else:
-            if (branch_id is None or not randomize_branch_behavior(
-                    candidate, branch_id,
-                    len(getattr(candidate, "input_layout", ()) or (1,)),
-                    preferred_signature=preferred_signature,
-                    input_patterns=input_patterns)):
-                mutate_branch_function(candidate, branch_id=branch_id)
-        children.append(candidate)
+            families=enabled, growth_seeds=growth_seeds))
     immigrant_count = min(
         count - len(children), int(round(count * immigrant_fraction)))
     for _ in range(immigrant_count):
@@ -874,8 +502,7 @@ def next_population(population, fitnesses, make_genome=None,
         mutate_functional(
             child, individual_mean, max_telomere=max_telomere,
             chromosome_count=chromosome_count, families=enabled,
-            growth_seeds=growth_seeds,
-            focus_families=focus_families)
+            growth_seeds=growth_seeds)
         children.append(child)
     return children
 

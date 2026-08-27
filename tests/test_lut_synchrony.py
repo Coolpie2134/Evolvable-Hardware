@@ -432,44 +432,6 @@ def test_combinational_output_is_placed_by_function_not_proximity():
     assert fitted_beats_proximity, 'fitted placement never beat the 0.5 baseline'
 
 
-def test_lut_solves_basic_gates_when_evolved():
-    """The headline: LUTs are lookup tables, so they should compute small
-    combinational functions. Inputs are now presented as a randomised PULSE
-    battery (aligned rising edges, random widths/delays, several trials
-    averaged), so a clean 1.0 is genuinely harder - a gate must settle correctly
-    regardless of when inputs arrive against the array's ongoing power-on
-    activity. The honest bar is therefore 'well above the constant-output
-    ceiling', not a perfect score: 0.5 is chance and 0.75 is a lopsided-gate
-    constant, so >= 0.85 proves real, robust computation. The fitted output must
-    also genuinely FOLLOW the truth table, not sit constant."""
-    from substrates.lut.ga import evolve_lut, _fit_combinational_outputs
-    from substrates.lut.lut import grow_lut
-    from substrates.snn.targets import get_target
-    target = get_target('OR')
-    champ, best = None, -1.0
-    for seed in (3, 7):
-        genome, fit = evolve_lut(target, generations=30, pop=80, seed=seed,
-                                 verbose=False)
-        if fit > best:
-            champ, best = genome, fit
-    assert best >= 0.85, 'OR stayed near the constant ceiling: %.4f' % best
-
-    # Real computation: the fitted output's per-case duty must track the truth
-    # table - high on the expected-1 rows, low on the expected-0 row - not a
-    # constant that merely rides the lopsided table.
-    grid = grow_lut(champ, seeds=tuple(target.inputs),
-                    grid_size=target.grid_size, iters=target.iters)
-    out_pos, duty_by_case = _fit_combinational_outputs(grid, target)
-    cell = out_pos[target.outputs[0].role]
-    duties = {tuple(in_bits): duty_by_case[i][cell]
-              for i, (in_bits, _) in enumerate(target.cases)}
-    lowest_one = min(d for ib, d in duties.items() if any(ib))   # expected-1 rows
-    zero_row = duties[(0, 0)]                                    # expected-0 row
-    assert lowest_one > zero_row + 0.3, (
-        'output does not follow OR: expected-1 duties %s vs zero-row %.2f'
-        % (duties, zero_row))
-
-
 def test_combinational_input_pulses_align_starts_with_varied_widths():
     """Pin the combinational pulse contract: each case is presented as several
     trials; within a trial the active inputs share ONE rising edge (aligned

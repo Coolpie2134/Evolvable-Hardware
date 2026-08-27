@@ -321,9 +321,9 @@ node has no fixed rectangle to memorise, so a circuit has to work by real
 dynamics. For a project whose credibility gate is generalisation (5.5), that is
 the decisive difference.
 
-**What it costs.** Two registered temporal targets become unavailable, Odd pulse selector and
-Pulse width sum, both declaring `supported_models=('pulse_delay',)` because they
-are waveform-DURATION contracts needing width-preserving transport. The target
+**What it costs.** The registered Odd pulse selector target becomes unavailable,
+declaring `supported_models=('pulse_delay',)` because it is a waveform-DURATION
+contract needing width-preserving transport. The target
 picker filters them out automatically. Runs are roughly 1.8x slower than the
 retired single-tile engine.
 
@@ -489,9 +489,7 @@ in the current bank 78% of the time and chooses a minimum-Hamming alternative;
 the rest crosses to another selected bank. The `UNRESTRICTED`-only path is a
 strict no-op around the historical random generator and bit-flip mutation, so
 old runs remain bit-identical. Checkpoints without the field load as
-`('UNRESTRICTED',)`. The spatial hard-target compiler rescue runs only when
-`UNRESTRICTED` is enabled, because a synthesized arbitrary table need not exist
-in a named physical bank.
+`('UNRESTRICTED',)`.
 
 **Dynamics.** `substrates/lut/pulse.py: AsyncLutSim` is continuous-time asynchronous
 level logic with inertial delay. A cell re-evaluates its tables when a neighbour
@@ -678,37 +676,16 @@ control gene—come from the same parent while the child retains that shared pad
 environment. When no compatible mate exists, it returns the first parent for
 ordinary mutation rather than grafting a module into an unrelated coordinate
 system. Context and control genes receive fresh stable IDs in a genuine child.
-This atomic pairing is the central experimental claim of v6: recombination
-exchanges "everything that develops output X" rather than an arm detached from
-the root geometry to which it adapted. Fan-out remains physical: it exists only
-at source pads and fixed components with two output ports. One unmutated best
-specialist per output role is retained in each offspring cohort. A small
-assembly cohort combines compatible role specialists that share an input layout
-without applying the ordinary post-crossover mutation burst; this gives the
-atomic role module one evaluated opportunity to work as an inherited unit rather
-than damaging the join before selection sees it.
+Recombination therefore exchanges "everything that develops output X" rather
+than an arm detached from the root geometry to which it adapted. Fan-out remains
+physical: it exists only at source pads and fixed components with two output
+ports. No unmutated role specialist or hand-assembled module receives a reserved
+offspring slot.
 
 There is no automatic route search, phenotype-to-genome conversion, target
-scaffold, or inverse development. Static combinational runs add one explicit,
-bounded exception after a sustained plateau: role rescue regrows an ordinary
-output arm toward only the pads that can influence that role (measured by paired
-contract rows), using a compact random crown scaled to that role's input arity,
-and searches only route-preserving AND/OR/XOR/VETO alleles. Complete shared-gene
-assignments are evaluated in packed bitsets in the target's actual row order;
-the closest samples seed a bounded allele beam, and the physically attainable
-signature with minimum truth-table Hamming distance is retained. This stage may
-read the declared contract, but it cannot move terminals, prescribe a route or
-gate tree, add a function family, or assign two values to one shared gene.
-Static regrowth draws morphology from the enabled LOGIC and DELAY construction
-palette rather than diluting it with temporal components. Its crown checks for
-the shared upstream buds required by multi-input functions and continues only
-to a small arity-scaled ceiling when those physical fan-out niches have not yet
-appeared.
-The deep search cohort is activated after four generations without contract
-progress. Before that point the same reserve uses inexpensive single-gate,
-route-preserving mutations; the larger archive rescue still begins at the
-shared twelve-generation stress threshold. Thus an improving run does not pay
-for nested arm regrowth and packed beam search on every generation.
+scaffold, inverse development, truth-table compiler, or target-aware allele
+search. Plateaus affect only ordinary mutation pressure, random immigration and
+mutated archive descendants.
 Incomplete fitted phenotypes still emit a zero for every declared contract case.
 Under genetic readout, each missing role site emits zero independently while
 other live roles remain observable. This keeps FNV case vectors rectangular and
@@ -1221,23 +1198,6 @@ matching kinds in stable genotype-keyed order, and masks sources from incoming
 feedback and sinks from downstream drive. Missing `io_kind` in an old LUT
 checkpoint defaults to an ordinary body cell.
 
-For the LUT backend with `spatial_chromosome` binding,
-`plateau_rescue_candidates(...)` adds a small deterministic memetic
-neighbourhood to that offspring generation. Two-input/two-output bodies try
-compact 2x2 assignments (all four port identities remain heritable), and rules
-expressed at bound output cells try every one-bit `self_out` neighbour.
-The motif and one-bit proposals never inspect expected answers. In addition,
-periodic truth tables now receive an explicit compiler proposal from
-`substrates/lut/synthesis.py`. A four-input hub uses its four directional LUTs as four
-independent output functions; the five-port comparator adds a strobe-driven
-zero detector and merge stage. Unaddressed LUT bits label cells for inverse
-development, and the inverse records exterior `self_in=0 -> 0` suppressors as
-well as positive births. A heritable polarised seed breaks the forced fourfold
-symmetry of the legacy isotropic centre seed (`None` retains legacy behaviour).
-The compiler result is admitted only after it re-grows exactly as an ordinary
-genome. Every proposal is still accepted or rejected by the unchanged growth
-engine and Behavior Contract; no hand-injected phenotype is scored.
-
 ### 4.6 Diversification
 
 `diversify(seeds, target, pop_size, valid=0.999, ...)` fills a population with
@@ -1293,7 +1253,7 @@ on load. Such a run is flagged in the status line as retired physics, because
 single-tile `uniform` is not the current profile.
 
 The desktop app intentionally supplies run-oriented defaults on top of the
-dataclass: population 50, generations 500, restarts 1, workers up to 8,
+dataclass: population 60, generations 500, restarts 1, workers up to 8,
 chromosomes 2, and an
 elite breeding pool of 5. `GAConfig.elite_count` remains 1 for direct API
 construction and checkpoint compatibility.
@@ -1537,10 +1497,10 @@ idle settle interval. Tables whose zero row is all low are unchanged.
 | Folder (GUI) | Examples | Notes |
 | :---- | :---- | :---- |
 | Combinational logic | AND/OR/XOR/NAND/NOR/XNOR, half and full adder, 2-bit adder, 2x2 multiplier, 2:1 MUX, 2-to-4 decoder, comparator, majority-3, parity-3 | Native truth tables on SNN. On the asynchronous backends they are wrapped by `periodic_combinational_target(...)`: every input combination is tested in its own widely-spaced window (a 1 is held high for a grid diameter plus a read window, a 0 is silent), with the gap between release and the next onset set to several times the grid's settling transient so one case cannot contaminate the next. Held level in, **held level out**: the `combinational_level` contract reads the settled tail of the hold and asks the output to SIT at its required value there, exactly as FNV reads a settled level at its horizon. That is what separates this wrapper from its `(temporal)` twin, which is edge-in/edge-out. See 5.4 for the physical consequence on a pulse substrate. Each table repeats under alternate row orders and two phases so a fixed oscillator cannot replace input-dependent logic. |
-| Timed events | Coincidence, Temporal XOR, Sequence A->B, Veto gate, Burst x3, Divide-by-3, Echo, Pair detector, C-element, A-first rendezvous, Collision serializer, Refractory filter, Watchdog, the A-count query family, Period doubler/tripler/halver, Temporal sum | Point-event (F1) scoring. The mixed-width A-count query family is the fairest cross-model comparison set. |
+| Timed events | Coincidence, Temporal XOR, Sequence A->B, Veto gate, Burst x3, Echo, C-element, A-first rendezvous, Collision serializer, Refractory filter, Watchdog, the A-count query family, Period doubler/tripler/halver, Temporal sum | Point-event (F1) scoring. The mixed-width A-count query family is the fairest cross-model comparison set. |
 | Memory and state | SR latch, Toggle flip-flop, One-shot, Gated oscillator, Resettable toggle | Persistence-window scoring; the real memory tests. |
 | Cadence and patterns | Oscillator (period 2), Pattern (1000), Period stepper | Oscillator and Pattern are autonomous hand-built banks. Period stepper is command-driven and oracle-backed. |
-| Pulse width and duration | Pulse width sum (A+B), Odd pulse selector, Pair detection gap (2x pulse width), Pulse doubler | Duration semantics. The two waveform-contract targets declare `supported_models=('pulse_delay',)`. |
+| Pulse width and duration | Odd pulse selector, Pulse doubler | Duration semantics. |
 
 ### 5.8 Which targets suit which model
 
@@ -1556,11 +1516,11 @@ This matters whenever results are compared across architectures or node models.
   the wrappers isolate and repeat each input row in time. Because LUT wires
   carry levels, the substrate can hold state genuinely (strict hold scoring)
   rather than representing it only as a circulating pulse.
-* **Nervous net**: everything, with model restrictions. Waveform-contract
-  targets (Pulse width sum, Odd pulse selector) are physically unreachable under
+* **Nervous net**: everything, with model restrictions. The waveform-contract
+  target Odd pulse selector is physically unreachable under
   `uniform`, because a node regenerates a fixed width and every internal wire has
   a single driver, so no mechanism can synthesise an input-dependent duration.
-  They declare `supported_models`, and the picker hides them under the wrong
+  It declares `supported_models`, and the picker hides it under the wrong
   model rather than letting a run silently cap below 1.0.
 * **FNV**: combinational and temporal targets through periodic input schedules.
   It evolves relative source-pad geometry and globally fits distinct read-only
@@ -1655,7 +1615,7 @@ machine-readable settings, timings, exclusions, and maxima under `results/`.
 
 Above the tabs, and shared by all of them:
 
-* **Model**: Nervous / FNV / LUT / SNN. The master switch: it reconfigures the window,
+* **Substrate**: Nervous / FNV / LUT / SNN. The master switch: it reconfigures the window,
   filters the target list, retitles the activity tab, and shows or hides the
   Designer and Diversity tabs (6.7, 6.9).
 * **Target**: a two-part picker: a category folder plus a searchable, editable
@@ -1666,17 +1626,20 @@ Above the tabs, and shared by all of them:
 * **Workers** - process limit for parallel genome evaluation. The default is at
   most 8, the accepted range is 1-16, and runs with smaller populations start
   no more processes than genomes.
-* **Substrate (Vth / Syn / Input) and Graded**: SNN only; disabled and
-  irrelevant for the paper architectures.
+* **Substrate (Vth / Syn / Input)**: SNN only; hidden and irrelevant for the
+  other architectures. Input current is also disabled for temporal SNN targets,
+  whose executable schedules own their stimulus amplitudes.
 * **GA tuning row**: mutations, limit, immigrants, tournament, elites, anneal,
-  beta, epsilon-lexicase, recombination, max telomere (4.7). Disabled for SNN, which
-  uses its own fixed constants.
+  beta, epsilon-lexicase, recombination, max telomere (4.7). SNN consumes the
+  shared settings but disables epsilon-lexicase because it has no per-case vector.
+  Fresh Nervous/SNN runs use the measured cooler tuple `4 / 0.08 / 4 / 5 /
+  0.997 / 1`; FNV/LUT use `6 / 0.12 / 3 / 3 / 1.0 / 2`. The GUI remembers
+  edits separately per substrate instead of silently carrying one substrate's
+  mutation pressure into another.
 * **Pulse physics row** (nervous only): Delay, Width, Coincidence, and the NV
-  profile dropdown, which now has a single entry, analog tri-circuit (2.2).
-  Changing the profile re-filters the target list, relabels the physics fields,
-  and shows or hides the analog constants row (Vth / Step / Tau leak /
-  Hysteresis), which appears only under the analog profile and locks while a run
-  is in flight.
+  static NV profile description, analog tri-circuit (2.2), plus the analog
+  constants row (Vth / Step / Tau leak / Hysteresis). These controls lock while
+  a run is in flight.
 * **I/O binding row**: a read-only native-I/O description for Nervous/FNV; FNV
   reflects its fitted-control or genetic-output choice. LUT has a two-choice selector
   (**Evolved internal source pads** or **Alternating exterior perimeter buses**); and

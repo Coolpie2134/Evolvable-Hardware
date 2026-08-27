@@ -42,8 +42,8 @@ from .targets import (OutputTerminal, Trial, TemporalTarget, TEMPORAL_TARGETS,
                       periodic_combinational_target, with_io_placement,
                       spike_target, sr_latch, toggle_ff, oscillator, echo,
                       pattern_generator, coincidence_detector, one_shot,
-                      pair_detector, temporal_xor, ordered_sequence, veto_gate,
-                      burst_generator, divide_by_3)
+                      temporal_xor, ordered_sequence, veto_gate,
+                      burst_generator)
 from .io_placement import (IO_STRATEGIES, io_strategy, cell_tags, bind_io,
                            wiring_chromosome, seed_spatial_from_phenotype,
                            describe_binding)

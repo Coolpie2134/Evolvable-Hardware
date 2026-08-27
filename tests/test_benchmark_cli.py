@@ -75,6 +75,36 @@ def test_benchmarks_skip_solver_bank_work_and_record_the_worker_limit():
     assert record['ga']['diversify_solvers'] is False
 
 
+def test_fresh_ga_defaults_are_resolved_per_substrate_and_overridable():
+    args = benchmark.build_parser().parse_args([])
+    args.fnv_families = benchmark.parse_list(args.fnv_families)
+    args.lut_function_families = benchmark.parse_list(
+        args.lut_function_families)
+
+    nervous = benchmark.build_run_config(args, 'nervous', 2).ga
+    fnv = benchmark.build_run_config(args, 'fnv', 2).ga
+    assert (nervous.mean_mutations, nervous.immigrant_fraction,
+            nervous.tournament_size, nervous.elite_count,
+            nervous.mutation_decay, nervous.stagnation_beta) == (
+                4.0, 0.08, 4, 5, 0.997, 1.0)
+    assert (fnv.mean_mutations, fnv.immigrant_fraction,
+            fnv.tournament_size, fnv.elite_count,
+            fnv.mutation_decay, fnv.stagnation_beta) == (
+                6.0, 0.12, 3, 3, 1.0, 2.0)
+
+    explicit = benchmark.build_parser().parse_args([
+        '--mutations', '7', '--immigrants', '0.2', '--tournament', '6',
+        '--elites', '2', '--anneal', '0.99', '--plateau-beta', '0.5'])
+    explicit.fnv_families = benchmark.parse_list(explicit.fnv_families)
+    explicit.lut_function_families = benchmark.parse_list(
+        explicit.lut_function_families)
+    configured = benchmark.build_run_config(explicit, 'fnv', 2).ga
+    assert (configured.mean_mutations, configured.immigrant_fraction,
+            configured.tournament_size, configured.elite_count,
+            configured.mutation_decay, configured.stagnation_beta) == (
+                7.0, 0.2, 6, 2, 0.99, 0.5)
+
+
 def _seed(gen):
     """One seed record shaped like the ones run_one() emits."""
     solved = gen is not None
@@ -139,5 +169,3 @@ def test_render_markdown_shows_solve_generations_and_the_caveat():
     assert '18/94/140' in report
     assert 'Budget caveats' in report
     assert 'lower bound' in report
-
-

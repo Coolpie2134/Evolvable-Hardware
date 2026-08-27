@@ -18,26 +18,6 @@ from .parallel import EvolutionCancelled   # re-exported for back-compat
 
 
 SOLVER_VALID = 0.999
-#: Rescue candidates per stalled generation. Deliberately still pop//2.
-#:
-#: A 90-second-budget ablation said 8 was better: over 24 paired runs across 8
-#: targets it beat pop//2 (12-3, sign p=0.035) and beat no rescue (13-3,
-#: p=0.021), while pop//2 looked indistinguishable from no rescue at all
-#: (7-4-13, p=0.55) despite building 125,970 genomes. Solve counts were equal
-#: at 6/24 under every setting, so 8 looked like a free ~80% saving.
-#:
-#: IT DID NOT REPLICATE AT FULL BUDGET. Full adder needs 561-869s to solve and
-#: never solved inside the 90s ablation under ANY variant, so that experiment
-#: could not see solve behaviour on the expensive targets at all. Re-tested on
-#: one seed at the real 200-generation budget: pop//2 certified 2/4, limit 8
-#: certified 0/4 - all four parked on the 0.9062 best-wrong ceiling - for a
-#: ~26% wall saving. Trading solves for speed is the wrong trade here.
-#:
-#: The knob (GAConfig.plateau_rescue_limit) stays so the experiment can be
-#: finished properly at full budget across the stall-prone targets. Until then
-#: the measured-at-90s value is NOT the default.
-#: See results/fnv_rescue_ablation.md.
-FNV_PLATEAU_RESCUE_LIMIT = None
 LATEST_POPULATION_NAME = 'latest_population.json'
 SOLVER_POPULATION_NAME = 'solver_generation.json'
 
@@ -233,7 +213,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     pool = None
     diversify_fn = None
     consolidate_fn = None
-    plateau_rescue_fn = None
     rank_fn = snn_rank_key
     rate_fn = lambda rate, stagnation, solved=False, beta=0.0, limit=8.0: rate
     base_rate, decay = config.ga.mean_mutations, config.ga.mutation_decay
@@ -242,9 +221,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     workers = max(1, min(config.ga.evaluation_workers, pop))
 
     if backend == 'nervous':
-        from substrates.nervous.branched_ga import (
-            plateau_rescue_candidates, random_branched_hex_genome,
-            select_developmental_seed)
+        from substrates.nervous.branched_ga import random_branched_hex_genome
         from substrates.nervous.ga import (eval_batch_cases, next_population, diversify,
                                consolidate_population,
                                adaptive_mutation_rate, rank_key)
@@ -264,7 +241,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         # Target-specific developmental selection is an injection mechanism,
         # not part of an unbiased evolutionary run. Keep initialization purely
         # random; reusable generic mutation operators remain available.
-        pure_evolution = True
         def make_genome(input_genes=None):
             # Branched, output-rooted development is the nervous encoding now
             # (substrates/nervous/branched.py). Arms start at genetic output
@@ -274,15 +250,12 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             # Richest of a few random starts, judged only on whether the
             # inputs can reach the outputs - most random starts have an output
             # nothing can drive, and those are all the same score to selection.
-            factory = lambda: random_branched_hex_genome(
+            return random_branched_hex_genome(
                 chromosome_count, max_telomere=config.ga.max_telomere,
                 n_inputs=target.n_inputs,
                 output_roles=tuple(terminal.role
                                    for terminal in target.outputs),
                 input_genes=input_genes)
-            return factory() if pure_evolution else select_developmental_seed(
-                factory, attempts=make_genome.developmental_seed_candidates)
-        make_genome.developmental_seed_candidates = 6
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
         selection_mode = (
@@ -291,20 +264,15 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 or getattr(target, 'combinational_cases', ())
                 or getattr(target, 'temporal_logic_cases', ()))
             else config.ga.selection)
-        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_population(
+        step = lambda p, f, c, mm, recombine, archive, stagnation: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
             selection=selection_mode,
             chromosome_count=chromosome_count, recombination=recombine,
             evolve_io=evolve_io, io_placement=io_strategy,
-            archive_parent=archive, stagnation=stagnation,
-            rescue_candidates=rescue)
+            archive_parent=archive, stagnation=stagnation)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
-        plateau_rescue_fn = lambda champion, limit: \
-            plateau_rescue_candidates(
-                champion, target, limit=limit,
-                max_telomere=config.ga.max_telomere)
         # Resolve the delay-mutation toggle once so diversification mutates
         # under exactly the same operator set as the main GA loop.
         evolve_delay = config.ga.timing_mutations()
@@ -320,32 +288,24 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     elif backend == 'fnv':
         from substrates.fnv.ga import (
             adaptive_mutation_rate, consolidate_population, diversify,
-            eval_batch_cases, initialization_families, next_population,
-            plateau_rescue_candidates, rank_key, select_developmental_seed)
+            eval_batch_cases, next_population, rank_key)
         from substrates.fnv.genome import random_functional_genome
         families = config.fnv.families
-        seed_families = initialization_families(families, target)
         setattr(target, '_fnv_families', families)
         setattr(target, 'io_placement', 'fixed')
         setattr(target, '_fnv_readout_mode', config.fnv.readout_mode)
         evolve_io = False
         cache = LRUCache(config.ga.cache_size)
         pool = ProcessPoolExecutor(max_workers=workers)
-        fnv_logic_contract = (
-            bool(getattr(target, "combinational_cases", ()))
-            or (not getattr(target, "temporal", False)
-                and bool(getattr(target, "cases", ()))))
-
         def make_genome():
             # Role names seed genetic output niches, not desired behavior or
             # coordinates. Local rules grow backward from those roots toward
             # the evolved source pads.
-            return select_developmental_seed(lambda: random_functional_genome(
+            return random_functional_genome(
                 chromosome_count, max_telomere=config.ga.max_telomere,
-                families=seed_families, n_inputs=target.n_inputs,
+                families=families, n_inputs=target.n_inputs,
                 output_roles=tuple(terminal.role
-                                   for terminal in target.outputs)),
-                prefer_logic_capacity=fnv_logic_contract)
+                                   for terminal in target.outputs))
 
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(
@@ -356,32 +316,16 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 or getattr(target, 'combinational_cases', ())
                 or getattr(target, 'temporal_logic_cases', ()))
             else config.ga.selection)
-        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: \
+        step = lambda p, f, c, mm, recombine, archive, stagnation: \
             next_population(
                 p, f, make_genome, c, mm, selection=selection_mode,
                 ga_config=config.ga, chromosome_count=chromosome_count,
                 recombination=recombine, archive_parent=archive,
-                stagnation=stagnation, rescue_candidates=rescue,
-                families=families, growth_seeds=target.inputs,
-                target=target,
-                focus_families=(
-                    tuple(family for family in ("LOGIC", "DELAY")
-                          if family in families)
-                    if fnv_logic_contract
-                    else ()))
+                stagnation=stagnation,
+                families=families, growth_seeds=target.inputs)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
-        plateau_rescue_fn = lambda champion, limit: \
-            plateau_rescue_candidates(
-                champion, limit=limit,
-                max_telomere=config.ga.max_telomere,
-                families=families, growth_seeds=target.inputs,
-                focus_families=(
-                    tuple(family for family in ("LOGIC", "DELAY")
-                          if family in families)
-                    if fnv_logic_contract else ()),
-                target=target)
         diversify_fn = lambda seeds, valid: diversify(
             seeds, target, pop, valid=valid, cache=cache, executor=pool,
             should_stop=stop_event.is_set,
@@ -394,11 +338,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             eval_batch_cases, next_population, diversify,
             consolidate_population, constrain_genome_functions,
             make_seed_genome,
-            adaptive_mutation_rate, rank_key,
-            plateau_rescue_candidates)
-        from substrates.lut.branched_ga import (
-            random_branched_lut_genome,
-            select_developmental_seed as select_lut_seed)
+            adaptive_mutation_rate, rank_key)
+        from substrates.lut.branched_ga import random_branched_lut_genome
         from substrates.lut.genome import random_input_layout
         from substrates.nervous.io_placement import seed_io_metadata
         # Evolvable I/O binding (see the nervous branch): body priorities or a
@@ -427,15 +368,13 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             if io_strategy == 'fixed' and getattr(
                     config.ga, 'lut_io_mode',
                     'source_pads') != 'exterior_edges':
-                return select_lut_seed(
-                    lambda: random_branched_lut_genome(
-                        chromosome_count, max_telomere=config.ga.max_telomere,
-                        n_inputs=target.n_inputs,
-                        output_roles=tuple(terminal.role
-                                           for terminal in target.outputs),
-                        families=function_families,
-                        input_genes=input_genes),
-                    attempts=make_genome.developmental_seed_candidates)
+                return random_branched_lut_genome(
+                    chromosome_count, max_telomere=config.ga.max_telomere,
+                    n_inputs=target.n_inputs,
+                    output_roles=tuple(terminal.role
+                                       for terminal in target.outputs),
+                    families=function_families,
+                    input_genes=input_genes)
             genome = constrain_genome_functions(
                 make_seed_genome(chromosome_count), function_families)
             for chromosome in genome.chromosomes:
@@ -467,20 +406,13 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 seed_wiring_from_phenotype(
                     genome, grid, target, tags=tags)
             return genome
-        make_genome.developmental_seed_candidates = 6
         raw_eval = lambda genomes, should_stop=None, on_progress=None: \
             eval_batch_cases(genomes, target, cache, pool, should_stop, on_progress)
-        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_population(
+        step = lambda p, f, c, mm, recombine, archive, stagnation: next_population(
             p, f, make_genome, c, mm, ga_config=selection_ga,
             chromosome_count=chromosome_count, recombination=recombine,
             evolve_io=evolve_io, io_placement=io_strategy,
-            archive_parent=archive, stagnation=stagnation,
-            rescue_candidates=rescue)
-        plateau_rescue_fn = lambda champion, limit: \
-            plateau_rescue_candidates(
-                champion, target, limit=limit,
-                max_telomere=config.ga.max_telomere,
-                function_families=function_families)
+            archive_parent=archive, stagnation=stagnation)
         rate_fn = adaptive_mutation_rate
         rank_fn = rank_key
         consolidate_fn = consolidate_population
@@ -527,37 +459,23 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
         raw_eval = lambda genomes, should_stop=None, on_progress=None: (
             eval_snn(genomes, target, arch, pool, cache, should_stop, on_progress),
             None)
-        # Same plateau machinery the other two backends get: the annealed and
-        # reheated mutation rate, fresh immigrants, a stressed archive parent,
-        # and spatial output-rescue proposals. substrates.snn.ga.next_population and
-        # substrates.snn.ga.evolve already support all of it; only this lambda was
-        # still dropping mm/archive/stagnation/rescue on the floor, which left
-        # the SNN backend running at a fixed mutation rate with no plateau
-        # response at all.
+        # Thread annealed/reheated mutation, random immigrants, and mutated
+        # archive descendants through the SNN breeder as on the other backends.
         # The SNN breeder takes no ga_config, so the escape configuration and
         # the mutation cap are handed to it explicitly - otherwise self-adaptive
         # mutation would silently do nothing on this backend.
-        step = lambda p, f, c, mm, recombine, archive, stagnation, rescue: next_snn(
+        step = lambda p, f, c, mm, recombine, archive, stagnation: next_snn(
             p, f, chromosome_count=chromosome_count,
             recombination=recombine, evolve_io=evolve_io,
             io_placement=io_strategy,
             mean_mutations=mm, make_genome=make_genome,
             archive_parent=archive, stagnation=stagnation,
-            rescue_candidates=rescue, escape=config.ga.escape,
-            mutation_limit=config.ga.mutation_limit)
+            escape=config.ga.escape,
+            mutation_limit=config.ga.mutation_limit,
+            immigrant_fraction=config.ga.immigrant_fraction,
+            tournament_size=config.ga.tournament_size,
+            elite_count=config.ga.elite_count)
         rate_fn = snn_adaptive_mutation_rate
-        if io_strategy == 'spatial_chromosome':
-            from substrates.nervous.io_placement import spatial_output_variants
-            plateau_rescue_fn = lambda champion, limit: \
-                spatial_output_variants(champion, target, limit=limit)
-
-    # One construction point for the escape machinery, shared with the headless
-    # driver (substrates.nervous.ga.evolve_nervous) so the two drive paths
-    # cannot breed, crowd or rebirth under different rules.
-    # Target-specific witness/rescue candidates are diagnostic tools only and
-    # must never enter production evolution or benchmark populations.
-    plateau_rescue_fn = None
-
     def new_escape_state():
         # Restarts are independent searches. Reusing this mutable object leaked
         # rebirth archives, cooldowns, pending island migrations, and now walker
@@ -650,8 +568,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             # plain comprehension ignored Stop until the whole population was
             # built (the "stop still grows a generation for LUTs" lag).
             population = []
-            if hasattr(make_genome, 'developmental_seed_candidates'):
-                make_genome.developmental_seed_candidates = 6
             # Arms are only safe to recombine when they grew against the same
             # concrete source pads. Independent random starts almost never
             # meet that condition, so guarded crossover had become a clone
@@ -673,14 +589,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     genome = make_genome(
                         cohort_inputs[(index - cohort_count) % cohort_count])
                 population.append(genome)
-            # Initial cohorts pay for the strongest target-blind connectivity
-            # filter. Immigrants exist to inject diversity every generation;
-            # rebuilding up to six complete organisms for each one dominated
-            # LUT wall time and selected that diversity back toward the same
-            # morphology. Two candidates still reject most inert starts while
-            # cutting the recurring construction bill by roughly two thirds.
-            if hasattr(make_genome, 'developmental_seed_candidates'):
-                make_genome.developmental_seed_candidates = 2
             validate_population(population)
             fitnesses, cases = evaluate(
                 population, 'Evaluating initial population', try_i, 0)
@@ -713,25 +621,6 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                     mutation_rate, stagnation, run_fit >= 1.0,
                     config.ga.stagnation_beta, config.ga.mutation_limit)
                 parents, parent_fitnesses, parent_cases = population, fitnesses, cases
-                rescue = ()
-                if run_fit >= 1.0 and consolidate_fn is not None:
-                    # Terminal consolidation exists so perfect circuits can
-                    # ACCUMULATE and the mean can converge to 1. It could not:
-                    # every offspring is mutated, mutation almost always breaks
-                    # a solution, so the population sat at exactly ONE perfect
-                    # member forever while the mean pinned to whatever the rest
-                    # scored. Elites are deliberately never copied, which stops
-                    # premature convergence BEFORE a solve; afterwards there is
-                    # nothing left to converge away from.
-                    #
-                    # Re-enter the solved genomes as unmutated children through
-                    # the same channel plateau rescue uses (those are cloned,
-                    # not mutated). Capped at a quarter of the population so the
-                    # remaining offspring keep exploring.
-                    rescue = [
-                        genome
-                        for genome, fitness in zip(parents, parent_fitnesses)
-                        if fitness >= SOLVER_VALID][:max(1, pop // 4)]
                 # One pool, or separate demes at their own mutation rates when
                 # islands are on. Shared with the headless driver.
                 offspring = escape_state.breed(
@@ -741,7 +630,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                         deme, deme_fitnesses, deme_cases, deme_rate,
                         recombination_enabled(),
                         champion if run_fit < 1.0 else None,
-                        stagnation, rescue))
+                        stagnation))
                 offspring_fitnesses, offspring_cases = evaluate(
                     offspring, 'Evaluating population', try_i, generation)
                 offspring_best = max(offspring_fitnesses)

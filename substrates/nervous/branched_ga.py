@@ -561,37 +561,6 @@ def crossover_branched_hex(left, right):
     return child
 
 
-def plateau_rescue_candidates(
-        genome, target, limit=48, max_telomere=MAX_TELOMERE):
-    """Verified arithmetic seed for a stalled live nervous-net population.
-
-    The candidate remains an ordinary branched genome and earns its score only
-    by development plus the normal paper-analog evaluation.  This closes the
-    previous gap where LUT had a truth-table plateau seed but the harder
-    nervous encoding had no rescue at all.
-    """
-    if int(limit) <= 0 or not isinstance(genome, BranchedHexGenome):
-        return []
-    from .branched_synthesis import (
-        SynthesisError, synthesize_branched_full_adder)
-    from .logic_synthesis import synthesize_branched_logic
-    from .state_synthesis import synthesize_branched_dynamic
-    from .ga import evaluate_nv_full
-    for compiler in (synthesize_branched_full_adder,
-                     synthesize_branched_logic,
-                     synthesize_branched_dynamic):
-        try:
-            candidate = compiler(
-                target, chromosome_count=len(genome.chromosomes),
-                max_telomere=max_telomere)
-        except SynthesisError:
-            continue
-        fitness, cases = evaluate_nv_full(candidate, target)
-        if fitness == 1.0 and cases and min(cases) == 1.0:
-            return [candidate]
-    return []
-
-
 def assemble_role_modules(base, donors):
     """Build one unmutated organism from compatible evaluated output arms."""
     child = clone_branched_hex(base)

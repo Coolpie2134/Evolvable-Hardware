@@ -1286,13 +1286,12 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     chromosome_count=None, recombination=True,
                     evolve_delay=None, evolve_io=False, io_placement=None,
                     archive_parent=None, stagnation=0,
-                    rescue_candidates=None, escape=None, mutation_limit=None):
+                    escape=None, mutation_limit=None):
     """Breed one exploratory offspring generation.
 
-    Elites are normally a breeding pool only. A stalled spatial run preserves
-    one cloned archive champion while it explores phenotype-local routing
-    patches; every other returned entry is a rescue proposal, immigrant, or
-    recombined/mutated child."""
+    Elites are normally a breeding pool only. Returned entries are random
+    immigrants, ordinary crossover/mutation offspring, or mutated archive
+    descendants; callers cannot insert prebuilt target-shaped genomes."""
     pop = len(population)
     elite_count = (ELITE_COUNT if ga_config is None else ga_config.elite_count)
     immigrant_fraction = (IMMIGRANT_FRAC if ga_config is None
@@ -1413,10 +1412,6 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         and stagnation >= STRESS_PATIENCE)
     new_pop = (
         [clone_genome(archive_parent)] if spatial_plateau and pop else [])
-    room = pop - len(new_pop)
-    new_pop += [
-        clone_genome(candidate)
-        for candidate in list(rescue_candidates or ())[:room]]
     remaining = pop - len(new_pop)
     new_pop += [make_genome() for _ in range(min(n_imm, remaining))]
     if (archive_parent is not None and stagnation >= STRESS_PATIENCE
@@ -1828,7 +1823,6 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                          else 0)
         solved_at, stagnation = None, 0
         mut_rate = MEAN_MUTATIONS           # annealing schedule (see MUT_DECAY)
-        spatial_rescue_queues = {}
         if verbose:
             print("%5s  %6s  %6s  %5s" % ("Gen", "Best", "Mean", "Mut"))
             print("-" * 30)
@@ -1840,50 +1834,6 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                                         solved=best_fitness >= 1.0)
             parents = list(population)
             parent_fitnesses, parent_cases = fitnesses, cases
-            rescue = ()
-            if (strategy == 'fixed'
-                    and best_fitness < 1.0
-                    and stagnation >= STRESS_PATIENCE):
-                from .branched_ga import plateau_rescue_candidates
-                rescue = plateau_rescue_candidates(
-                    best_genome, target, limit=min(48, max(1, pop // 2)),
-                    max_telomere=ga_config.max_telomere)
-            elif (strategy == 'spatial_chromosome'
-                    and best_fitness < 1.0
-                    and stagnation >= STRESS_PATIENCE):
-                from .io_placement import (
-                    spatial_input_sites, spatial_output_variants,
-                    spatial_routing_variants)
-                from .nervous import grow_nervous
-                limit = min(48, max(1, pop // 2))
-                grid = grow_nervous(
-                    best_genome,
-                    seeds=growth_seeds(
-                        target, 'spatial_chromosome', best_genome),
-                    grid_size=target.grid_size, iters=target.iters)
-                body_key = (
-                    tuple(sorted(grid.items())),
-                    tuple(spatial_input_sites(best_genome, target)))
-                queues = spatial_rescue_queues.get(body_key)
-                if queues is None:
-                    spatial_rescue_queues.clear()
-                    queues = {
-                        'outputs': spatial_output_variants(
-                            best_genome, target, limit=10_000),
-                        'routing': spatial_routing_variants(
-                            best_genome, target, limit=10_000),
-                    }
-                    spatial_rescue_queues[body_key] = queues
-                output_queue = queues['outputs']
-                output_count = min(
-                    len(output_queue), max(1, limit // 3))
-                rescue = output_queue[:output_count]
-                del output_queue[:output_count]
-                routing_queue = queues['routing']
-                routing_count = min(
-                    len(routing_queue), max(0, limit - len(rescue)))
-                rescue += routing_queue[:routing_count]
-                del routing_queue[:routing_count]
             # Memetic/Lamarckian write-back: replay the deterministic local
             # timing session for top breeders and copy accepted fine adjustments
             # into cloned parents before reproduction. Off by default.
@@ -1915,7 +1865,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
                         selection=selection, chromosome_count=n_chroms,
                         evolve_delay=evolve_delay, evolve_io=evolve_io,
                         io_placement=strategy, archive_parent=best_genome,
-                        stagnation=stagnation, rescue_candidates=rescue,
+                        stagnation=stagnation,
                         escape=escape_cfg,
                         mutation_limit=ga_config.mutation_limit))
             offspring_fitnesses, offspring_cases = eval_batch_cases(

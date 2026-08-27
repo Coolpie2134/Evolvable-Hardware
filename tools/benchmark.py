@@ -70,13 +70,11 @@ if hasattr(sys.stdout, 'reconfigure'):
 from runtime.config import (                                       # noqa: E402
     DEFAULT_EVALUATION_WORKERS, FNV_FAMILIES, FNVConfig, GAConfig,
     MAX_EVALUATION_WORKERS, NV_NEW_RUN_PROFILES, RunConfig,
-    default_max_telomere)
+    default_ga_tuning, default_max_telomere)
 from runtime.controller import SOLVER_VALID, run_evolution         # noqa: E402
 from runtime.escape import EscapeConfig                            # noqa: E402
 from runtime.limits import MAX_CHROMOSOME_COUNT                    # noqa: E402
 from runtime.mutation import DEFAULT_MUTATION_LIMIT                # noqa: E402
-from substrates.nervous.ga import (                                # noqa: E402
-    IMMIGRANT_FRAC, MEAN_MUTATIONS, MUT_DECAY, TOURNAMENT_K)
 from substrates.nervous.pulse import COINC, DELAY, WIDTH, PulseConfig  # noqa: E402
 from substrates.nervous.targets import (                           # noqa: E402
     TEMPORAL_TARGETS, periodic_combinational_target)
@@ -213,13 +211,13 @@ def resolve_target_names(requested, backend, node_model):
     return list(dict.fromkeys(selected)), list(dict.fromkeys(unsupported))
 
 
-def effective_target(target, high, graded):
+def effective_target(target, high):
     """The GUI's ``_effective_target``: a fresh copy, with the truth-table knobs
     applied only where they exist (temporal targets have neither)."""
     if getattr(target, 'temporal', False):
         return dataclasses.replace(target)
     return dataclasses.replace(
-        target, high=(target.high if high is None else high), graded=graded)
+        target, high=(target.high if high is None else high))
 
 
 # ----------------------------- configuration --------------------------------
@@ -262,15 +260,21 @@ def build_run_config(args, backend, chromosome_count):
                     else args.max_telomere)
     extra = ({'lut_function_families': tuple(args.lut_function_families)}
              if LUT_FUNCTION_FAMILIES else {})
+    tuning = default_ga_tuning(backend)
+
+    def chosen(option, key):
+        value = getattr(args, option)
+        return tuning[key] if value is None else value
+
     return RunConfig(
         ga=GAConfig(
-            mean_mutations=args.mutations,
-            immigrant_fraction=args.immigrants,
+            mean_mutations=chosen('mutations', 'mean_mutations'),
+            immigrant_fraction=chosen('immigrants', 'immigrant_fraction'),
             mutation_limit=args.mutation_cap,
-            tournament_size=args.tournament,
-            elite_count=args.elites,
-            mutation_decay=args.anneal,
-            stagnation_beta=args.plateau_beta,
+            tournament_size=chosen('tournament', 'tournament_size'),
+            elite_count=chosen('elites', 'elite_count'),
+            mutation_decay=chosen('anneal', 'mutation_decay'),
+            stagnation_beta=chosen('plateau_beta', 'stagnation_beta'),
             selection='lexicase' if args.lexicase else 'tournament',
             recombination_enabled=not args.no_recombination,
             max_telomere=max_telomere,
@@ -282,9 +286,6 @@ def build_run_config(args, backend, chromosome_count):
             chromosome_count=chromosome_count,
             evaluation_workers=args.workers,
             diversify_solvers=args.diversify_solvers,
-            pure_evolution=args.pure_evolution,
-            plateau_rescue_limit=(None if args.rescue_limit < 0
-                                  else args.rescue_limit),
             escape=build_escape_config(args),
             **extra),
         pulse=pulse,
@@ -330,12 +331,11 @@ def config_record(args, architectures):
             'population': args.pop, 'generations': args.gens,
             'restarts': args.tries, 'chromosomes': args.chroms,
             'workers': args.workers,
-            'graded': args.graded, 'input_high': args.input_high,
+            'input_high': args.input_high,
             # Both change what a cell can reach, so they belong in the
             # fingerprint: resuming a capped sweep into an uncapped one would
             # mix incomparable rows.
             'time_cap': args.time_cap, 'stop_on_solve': args.stop_on_solve,
-            'rescue_limit': args.rescue_limit,
         },
         'ga': {
             'mutations': args.mutations, 'immigrants': args.immigrants,
@@ -345,6 +345,21 @@ def config_record(args, architectures):
             'recombination': not args.no_recombination,
             'diversify_solvers': args.diversify_solvers,
             'max_telomere': args.max_telomere,
+            'resolved_tuning': {
+                backend: {
+                    key: (default_ga_tuning(backend)[key]
+                          if getattr(args, option) is None
+                          else getattr(args, option))
+                    for option, key in (
+                        ('mutations', 'mean_mutations'),
+                        ('immigrants', 'immigrant_fraction'),
+                        ('tournament', 'tournament_size'),
+                        ('elites', 'elite_count'),
+                        ('anneal', 'mutation_decay'),
+                        ('plateau_beta', 'stagnation_beta'))
+                }
+                for backend in architectures
+            },
             'resolved_max_telomere': {
                 backend: (default_max_telomere(backend)
                           if args.max_telomere is None else args.max_telomere)
@@ -427,7 +442,7 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
     """Evolve one (backend, target, seed) cell through the controller."""
     run_config = build_run_config(args, backend, args.chroms)
     arch, high = build_arch(args, target, backend)
-    live_target = effective_target(target, high, args.graded)
+    live_target = effective_target(target, high)
     setattr(live_target, 'pulse_config', run_config.pulse)
     setattr(live_target, 'io_placement', run_config.ga.io_placement)
     if backend == 'fnv':
@@ -876,6 +891,21 @@ def run_sweep(args, architectures):
     document['skipped'] = [{'backend': backend, 'target': name}
                            for backend, name in skipped]
 
+    # A resumed file may predate target retirement, and sometimes one backend
+    # must be rerun after an implementation-only fix.  Keep only cells that are
+    # part of the current plan; optionally invalidate selected backends without
+    # throwing away the expensive unaffected cells.
+    planned = {(backend, name) for backend, name, _target in plan}
+    refresh = set(getattr(args, 'rerun_architectures', ()))
+    done = {
+        key: cell for key, cell in done.items()
+        if key in planned and key[0] not in refresh
+    }
+    document['cells'] = [
+        cell for cell in document['cells']
+        if (cell['backend'], cell['target']) in done
+    ]
+
     if not plan:
         raise SystemExit('nothing to run - the target selection is empty')
 
@@ -979,31 +1009,22 @@ def build_parser():
     run.add_argument('--max-telomere', type=int, default=None,
                      help='Genome: Max telomere (default: per-backend, '
                      'nervous 24, snn 20, fnv 32, lut 18)')
-    run.add_argument('--pure-evolution', action='store_true',
-                     help='Disable target-specific developmental seeds and '
-                          'witness rescue for an unbiased evolution run')
-    run.add_argument('--graded', action='store_true',
-                     help='Graded logic fitness (SNN combinational only)')
     run.add_argument('--input-high', type=float, default=None,
                      help="Substrate: Input I (default: the target's own high)")
 
     ga = parser.add_argument_group('GA tuning (GUI: GA row)')
-    ga.add_argument('--mutations', type=float, default=MEAN_MUTATIONS,
-                    help='Mutations/child')
-    ga.add_argument('--immigrants', type=float, default=IMMIGRANT_FRAC,
-                    help='Immigrants')
-    ga.add_argument('--tournament', type=int, default=TOURNAMENT_K,
-                    help='Tournament')
-    ga.add_argument('--elites', type=int, default=5, help='Elites')
-    ga.add_argument('--rescue-limit', type=int, default=-1, metavar='N',
-                    help='plateau-rescue candidates per stalled generation '
-                         '(0 disables rescue, -1 = the backend default: 8 '
-                         'for FNV from the measured ablation, pop//2 '
-                         'elsewhere)')
-    ga.add_argument('--anneal', type=float, default=MUT_DECAY,
-                    help='Anneal alpha')
-    ga.add_argument('--plateau-beta', type=float, default=1.0,
-                    help='Plateau beta')
+    ga.add_argument('--mutations', type=float, default=None,
+                    help='Mutations/child (default: per substrate)')
+    ga.add_argument('--immigrants', type=float, default=None,
+                    help='Immigrants (default: per substrate)')
+    ga.add_argument('--tournament', type=int, default=None,
+                    help='Tournament (default: per substrate)')
+    ga.add_argument('--elites', type=int, default=None,
+                    help='Elites (default: per substrate)')
+    ga.add_argument('--anneal', type=float, default=None,
+                    help='Anneal alpha (default: per substrate)')
+    ga.add_argument('--plateau-beta', type=float, default=None,
+                    help='Plateau beta (default: per substrate)')
     ga.add_argument('--mutation-cap', type=float, default=DEFAULT_MUTATION_LIMIT,
                     help='Mutation cap')
     ga.add_argument('--lexicase', action='store_true',
@@ -1099,6 +1120,10 @@ def build_parser():
                           'snapshots (default: a temporary dir, discarded)')
     out.add_argument('--resume', action='store_true',
                      help='continue an interrupted sweep from --out')
+    out.add_argument(
+        '--rerun-architectures', default='',
+        help='with --resume, discard cached cells for these comma-separated '
+             'architectures and rerun them')
     out.add_argument('--report-only', action='store_true',
                      help='re-render the markdown from --out; run nothing')
     out.add_argument('--dry-run', action='store_true',
@@ -1157,6 +1182,14 @@ def main(argv=None):
         parser.error(str(error))
     args.targets = parse_list(args.targets)
     args.exclude = parse_list(args.exclude)
+    args.rerun_architectures = parse_list(args.rerun_architectures)
+    unknown_refresh = sorted(
+        set(args.rerun_architectures).difference(ARCHITECTURES))
+    if unknown_refresh:
+        parser.error('unknown --rerun-architectures value: %s'
+                     % ', '.join(unknown_refresh))
+    if args.rerun_architectures and not args.resume:
+        parser.error('--rerun-architectures requires --resume')
     args.fnv_families = parse_list(args.fnv_families)
     args.lut_function_families = parse_list(
         getattr(args, 'lut_function_families', 'UNRESTRICTED'))

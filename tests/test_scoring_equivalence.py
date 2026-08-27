@@ -26,12 +26,25 @@ from substrates.nervous.scoring import (TemporalTraces, contract_relations,     
                             _min_waveform_shift)
 from substrates.nervous.targets import periodic_combinational_target            # noqa: E402
 from substrates.snn.targets import gate_target, get_target                 # noqa: E402
+from substrates.snn.targets import TARGETS                                 # noqa: E402
 
 
 RELATIONS = {
     'event_correspondence', 'logical_state', 'pulse_intervals',
     'sustained_cadence', 'commanded_cadence', 'bounded_state',
     'transition_correspondence',
+}
+
+RELATION_OBSERVABLES = {
+    'truth_table': 'logic',
+    'event_correspondence': 'rises',
+    'combinational_level': 'intervals',
+    'transition_correspondence': 'intervals',
+    'logical_state': 'samples',
+    'pulse_intervals': 'intervals',
+    'sustained_cadence': 'rises',
+    'commanded_cadence': 'samples',
+    'bounded_state': 'rises',
 }
 
 
@@ -41,6 +54,33 @@ def test_every_registered_target_has_an_executable_contract():
         assert set(contract_relations(target)) <= RELATIONS, name
         assert not hasattr(target, 'score_mode'), name
     assert logic_contract().constraints[0].relation == 'truth_table'
+
+
+def test_every_target_contract_has_valid_relation_observable_and_weight():
+    """Audit the complete registry, including native combinational targets."""
+    targets = dict(TARGETS)
+    targets.update(TEMPORAL_TARGETS)
+    for name, target in targets.items():
+        assert target.contract.aggregation == 'mean_worst', name
+        assert target.contract.constraints, name
+        assert contract_case_count(target) > 0, name
+        for clause in target.contract.constraints:
+            assert clause.relation in RELATION_OBSERVABLES, name
+            assert clause.observable == RELATION_OBSERVABLES[clause.relation], name
+            assert float(clause.weight) > 0.0, name
+
+
+def test_missing_truth_table_rows_are_failures_not_a_perfect_prefix():
+    target = gate_target('XOR')
+    perfect = [[out[0]] for _bits, out in target.cases]
+    full_score, full_cases, _ = score_contract(perfect, target)
+    partial_score, partial_cases, _ = score_contract(perfect[:1], target)
+
+    assert full_score == 1.0
+    assert partial_score < 1.0
+    assert len(partial_cases) == len(full_cases) == contract_case_count(target)
+    assert partial_cases[0] == 1.0
+    assert all(score == 0.0 for score in partial_cases[1:])
 
 
 def test_contract_presentation_is_generated_from_executable_data():
@@ -106,6 +146,29 @@ def test_logic_contract_rewards_partial_correctness_monotonically():
         assert score >= prev - 1e-12, (i, score, prev)
         prev = score
     assert prev == 1.0
+
+
+def test_every_static_truth_table_accepts_exactly_its_declared_rows():
+    for name, target in TARGETS.items():
+        perfect = [list(output_bits) for _input_bits, output_bits in target.cases]
+        score, cases, _ = score_contract(perfect, target)
+        assert score == 1.0, name
+        assert len(cases) == contract_case_count(target), name
+
+
+def test_every_periodic_truth_table_accepts_held_exact_outputs():
+    for name, base in TARGETS.items():
+        target = periodic_combinational_target(base)
+        roles = [terminal.role for terminal in target.outputs]
+        tables = {
+            role: {bits: outputs[index]
+                   for bits, outputs in target.combinational_cases}
+            for index, role in enumerate(roles)}
+        traces = combinational_level_traces(
+            target, lambda role, bits, t=tables: bool(t[role][bits]))
+        score, cases, _ = score_contract(traces, target)
+        assert score == 1.0, name
+        assert len(cases) == contract_case_count(target), name
 
 
 def test_multi_output_logic_ranks_balanced_progress_above_easy_output_only():
@@ -193,6 +256,27 @@ def test_temporal_logic_balances_outputs_in_scalar_and_alignment():
     output_scores = [sum(by_role[role]) / len(by_role[role]) for role in roles]
     assert abs(balanced_score - 0.5 * (
         sum(output_scores) / len(output_scores) + min(output_scores))) < 1e-12
+
+
+def test_multi_output_event_contract_does_not_favor_the_fastest_stream():
+    """Rhythm Cascade's R1 has far more edges than R2/R4.
+
+    Raw pooled F1 made an R1-only circuit look roughly three-quarters solved.
+    Each required physical output must instead carry equal semantic weight.
+    """
+    target = TEMPORAL_TARGETS['Rhythm cascade']
+    roles = [terminal.role for terminal in target.outputs]
+    r1_only = TemporalTraces(
+        {role: [[] for _ in target.trials] for role in roles},
+        events={
+            role: [list(trial.expected_events[role])
+                   if role == roles[0] else []
+                   for trial in target.trials]
+            for role in roles})
+
+    score, cases, _ = score_contract(r1_only, target)
+    assert score < 0.25
+    assert max(cases) == 1.0 and min(cases) == 0.0
 
 
 def test_periodic_truth_table_reports_the_exact_row_level_selection_score():
@@ -421,6 +505,19 @@ def _state_target_trace(target, shift=0.0, jitter=False, strict=True):
         samples, events=events, intervals=intervals)
     traces.hold_tol = 0 if strict else 1
     return traces
+
+
+def test_every_registered_state_target_accepts_its_exact_state_machine():
+    targets = {
+        name: target for name, target in TEMPORAL_TARGETS.items()
+        if contract_relations(target)
+        == ('transition_correspondence', 'logical_state')}
+    assert targets
+    for name, target in targets.items():
+        exact = _state_target_trace(target)
+        score, cases, _ = score_contract(exact, target)
+        assert score == 1.0, name
+        assert len(cases) == contract_case_count(target), name
 
 
 def _event_target_trace(target, shift=0.0, jitter=False):
@@ -683,7 +780,7 @@ def test_every_registered_commanded_cadence_honors_each_command():
 
 
 def test_interval_contract_rejects_right_rises_with_wrong_widths():
-    target = TEMPORAL_TARGETS['Pulse width sum (A+B)']
+    target = TEMPORAL_TARGETS['Odd pulse selector']
     perfect_intervals = {
         'Q': [list(tr.expected_intervals['Q']) for tr in target.trials]}
     perfect = TemporalTraces(

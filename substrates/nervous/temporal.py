@@ -437,7 +437,7 @@ def place_outputs_by_trace(grid, routing, in_pos, ttarget, delays=None,
     # first role can spend the only strong cell and strand a later one.
     assignment = best_distinct_assignment(
         tuple(out_pos), candidates, scores,
-        balance_worst=bool(getattr(ttarget, 'combinational_cases', ())))
+        balance_worst=len(ttarget.outputs) > 1)
     if assignment is None:
         return out_pos, traces
     out_pos.update(assignment)

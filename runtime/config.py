@@ -30,6 +30,34 @@ LUT_FUNCTION_FAMILIES = (
     'UNRESTRICTED',
 )
 
+# Empirical fresh-run defaults. LUT/FNV benefited from sustained structural
+# exploration, while that same hot search damaged SNN timing lineages and did
+# not improve the Nervous substrate. See results/ga_validate_*_*.json.
+_BASELINE_GA_TUNING = {
+    'mean_mutations': 4.0,
+    'immigrant_fraction': 0.08,
+    'tournament_size': 4,
+    'elite_count': 5,
+    'mutation_decay': 0.997,
+    'stagnation_beta': 1.0,
+}
+_EXPLORATORY_GA_TUNING = {
+    'mean_mutations': 6.0,
+    'immigrant_fraction': 0.12,
+    'tournament_size': 3,
+    'elite_count': 3,
+    'mutation_decay': 1.0,
+    'stagnation_beta': 2.0,
+}
+
+
+def default_ga_tuning(backend):
+    """Return independent, mutable fresh-run tuning for ``backend``."""
+    source = (_EXPLORATORY_GA_TUNING
+              if str(backend).lower() in ('fnv', 'lut')
+              else _BASELINE_GA_TUNING)
+    return dict(source)
+
 # The only NV Net substrates exposed for NEW runs. Older node models remain in
 # the engine solely so existing checkpoints and controlled comparisons load.
 #: (tile_arch, node_model, evolve_delay) per profile.
@@ -189,18 +217,6 @@ class GAConfig:
     # constraint, not merely an initial-population hint.
     chromosome_count: int | None = None
     cache_size: int = 200_000
-    # How many rescue candidates a stalled generation may build. This used to
-    # be hardwired at pop//2 (capped 48), which MEASURED AS PURE COST on FNV:
-    # against no rescue at all it went 7-4-13 over 24 paired equal-wall-clock
-    # runs (sign p=0.55) while constructing 125,970 genomes. At 8 candidates
-    # the same mechanism beats both that setting (12-3, p=0.035) and no rescue
-    # (13-3, p=0.021) on a fifth of the work, because rescue was consuming more
-    # search than it returned. 0 disables rescue entirely.
-    #
-    # Only FNV was measured. Nervous and LUT keep the historical pop//2 unless
-    # this is set explicitly (see runtime/controller.py), so their recorded
-    # results stay comparable until the same ablation is run for them.
-    plateau_rescue_limit: int | None = None
     # One process per independently evaluated genome. Keeping this in the run
     # config makes GUI and benchmark load comparable and prevents a default run
     # from saturating every logical CPU on a desktop machine.
@@ -208,9 +224,6 @@ class GAConfig:
     # Useful for an interactive solver bank, but not part of measuring whether
     # a target was solved. Benchmarks disable this extra post-solve search.
     diversify_solvers: bool = True
-    # Unbiased benchmark mode: random/generic initialization only, with no
-    # target-specific developmental selection or witness rescue.
-    pure_evolution: bool = False
     # Reserved / no-op: evaluation now runs one saturated, cancellation-aware
     # pool pass per generation (runtime.parallel.map_ordered) instead of
     # chunked barriers, so this multiplier is no longer consumed. Kept as a

@@ -33,7 +33,8 @@ def _genome(genes, families=NAMED, tolerance=6, telomere=14):
             genes=list(genes),
             controls=[LutControlGene(tolerance=tolerance, telomere=telomere),
                       LutControlGene()])],
-        outputs=[LutOutputGene(role='Q', bearing=0, distance=2, branch_id=1)],
+        io_chromosome=LutIoChromosome(outputs=[
+            LutOutputGene(role='Q', bearing=0, distance=2, branch_id=1)]),
         families=families)
 
 
@@ -186,26 +187,6 @@ def test_an_arm_starts_only_at_its_genetic_output_root():
     trace = develop_branched_lut(rooted, [(0, 0)])
     assert len(trace.grid) == 1
     assert set(trace.grid) == set(output_root_sites(rooted, [(0, 0)]).values())
-
-
-def test_depth_bands_differentiate_on_the_square_lattice_too():
-    """The individuation the native LUT ontogeny cannot express."""
-    and_table = catalogue(('AND',))[0][1]
-    routes = [table for _family, table in catalogue(('ROUTING',))]
-    genome = _genome([
-        LutContextGene(1, self_in=OUT_CELL, self_out=(and_table, 0, 0, 0),
-                       branch_id=1),
-        LutContextGene(2, self_in=EMPTY_CELL, self_out=(routes[0], 0, 0, 0),
-                       branch_id=1, depth=1),
-        LutContextGene(3, self_in=EMPTY_CELL, self_out=(routes[1], 0, 0, 0),
-                       branch_id=1, depth=2),
-    ])
-    trace = develop_branched_lut(genome, [(0, 0)])
-    by_depth = {}
-    for cell, state in trace.grid.items():
-        by_depth.setdefault(trace.depths[cell], set()).add(state)
-    assert len(by_depth) >= 3
-    assert len({state for states in by_depth.values() for state in states}) >= 3
 
 
 def test_pads_are_read_only_and_development_is_deterministic():

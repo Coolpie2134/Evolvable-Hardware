@@ -23,10 +23,10 @@ from substrates.fnv.construction import (
     arm_control, arm_telomere, arm_tolerance, branch_growth_order,
     context_distance, develop_constructive)
 from substrates.fnv.construction_ga import (
-    BRANCHED_MUT_OPS, assemble_role_modules, branch_cut, branch_map, branched_signature,
+    BRANCHED_MUT_OPS, branch_cut, branch_map, branched_signature,
     chromosome_rules, clone_constructive, crossover_branched, mutate_branched,
     mutate_branched_once, observed_contexts, placement_genes,
-    random_branched_genome, randomize_branch_behavior, relabel_branches,
+    random_branched_genome, relabel_branches,
 )
 from substrates.fnv.ga import _recombination_mate_pool
 from substrates.fnv.genome import (
@@ -89,42 +89,6 @@ def test_an_output_root_gene_starts_only_at_its_assigned_site():
     trace, cells = _body(_genome([_arm([gene], 4)]))
     assert cells == {(0, 1): DOWN_TO_LR}
     assert sorted(trace.active_ids) == [1]
-
-
-def test_contract_allele_choice_changes_only_the_existing_gate_function():
-    pads = ((-1, 1), (1, 1))
-    route = BY_NAME["AND_LR_TO_D"].id
-    root = ContextGene(
-        1, PAD_STATE, PAD_STATE, EMPTY_STATE, OUT_STATE, route, 2)
-    genome = _genome([_arm([root], 4)], pads=pads)
-    before_layout = genome.output_layout
-
-    # In canonical binary-row order XOR is high on rows 01 and 10: 0b0110.
-    assert randomize_branch_behavior(
-        genome, 2, 2, preferred_signature=0b0110)
-    assert BY_ID[root.self_out].behavior == "XOR"
-    assert BY_ID[root.self_out].inputs == BY_ID[route].inputs
-    assert BY_ID[root.self_out].outputs == BY_ID[route].outputs
-    assert genome.output_layout == before_layout
-
-
-def test_contract_allele_choice_honors_the_targets_input_row_order():
-    pads = ((-1, 1), (1, 1))
-    route = BY_NAME["AND_LR_TO_D"].id
-    root = ContextGene(
-        1, PAD_STATE, PAD_STATE, EMPTY_STATE, OUT_STATE, route, 2)
-    genome = _genome([_arm([root], 4)], pads=pads)
-
-    # The middle two rows reverse canonical binary order, as happens when a
-    # target enumerates input 0 as the least-significant counter bit.  In this
-    # order A & ~B is 0,1,0,0 -> 0b0010.
-    patterns = ((0, 0), (1, 0), (0, 1), (1, 1))
-    assert randomize_branch_behavior(
-        genome, 2, 2, preferred_signature=0b0010,
-        input_patterns=patterns)
-    # Pad 0 is physically left of the cell and therefore enters its R-facing
-    # port (the port name is the direction the signal travels toward).
-    assert root.self_out == BY_NAME["VETO_R_NOT_L_TO_D"].id
 
 
 def test_a_gene_may_retype_and_erase_an_existing_cell():
@@ -436,7 +400,7 @@ def test_max_telomere_is_the_arm_lifespan_ceiling():
     from substrates.fnv.construction_ga import MAX_ARM_TELOMERE
 
     assert default_max_telomere("fnv") == MAX_ARM_TELOMERE
-    assert default_max_telomere("lut") == 8
+    assert default_max_telomere("lut") == 18
     assert default_max_telomere("nervous") == 24
 
     random.seed(31)
@@ -573,29 +537,6 @@ def test_mate_pool_prioritises_input_layout_over_morphology():
     pool = _recombination_mate_pool(
         population, 0, [1, 2], ['a', 'b', 'c'], ['tree', 'tree', 'other'])
     assert pool == [2]
-
-
-def test_role_assembly_joins_compatible_specialists_without_mutating_modules():
-    random.seed(230)
-    left = random_branched_genome(2, FAMILIES, 3, ('sum', 'carry'))
-    from substrates.fnv.construction_ga import clone_constructive
-    right = clone_constructive(left)
-
-    left.output_chromosome.genes[0].distance = 2
-    right.output_chromosome.genes[1].distance = 4
-    arm_control(left.chromosomes[0], 0).tolerance = 11
-    arm_control(right.chromosomes[0], 1).tolerance = 92
-    sync_output_layout(left)
-    sync_output_layout(right)
-
-    child = assemble_role_modules(left, {1: left, 2: right}, FAMILIES)
-
-    assert child.input_layout == left.input_layout == right.input_layout
-    assert arm_control(child.chromosomes[0], 0).tolerance == 11
-    assert arm_control(child.chromosomes[0], 1).tolerance == 92
-    assert child.output_chromosome.genes[0].distance == 2
-    assert child.output_chromosome.genes[1].distance == 4
-    validate_genome(child, FAMILIES)
 
 
 def test_moving_an_output_changes_its_genetic_root_without_repairing_the_gene():

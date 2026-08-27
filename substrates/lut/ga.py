@@ -283,7 +283,7 @@ def place_outputs_by_trace(grid, in_pos, ttarget, source_nodes=None,
 
     assignment = best_distinct_assignment(
         tuple(out_pos), candidates, scores,
-        balance_worst=bool(getattr(ttarget, 'combinational_cases', ())))
+        balance_worst=len(ttarget.outputs) > 1)
     if assignment is None:
         return out_pos, traces
     out_pos.update(assignment)
@@ -1961,182 +1961,6 @@ def _gene_cap():
     return ONTOGENY_CAP
 
 
-def plateau_rescue_candidates(
-        genome, target, limit=48, max_telomere=MAX_TELOMERE,
-        function_families=None):
-    """Legitimate rescue genomes for a stalled spatial-I/O LUT run.
-
-    Three failure modes are covered:
-
-    * A retained periodic truth table with at most four inputs/outputs is
-      compiled into a compact crossbar, inverse-grown into an ordinary genome,
-      and verified. This is an explicit feasibility witness and gives genuinely
-      hard arithmetic targets a reachable rescue seed.
-
-    * For a two-input/two-output body, enumerate compact 2x2 port motifs.  The
-      four ports are moved together, allowing selection to cross valleys where
-      every one-port intermediate is worse.
-    * Flip one bit of a rule whose output LUT is expressed at a currently bound
-      output cell.  Maintenance rules are tried before growth rules so a local
-      logic repair need not disturb morphology.
-
-    Every proposal remains an ordinary genome and is evaluated by the unchanged
-    target contract. The compiler uses the target's declared truth table; the
-    local motif/rule neighbourhood does not.
-    """
-    limit = max(0, int(limit))
-    if limit == 0:
-        return []
-    # The live fixed-pad encoding used to fall through here with no rescue at
-    # all: the existing truth-table compiler below only speaks the retired
-    # spatial-I/O genome. Compile the hard arithmetic witness into an ordinary
-    # output-rooted genome instead. It is still grown and evaluated normally;
-    # this merely makes the already-proven circuit reachable after a plateau.
-    if is_branched(genome):
-        from .branched_synthesis import synthesize_branched_truth_table
-        from .state_synthesis import synthesize_branched_dynamic
-        from .synthesis import SynthesisError
-        for compiler in (
-                synthesize_branched_truth_table,
-                synthesize_branched_dynamic):
-            try:
-                candidate = compiler(
-                    target, chromosome_count=len(genome.chromosomes),
-                    max_telomere=max_telomere,
-                    function_families=function_families)
-            except SynthesisError:
-                continue
-            fitness, cases = evaluate_lut_full(candidate, target)
-            if fitness == 1.0 and cases and min(cases) == 1.0:
-                return [candidate]
-        return []
-    from substrates.nervous.io_placement import (
-        bind_io, flat_inputs, flat_outputs, growth_seeds, io_strategy,
-        set_spatial_port_positions)
-    if io_strategy(target) != 'spatial_chromosome':
-        return []
-    seen = {_recombination_signature(genome)}
-
-    def unique(candidate, destination):
-        signature = _recombination_signature(candidate)
-        if signature in seen:
-            return
-        seen.add(signature)
-        destination.append(candidate)
-
-    families = normalise_function_families(function_families)
-    compiled = []
-    if UNRESTRICTED in families:
-        from .synthesis import (
-            SynthesisError, synthesize_combinational_genome)
-        try:
-            result = synthesize_combinational_genome(
-                target, chromosome_count=len(genome.chromosomes),
-                max_telomere=max_telomere)
-            unique(result.genome, compiled)
-        except SynthesisError:
-            pass
-
-    if len(compiled) >= limit:
-        return compiled[:limit]
-    from substrates.nervous.io_placement import spatial_output_variants
-    readouts = []
-    for candidate in spatial_output_variants(
-            genome, target,
-            limit=max(1, (limit - len(compiled)) // 2)):
-        unique(candidate, readouts)
-    grid = grow_lut(
-        genome, seeds=growth_seeds(
-            target, io_strategy(target), genome),
-        grid_size=target.grid_size, iters=target.iters)
-    if not grid:
-        return (compiled + readouts)[:limit]
-    from .lut import cell_io_tags
-    bound = bind_io(
-        genome, grid, target, 'spatial_chromosome',
-        tags=cell_io_tags(genome, grid))
-    if bound is None:
-        return (compiled + readouts)[:limit]
-    in_pos, out_pos = bound
-    current = flat_inputs(in_pos) + flat_outputs(out_pos)
-    positions = sorted(grid)
-    motif = []
-    if target.n_inputs == 2 and len(target.outputs) == 2 and len(current) == 4:
-        from itertools import permutations
-        cells = set(grid)
-        assignments = []
-        for x, y in positions:
-            square = {
-                (x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)}
-            if not square.issubset(cells):
-                continue
-            diagonals = (
-                ([(x, y), (x + 1, y + 1)],
-                 [(x + 1, y), (x, y + 1)]),
-                ([(x + 1, y), (x, y + 1)],
-                 [(x, y), (x + 1, y + 1)]),
-            )
-            for inputs, outputs in diagonals:
-                for input_order in permutations(inputs):
-                    for output_order in permutations(outputs):
-                        assignment = list(input_order + output_order)
-                        distance = sum(
-                            abs(old[0] - new[0]) + abs(old[1] - new[1])
-                            for old, new in zip(current, assignment))
-                        assignments.append((distance, assignment))
-        assignments.sort(key=lambda item: (item[0], item[1]))
-        for _distance, assignment in assignments:
-            candidate = clone_genome(genome)
-            if set_spatial_port_positions(
-                    candidate, positions, assignment,
-                    target=target) == len(assignment):
-                unique(candidate, motif)
-
-    rule = []
-    output_values = {
-        int(value)
-        for pos in flat_outputs(out_pos)
-        for value in grid.get(pos, ())
-        if int(value)
-    }
-    loci = []
-    for chromosome_index, chromosome in enumerate(genome.chromosomes):
-        if getattr(chromosome, 'wiring', False):
-            continue
-        for gene_index, gene in enumerate(chromosome.genes):
-            if int(gene.self_out) in output_values:
-                # Maintenance before growth, then deterministic locus order.
-                loci.append((
-                    0 if int(gene.self_in) else 1,
-                    chromosome_index, gene_index))
-    loci.sort()
-    for _kind, chromosome_index, gene_index in loci:
-        for bit in range(16):
-            candidate = clone_genome(genome)
-            chromosome = candidate.chromosomes[chromosome_index]
-            gene = copy.copy(chromosome.genes[gene_index])
-            if unrestricted_only(families):
-                gene.self_out ^= 1 << bit
-            else:
-                gene.self_out = mutate_function_table(
-                    gene.self_out, families)
-            chromosome.genes[gene_index] = gene
-            unique(candidate, rule)
-
-    # Reserve room for both rescue families.  Unused quota from one is filled
-    # by the other, so small/simple bodies do not waste evaluation slots.
-    remaining = limit - len(compiled) - len(readouts)
-    motif_quota = remaining // 2
-    rule_quota = remaining - motif_quota
-    selected = (
-        compiled + readouts + motif[:motif_quota] + rule[:rule_quota])
-    if len(selected) < limit:
-        selected += motif[motif_quota:motif_quota + limit - len(selected)]
-    if len(selected) < limit:
-        selected += rule[rule_quota:rule_quota + limit - len(selected)]
-    return selected[:limit]
-
-
 def tournament_lut(population, fitnesses):
     idx = random.sample(range(len(population)), min(TOURNAMENT_K, len(population)))
     return population[max(
@@ -2235,7 +2059,7 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
                     mean_mutations=None, ga_config=None,
                     chromosome_count=None, recombination=True,
                     evolve_io=False, io_placement=None, archive_parent=None,
-                    stagnation=0, rescue_candidates=None, escape=None,
+                    stagnation=0, escape=None,
                     mutation_limit=None, function_families=None):
     """One generation of a steady, exploratory GA - elitism + immigrants +
     recombination/mutation, parents via epsilon-lexicase when per-case vectors are
@@ -2343,12 +2167,9 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
         key=lambda i: rank_key(population[i], fitnesses[i]),
         reverse=True)
     # Elites choose parents here but are never copied into the next generation.
-    # Plateau-rescue proposals and archived-champion descendants are still new,
-    # mutated genomes; no evaluated parent survives into this generation.
-    new_pop = [
-        constrain_genome_functions(
-            clone_genome(candidate), function_families)
-        for candidate in list(rescue_candidates or ())[:pop]]
+    # Archived-champion descendants are mutated; no evaluated parent is
+    # inserted through a target-shaped rescue channel.
+    new_pop = []
     remaining = pop - len(new_pop)
     new_pop += [
         constrain_genome_functions(make_genome(), function_families)
@@ -2589,21 +2410,16 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                 # encoding is the point (see the two-GA-drive-paths note);
                 # exterior-edge I/O still seeds natively because its inputs are
                 # drivers outside the body, not pads the arms grow toward.
-                from .branched_ga import (random_branched_lut_genome,
-                                           select_developmental_seed)
-                return select_developmental_seed(
-                    lambda: random_branched_lut_genome(
-                        n_chroms, max_telomere=ga_config.max_telomere,
-                        n_inputs=target.n_inputs,
-                        output_roles=tuple(terminal.role
-                                           for terminal in target.outputs),
-                        families=function_families,
-                        input_genes=input_genes),
-                    attempts=make_genome.developmental_seed_candidates)
+                from .branched_ga import random_branched_lut_genome
+                return random_branched_lut_genome(
+                    n_chroms, max_telomere=ga_config.max_telomere,
+                    n_inputs=target.n_inputs,
+                    output_roles=tuple(terminal.role
+                                       for terminal in target.outputs),
+                    families=function_families,
+                    input_genes=input_genes)
             return constrain_genome_functions(
                 make_seed_genome(n_chroms), function_families)
-    if strategy == 'fixed' and lut_io_mode(target) != 'exterior_edges':
-        make_genome.developmental_seed_candidates = 6
     # Escape mechanisms, resolved and attached exactly as the desktop
     # controller does it, so this headless driver and the app agree.
     escape_cfg = ga_config.escape or OFF
@@ -2622,7 +2438,6 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
                     genome = make_genome(
                         cohort_inputs[(index - cohort_count) % cohort_count])
                 population.append(genome)
-            make_genome.developmental_seed_candidates = 2
         else:
             population = [make_genome() for _ in range(pop)]
         fitnesses, cases = eval_batch_cases(population, target, cache, ex)
@@ -2646,17 +2461,11 @@ def evolve_lut(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
             mm = adaptive_mutation_rate(mut_rate, stagnation,
                                         solved=best_fitness >= 1.0)
             parents, parent_fitnesses, parent_cases = population, fitnesses, cases
-            rescue = (
-                plateau_rescue_candidates(
-                    best_genome, target, limit=min(48, max(1, pop // 2)),
-                    function_families=function_families)
-                if (stagnation >= STRESS_PATIENCE
-                    and best_fitness < 1.0) else ())
             offspring = next_population(
                 parents, parent_fitnesses, make_genome, parent_cases, mm,
                 chromosome_count=n_chroms, evolve_io=evolve_io,
                 io_placement=strategy, archive_parent=best_genome,
-                stagnation=stagnation, rescue_candidates=rescue,
+                stagnation=stagnation,
                 escape=escape_cfg, mutation_limit=ga_config.mutation_limit,
                 function_families=function_families)
             offspring_fitnesses, offspring_cases = eval_batch_cases(

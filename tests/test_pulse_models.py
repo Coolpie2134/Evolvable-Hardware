@@ -289,11 +289,11 @@ def test_evolved_delay_checkpoint_round_trip():
 
 
 def test_waveform_target_checkpoint_round_trip():
-    target = TEMPORAL_TARGETS['Pulse width sum (A+B)']
+    target = TEMPORAL_TARGETS['Odd pulse selector']
     restored = _target_from_dict(_target_to_dict(target))
     assert [c.relation for c in restored.contract.constraints] == \
         ['pulse_intervals']
-    assert restored.waveform_contract == 'width_sum'
+    assert restored.waveform_contract == 'odd_selector'
     assert restored.trials[0].expected_intervals == \
         target.trials[0].expected_intervals
 
@@ -304,56 +304,6 @@ def _perfect_waveform_traces(target):
     return TemporalTraces(
         {'Q': [[] for _ in target.trials]},
         intervals={'Q': intervals})
-
-
-def test_width_sum_target_uses_both_input_durations():
-    target = TEMPORAL_TARGETS['Pulse width sum (A+B)']
-    target.pulse_config = PulseConfig(model='pulse_delay')
-    assert target.waveform_contract == 'width_sum'
-    assert len(target.inputs) == 2
-    positive = 0
-    for trial in target.trials:
-        expected = _waveform_expected(target, trial, 'Q')
-        if all(trial.input_events):
-            positive += 1
-            (start, end), = expected
-            pulses = [lane[0] for lane in trial.input_events]
-            assert abs((end - start) - sum(width for _, width in pulses)) <= TOL
-            assert abs(start - (max(t for t, _ in pulses) + 1.0)) <= TOL
-        else:
-            assert expected == []
-    assert positive == 6
-    assert score_contract(_perfect_waveform_traces(target), target)[0] == 1.0
-
-
-def test_waveform_targets_fit_one_shared_latency_but_not_width_errors():
-    target = TEMPORAL_TARGETS['Pulse width sum (A+B)']
-    target.pulse_config = PulseConfig(model='pulse_delay')
-    shifted = _perfect_waveform_traces(target)
-    latency = 2.3
-    shifted.intervals['Q'] = [
-        [(start + latency, end + latency) for start, end in trial]
-        for trial in shifted.intervals['Q']]
-
-    score, _, fitted = score_contract(shifted, target)
-    assert abs(score - 1.0) <= TOL
-    assert abs(fitted - latency) <= TOL
-    frozen_wrong, _, used = score_contract(
-        shifted, target, alignment=0.0)
-    assert frozen_wrong < 1.0
-    assert used == 0.0
-
-    start, end = shifted.intervals['Q'][0][0]
-    shifted.intervals['Q'][0][0] = (start, end - 0.5)
-    shifted._waveform_result = None
-    # A fitted latency cannot conceal an incorrect output duration.
-    assert score_contract(shifted, target)[0] < 1.0
-
-    wrong = _perfect_waveform_traces(target)
-    wrong.intervals['Q'][0][0] = (
-        wrong.intervals['Q'][0][0][0],
-        wrong.intervals['Q'][0][0][1] - 0.5)
-    assert score_contract(wrong, target)[0] < 1.0
 
 
 def test_odd_selector_passes_odd_indexed_pulses_with_their_widths():
@@ -790,13 +740,13 @@ def test_waveform_targets_declare_width_preserving_model():
     width-preserving transport can emit - they declare supported_models so a
     'uniform' run is filtered out instead of silently capping
     below 1.0. Event/trace targets stay open to every model."""
-    for name in ('Pulse width sum (A+B)', 'Odd pulse selector'):
-        assert tuple(TEMPORAL_TARGETS[name].supported_models) == ('pulse_delay',)
+    assert tuple(TEMPORAL_TARGETS[
+        'Odd pulse selector'].supported_models) == ('pulse_delay',)
     for name in ('SR latch', 'Toggle flip-flop', 'Echo (delay 3)',
                  'A-count parity queried by B'):
         assert not TEMPORAL_TARGETS[name].supported_models
     restored = _target_from_dict(_target_to_dict(
-        TEMPORAL_TARGETS['Pulse width sum (A+B)']))
+        TEMPORAL_TARGETS['Odd pulse selector']))
     assert tuple(restored.supported_models) == ('pulse_delay',)
 
 
@@ -847,17 +797,16 @@ def test_gui_categories_group_combinational_and_pulse_width_targets():
         assert target_category(name, raw) == 'Combinational logic'
         wrapped = periodic_combinational_target(raw)
         assert target_category(name, wrapped) == 'Combinational logic'
-    for name in ('Pulse width sum (A+B)', 'Odd pulse selector',
-                 'Pair detection gap (2x pulse width)'):
-        assert target_category(name, TEMPORAL_TARGETS[name]) \
-            == 'Pulse width & duration'
+    assert target_category(
+        'Odd pulse selector', TEMPORAL_TARGETS['Odd pulse selector']) \
+        == 'Pulse width & duration'
     # semantics-derived folders are unchanged for everything else
     assert target_category('SR latch', TEMPORAL_TARGETS['SR latch']) \
         == 'Memory & state'
     assert target_category('Echo (delay 3)', TEMPORAL_TARGETS['Echo (delay 3)']) \
         == 'Timed events'
     restored = _target_from_dict(_target_to_dict(
-        TEMPORAL_TARGETS['Pulse width sum (A+B)']))
+        TEMPORAL_TARGETS['Odd pulse selector']))
     assert restored.category == 'Pulse width & duration'
 
 

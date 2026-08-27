@@ -51,12 +51,17 @@ def test_classify_solve_and_plateau_and_uncertified():
 def test_oracle_mapping_present_only_for_oracle_targets():
     assert oracle_spec_for(TEMPORAL_TARGETS['C-element (2-in join)']) is not None
     assert oracle_spec_for(TEMPORAL_TARGETS['SR latch']) is not None
-    assert oracle_spec_for(
-        TEMPORAL_TARGETS['Pair detection gap (2x pulse width)']) is not None
     legacy = dataclasses.replace(
         TEMPORAL_TARGETS['One-shot (12 seconds)'], name='One-shot (5 ticks)')
     assert oracle_spec_for(legacy) is not None
     assert oracle_spec_for(TEMPORAL_TARGETS['Oscillator']) is None   # autonomous
+
+
+def test_retired_targets_are_not_registered():
+    for name in ('Divide-by-3', 'Pulse width sum (A+B)',
+                 'Pair detector (gap 2)',
+                 'Pair detection gap (2x pulse width)'):
+        assert name not in TEMPORAL_TARGETS
 
 
 def test_certify_non_oracle_target_is_uncertified_without_scoring():

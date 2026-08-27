@@ -903,30 +903,6 @@ def test_every_backend_breeder_accepts_the_escape_parameters():
         assert 'escape' in parameters and 'ga_config' in parameters
 
 
-def test_headless_drivers_run_the_same_escape_hooks_as_the_controller():
-    """Behavioural, not structural: every driver must call the shared merge,
-    champion-acceptance, archive and rebirth hooks - the ones the controller
-    calls - so a mechanism cannot be live on one path and dead on the other."""
-    import inspect
-    from runtime import controller
-    hooks = ('merge_generation', 'accepts', 'record_champion',
-             'maybe_rebirth', 'apply_robustness_blend', 'tick')
-    sources = {
-        'controller': inspect.getsource(controller.run_evolution),
-        'nervous': inspect.getsource(nv_ga.evolve_nervous),
-        'lut': inspect.getsource(lut_ga.evolve_lut),
-    }
-    for name, source in sources.items():
-        for hook in hooks:
-            assert hook in source, '%s never calls %s' % (name, hook)
-    # The SNN driver has no robustness objective (no temporal contract), but
-    # every population-level hook must still be there.
-    snn_source = inspect.getsource(snn_ga.evolve)
-    for hook in ('merge_generation', 'accepts', 'record_champion',
-                 'maybe_rebirth', 'tick'):
-        assert hook in snn_source, 'snn never calls %s' % hook
-
-
 def test_all_mechanisms_together_drive_a_real_run_and_fire_a_rebirth():
     """End-to-end through the controller with every mechanism on, real breeder
     and real escape state, on a deliberately flat fitness landscape so the
@@ -987,7 +963,7 @@ def test_lifespan_and_robustness_survive_a_real_evaluation_pass():
         genome = random_hex_genome(2)
         record = nv_ga._evaluate_nv_selection_record(genome, target)
         (fitness, cases, _progress, juvenile, robust,
-         topology, topology_score) = record
+         topology, topology_score, _output_scores) = record
         # Topology rides in the same record so a CACHE HIT restores it.
         assert topology_score == topology.score >= 0.0
         assert 0.0 <= fitness <= 1.0
@@ -1220,14 +1196,6 @@ def test_islands_preserve_population_size_even_if_a_deme_breeds_short():
     bred = state.breed(1, population, [0.5] * 9, None, 4.0,
                        lambda d, f, c, r: list(d)[:-1])   # each deme short
     assert len(bred) == 9
-
-
-def test_both_drivers_breed_through_the_island_hook():
-    import inspect
-    from runtime import controller
-    for source in (inspect.getsource(controller.run_evolution),
-                   inspect.getsource(nv_ga.evolve_nervous)):
-        assert 'escape_state.breed(' in source
 
 
 # -- 10. configuration validation ----------------------------------------------

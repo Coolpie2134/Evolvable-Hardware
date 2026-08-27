@@ -673,7 +673,7 @@ def place_temporal_outputs(grid, inputs, target, *, _compiled=None):
 
     assignment = best_distinct_assignment(
         tuple(out_positions), candidates, scores,
-        balance_worst=bool(getattr(target, "combinational_cases", ())))
+        balance_worst=len(target.outputs) > 1)
     if assignment is None:
         return out_positions, traces
     out_positions.update(assignment)

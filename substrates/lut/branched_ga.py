@@ -20,9 +20,8 @@ from .branched import (
     DEPTH_ANY, DEPTH_BANDS, EMPTY_CELL, OUT_CELL, PAD_CELL,
     BranchedLutChromosome, BranchedLutGenome, LutContextGene, LutControlGene,
     LutInputGene, LutOutputGene, _band_of, _cell_of, bearing_cell, catalogue,
-    LutIoChromosome, arm_reach, develop_branched_lut, driven_roots,
+    LutIoChromosome, arm_reach, develop_branched_lut,
     growth_candidates, materialise_pads, neighbours, output_root_sites,
-    root_source_counts,
     required_output_directions, DIRECTIONS, table_family, table_support)
 from .functions import normalise_function_families
 
@@ -174,10 +173,12 @@ def random_branched_lut_genome(n_chroms=2, n_inputs=2, output_roles=('Q',),
         families=tuple(enabled),
         next_gene_id=1)
 
-    # Development is the expensive step - one growth costs many times what
-    # evaluating the grown organism costs - so this loop performs exactly ONE
-    # per attempted gene: the pads are fixed for the whole construction, and the
-    # accepted organism carries forward instead of being re-grown to inspect it.
+    # New rules may look only at contexts in the organism that exists now.  Do
+    # not trial-develop a proposed rule and keep/reject it based on what it will
+    # build: that is both the dominant construction cost and a hidden
+    # phenotype-level search outside the GA.  Arms add one context-compatible
+    # rule per round, then development is refreshed once to expose the contexts
+    # available to the next round.
     pads = input_pads(genome)
     trace = develop_branched_lut(genome, pads)
     growing = {gene.branch_id for gene in genome.outputs}
@@ -186,69 +187,24 @@ def random_branched_lut_genome(n_chroms=2, n_inputs=2, output_roles=('Q',),
             break
         order = sorted(growing)
         random.shuffle(order)
+        added = False
         for label in order:
             if label not in growing:
                 continue
             chromosome = genome.chromosomes[(label - 1) // 2]
-            placed = False
-            for _attempt in range(6):
-                gene = random_gene(genome, genome.next_gene_id, label,
-                                   allow_output=not _arm_has_root(genome, label),
-                                   trace=trace, pads=pads)
-                if gene is None:
-                    break
-                chromosome.genes.append(gene)
-                grown = develop_branched_lut(genome, pads)
-                if grown.grid != trace.grid:
-                    genome.next_gene_id += 1
-                    trace = grown          # keep the organism it just built
-                    placed = True
-                    break
-                chromosome.genes.pop()
-            if not placed:
+            gene = random_gene(genome, genome.next_gene_id, label,
+                               allow_output=not _arm_has_root(genome, label),
+                               trace=trace, pads=pads)
+            if gene is None:
                 growing.discard(label)
+                continue
+            chromosome.genes.append(gene)
+            genome.next_gene_id += 1
+            added = True
+        if not added:
+            break
+        trace = develop_branched_lut(genome, pads)
     return genome
-
-
-#: How many random starts to look at before picking one. Same mechanism, and
-#: same reason, as the hex port and as FNV.
-DEVELOPMENTAL_SEED_CANDIDATES = 6
-
-
-def select_developmental_seed(make_genome,
-                              attempts=DEVELOPMENTAL_SEED_CANDIDATES):
-    """Pick the most connected of a few random starts. Target-blind.
-
-    An organism whose output root nothing can drive scores the silent baseline
-    whatever else is true of it, and on this substrate almost all random starts
-    are that: measured over 40 fresh genomes, only 3 of the 25 viable ones could
-    drive an output at all. A population of those is undifferentiated rather
-    than merely weak - selection cannot tell its members apart.
-
-    Looks only at whether inputs can reach outputs, never at the target, so it
-    moves where search STARTS without changing what counts as fitness.
-    """
-    def key(genome):
-        pads = input_pads(genome)
-        grid = materialise_pads(
-            develop_branched_lut(genome, pads).grid, pads)
-        roots = output_root_sites(genome, pads)
-        counts = root_source_counts(grid, pads, roots)
-        coverage = tuple(counts.get(label, 0) for label in sorted(roots))
-        return (min(coverage, default=0), sum(coverage),
-                len(driven_roots(grid, pads, roots)), len(grid),
-                -sum(len(c.genes) for c in genome.chromosomes))
-
-    best, best_key = None, None
-    for _ in range(max(1, int(attempts))):
-        candidate = make_genome()
-        score = key(candidate)
-        if best_key is None or score > best_key:
-            best, best_key = candidate, score
-        if (score[0] >= len(input_pads(candidate))
-                and score[2] >= len(candidate.outputs)):
-            break                      # every source can drive every role
-    return best
 
 
 # -- variation ------------------------------------------------------------------

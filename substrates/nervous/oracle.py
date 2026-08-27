@@ -606,11 +606,14 @@ def toggle_oracle(seed=20260702):
 
 
 def echo_oracle(seed=20260702, delay=3):
-    return oracle_target('Echo (oracle)', make_echo(delay), [(0, 2)], 'Q',
-                         # ``make_echo`` already shifts the state-machine
-                         # output by ``delay`` samples. Adding it again in
-                         # label_trace judged a stated 3-second echo at 6.
-                         T=22, n_trials=10, seed=seed, latency=0, min_gap=3,
+    def relay(inb, _state):
+        return (inb[0],), None
+
+    return oracle_target('Echo (oracle)', relay, [(0, 2)], 'Q',
+                         # The target builder owns the physical response delay.
+                         # Keeping it in ``latency`` makes the contract visible
+                         # to certification without shifting the trace twice.
+                         T=22, n_trials=10, seed=seed, latency=delay, min_gap=3,
                          contract=event_contract(fit_latency=False),
                          description=describe_target(
         'Reproduce every input edge exactly %d seconds later.' % delay,
@@ -2005,7 +2008,7 @@ def ring_pattern_oracle(seed=20260818, period=3, phases=3):
             'A single input pulse starts a travelling wave: P1, P2 and P3 fire '
             'in turn, %d seconds apart, and keep going with no further input.'
             % period,
-            'Five trials kick at different ticks, one never kicks at all and '
+            'Five trials kick at different times, one never kicks at all and '
             'must stay silent, and one kicks twice so the wave restarts from '
             'the first phase.'))
 

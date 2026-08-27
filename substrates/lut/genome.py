@@ -132,8 +132,7 @@ class Genome:
     # lets designed/evolved organisms break the otherwise unavoidable fourfold
     # symmetry of growth from one neutral centre cell.
     seed_state: tuple[int, int, int, int] | None = None
-    # Non-behavioural audit label. Compiler rescues retain their origin through
-    # mutation/checkpointing so they cannot be mistaken for unaided discoveries.
+    # Non-behavioural audit label retained for legacy checkpoint compatibility.
     provenance: str = ''
     # None marks a legacy fixed-input genome. Native LUT genomes carry exactly
     # one square-lattice source pad per logical input; input zero is pinned only

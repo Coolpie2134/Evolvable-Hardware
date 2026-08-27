@@ -19,8 +19,9 @@ from substrates.nervous.io_placement import (
     bind_io, flat_inputs, flat_outputs, growth_seeds, input_groups,
     io_strategy, merge_intervals, output_groups)
 from substrates.nervous.scoring import (
-    TemporalTraces, _obs_len, _score_output_candidate, needs_samples,
-    score_contract, score_report_lines)
+    TemporalTraces, _obs_len, _score_output_candidate,
+    best_distinct_assignment, needs_samples, score_contract,
+    score_report_lines)
 from substrates.nervous.temporal import _local_output_candidates
 
 from .growth import cell_io_tags, grow_snn
@@ -160,12 +161,14 @@ def _fit_outputs(grid, in_pos, run, target):
     in_set = set(flat_inputs(in_pos))
     out_pos = {terminal.role: None for terminal in target.outputs}
     traces = TemporalTraces(overflow=overflow)
-    used = set()
+    local = {
+        terminal.role: tuple(_local_output_candidates(grid, in_set, terminal))
+        for terminal in target.outputs}
+    candidates = tuple(dict.fromkeys(
+        cell for terminal in target.outputs for cell in local[terminal.role]))
+    scores = {terminal.role: {} for terminal in target.outputs}
     for terminal in target.outputs:
-        best = best_key = None
-        for cell in _local_output_candidates(grid, in_set, terminal):
-            if cell in used:
-                continue
+        for cell in candidates:
             sampled, events, intervals, expected = [], [], [], []
             for trial_index, trial in enumerate(target.trials):
                 exp = trial.expected.get(terminal.role)
@@ -178,15 +181,16 @@ def _fit_outputs(grid, in_pos, run, target):
             score, _alignment = _score_output_candidate(
                 sampled, events, expected, terminal.role, target,
                 intervals=intervals)
-            distance = (abs(cell[0] - terminal.pos[0])
-                        + abs(cell[1] - terminal.pos[1]))
-            key = (-score, distance, cell)
-            if best_key is None or key < best_key:
-                best_key, best = key, cell
-        if best is None:
-            return None, traces
-        used.add(best)
-        out_pos[terminal.role] = best
+            scores[terminal.role][cell] = score
+
+    assignment = best_distinct_assignment(
+        tuple(out_pos), candidates, scores,
+        balance_worst=len(target.outputs) > 1)
+    if assignment is None:
+        return None, traces
+    out_pos.update(assignment)
+    for terminal in target.outputs:
+        best = out_pos[terminal.role]
         traces[terminal.role] = [
             trial_samples[index].get(best, [])
             for index in range(len(target.trials))]

@@ -15,9 +15,7 @@ from substrates.fnv.catalogue import (
     NODE_TYPE_DICTIONARY,
     enabled_component_ids,
 )
-from substrates.fnv.ga import (
-    _contract_input_dependencies, mutate_functional, mutate_input_layout,
-    rank_key)
+from substrates.fnv.ga import mutate_functional, mutate_input_layout, rank_key
 from substrates.fnv.genome import (
     Genome, Chromosome, functional_input_positions, random_functional_genome,
 )
@@ -502,15 +500,6 @@ def test_fnv_readout_mode_validates_and_roundtrips():
         ValueError, lambda: FNVConfig(("LOGIC",), "best-looking-cell"))
 
 
-def test_static_role_dependencies_follow_logical_input_identity_not_row_bits():
-    from substrates.snn.targets import TARGETS
-
-    target = TARGETS["2-bit adder"]
-    assert _contract_input_dependencies(target, 0) == (0, 2)
-    assert _contract_input_dependencies(target, 1) == (0, 1, 2, 3)
-    assert _contract_input_dependencies(target, 2) == (0, 1, 2, 3)
-
-
 def test_dead_genetic_output_is_silent_but_keeps_its_role_site():
     from substrates.fnv.evaluation import prepare_functional
     from substrates.snn.targets import gate_target
@@ -575,25 +564,6 @@ def test_native_baseline_is_informational_and_respects_family_bank():
         echo(delay=3), ("DELAY",)) is None
     assert native_component_baseline(
         toggle_ff(), ("TOGGLE",)) == "TOGGLE"
-
-
-def test_combinational_initialization_focuses_logic_without_narrowing_bank():
-    from substrates.fnv.ga import initialization_families
-    from substrates.nervous.targets import echo, periodic_combinational_target
-    from substrates.snn.targets import get_target
-
-    all_families = tuple(FAMILIES)
-    logic_target = periodic_combinational_target(get_target("Half adder"))
-    assert initialization_families(
-        all_families, logic_target) == frozenset(("LOGIC", "DELAY"))
-    assert initialization_families(
-        ("LOGIC", "HOLD"), logic_target) == frozenset(("LOGIC",))
-    assert initialization_families(
-        all_families, echo(delay=2)) == frozenset(all_families)
-    # A user-selected logic-free physical bank is respected exactly.
-    assert initialization_families(
-        ("DELAY", "HOLD"), logic_target) == frozenset(
-            ("DELAY", "HOLD"))
 
 
 def test_fnv_logic_behavior_mutations_keep_the_same_physical_pins():

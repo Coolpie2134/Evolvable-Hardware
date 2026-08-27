@@ -42,7 +42,7 @@ from substrates.snn.genome import (MAX_CHROMS as SNN_MAX_CHROMS,
 
 
 def test_backends_use_physical_fresh_run_telomere_defaults():
-    assert default_max_telomere('lut') == 8
+    assert default_max_telomere('lut') == 18
     assert default_max_telomere('nervous') == 24
     assert default_max_telomere('snn') == 20
     assert GAConfig().max_telomere == 20
@@ -328,7 +328,7 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
     genome = random_hex_genome(2)
     genome.chromosomes[0].genes = genome.chromosomes[0].genes[:1]
     genome.chromosomes[0].split = 99
-    target = TEMPORAL_TARGETS['Pair detection gap (2x pulse width)']
+    target = TEMPORAL_TARGETS['SR latch']
     with tempfile.TemporaryDirectory() as directory:
         path = os.path.join(directory, 'checkpoint.json')
         save_checkpoint(
@@ -550,124 +550,6 @@ def test_coordinated_spatial_io_mutation_relocates_distinct_ports():
                for index in changed)
 
 
-def test_lut_plateau_rescue_proposes_motifs_and_output_rule_bits():
-    from substrates.nervous.io_placement import (
-        bind_io, flat_inputs, flat_outputs, set_spatial_port_positions)
-    from substrates.nervous.targets import periodic_combinational_target
-    from substrates.snn.targets import get_target
-
-    target = periodic_combinational_target(get_target('Half adder'))
-    target.io_placement = 'spatial_chromosome'
-    genome = random_lut_genome(
-        3, wiring_chromosome=True, n_ports=4,
-        spatial_chromosome=True)
-    # Make one maintenance rule visibly expressed at every fake output cell.
-    genome.chromosomes[0].genes[0] = dataclasses.replace(
-        genome.chromosomes[0].genes[0], self_in=1, self_out=1)
-    grid = {
-        (0, 0): (1, 0, 0, 0), (1, 0): (1, 0, 0, 0),
-        (0, 1): (1, 0, 0, 0), (1, 1): (1, 0, 0, 0),
-    }
-    initial = [(0, 0), (1, 1), (1, 0), (0, 1)]
-    assert set_spatial_port_positions(
-        genome, grid, initial) == len(initial)
-
-    with mock.patch.object(lut_ga, 'grow_lut', return_value=grid):
-        candidates = lut_ga.plateau_rescue_candidates(
-            genome, target, limit=16)
-
-    assert candidates
-    signatures = [lut_ga._recombination_signature(g) for g in candidates]
-    assert len(signatures) == len(set(signatures))
-    # A compact-motif proposal coordinates all four logical ports.
-    bindings = []
-    from substrates.lut.lut import cell_io_tags
-    for candidate in candidates:
-        bound = bind_io(
-            candidate, grid, target, 'spatial_chromosome',
-            tags=cell_io_tags(candidate, grid))
-        if bound is not None:
-            bindings.append(flat_inputs(bound[0]) + flat_outputs(bound[1]))
-    assert any(binding != initial for binding in bindings)
-    # A local-rule proposal flips exactly one output bit on the maintenance gene.
-    assert any(
-        candidate.chromosomes[0].genes[0].self_out == 0
-        for candidate in candidates)
-
-
-def test_lut_synthesizes_every_hard_combinational_target_as_a_grown_genome():
-    from substrates.lut.synthesis import (
-        POLARISED_SEED, synthesize_combinational_genome)
-    from substrates.nervous.targets import periodic_combinational_target
-    from substrates.snn.targets import get_target
-
-    names = (
-        'Full adder', '2-bit adder', '2:1 MUX', 'Majority-3',
-        'Parity-3 (XOR3)', '2-to-4 decoder', '2-bit comparator',
-        '2x2 multiplier',
-    )
-    compiled = {}
-    for name in names:
-        target = periodic_combinational_target(get_target(name))
-        target.io_placement = 'spatial_chromosome'
-        result = synthesize_combinational_genome(
-            target, chromosome_count=3, max_telomere=8)
-        fitness, cases = lut_ga.evaluate_lut_full(result.genome, target)
-        assert result.inverse_report['exact']
-        assert result.inverse_report['radius'] <= 8
-        assert result.genome.seed_state == POLARISED_SEED
-        assert result.genome.provenance == 'truth-table-compiler-v1'
-        assert len(result.genome.chromosomes) == 3
-        assert result.genome.chromosomes[2].wiring
-        assert max(
-            len(chromosome.genes)
-            for chromosome in result.genome.chromosomes
-            if not chromosome.wiring) <= lut_ga.ONTOGENY_CAP
-        assert fitness == 1.0
-        assert min(cases) == 1.0
-        compiled[name] = (target, result)
-
-    # The new developmental seed is real genotype state: checkpoint round-trip
-    # and cache/signature identity must retain it.
-    target, result = compiled['2-bit comparator']
-    config = RunConfig(ga=GAConfig(
-        chromosome_count=3, io_placement='spatial_chromosome',
-        max_telomere=8))
-    with tempfile.TemporaryDirectory() as directory:
-        path = os.path.join(directory, 'compiled.json')
-        save_checkpoint(
-            path, result.genome, 1.0, target, None, 73, 'lut', config)
-        restored = load_checkpoint(path)
-    assert restored['best_genome'].seed_state == POLARISED_SEED
-    assert restored['best_genome'].provenance == 'truth-table-compiler-v1'
-    assert restored['target'].combinational_strobe
-    assert restored['target'].combinational_data_inputs == 4
-    assert restored['target'].combinational_cases == target.combinational_cases
-    assert [
-        trial.case_windows for trial in restored['target'].trials
-    ] == [trial.case_windows for trial in target.trials]
-    assert lut_ga.genome_signature(
-        restored['best_genome']) == lut_ga.genome_signature(result.genome)
-
-
-def test_hard_target_compiler_is_the_first_plateau_rescue_candidate():
-    from substrates.nervous.targets import periodic_combinational_target
-    from substrates.snn.targets import get_target
-
-    target = periodic_combinational_target(get_target('2x2 multiplier'))
-    target.io_placement = 'spatial_chromosome'
-    champion = random_lut_genome(
-        3, wiring_chromosome=True,
-        spatial_chromosome=True,
-        n_ports=target.n_inputs + len(target.outputs))
-    candidates = lut_ga.plateau_rescue_candidates(
-        champion, target, limit=4, max_telomere=8)
-    assert candidates
-    fitness, cases = lut_ga.evaluate_lut_full(candidates[0], target)
-    assert fitness == 1.0
-    assert min(cases) == 1.0
-
-
 def test_plateau_archive_keeps_breeding_the_all_time_lut_champion():
     random.seed(7011)
     population = [random_lut_genome(3) for _ in range(10)]
@@ -723,49 +605,6 @@ def test_spatial_plateau_preserves_one_champion_and_mixes_local_edits():
         for call in mutate.call_args_list]
     assert any(local_flags)
     assert any(not flag for flag in local_flags)
-
-
-def test_controller_invokes_lut_rescue_only_after_plateau_patience():
-    target = TEMPORAL_TARGETS['Veto gate']
-    config = RunConfig(ga=GAConfig(chromosome_count=2))
-    messages = queue.Queue()
-    stop = threading.Event()
-
-    class FakePool:
-        def shutdown(self, **_kwargs):
-            pass
-
-    def evaluate(genomes, *_args, **_kwargs):
-        return [0.5] * len(genomes), None
-
-    with tempfile.TemporaryDirectory() as directory, \
-            mock.patch('runtime.controller.ProcessPoolExecutor',
-                       return_value=FakePool()) as pool_factory, \
-            mock.patch.object(
-                lut_ga, 'make_seed_genome',
-                side_effect=lambda count: random_lut_genome(count)), \
-            mock.patch.object(lut_ga, 'eval_batch_cases',
-                              side_effect=evaluate), \
-            mock.patch.object(
-                lut_ga, 'plateau_rescue_candidates',
-                return_value=[]) as rescue, \
-            mock.patch('substrates.nervous.certification.certify', return_value=None):
-        run_evolution(
-            gens=nv_ga.STRESS_PATIENCE + 1, pop=2, n_chroms=2,
-            tries=1, target=target, arch=None, messages=messages,
-            stop_event=stop, base_seed=7012, backend='lut',
-            run_config=config, results_dir=directory)
-
-    assert rescue.call_count == 1
-    assert rescue.call_args.kwargs['limit'] == 1
-    # The controller should not start idle processes: the pool is capped by the
-    # population. Assert the RULE rather than the literal 2 - the configured
-    # default is derived from the host's CPU count, so hard-coding the expected
-    # width made this test fail on any machine with fewer than 3 cores (it read
-    # 1 == 2 on a 2-core CI box) while testing nothing extra on a large one.
-    expected_workers = max(1, min(config.ga.evaluation_workers, 2))
-    assert pool_factory.call_args.kwargs['max_workers'] == expected_workers
-    assert pool_factory.call_args.kwargs['max_workers'] <= 2
 
 
 def test_controller_uses_row_lexicase_for_combinational_nervous_targets():
@@ -856,8 +695,9 @@ def test_controller_gives_the_snn_backend_the_same_plateau_machinery():
     ``random_genome`` that has no spatial port chromosome.
     """
     target = TEMPORAL_TARGETS['Veto gate']
-    config = RunConfig(ga=GAConfig(chromosome_count=3,
-                                   io_placement='spatial_chromosome'))
+    config = RunConfig(ga=GAConfig(
+        chromosome_count=3, io_placement='spatial_chromosome',
+        immigrant_fraction=0.25, tournament_size=2, elite_count=3))
     messages = queue.Queue()
     stop = threading.Event()
 
@@ -886,8 +726,11 @@ def test_controller_gives_the_snn_backend_the_same_plateau_machinery():
     for call in step.call_args_list:
         assert call.kwargs['make_genome'] is not None
         assert call.kwargs['mean_mutations'] is not None
+        assert call.kwargs['immigrant_fraction'] == 0.25
+        assert call.kwargs['tournament_size'] == 2
+        assert call.kwargs['elite_count'] == 3
         assert 'archive_parent' in call.kwargs
-        assert 'rescue_candidates' in call.kwargs
+        assert 'rescue_candidates' not in call.kwargs
     # Fitness never improves above, so stagnation must climb past the patience
     # threshold and hand the archived champion to the stressed branch.
     assert max(call.kwargs['stagnation']
@@ -1282,44 +1125,31 @@ def test_stop_before_initial_evaluation_still_finishes_and_releases_pool():
 
 
 def test_seeded_lut_runs_do_not_depend_on_what_ran_before_them():
-    """A seeded evolve_lut must build the same population whenever it runs.
-
-    make_seed_genome caches its first _ONTO_POOL_SIZE ontogeny biomorphs in a
-    module-level pool that lives as long as the PROCESS. The first run of a
-    process grows them fresh; every later run draws its whole population from
-    that cache instead - masters grown under an EARLIER target's RNG stream.
-    Re-seeding cannot undo that, so the same seed and config gave different
-    answers depending on execution order: LUT AND scored 1.000 run first and
-    0.750 run after Half adder, silently contaminating rows 2..N of every
-    multi-target sweep. Compare populations rather than fitness so the check
-    cannot pass by two orderings happening to converge to the same score.
-    """
+    """The live branched LUT factory remains reproducible across run order."""
     from substrates.lut.ga import genome_signature
+    from substrates.lut import branched_ga
     from substrates.nervous.targets import periodic_combinational_target
     from substrates.snn.targets import gate_target
 
     def seeded_population(name, seed):
         recorded = []
-        original = lut_ga.make_seed_genome
+        original = branched_ga.random_branched_lut_genome
 
-        def recorder(n_chroms=2):
-            genome = original(n_chroms)
+        def recorder(*args, **kwargs):
+            genome = original(*args, **kwargs)
             recorded.append(genome_signature(genome))
             return genome
 
         target = periodic_combinational_target(gate_target(name))
-        with mock.patch.object(lut_ga, 'make_seed_genome', recorder):
+        with mock.patch.object(
+                branched_ga, 'random_branched_lut_genome', recorder):
             lut_ga.evolve_lut(target, generations=1, pop=6, n_chroms=2,
                               verbose=False, seed=seed)
         return recorded
 
-    # A small pool keeps the test quick while still filling: growing one
-    # ontogeny biomorph costs ~0.3s, and the real pool holds 24.
-    with mock.patch.object(lut_ga, '_ONTO_POOL_SIZE', 3):
-        lut_ga._ONTO_POOL.clear()
-        first = seeded_population('AND', 4242)
-        seeded_population('XOR', 99)          # pollute from another RNG stream
-        later = seeded_population('AND', 4242)
+    first = seeded_population('AND', 4242)
+    seeded_population('XOR', 99)
+    later = seeded_population('AND', 4242)
 
     assert first, 'the factory was never exercised'
     assert later == first, (
@@ -1348,46 +1178,3 @@ def test_timing_assimilation_clones_parent_before_writing_learned_delays():
     assert population[0].state_delays is None
     assert parents[1] is population[1]
     assert tune.call_args.kwargs['step'] == 0.08
-
-
-def test_fnv_plateau_rescue_limit_is_the_measured_value_not_pop_half():
-    """Rescue volume stays at pop//2 until a FULL-BUDGET ablation says otherwise.
-
-    A 90-second ablation favoured 8 candidates (12-3 over pop//2, sign
-    p=0.035). It did not replicate: Full adder needs 561-869s to solve and
-    never solved inside that budget under any variant, so the experiment was
-    blind to solve behaviour on expensive targets. Re-tested at the real
-    200-generation budget on one seed, pop//2 certified 2/4 while 8 certified
-    0/4, every run parked on the 0.9062 best-wrong ceiling. Speed is not worth
-    solves, so the default must NOT be lowered on the short-budget result.
-    """
-    from runtime.config import GAConfig
-    from runtime.controller import FNV_PLATEAU_RESCUE_LIMIT
-
-    assert FNV_PLATEAU_RESCUE_LIMIT is None
-    # None means "ask the backend", which is what keeps nervous/LUT on their
-    # historical pop//2 while FNV takes the measured value.
-    assert GAConfig().plateau_rescue_limit is None
-
-
-def test_rescue_limit_resolution_is_per_backend_and_overridable():
-    """The resolution rule itself, without running an evolution.
-
-    Every backend currently resolves to pop//2; the hook exists so the FNV
-    default can be moved once a full-budget ablation supports it, and so a
-    sweep can set the limit explicitly without editing code.
-    """
-    from runtime.controller import FNV_PLATEAU_RESCUE_LIMIT
-
-    def resolve(configured, backend, pop):
-        if configured is None and backend == 'fnv':
-            configured = FNV_PLATEAU_RESCUE_LIMIT
-        return (int(configured) if configured is not None
-                else min(48, max(1, pop // 2)))
-
-    assert resolve(None, 'fnv', 60) == 30
-    assert resolve(None, 'nervous', 60) == 30
-    assert resolve(None, 'lut', 60) == 30
-    assert resolve(None, 'nervous', 200) == 48        # historical cap
-    assert resolve(0, 'fnv', 60) == 0                 # 0 disables rescue
-    assert resolve(24, 'nervous', 60) == 24           # explicit wins

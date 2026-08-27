@@ -437,7 +437,9 @@ def next_population(population, fitnesses, chromosome_count=None,
                     recombination=True, evolve_io=False,
                     io_placement=None, mean_mutations=None, make_genome=None,
                     archive_parent=None, stagnation=0,
-                    rescue_candidates=None, escape=None, mutation_limit=8.0):
+                    escape=None, mutation_limit=8.0,
+                    immigrant_fraction=None, tournament_size=None,
+                    elite_count=None):
     """One generation of offspring only.
 
     Elites are a recombination parent pool, not verbatim survivors.  The
@@ -457,9 +459,19 @@ def next_population(population, fitnesses, chromosome_count=None,
     if escape is None:
         from runtime.escape import OFF
         escape = OFF
+    immigrant_fraction = (
+        IMMIGRANT_FRAC if immigrant_fraction is None
+        else float(immigrant_fraction))
+    tournament_size = (
+        TOURNAMENT_K if tournament_size is None else int(tournament_size))
+    if not 0.0 <= immigrant_fraction <= 1.0 or tournament_size < 1:
+        raise ValueError('invalid SNN reproduction configuration')
     pop     = len(population)
-    n_elite = max(1, int(pop * ELITE_FRAC))
-    n_imm = min(int(round(pop * IMMIGRANT_FRAC)), pop)
+    n_elite = (max(1, int(pop * ELITE_FRAC)) if elite_count is None else
+               (pop if int(elite_count) == 0 else min(pop, int(elite_count))))
+    if n_elite < 1:
+        raise ValueError('elite_count must be non-negative')
+    n_imm = min(int(round(pop * immigrant_fraction)), pop)
     order   = sorted(range(pop),
                      key=lambda i: rank_key(population[i], fitnesses[i]), reverse=True)
     elite   = order[:n_elite]
@@ -467,7 +479,7 @@ def next_population(population, fitnesses, chromosome_count=None,
         _recombination_signature(genome) for genome in population]
 
     def pick_index(candidates):
-        k = min(TOURNAMENT_K, len(candidates))
+        k = min(tournament_size, len(candidates))
         return max(random.sample(candidates, k),
                    key=lambda i: rank_key(population[i], fitnesses[i]))
 
@@ -499,9 +511,7 @@ def next_population(population, fitnesses, chromosome_count=None,
 
     if make_genome is None:
         make_genome = lambda: random_genome(chromosome_count or 2)
-    new_pop = [
-        clone_genome(candidate)
-        for candidate in list(rescue_candidates or ())[:pop]]
+    new_pop = []
     remaining = pop - len(new_pop)
     new_pop += [make_genome() for _ in range(min(n_imm, remaining))]
     if (archive_parent is not None and stagnation >= STRESS_PATIENCE
@@ -625,22 +635,17 @@ def evolve(generations=100, verbose=True, n_chroms=2, pop=None, target=None,
             mutation_rate *= MUT_DECAY
             actual_rate = adaptive_mutation_rate(
                 mutation_rate, stagnation, solved=best_fitness >= 1.0)
-            rescue = ()
-            if (strategy == 'spatial_chromosome'
-                    and best_fitness < 1.0
-                    and stagnation >= STRESS_PATIENCE):
-                from substrates.nervous.io_placement import spatial_output_variants
-                rescue = spatial_output_variants(
-                    best_genome, target,
-                    limit=min(48, max(1, popsize // 2)))
             parents, parent_fitnesses = population, fitnesses
             offspring = next_population(
                 parents, parent_fitnesses, chromosome_count=n_chroms,
                 evolve_io=evolve_io, io_placement=strategy,
                 mean_mutations=actual_rate, make_genome=make_genome,
                 archive_parent=best_genome, stagnation=stagnation,
-                rescue_candidates=rescue, escape=escape_cfg,
-                mutation_limit=ga_config.mutation_limit)
+                escape=escape_cfg,
+                mutation_limit=ga_config.mutation_limit,
+                immigrant_fraction=ga_config.immigrant_fraction,
+                tournament_size=ga_config.tournament_size,
+                elite_count=ga_config.elite_count)
             offspring_fitnesses = _eval_batch(offspring, target, arch, ex, cache)
             # The SNN backend has no terminal (mu + lambda) consolidation, so
             # this is either crowding or the original strict generational

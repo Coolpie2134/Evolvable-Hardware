@@ -96,14 +96,44 @@ def test_app_exposes_only_the_current_nv_profiles():
         assert not is_current_nv_profile(retired)
 
     app = App.__new__(App)
-    app._NV_PROFILE_LABELS = {
-        'Analog': NV_NEW_RUN_PROFILES['analog_tri'],
-    }
-    app._nv_profile_var = type(
-        'Var', (), {'get': lambda self: self.value})()
-    app._nv_profile_var.value = 'Analog'
     assert App._selected_tile_arch(app) == 'tri3'
     assert App._selected_node_model(app) == ('paper_analog', None)
+
+
+def test_gui_remembers_measured_ga_tuning_per_substrate():
+    class Var:
+        def __init__(self, value):
+            self.value = str(value)
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = str(value)
+
+    app = App.__new__(App)
+    app._mut_var = Var(4.0)
+    app._imm_var = Var(0.08)
+    app._tourn_var = Var(4)
+    app._elite_var = Var(5)
+    app._alpha_var = Var(0.997)
+    app._beta_var = Var(1.0)
+    app._ga_tuning_backend = 'snn'
+    app._ga_tuning_values = {'snn': App._capture_ga_tuning(app)}
+
+    App._switch_ga_tuning_backend(app, 'lut')
+    assert app._mut_var.get() == '6.0'
+    assert app._imm_var.get() == '0.12'
+    assert app._tourn_var.get() == '3'
+    assert app._elite_var.get() == '3'
+    assert app._alpha_var.get() == '1.0'
+    assert app._beta_var.get() == '2.0'
+
+    app._mut_var.set('7.5')
+    App._switch_ga_tuning_backend(app, 'snn')
+    assert app._mut_var.get() == '4.0'
+    App._switch_ga_tuning_backend(app, 'lut')
+    assert app._mut_var.get() == '7.5'
 
 
 def test_wiring_io_selection_automatically_provides_chromosome_three():
@@ -189,13 +219,8 @@ def test_analog_profile_relabels_and_locks_irrelevant_controls():
             self.packed = False
 
     app = App.__new__(App)
-    app._NV_PROFILE_LABELS = {
-        'Analog': NV_NEW_RUN_PROFILES['analog_tri'],
-    }
-    app._nv_profile_var = type('Var', (), {'get': lambda self: 'Analog'})()
     app._pulse_entries = [Widget(), Widget(), Widget()]
     app._pulse_labels = [Widget(), Widget(), Widget()]
-    app._nv_profile_cb = Widget()
     app._tune_reset_btn = Widget()
     app._nv_controls_locked = False
     app._analog_row = RowWidget()
@@ -208,13 +233,11 @@ def test_analog_profile_relabels_and_locks_irrelevant_controls():
         'Propagation delay:', 'Input width:', 'Coinc (emergent):']
     assert [w.options['state'] for w in app._pulse_entries] == [
         'normal', 'normal', 'disabled']
-    assert app._nv_profile_cb.options['state'] == 'readonly'
     assert app._analog_row.packed
     assert all(w.options['state'] == 'normal' for w in app._analog_entries)
 
     App._set_nv_controls_locked(app, True)
     assert all(w.options['state'] == 'disabled' for w in app._pulse_entries)
-    assert app._nv_profile_cb.options['state'] == 'disabled'
     assert app._tune_reset_btn.options['state'] == 'disabled'
     # the analog row stays visible during a run but its constants lock
     assert app._analog_row.packed

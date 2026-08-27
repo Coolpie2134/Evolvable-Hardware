@@ -511,7 +511,16 @@ def _group_counts(pairs, tolerance, shift):
 
 
 def _pooled_event_f1(groups, tolerance, shift, slack=0.0, floor=None):
-    tr = ne = tp = na = 0
+    """Event F1, balanced across required output roles.
+
+    Events remain pooled across trials *within* one physical output stream, so
+    dense and sparse schedules jointly describe that stream. Different output
+    roles are separate requirements, however: pooling them by raw event count
+    let a fast/easy output (R1 in Rhythm cascade) swamp slower R2/R4 outputs.
+    Use the same mean-and-worst output aggregation as static and temporal truth
+    tables. Single-output targets are bit-for-bit unchanged.
+    """
+    role_scores = []
     for index, (_role, pairs) in enumerate(groups):
         deltas = (0.0,) if index == 0 else _role_deltas(slack, tolerance)
         best = None
@@ -526,9 +535,11 @@ def _pooled_event_f1(groups, tolerance, shift, slack=0.0, floor=None):
                 best = (key, counts)
         if best is None:      # every delta violated the causal floor
             best = (None, _group_counts(pairs, tolerance, shift))
-        a, b, c, d = best[1]
-        tr += a; ne += b; tp += c; na += d
-    return _f1(tr, ne, tp, na)
+        role_scores.append(_f1(*best[1]))
+    if not role_scores:
+        return 0.0
+    return (role_scores[0] if len(role_scores) == 1 else
+            0.5 * (sum(role_scores) / len(role_scores) + min(role_scores)))
 
 
 def _best_event_shift(traces, ttarget):
@@ -1142,7 +1153,13 @@ def _logic_contract_score(observations, target):
     # (row-major) vector the reports and case_count expect.
     per_output = [{0: [], 1: []} for _ in range(n_out)]
     cases = []
-    for row, (_, expected) in zip(observations or (), target.cases):
+    observed_rows = list(observations or ())
+    for case_index, (_, expected) in enumerate(target.cases):
+        # A failed/partial backend observation is wrong, not an abbreviated
+        # truth table. Previously ``zip`` silently dropped missing rows from
+        # the per-output means, so a correct prefix could score a false 1.0
+        # even though the returned case vector was padded with zeroes.
+        row = observed_rows[case_index] if case_index < len(observed_rows) else ()
         for index, wanted in enumerate(expected):
             actual = row[index] if index < len(row) else None
             if actual is None:
@@ -1153,10 +1170,6 @@ def _logic_contract_score(observations, target):
             cases.append(correctness)
             if index < n_out:
                 per_output[index][1 if wanted else 0].append(correctness)
-    missing = contract_case_count(target) - len(cases)
-    if missing > 0:
-        cases.extend([0.0] * missing)
-
     output_scores = []
     for levels in per_output:
         group_means = [sum(cells) / len(cells)
@@ -2832,9 +2845,9 @@ def best_distinct_assignment(
     suboptimal, it can be arbitrarily bad on exactly the multi-output targets
     that matter. By default this small bitmask dynamic program maximises the
     total role score. With ``balance_worst`` it instead maximises the same
-    half-mean plus half-worst objective used by multi-output truth-table
-    scoring. Otherwise probe fitting can install a readout that the final
-    contract immediately considers inferior.
+    half-mean plus half-worst objective used by every multi-output contract.
+    Otherwise probe fitting can install a readout that the final contract
+    immediately considers inferior.
 
     Compactness is NOT an objective here: coordinate order enters only as a
     deterministic tie-break between assignments of equal total score, so the

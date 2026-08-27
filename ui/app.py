@@ -98,7 +98,7 @@ from runtime.config import (FNVConfig, FNV_FAMILIES, GAConfig, RunConfig,
                                 LUT_FUNCTION_FAMILIES, NV_NEW_RUN_PROFILES,
                                 MAX_EVALUATION_WORKERS,
                                 MAX_CHROMOSOME_COUNT as MAX_CHROMS,
-                                default_max_telomere)
+                                default_ga_tuning, default_max_telomere)
 from runtime.checkpoint import load_checkpoint, save_checkpoint
 from runtime.controller import worker_entry as evolution_worker_entry
 
@@ -858,7 +858,7 @@ class App:
         ctrl = ttk.Frame(self.root, padding=(6, 4))
         ctrl.pack(fill='x', side='top')
 
-        ttk.Label(ctrl, text='Model:').pack(side='left', padx=(2, 2))
+        ttk.Label(ctrl, text='Substrate:').pack(side='left', padx=(2, 2))
         self._backend_var = tk.StringVar(value='SNN')
         self._telomere_values = {
             backend: str(default_max_telomere(backend))
@@ -894,15 +894,12 @@ class App:
                   self._load_btn, self._save_btn):
             b.pack(side='left', padx=3)
         self._recombination_var = tk.BooleanVar(value=True)
-        self._recombination_chk = ttk.Checkbutton(
-            ctrl, text='Recombine', variable=self._recombination_var,
-            command=self._sync_recombination)
-        self._recombination_chk.pack(side='left', padx=(6, 0))
 
         # Run settings get their own row so controls remain reachable on laptop
         # screens instead of forcing a >1200 px top bar.
         run_ctrl = ttk.Frame(self.root, padding=(6, 0, 6, 4))
         run_ctrl.pack(fill='x', side='top')
+        self._run_settings_frame = run_ctrl
         ttk.Label(run_ctrl, text='Run settings:').pack(side='left', padx=(2, 4))
 
         def lentry(parent, label, default, width=6):
@@ -911,7 +908,7 @@ class App:
             ttk.Entry(parent, textvariable=v, width=width).pack(side='left')
             return v
 
-        self._pop_var   = lentry(run_ctrl, 'Population:', 50)
+        self._pop_var   = lentry(run_ctrl, 'Population:', 60)
         # long single run instead of many short restarts, so slow steady progress
         # is visible (user-preferred; was Gens=30, Tries=20 which restarted every
         # 30 generations before any trend showed).
@@ -923,11 +920,6 @@ class App:
 
         self._progress = ttk.Progressbar(run_ctrl, length=130, mode='determinate')
         self._progress.pack(side='right', padx=(8, 4), fill='x', expand=True)
-
-        self._graded_var = tk.BooleanVar(value=False)
-        self._graded_chk = ttk.Checkbutton(run_ctrl, text='Graded logic fitness',
-                                           variable=self._graded_var)
-        self._graded_chk.pack(side='left', padx=(10, 0))
 
         # -- second row: model-specific parameters --
         ctrl2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
@@ -953,7 +945,11 @@ class App:
         self._syn_var  = aentry(self._arch_frame, 'Syn weight:', DEFAULT_ARCH.syn_weight)
         self._vmin_var = aentry(self._arch_frame, 'Vth min:',    DEFAULT_ARCH.vth_levels[0])
         self._vmax_var = aentry(self._arch_frame, 'Vth max:',    DEFAULT_ARCH.vth_levels[-1])
-        self._cur_var  = aentry(self._arch_frame, 'Input I:',    self.target.high)
+        self._current_entries = []
+        self._current_labels = []
+        self._cur_var = aentry(
+            self._arch_frame, 'Input I:', self.target.high,
+            store=self._current_entries, label_store=self._current_labels)
         self._arch_sep = ttk.Separator(ctrl2, orient='vertical')
         self._arch_sep.pack(side='left', fill='y', padx=8)
 
@@ -975,7 +971,7 @@ class App:
         self._maxtel_var = aentry(
             self._layout_frame, 'Max telomere:',
             default_max_telomere('snn'), width=4)
-        self._layout_reset_btn = ttk.Button(self._layout_frame, text='Reset', width=6,
+        self._layout_reset_btn = ttk.Button(self._layout_frame, text='Reset genome', width=12,
                                              command=self._reset_arch)
         self._layout_reset_btn.pack(side='left', padx=8)
 
@@ -986,12 +982,16 @@ class App:
             wraplength=max(140, event.width - 8)), add='+')
 
         # -- third row: GA + substrate-physics tuning (applied on Run) --
-        from substrates.nervous.ga import (MEAN_MUTATIONS as _MM, IMMIGRANT_FRAC as _IM,
-                               TOURNAMENT_K as _TK, MUT_DECAY as _AL)
         from runtime.mutation import DEFAULT_MUTATION_LIMIT as _ML
         from substrates.nervous.pulse import DELAY as _D, WIDTH as _W, COINC as _C
-        self._tune_defaults = dict(mut=_MM, imm=_IM, tk=_TK, alpha=_AL,
-                                   beta=1.0, limit=_ML, elite=5,
+        _ga_defaults = default_ga_tuning('snn')
+        self._tune_defaults = dict(
+            mut=_ga_defaults['mean_mutations'],
+            imm=_ga_defaults['immigrant_fraction'],
+            tk=_ga_defaults['tournament_size'],
+            alpha=_ga_defaults['mutation_decay'],
+            beta=_ga_defaults['stagnation_beta'], limit=_ML,
+            elite=_ga_defaults['elite_count'],
                                    delay=_D, width=_W, coinc=_C)
         # TWO rows, not one. Packed side by side these controls need about
         # 2070px on the nervous net, and Tk's packer does not clip an
@@ -1008,20 +1008,20 @@ class App:
         self._substrate_row = ctrl3b
 
         ga_frame = ttk.Frame(ctrl3); ga_frame.pack(side='left')
+        self._ga_frame = ga_frame
         ttk.Label(ga_frame, text='GA:').pack(side='left', padx=(2, 0))
-        # Nervous/FNV/LUT read these; SNN has its own fixed constants and ignores
-        # them, so the whole row is disabled when SNN is selected (see
-        # _reconfigure_for_backend). Widgets are collected so they can be toggled.
+        # All four substrates read these settings. SNN lacks per-case score
+        # vectors, so only epsilon-lexicase is unavailable for it.
         self._ga_entries = []
-        self._mut_var  = aentry(ga_frame, 'Mutations/child:', _MM, width=4, store=self._ga_entries)
-        self._imm_var  = aentry(ga_frame, 'Immigrants:',      _IM, width=4, store=self._ga_entries)
-        self._tourn_var = aentry(ga_frame, 'Tournament:',     _TK, width=3, store=self._ga_entries)
+        self._mut_var  = aentry(ga_frame, 'Mutations/child:', self._tune_defaults['mut'], width=4, store=self._ga_entries)
+        self._imm_var  = aentry(ga_frame, 'Immigrants:',      self._tune_defaults['imm'], width=4, store=self._ga_entries)
+        self._tourn_var = aentry(ga_frame, 'Tournament:',     self._tune_defaults['tk'], width=3, store=self._ga_entries)
         # Size of the elite breeding pool. Reproduction does not copy these
         # verbatim; after a terminal solve, evaluated parents may survive the
         # parent+offspring consolidation step. 0 = use the whole population.
-        self._elite_var = aentry(ga_frame, 'Elites:',         5,   width=3, store=self._ga_entries)
+        self._elite_var = aentry(ga_frame, 'Elites:', self._tune_defaults['elite'], width=3, store=self._ga_entries)
         # simulated-annealing decay: mutation rate *= alpha each generation (1 = off)
-        self._alpha_var = aentry(ga_frame, 'Anneal alpha:',       _AL, width=6, store=self._ga_entries)
+        self._alpha_var = aentry(ga_frame, 'Anneal alpha:', self._tune_defaults['alpha'], width=6, store=self._ga_entries)
         # beta controls plateau reheating: 0 disables it, 1 keeps the tuned
         # behavior, and larger values raise mutation faster during stagnation.
         self._beta_var = aentry(ga_frame, 'Plateau beta:', 1.0,
@@ -1036,6 +1036,12 @@ class App:
                                               variable=self._lexicase_var)
         self._lexicase_chk.pack(side='left', padx=(6, 0))
         self._ga_entries.append(self._lexicase_chk)
+        self._recombination_chk = ttk.Checkbutton(
+            ga_frame, text='Recombine', variable=self._recombination_var,
+            command=self._sync_recombination)
+        self._recombination_chk.pack(side='left', padx=(6, 0))
+        self._ga_tuning_backend = 'snn'
+        self._ga_tuning_values = {'snn': self._capture_ga_tuning()}
         ttk.Separator(ctrl3, orient='vertical').pack(side='left', fill='y', padx=8)
         self._tune_reset_btn = ttk.Button(ctrl3, text='Reset tuning', width=12,
                                           command=self._reset_tuning)
@@ -1067,18 +1073,9 @@ class App:
         # timing-model audits.
         ttk.Label(self._pulse_frame, text='NV profile:').pack(
             side='left', padx=(6, 2))
-        self._NV_PROFILE_LABELS = {
-            'Analog tri-circuit (3-output, paper Fig. 1 node)':
-                NV_NEW_RUN_PROFILES['analog_tri'],
-        }
-        self._nv_profile_var = tk.StringVar(
-            value='Analog tri-circuit (3-output, paper Fig. 1 node)')
-        self._nv_profile_cb = ttk.Combobox(
-            self._pulse_frame, textvariable=self._nv_profile_var, width=39,
-            state='readonly', values=list(self._NV_PROFILE_LABELS))
-        self._nv_profile_cb.pack(side='left')
-        self._nv_profile_cb.bind('<<ComboboxSelected>>',
-                                 self._on_nv_profile_change)
+        ttk.Label(
+            self._pulse_frame,
+            text='Analog tri-circuit (paper Fig. 1)').pack(side='left')
         # I/O description/selection. Nervous and FNV show their one native
         # evolved-pad/fitted-probe architecture, LUT chooses between internal
         # pads and exterior-edge drivers, and SNN exposes the compatible legacy
@@ -1223,18 +1220,6 @@ class App:
         # applies to all four backends and both GA drive paths.
         from runtime.escape import EscapeConfig as _EC
         _ED = _EC()
-        self._escape_defaults = dict(
-            lifespan=False, stages=_ED.lifespan_checkpoints,
-            crowding=False, window=_ED.crowding_window,
-            reserve=_ED.crowding_fraction,
-            drift=False, adaptive=False,
-            rebirth=False, patience=_ED.rebirth_patience,
-            fraction=_ED.rebirth_fraction,
-            lineage_walk=False, lineage_fraction=_ED.lineage_walk_fraction,
-            robust=False, jitter=_ED.robustness_jitter,
-            islands=False, island_count=_ED.island_count,
-            island_interval=_ED.island_migration_interval,
-            downsample=_ED.lexicase_downsample)
         # Three sub-rows: all of these on one line overflows the window at its
         # natural width, and a control the user cannot see is a control that
         # silently does not exist.
@@ -1369,24 +1354,12 @@ class App:
              'generations at the same selection\nquality. The sample is '
              'redrawn every generation, so this also serves as a\nrotating '
              'stimulus set. Only has an effect when epsilon-lexicase is selected.')
-        # A genuine valley needs a lineage that is allowed to be worse for more
-        # than one generation. Keep this on its own row: unlike neutral drift
-        # and high-rate rebirth, its guarantee is easy to state precisely.
+        # Status/reset live on the final short row. Lineage Walk is intentionally
+        # not offered: it preserves fitness-blind elites without crossover,
+        # contrary to the application's recombination-first evolutionary model.
+        # The runtime field remains checkpoint-compatible for old experiments.
         ctrl4 = esc3
         ttk.Label(esc3, text='          ').pack(side='left', padx=(2, 0))
-        self._lineage_walk_var = echeck(
-            'Lineage walk',
-            'Reserves a small group for mutation-only random walks that '
-            'ignore fitness.\nEach walker descends from its own previous '
-            'state, so an intermediate that is\ntemporarily worse survives '
-            'long enough to mutate again. Any walker that\nimproves is copied '
-            'back into the ordinary breeding pool.\n\nThis knows nothing '
-            'about the task and adds no extra evaluations. It spends the\n'
-            'selected share of existing population slots on crossing valleys '
-            'that take\nmore than one generation to cross.')
-        self._lineage_fraction_var = aentry(
-            ctrl4, 'share:', _ED.lineage_walk_fraction, width=4,
-            store=self._escape_entries)
         self._escape_reset_btn = ttk.Button(
             ctrl4, text='Reset escape', width=13,
             command=self._reset_escape)
@@ -1433,7 +1406,7 @@ class App:
             mono=self._mono)
 
         self._status = tk.StringVar(
-            value='Ready: pick a model and target, set parameters, click Run (or Load Saved).')
+            value='Ready: pick a substrate and target, set parameters, click Run (or Load Saved).')
         self._status_label = ttk.Label(
             self.root, textvariable=self._status, anchor='w',
             relief='sunken', padding=(6, 2), wraplength=1000, justify='left')
@@ -1493,7 +1466,6 @@ class App:
         if backend != 'snn':
             self._arch_frame.pack_forget()
             self._arch_sep.pack_forget()
-            self._graded_chk.state(['disabled'])
             if backend == 'nervous':
                 tri = self._selected_tile_arch() == 'tri3'
                 model = self._selected_node_model()[0]
@@ -1514,15 +1486,15 @@ class App:
                         'Both waveform edges are preserved and propagation '
                         'delay evolves by routing state.')
                 note = ('Nervous net: HEX array; each tile has %s. %s Loops '
-                        'circulate injected pulses as memory. Substrate '
-                        '(Vth/Syn/Input) and Graded do not apply.'
+                        'circulate injected pulses as memory. SNN-specific '
+                        'Vth/Syn/Input controls do not apply.'
                         % (tile_note, physics_note))
             else:
                 note = ('LUT array: SQUARE array (each cell wired to 4 neighbours N/S/E/W), '
                         '4 directional 16-bit lookup tables per cell, asynchronous level logic '
                         '(paper Architecture 2 / sim6). Recurrent & dynamical: TEMPORAL '
                         'targets only (it cannot settle to combinational logic). '
-                        'Substrate/Graded do not apply.')
+                        'SNN-specific substrate controls do not apply.')
             if backend == 'fnv':
                 note = (
                     'Functional NV Net (FNV) - directed honeycomb hardware. '
@@ -1535,7 +1507,6 @@ class App:
         else:
             self._arch_frame.pack(side='left', before=self._layout_frame)
             self._arch_sep.pack(side='left', fill='y', padx=8, before=self._layout_frame)
-            self._graded_chk.state(['!disabled'])
             self._model_note.config(text='SNN: leaky integrate-and-fire neurons.')
             self._set_tab_label(self._volt_tab, 'Voltage Traces')
         # pulse-physics knobs apply only to the nervous net's pulse engine.
@@ -1570,17 +1541,18 @@ class App:
                     fill='x', side='top', before=self._escape_row)
             else:
                 self._lut_function_row.pack_forget()
-        # GA tuning (mutations / immigrants / tournament / elites / anneal / lexicase)
-        # feeds the nervous, FNV and LUT GAs; SNN uses its own fixed constants
-        # and ignores them - so disable the whole row for SNN rather than let it look
-        # as if it applies.
+        # GA tuning feeds every backend. SNN does not expose per-case vectors,
+        # so epsilon-lexicase alone is unavailable there.
         if hasattr(self, '_ga_entries'):
-            st = 'disabled' if backend == 'snn' else 'normal'
             for w in self._ga_entries:
                 try:
-                    w.configure(state=st)
+                    w.configure(state='normal')
                 except tk.TclError:
                     pass
+            self._lexicase_chk.configure(
+                state='disabled' if backend == 'snn' else 'normal')
+            if backend == 'snn':
+                self._lexicase_var.set(False)
         # The population-level escape mechanisms (crowding / neutral drift /
         # self-adaptive mutation / rebirth) work on all four backends. Lifespan
         # scoring, the robustness objective and lexicase downsampling all read
@@ -1599,7 +1571,7 @@ class App:
                     pass
         # the Designer edits grown hardware, which only the two asynchronous
         # substrates have - hide its tab for SNN runs, and keep its
-        # architecture in lockstep with the Model selector otherwise
+        # architecture in lockstep with the Substrate selector otherwise
         if hasattr(self, '_designer'):
             try:
                 if backend in ('snn', 'fnv'):
@@ -1958,7 +1930,10 @@ class App:
         self.target = self._targets_for_backend(self._backend()).get(
             name, get_target(DEFAULT_TARGET))
         self._cur_var.set(str(self.target.high))
-        if getattr(self.target, 'temporal', False):
+        temporal = bool(getattr(self.target, 'temporal', False))
+        for widget in self._current_entries + self._current_labels:
+            widget.configure(state='disabled' if temporal else 'normal')
+        if temporal:
             self._reconfigure_for_backend()
             # show what this target IS right away in the Evolution tab's panel
             try:
@@ -1998,22 +1973,49 @@ class App:
             self.target.name, self.target.n_inputs, self.target.n_outputs, n_cases,
             '   (large: evolution will be slow)' if n_cases > 32 else ''))
 
-    def _effective_target(self, high, graded):
-        """Apply the GUI's high/graded knobs to the selected target. Growth is no
+    def _effective_target(self, high):
+        """Apply the GUI's input-current knob to a static target. Growth is no
         longer grid/iters-bounded (the nervous telomere is self-limiting), so the
         target keeps its own I/O layout: grid_size/iters are left untouched."""
         if getattr(self.target, 'temporal', False):
-            # temporal targets have fixed close I/O and no high/graded fields
+            # Temporal targets carry their own physical source schedules.
             return dataclasses.replace(self.target)
-        return dataclasses.replace(self.target, high=high, graded=graded)
+        return dataclasses.replace(self.target, high=high)
+
+    def _capture_ga_tuning(self):
+        return {
+            'mean_mutations': self._mut_var.get(),
+            'immigrant_fraction': self._imm_var.get(),
+            'tournament_size': self._tourn_var.get(),
+            'elite_count': self._elite_var.get(),
+            'mutation_decay': self._alpha_var.get(),
+            'stagnation_beta': self._beta_var.get(),
+        }
+
+    def _apply_ga_tuning(self, values):
+        self._mut_var.set(str(values['mean_mutations']))
+        self._imm_var.set(str(values['immigrant_fraction']))
+        self._tourn_var.set(str(values['tournament_size']))
+        self._elite_var.set(str(values['elite_count']))
+        self._alpha_var.set(str(values['mutation_decay']))
+        self._beta_var.set(str(values['stagnation_beta']))
+
+    def _switch_ga_tuning_backend(self, backend):
+        """Remember edits per substrate and load its measured defaults."""
+        previous = getattr(self, '_ga_tuning_backend', backend)
+        if hasattr(self, '_ga_tuning_values'):
+            self._ga_tuning_values[previous] = self._capture_ga_tuning()
+            values = self._ga_tuning_values.setdefault(
+                backend, default_ga_tuning(backend))
+            self._apply_ga_tuning(values)
+        self._ga_tuning_backend = backend
 
     def _reset_tuning(self):
         d = self._tune_defaults
-        self._mut_var.set(str(d['mut']));   self._imm_var.set(str(d['imm']))
-        self._tourn_var.set(str(d['tk']));  self._alpha_var.set(str(d['alpha']))
-        self._beta_var.set(str(d['beta']))
+        ga_defaults = default_ga_tuning(self._backend())
+        self._apply_ga_tuning(ga_defaults)
+        self._ga_tuning_values[self._backend()] = self._capture_ga_tuning()
         self._mutation_limit_var.set(str(d['limit']))
-        self._elite_var.set(str(d['elite']))
         self._delay_var.set(str(d['delay']))
         self._width_var.set(str(d['width'])); self._coinc_var.set(str(d['coinc']))
         if hasattr(self, '_analog_defaults'):
@@ -2022,10 +2024,7 @@ class App:
             self._astep_var.set(str(a['step']))
             self._atau_var.set(str(a['tau']))
             self._ahyst_var.set(str(a['hyst']))
-        if hasattr(self, '_nv_profile_var'):
-            self._nv_profile_var.set(
-                'Analog tri-circuit (3-output, paper Fig. 1 node)')
-            self._sync_nv_profile_controls()
+        self._sync_nv_profile_controls()
         if hasattr(self, '_lexicase_var'):
             self._lexicase_var.set(False)    # tournament is the tuned default
         for variable in getattr(self, '_fnv_family_vars', {}).values():
@@ -2038,26 +2037,28 @@ class App:
 
     def _reset_escape(self):
         """Return every escape mechanism to off: the pre-escape behaviour."""
-        d = self._escape_defaults
-        self._lifespan_var.set(d['lifespan'])
-        self._lifespan_stages_var.set(str(d['stages']))
-        self._crowding_var.set(d['crowding'])
-        self._crowding_window_var.set(str(d['window']))
-        self._crowding_fraction_var.set(str(d['reserve']))
-        self._drift_var.set(d['drift'])
-        self._adaptive_mut_var.set(d['adaptive'])
-        self._rebirth_var.set(d['rebirth'])
-        self._rebirth_patience_var.set(str(d['patience']))
-        self._rebirth_fraction_var.set(str(d['fraction']))
-        self._lineage_walk_var.set(d['lineage_walk'])
-        self._lineage_fraction_var.set(str(d['lineage_fraction']))
-        self._robust_var.set(d['robust'])
-        self._robust_jitter_var.set(str(d['jitter']))
-        self._islands_var.set(d['islands'])
-        self._island_count_var.set(str(d['island_count']))
-        self._island_interval_var.set(str(d['island_interval']))
-        self._downsample_var.set(str(d['downsample']))
-        self._escape_status.set('off')
+        from runtime.escape import EscapeConfig
+        self._apply_escape_config(EscapeConfig())
+
+    def _apply_escape_config(self, config):
+        """Make the visible escape controls describe ``config`` exactly."""
+        self._lifespan_var.set(bool(config.lifespan_scoring))
+        self._lifespan_stages_var.set(str(config.lifespan_checkpoints))
+        self._crowding_var.set(bool(config.crowding))
+        self._crowding_window_var.set(str(config.crowding_window))
+        self._crowding_fraction_var.set(str(config.crowding_fraction))
+        self._drift_var.set(bool(config.neutral_drift))
+        self._adaptive_mut_var.set(bool(config.self_adaptive_mutation))
+        self._rebirth_var.set(bool(config.rebirth))
+        self._rebirth_patience_var.set(str(config.rebirth_patience))
+        self._rebirth_fraction_var.set(str(config.rebirth_fraction))
+        self._robust_var.set(bool(config.robustness))
+        self._robust_jitter_var.set(str(config.robustness_jitter))
+        self._islands_var.set(bool(config.islands))
+        self._island_count_var.set(str(config.island_count))
+        self._island_interval_var.set(str(config.island_migration_interval))
+        self._downsample_var.set(str(config.lexicase_downsample))
+        self._escape_status.set(config.summary())
 
     def _read_escape_config(self):
         """Parse the escape row, or None when a field is invalid.
@@ -2078,9 +2079,7 @@ class App:
                 rebirth=bool(self._rebirth_var.get()),
                 rebirth_patience=int(self._rebirth_patience_var.get()),
                 rebirth_fraction=float(self._rebirth_fraction_var.get()),
-                lineage_walk=bool(self._lineage_walk_var.get()),
-                lineage_walk_fraction=float(
-                    self._lineage_fraction_var.get()),
+                lineage_walk=False,
                 robustness=bool(self._robust_var.get()),
                 robustness_jitter=float(self._robust_jitter_var.get()),
                 islands=bool(self._islands_var.get()),
@@ -2255,16 +2254,9 @@ class App:
                     'non-developmental I/O map.')
 
     def _selected_nv_profile(self):
-        default = ('tri3', 'paper_analog', None)
-        if not hasattr(self, '_nv_profile_var'):
-            return default
-        return self._NV_PROFILE_LABELS.get(
-            self._nv_profile_var.get(), default)
-
-    def _on_nv_profile_change(self, _evt=None):
-        self._sync_nv_profile_controls()
-        self._reconfigure_for_backend()
-        self._refresh_target_list()
+        # Fresh runs expose one audited substrate, so this is a description,
+        # not a one-item selector.
+        return NV_NEW_RUN_PROFILES['analog_tri']
 
     def _sync_nv_profile_controls(self):
         """Keep labels and editability honest for the selected NV physics."""
@@ -2280,8 +2272,6 @@ class App:
             widget.configure(state=('disabled'
                                     if locked or (analog and index == 2)
                                     else 'normal'))
-        self._nv_profile_cb.configure(
-            state='disabled' if locked else 'readonly')
         self._tune_reset_btn.configure(
             state='disabled' if locked else 'normal')
         if hasattr(self, '_analog_row'):
@@ -2308,6 +2298,49 @@ class App:
         for widget in getattr(self, '_lut_function_family_checks', ()):
             widget.configure(state='disabled' if locked else 'normal')
 
+    def _set_configuration_locked(self, locked):
+        """Prevent controls from promising mid-run changes that cannot apply.
+
+        The worker receives an immutable RunConfig when it starts. Recombination
+        is the sole live setting and is re-enabled explicitly while paused.
+        """
+        frames = (
+            getattr(self, '_run_settings_frame', None),
+            getattr(self, '_arch_frame', None),
+            getattr(self, '_layout_frame', None),
+            getattr(self, '_ga_frame', None),
+            getattr(self, '_substrate_row', None),
+            getattr(self, '_analog_row', None),
+            getattr(self, '_fnv_row', None),
+            getattr(self, '_lut_function_row', None),
+            getattr(self, '_escape_row', None),
+        )
+
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+
+        seen = set()
+        for frame in frames:
+            if frame is None:
+                continue
+            for widget in descendants(frame):
+                key = str(widget)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if isinstance(widget, ttk.Combobox):
+                    widget.configure(state='disabled' if locked else 'readonly')
+                elif isinstance(widget, (ttk.Entry, ttk.Checkbutton, ttk.Button)):
+                    widget.configure(state='disabled' if locked else 'normal')
+        self._set_nv_controls_locked(locked)
+        if not locked:
+            # Restore backend- and target-specific restrictions after the broad
+            # unlock (for example SNN lexicase and temporal Input I).
+            self._reconfigure_for_backend()
+            self._on_target_change()
+
     def _sync_telomere_backend(self, backend=None):
         """Swap in the remembered growth ceiling for the selected backend.
 
@@ -2327,31 +2360,37 @@ class App:
         self._telomere_backend = backend
 
     def _on_backend_change(self, _evt=None):
+        self._switch_ga_tuning_backend(self._backend())
         self._reconfigure_for_backend()
         # The same combinational name maps to static SNN data or a periodic
         # asynchronous wrapper, so refresh the selected object too.
         self._on_target_change()
         backend = self._backend()
         if backend == 'nervous':
-            self._status.set('Model: Nervous net, coincidence + inhibition + loops; '
+            self._status.set('Substrate: Nervous net, coincidence + inhibition + loops; '
                              'best with small grids and close I/O.')
         elif backend == 'fnv':
             self._status.set(
-                'Model: Functional NV Net - fixed physical functions on '
+                'Substrate: Functional NV Net - fixed physical functions on '
                 'directed honeycomb wires; select whole component families.')
         elif backend == 'lut':
-            self._status.set('Model: LUT array, square grid, 4 neighbours, four 16-bit '
+            self._status.set('Substrate: LUT array, square grid, 4 neighbours, four 16-bit '
                              'lookup tables per cell, asynchronous level logic (sim6 / Arch 2).')
         else:
-            self._status.set('Model: SNN, leaky integrate-and-fire neurons.')
+            self._status.set('Substrate: SNN, leaky integrate-and-fire neurons.')
 
     def _read_arch(self):
         """Parse the substrate fields -> (Arch, input_high, ok)."""
+        if self._backend() != 'snn':
+            # Hidden SNN fields must never block another substrate's run.
+            return DEFAULT_ARCH, float(getattr(self.target, 'high', 1.0)), True
         try:
             sw   = float(self._syn_var.get())
             vmin = float(self._vmin_var.get())
             vmax = float(self._vmax_var.get())
-            high = float(self._cur_var.get())
+            high = (float(getattr(self.target, 'high', 1.0))
+                    if getattr(self.target, 'temporal', False)
+                    else float(self._cur_var.get()))
             if sw <= 0 or high <= 0 or vmin < 0 or vmax < vmin:
                 raise ValueError
         except ValueError:
@@ -2457,7 +2496,7 @@ class App:
             return
 
         backend = self._backend()
-        eff_target = self._effective_target(high, self._graded_var.get())
+        eff_target = self._effective_target(high)
         setattr(eff_target, 'pulse_config', run_config.pulse)
         if backend == 'fnv':
             setattr(eff_target, '_fnv_families', run_config.fnv.families)
@@ -2512,7 +2551,7 @@ class App:
         self._target_picker.set_state('disabled')
         self._backend_cb.config(state='disabled')
         self._recombination_chk.config(state='disabled')
-        self._set_nv_controls_locked(True)
+        self._set_configuration_locked(True)
 
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
@@ -2530,9 +2569,9 @@ class App:
                          (backend, run_config.ga.tile_arch,
                           run_config.pulse.model))
                         if backend == 'nervous' else backend)
-        self._status.set('Evolving %s [%s] ...  pop=%d  gens=%d  tries=%d  seed=%d%s' %
-                         (self.target.name, backend_note, pop, gens, tries, base_seed,
-                          '  [graded]' if self._graded_var.get() else ''))
+        self._status.set(
+            'Evolving %s [%s] ...  pop=%d  gens=%d  tries=%d  seed=%d' %
+            (self.target.name, backend_note, pop, gens, tries, base_seed))
 
     def _sync_recombination(self):
         enabled = bool(self._recombination_var.get())
@@ -2639,7 +2678,6 @@ class App:
         self.target       = saved_target
         self._disp_target = saved_target
         self._disp_arch   = saved_arch
-        self._graded_var.set(bool(getattr(saved_target, 'graded', False)))
         self._syn_var.set(str(saved_arch.syn_weight))
         self._vmin_var.set(str(saved_arch.vth_levels[0]))
         self._vmax_var.set(str(saved_arch.vth_levels[-1]))
@@ -2663,10 +2701,20 @@ class App:
             setattr(
                 saved_target, '_lut_function_families',
                 normalized_config.ga.lut_function_families)
-        self._beta_var.set(str(normalized_config.ga.stagnation_beta))
-        self._mutation_limit_var.set(str(normalized_config.ga.mutation_limit))
-        self._workers_var.set(str(normalized_config.ga.evaluation_workers))
-        self._recombination_var.set(normalized_config.ga.recombination_enabled)
+        loaded_ga = normalized_config.ga
+        self._mut_var.set(str(loaded_ga.mean_mutations))
+        self._imm_var.set(str(loaded_ga.immigrant_fraction))
+        self._tourn_var.set(str(loaded_ga.tournament_size))
+        self._elite_var.set(str(loaded_ga.elite_count))
+        self._alpha_var.set(str(loaded_ga.mutation_decay))
+        self._beta_var.set(str(loaded_ga.stagnation_beta))
+        self._ga_tuning_backend = saved_backend
+        self._ga_tuning_values[saved_backend] = self._capture_ga_tuning()
+        self._mutation_limit_var.set(str(loaded_ga.mutation_limit))
+        self._workers_var.set(str(loaded_ga.evaluation_workers))
+        self._recombination_var.set(loaded_ga.recombination_enabled)
+        self._lexicase_var.set(loaded_ga.selection == 'lexicase')
+        self._apply_escape_config(loaded_ga.escape)
         self._delay_var.set(str(normalized_config.pulse.delay))
         self._width_var.set(str(normalized_config.pulse.width))
         self._coinc_var.set(str(normalized_config.pulse.coincidence))
@@ -2685,20 +2733,14 @@ class App:
             normalized_config.ga.tile_arch,
             normalized_config.pulse.model,
             getattr(normalized_config.ga, 'evolve_delay', None))
-        profile_label = next(
-            (label for label, profile in self._NV_PROFILE_LABELS.items()
-             if profile == saved_profile), None)
         profile_warn = ''
-        if profile_label is None:
-            # A checkpoint saved under a retired engine. The dropdown can
-            # only show the one live profile, so say plainly that the run
-            # being displayed is not the one a fresh Run would use.
-            profile_label = 'Analog tri-circuit (3-output, paper Fig. 1 node)'
+        if saved_profile not in NV_NEW_RUN_PROFILES.values():
+            # A checkpoint saved under a retired engine. Fresh Run always uses
+            # the one audited analog tri-circuit substrate.
             if loaded_backend == 'nervous':
                 profile_warn = ('  : this checkpoint was saved under a '
                                 'RETIRED NV engine; the shown profile is '
                                 'the current one, not the saved one')
-        self._nv_profile_var.set(profile_label)
         # Restore the I/O binding dropdown from the loaded run (old checkpoints
         # default to 'fixed').
         saved_io = getattr(normalized_config.ga, 'io_placement', 'fixed')
@@ -2975,7 +3017,7 @@ class App:
                         state='normal' if self.best_genome else 'disabled')
                     self._progress.configure(value=self._progress.cget('maximum'))
                     self._worker = None
-                    self._set_nv_controls_locked(False)
+                    self._set_configuration_locked(False)
                     if completion_error:
                         self._status.set(
                             'Run finished, but final save/display failed: %s  '

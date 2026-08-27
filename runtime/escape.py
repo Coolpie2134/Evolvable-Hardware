@@ -926,8 +926,8 @@ class EscapeState:
         Strict improvement normally; equal-ranked challengers are also accepted
         under neutral drift, so the archived champion keeps moving along the
         plateau's neutral network instead of pinning to the first genome that
-        reached the plateau. That matters because the champion is the seed for
-        plateau rescue and for rebirth.
+        reached the plateau. That matters because the champion remains the seed
+        for ordinary mutated archive descendants and rebirth.
         """
         if old_rank is None:
             return True

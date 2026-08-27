@@ -752,6 +752,7 @@ def echo(grid_size=5, delay=3):
     return TemporalTarget('Echo (delay %d)' % delay, [In], [out], T, trials,
                           grid_size=grid_size, iters=30,
                           contract=event_contract(fit_latency=False),
+                          latency=delay,
                           description=describe_target(
         'Reproduce every input edge at Q exactly %d seconds later.' % delay,
         'Four schedules vary pulse count and spacing. A direct input-to-output '
@@ -1183,14 +1184,12 @@ TEMPORAL_TARGETS = {
     'Sequence A->B':         ordered_sequence(),
     'Veto gate':             veto_gate(),
     'Burst x3':              burst_generator(),
-    'Divide-by-3':           divide_by_3(),
 }
 
 # Registry display name -> its reference-oracle spec name (in oracle.ORACLE_SPECS).
 # Exposed so held-out certification can recover the reference state machine that
 # defines a given target and re-sample fresh validation schedules from it.
 ORACLE_KEY_TO_SPEC = {
-    'Pulse width sum (A+B)': 'Pulse width sum (oracle)',
     'Odd pulse selector':    'Odd pulse selector (oracle)',
     'A-count parity queried by B': 'A parity query (oracle)',
     'A-count multiple-of-3 queried by B': 'A modulo-3 query (oracle)',
@@ -1217,8 +1216,6 @@ ORACLE_KEY_TO_SPEC = {
     'Period tripler (3x)':   'Period tripler (oracle)',
     'Period halver (1/2x)':  'Period halver (oracle)',
     'Temporal sum (deltaA + deltaB)': 'Temporal sum (oracle)',
-    'Pair detector (gap 2)': 'Pair detector (oracle)',
-    'Pair detection gap (2x pulse width)': 'Pair gap 2x width (oracle)',
     'Period stepper':        'Period stepper (oracle)',
     'Gated oscillator':      'Gated oscillator (oracle)',
     'Resettable toggle':     'Resettable toggle (oracle)',
