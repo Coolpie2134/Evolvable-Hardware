@@ -40,3 +40,15 @@ def test_fnv_reproduction_has_no_target_answer_channel():
     source = inspect.getsource(fnv_ga.next_population)
     assert 'preferred_signature' not in source
     assert 'evaluate_functional_full' not in source
+
+
+def test_fnv_has_no_constructor_or_mutation_terminal_tropism():
+    source = (ROOT / 'substrates/fnv/construction_ga.py').read_text(
+        encoding='utf-8')
+    forbidden = (
+        '_connect_terminal_step',
+        'LOGIC_SCAFFOLD_GENES',
+        'MAX_LOGIC_SCAFFOLD_GENES',
+        'FEEDBACK_CLOSE_PROBABILITY',
+    )
+    assert not [name for name in forbidden if name in source]

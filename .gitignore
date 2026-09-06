@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+tmp/
+.venv/
+venv/
 
 # Results (large/generated files)
 results/

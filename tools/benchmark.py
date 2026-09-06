@@ -332,6 +332,9 @@ def config_record(args, architectures):
             'restarts': args.tries, 'chromosomes': args.chroms,
             'workers': args.workers,
             'input_high': args.input_high,
+            'behavior_checkpoints': list(args.behavior_checkpoints),
+            **({'record_champions': True}
+               if getattr(args, 'champion_dir', None) else {}),
             # Both change what a cell can reach, so they belong in the
             # fingerprint: resuming a capped sweep into an uncapped one would
             # mix incomparable rows.
@@ -454,7 +457,17 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
     stop_event = threading.Event()
     state = {'certification': None, 'error': None, 'best': 0.0,
              'first_solved_gen': None, 'last_gen': 0, 'done': False,
-             'stopped_early': None}
+             'stopped_early': None, 'history': [], 'events': [],
+             'effective_selection': None}
+
+    recorder = None
+    if getattr(args, 'champion_dir', None):
+        from runtime.observation import ChampionRecorder
+        target_id = hashlib.sha256(target_name.encode()).hexdigest()[:12]
+        recorder = ChampionRecorder(
+            os.path.join(args.champion_dir, '%s-%s-%s' %
+                         (backend, target_id, seed)),
+            backend, live_target, arch, seed, run_config)
 
     started = time.time()
     time_cap = float(getattr(args, 'time_cap', 0) or 0)
@@ -479,7 +492,10 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
                 args.gens, args.pop, args.chroms, args.tries, live_target,
                 arch, messages, stop_event, base_seed=seed, backend=backend,
                 run_config=run_config, results_dir=snapshot_dir,
-                budget=(budget if (time_cap or stop_on_solve) else None))
+                budget=(budget if (time_cap or stop_on_solve) else None),
+                behavior_checkpoints=getattr(
+                    args, 'behavior_checkpoints', ()),
+                **({'record_champions': True} if recorder else {}))
         except BaseException:                       # noqa: BLE001 - recorded
             import traceback
             messages.put(('error', traceback.format_exc(limit=5)))
@@ -504,8 +520,39 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
             if kind == 'gen':
                 _try_i, generation, best_fit = message[1], message[2], message[3]
                 absolute_gen += 1
+                telemetry = (
+                    message[8] if len(message) > 8
+                    and isinstance(message[8], dict) else {})
+                state['effective_selection'] = telemetry.get(
+                    'effective_selection', state['effective_selection'])
+                nominal_evaluations = int(absolute_gen * args.pop)
                 state['best'] = max(state['best'], best_fit)
                 state['last_gen'] = generation
+                history_entry = {
+                    'absolute_generation': absolute_gen - 1,
+                    'try': int(_try_i),
+                    'generation': int(generation),
+                    # Actual evaluated phenotype representatives. Fall back to
+                    # the historical nominal count for older/mock drivers.
+                    'evaluations': int(telemetry.get(
+                        'phenotype_evaluations', nominal_evaluations)),
+                    'nominal_evaluations': nominal_evaluations,
+                    'cache_hits': int(telemetry.get('cache_hits', 0)),
+                    'cache_misses': int(telemetry.get('cache_misses', 0)),
+                    'cache_evictions': int(telemetry.get(
+                        'cache_evictions', 0)),
+                    'best_so_far': round(float(best_fit), 6),
+                    'population_mean': round(float(message[4]), 6),
+                    'offspring_best': round(float(message[5]), 6),
+                    'mutation_rate': round(float(message[6]), 6),
+                    'population_std': round(float(message[7]), 6),
+                    'elapsed_s': round(time.time() - started, 3),
+                }
+                if 'champion_cases' in telemetry:
+                    history_entry['champion_cases'] = [
+                        round(float(value), 6)
+                        for value in telemetry['champion_cases']]
+                state['history'].append(history_entry)
                 if (state['first_solved_gen'] is None
                         and best_fit >= SOLVER_VALID):
                     state['first_solved_gen'] = absolute_gen
@@ -513,8 +560,22 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
                         generation % args.progress_every == 0):
                     print('      gen %4d  best %.3f  mean %.3f'
                           % (generation, best_fit, message[4]), flush=True)
+            elif kind == 'champion':
+                if recorder is None or not state['history']:
+                    raise RuntimeError('Unexpected champion without generation')
+                recorder.record(message[3], message[4], message[1], message[2],
+                                state['history'][-1])
             elif kind == 'budget':
                 state['stopped_early'] = message[1]
+                state['events'].append({
+                    'absolute_generation': max(0, absolute_gen - 1),
+                    'kind': 'budget', 'detail': str(message[1]),
+                })
+            elif kind == 'rebirth':
+                state['events'].append({
+                    'absolute_generation': max(0, absolute_gen - 1),
+                    'kind': 'rebirth', 'detail': message[1],
+                })
             elif kind == 'certified':
                 state['certification'] = message[1]
             elif kind == 'error':
@@ -522,7 +583,7 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
             elif kind == 'done':
                 state['best'] = max(state['best'], message[2] or 0.0)
                 state['done'] = True
-    except KeyboardInterrupt:
+    except BaseException:
         stop_event.set()
         thread.join()
         raise
@@ -533,6 +594,7 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
                              state['error'])
     return {
         'seed': seed,
+        **({'champion_index': str(recorder.index_path)} if recorder else {}),
         'best': round(float(state['best']), 6),
         'train': (None if certification is None
                   else certification.get('train')),
@@ -547,6 +609,12 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
         'trained': state['best'] >= SOLVER_VALID,
         'first_solved_gen': state['first_solved_gen'],
         'generations': state['last_gen'],
+        # Retain the live chart data so convergence bands, time-to-target
+        # curves, mutation schedules, and paired seed plots remain possible
+        # after a headless run. Older benchmark documents simply lack it.
+        'history': state['history'],
+        'events': state['events'],
+        'effective_selection': state['effective_selection'],
         # Why the run ended before its generation budget, if it did. A
         # capped run is NOT evidence the target is unreachable, so the
         # reason has to survive into the report.
@@ -615,6 +683,19 @@ def summarise_cell(cell):
     cell['solve_gens'] = sorted(
         seed['first_solved_gen'] for seed in seeds
         if seed.get('first_solved_gen') is not None)
+    final_evaluations = [
+        seed['history'][-1]['evaluations'] for seed in seeds
+        if seed.get('history')]
+    final_nominal = [
+        seed['history'][-1].get('nominal_evaluations') for seed in seeds
+        if seed.get('history')
+        and seed['history'][-1].get('nominal_evaluations') is not None]
+    cell['evaluations_mean'] = (
+        round(sum(final_evaluations) / len(final_evaluations), 1)
+        if final_evaluations else None)
+    cell['nominal_evaluations_mean'] = (
+        round(sum(final_nominal) / len(final_nominal), 1)
+        if final_nominal else None)
     return cell
 
 
@@ -660,8 +741,9 @@ def _cell_label(cell):
 
 def render_markdown(document):
     config = document['config']
+    raw_cells = document['cells']
     cells = {(cell['backend'], cell['target']): summarise_cell(cell)
-             for cell in document['cells']}
+             for cell in raw_cells}
     architectures = config.get('architectures', config.get('backends', ()))
     backends = [backend for backend in architectures
                 if any(key[0] == backend for key in cells)]
@@ -694,6 +776,20 @@ def render_markdown(document):
     lines.append('Escape mechanisms: %s'
                  % (', '.join('`%s`' % name for name in escape) if escape
                     else 'none (all off)'))
+    effective = {}
+    for cell in raw_cells:
+        modes = sorted({
+            seed.get('effective_selection') for seed in cell.get('seeds', ())
+            if seed.get('effective_selection')})
+        if modes:
+            effective[cell['backend']] = '/'.join(modes)
+    requested = ('lexicase' if config['ga'].get('lexicase')
+                 else 'tournament')
+    lines.append('')
+    lines.append('Selection: requested `%s`; effective %s.' % (
+        requested,
+        ', '.join('`%s=%s`' % item for item in sorted(effective.items()))
+        if effective else '(not recorded by this result schema)'))
     lines.append('')
     lines.append('## Certified solve rate')
     lines.append('')
@@ -783,8 +879,9 @@ def render_markdown(document):
     lines.append('## Cell detail')
     lines.append('')
     lines.append('| Backend | Target | Certified | Best (max) | Best (mean) | '
-                 'Held-out (mean) | Solve gen (min/med/max) | Verdicts |')
-    lines.append('| --- | --- | --- | --- | --- | --- | --- | --- |')
+                 'Held-out (mean) | Evaluations (actual/nominal mean) | '
+                 'Solve gen (min/med/max) | Verdicts |')
+    lines.append('| --- | --- | --- | --- | --- | --- | --- | --- | --- |')
     for target in targets:
         for backend in backends:
             cell = cells.get((backend, target))
@@ -795,11 +892,17 @@ def render_markdown(document):
                 for name, count in sorted(cell['counts'].items()))
             solve_gens = cell.get('solve_gens') or []
             lines.append(
-                '| %s | %s | %d/%d | %.3f | %.3f | %s | %s | %s |'
+                '| %s | %s | %d/%d | %.3f | %.3f | %s | %s | %s | %s |'
                 % (backend, target, cell['certified'], cell['n'],
                    cell['best_max'], cell['best_mean'],
                    ('%.3f' % cell['holdout_mean']
                     if cell['holdout_mean'] is not None else '-'),
+                   ('%.0f/%.0f' % (
+                       cell['evaluations_mean'],
+                       cell['nominal_evaluations_mean'])
+                    if cell.get('evaluations_mean') is not None
+                    and cell.get('nominal_evaluations_mean') is not None
+                    else '-'),
                    ('%d/%d/%d' % (solve_gens[0],
                                   solve_gens[len(solve_gens) // 2],
                                   solve_gens[-1])
@@ -1118,6 +1221,9 @@ def build_parser():
     out.add_argument('--snapshot-dir', default=None,
                      help="directory for the controller's population "
                           'snapshots (default: a temporary dir, discarded)')
+    out.add_argument('--champion-dir', default=None,
+                     help='durable per-run champion genomes and generation '
+                          'index for offline evaluation; no selection feedback')
     out.add_argument('--resume', action='store_true',
                      help='continue an interrupted sweep from --out')
     out.add_argument(
@@ -1140,6 +1246,10 @@ def build_parser():
                           'instead of exhausting the generation budget')
     out.add_argument('--progress-every', type=int, default=10,
                      help='print a progress line every N generations (0 = off)')
+    out.add_argument(
+        '--behavior-checkpoints', default='',
+        help='comma-separated generations at which to retain the champion\'s '
+             'per-case scores in the result JSON')
     out.add_argument('--list-targets', action='store_true',
                       help='list each backend\'s supported targets and exit')
     out.add_argument('--list-architectures', action='store_true',
@@ -1182,6 +1292,16 @@ def main(argv=None):
         parser.error(str(error))
     args.targets = parse_list(args.targets)
     args.exclude = parse_list(args.exclude)
+    try:
+        args.behavior_checkpoints = sorted({
+            int(value) for value in parse_list(args.behavior_checkpoints)})
+    except ValueError:
+        parser.error('--behavior-checkpoints must contain integers')
+    invalid_checkpoints = [
+        generation for generation in args.behavior_checkpoints
+        if generation < 0 or generation > args.gens]
+    if invalid_checkpoints:
+        parser.error('--behavior-checkpoints must be between 0 and --gens')
     args.rerun_architectures = parse_list(args.rerun_architectures)
     unknown_refresh = sorted(
         set(args.rerun_architectures).difference(ARCHITECTURES))

@@ -31,7 +31,7 @@ from substrates.fnv.construction_ga import (
 from substrates.fnv.ga import _recombination_mate_pool
 from substrates.fnv.genome import (
     BRANCHED_ENCODING, Chromosome, ContextGene, ControlGene, EMPTY_STATE,
-    Genome, OUT_STATE, OutputGene, PAD_STATE, is_branched,
+    Genome, MAX_GENES, MAX_PLACEMENTS, OUT_STATE, OutputGene, PAD_STATE, is_branched,
     sync_input_layout, sync_output_layout, validate_genome,
 )
 
@@ -39,6 +39,10 @@ FAMILIES = ("LOGIC", "DELAY")
 DOWN_TO_LR = BY_NAME["DELAY1_D_TO_LR"].id
 LEFT_TO_RD = BY_NAME["DELAY1_L_TO_RD"].id
 PADS = ((0, 0), (-8, -8))
+
+
+def test_chromosome_capacity_cannot_bind_before_global_placement_capacity():
+    assert MAX_GENES >= MAX_PLACEMENTS + 2
 
 
 def _genome(chromosomes, pads=PADS, next_gene_id=99):
@@ -233,7 +237,7 @@ def test_binary_root_exposes_two_independent_developmental_buds():
 
 def test_at_most_one_output_root_gene_per_arm_survives_repair():
     assert BRANCHED_MUT_OPS == [
-        "tweak", "add_gene", "connect", "block", "del_rule", "del_branch",
+        "tweak", "add_gene", "block", "del_rule", "del_branch",
         "control", "inputs", "outputs"]
     random.seed(9)
     genome = random_branched_genome(2, FAMILIES, 3)

@@ -182,6 +182,45 @@ def test_run_config_reproduces_analog_constants():
     assert sim.config.hysteresis == 0.09
 
 
+def test_factory_rejects_retired_digital_engines():
+    grid, routing, sources = _buffer_graph()
+    for model in ('uniform', 'pulse_delay'):
+        try:
+            create_simulator(grid, routing, config=PulseConfig(model=model),
+                             sources=sources)
+        except ValueError as error:
+            assert 'Retired nervous-net engine' in str(error)
+        else:
+            raise AssertionError('removed digital engine still executes')
+
+
+def test_checkpoint_rejects_retired_engine_instead_of_changing_physics():
+    import json
+    import tempfile
+    from pathlib import Path
+    from runtime.checkpoint import load_checkpoint, save_checkpoint
+    from runtime.config import nv_run_config
+    from substrates.nervous.genome import random_hex_genome
+    from substrates.nervous.targets import TEMPORAL_TARGETS
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'checkpoint.json'
+        save_checkpoint(str(path), random_hex_genome(2, arch='tri3'), .5,
+                        TEMPORAL_TARGETS['Veto gate'], None, 17, 'nervous',
+                        nv_run_config(chromosome_count=2))
+        assert load_checkpoint(str(path))['run_config'].pulse.model == 'paper_analog'
+        document = json.loads(path.read_text())
+        document['run_config']['ga']['node_model'] = 'uniform'
+        document['run_config']['pulse']['model'] = 'uniform'
+        path.write_text(json.dumps(document))
+        try:
+            load_checkpoint(str(path))
+        except ValueError as error:
+            assert 'retired' in str(error)
+        else:
+            raise AssertionError('retired checkpoint loaded with different physics')
+
+
 def test_discrete_step_surface_matches_held_input_semantics():
     grid, routing, sources = _buffer_graph()
     sim = _sim(grid, routing, sources)

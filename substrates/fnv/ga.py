@@ -25,6 +25,11 @@ FITNESS_CACHE_MAX = 200_000
 # whether its inherited output modules are actually compatible.  This stays
 # small so the normal mutation/search stream remains the majority.
 RECOMBINATION_EVALUATION_FRACTION = 0.10
+# A specialist may contribute to the next generation, but never by being
+# copied into it unchanged.  This quota creates crossed/mutated descendants
+# of distinct hard-case experts and replaces FNV's former environmental
+# parent survival.
+SPECIALIST_BREEDING_FRACTION = 0.10
 DEVELOPMENTAL_SEED_CANDIDATES = 1
 
 
@@ -204,6 +209,40 @@ def _selection_case_vector(cases, target):
     return base + tuple(output_scores) + joint_rows + (min(output_scores),)
 
 
+def _specialist_parent_indices(case_vecs, fitnesses, limit):
+    """Choose distinct hard-case experts without reading target answers."""
+    if not case_vecs or limit < 1 or any(vector is None for vector in case_vecs):
+        return []
+    vectors = [tuple(float(value) for value in vector)
+               for vector in case_vecs]
+    width = len(vectors[0]) if vectors else 0
+    if width < 1 or any(len(vector) != width for vector in vectors):
+        return []
+    best_by_case = [max(vector[case] for vector in vectors)
+                    for case in range(width)]
+    # Cases with the lowest population ceiling are the missing pieces most at
+    # risk of disappearing. Random tie order prevents a permanent row bias.
+    case_order = list(range(width))
+    random.shuffle(case_order)
+    case_order.sort(key=lambda case: best_by_case[case])
+    chosen = []
+    behaviors = set()
+    for case in case_order:
+        candidates = [
+            index for index, vector in enumerate(vectors)
+            if vector not in behaviors]
+        if not candidates:
+            break
+        winner = max(candidates, key=lambda index: (
+            vectors[index][case], tuple(sorted(vectors[index])),
+            sum(vectors[index]) / width, float(fitnesses[index])))
+        chosen.append(winner)
+        behaviors.add(vectors[winner])
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
 def eval_batch_cases(genomes, target, cache=None, executor=None,
                      should_stop=None, on_progress=None):
     records = [None] * len(genomes)
@@ -345,14 +384,6 @@ def rank_key(genome, fitness):
     )
 
 
-def _tournament(population, fitnesses, size=4):
-    indices = random.sample(
-        range(len(population)), min(int(size), len(population)))
-    return population[max(
-        indices, key=lambda index: rank_key(
-            population[index], fitnesses[index]))]
-
-
 def _lexicase(population, case_vectors):
     if not case_vectors or not case_vectors[0]:
         return None
@@ -470,6 +501,43 @@ def next_population(population, fitnesses, make_genome=None,
                     or signatures[second] == signatures[first]):
                 second = random.choice(parent_pool)
         return population[first], population[second]
+
+    # Specialists receive offspring, not immortality. Each selected parent is
+    # crossed with a behaviorally complementary compatible mate when crossing
+    # is enabled, and every resulting child is mutated before evaluation.
+    specialist_slots = min(
+        max(0, count - len(children)),
+        int(round(count * SPECIALIST_BREEDING_FRACTION)))
+    for first in _specialist_parent_indices(
+            case_vecs, fitnesses, specialist_slots):
+        candidates = [index for index in range(count) if index != first]
+        if candidates:
+            parent_pool = _recombination_mate_pool(
+                population, first, candidates, signatures,
+                morphology_signatures)
+            if selection == 'lexicase' and case_vecs:
+                from runtime.escape import complementary_parent_index
+                second = complementary_parent_index(
+                    first, parent_pool, case_vecs, fitnesses)
+            else:
+                second = random.choice(parent_pool)
+        else:
+            second = first
+        left, right = population[first], population[second]
+        child = (crossover_functional(left, right, enabled)
+                 if recombination and count > 1
+                 else clone_genome(left))
+        individual_mean = mean
+        if escape is not None and escape.self_adaptive_mutation:
+            from runtime.escape import inherit_mutation_rate, mutation_rate_of
+            inherit_mutation_rate(
+                child, left, right, escape, mean, mutation_limit)
+            individual_mean = mutation_rate_of(child, mean)
+        mutate_functional(
+            child, individual_mean, max_telomere=max_telomere,
+            chromosome_count=chromosome_count, families=enabled,
+            growth_seeds=growth_seeds)
+        children.append(child)
 
     # The ordinary path below immediately mutates every crossover.  Keep a
     # bounded cohort intact long enough to measure the recombination itself;

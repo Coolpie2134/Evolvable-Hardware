@@ -13,11 +13,11 @@ Lets a human design a circuit BY HAND at either level of the indirect encoding:
     edit a tri3 tile's three independent 4-bit directional channels; neighbours resolved
     through hex_dirs so parity is honest) or a LUT cell's four directional
     tables (hex / clickable 4x4 truth grid / decoded SOP), mark inputs and
-    output roles. Both PulseSim and AsyncLutSim run on a bare grid, so a
+    output roles. Both TriSim and AsyncLutSim run on a bare grid, so a
     hand-built circuit needs NO genome to be simulated or scored. The nervous
     BOTH substrates are driven ASYNCHRONOUSLY the same way, input pulses
     placed on a clickable timeline, played in continuous time via the same
-    event engines evolution scores with (PulseSim for the nervous net,
+    event engines evolution scores with (TriSim for the nervous net,
     AsyncLutSim for the LUT array's level logic).
 
 Genome -> grid is exact via Grow. Grid -> genome is a separate best-effort

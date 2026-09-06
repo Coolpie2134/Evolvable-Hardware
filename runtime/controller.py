@@ -119,7 +119,8 @@ def wait_for_resume(pause_event, stop_event, messages):
 def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                   stop_event, base_seed=None, backend='snn', run_config=None,
                   results_dir='results', pause_event=None,
-                  recombination_event=None, budget=None):
+                  recombination_event=None, budget=None,
+                  behavior_checkpoints=(), record_champions=False):
     """Backend-neutral evolution worker used by the desktop application.
 
     ``budget`` is an optional ``callable(best_fit) -> reason or None`` consulted
@@ -138,6 +139,8 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     # retired single-tile engine and would be rejected by the gate below.
     config = run_config or (nv_run_config() if backend == 'nervous'
                             else RunConfig())
+    behavior_checkpoints = frozenset(
+        int(generation) for generation in (behavior_checkpoints or ()))
     if backend == 'snn' and config.ga.io_placement == 'terminal_nodes':
         raise ValueError(
             "io_placement='terminal_nodes' is retained for programmatic LUT "
@@ -205,7 +208,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             getattr(config.ga, 'lut_function_families',
                     ('UNRESTRICTED',)))
     # The escape configuration rides on the TARGET so it reaches evaluation
-    # worker processes (same idiom as pulse_config / _lifetime_samples). It is
+    # worker processes (same idiom as pulse_config). It is
     # what turns lifespan scoring and the robustness objective on inside the
     # worker; the population-level mechanisms are driven from this loop.
     setattr(target, '_escape', config.ga.escape)
@@ -219,6 +222,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
     # More workers than genomes only adds process-start and context-switching
     # overhead. The configured cap is shared by GUI and benchmark runs.
     workers = max(1, min(config.ga.evaluation_workers, pop))
+    effective_selection = config.ga.selection
 
     if backend == 'nervous':
         from substrates.nervous.branched_ga import random_branched_hex_genome
@@ -264,6 +268,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 or getattr(target, 'combinational_cases', ())
                 or getattr(target, 'temporal_logic_cases', ()))
             else config.ga.selection)
+        effective_selection = selection_mode
         step = lambda p, f, c, mm, recombine, archive, stagnation: next_population(
             p, f, make_genome, c, mm, ga_config=config.ga,
             selection=selection_mode,
@@ -316,6 +321,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 or getattr(target, 'combinational_cases', ())
                 or getattr(target, 'temporal_logic_cases', ()))
             else config.ga.selection)
+        effective_selection = selection_mode
         step = lambda p, f, c, mm, recombine, archive, stagnation: \
             next_population(
                 p, f, make_genome, c, mm, selection=selection_mode,
@@ -359,6 +365,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 or getattr(target, 'combinational_cases', ())
                 or getattr(target, 'temporal_logic_cases', ()))
             else config.ga)
+        effective_selection = selection_ga.selection
         pool = ProcessPoolExecutor(max_workers=workers)
         def make_genome(input_genes=None):
             # Branched, output-rooted development is the LUT encoding now
@@ -476,6 +483,19 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             tournament_size=config.ga.tournament_size,
             elite_count=config.ga.elite_count)
         rate_fn = snn_adaptive_mutation_rate
+        effective_selection = 'tournament'
+
+    def evaluation_telemetry(generation=None, champion_cases=None):
+        values = cache.telemetry()
+        values['effective_selection'] = effective_selection
+        if (generation in behavior_checkpoints
+                and champion_cases is not None):
+            # Contract-case scores are the smallest target-independent record
+            # of what the current champion can do. Keep them only at explicit
+            # diagnostic checkpoints so ordinary benchmarks stay compact.
+            values['champion_cases'] = [float(value)
+                                        for value in champion_cases]
+        return values
     def new_escape_state():
         # Restarts are independent searches. Reusing this mutable object leaked
         # rebirth archives, cooldowns, pending island migrations, and now walker
@@ -524,7 +544,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 'population violates configured chromosome count %d' %
                 chromosome_count)
 
-    best_fit, best_genome, best_rank = 0.0, None, None
+    best_fit, best_genome, best_rank, best_cases = 0.0, None, None, None
     budget_reason = None
     population, fitnesses = [], []
     latest_population, latest_fitnesses = [], []
@@ -599,6 +619,7 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             bi = max(range(pop),
                      key=lambda index: rank_fn(population[index], fitnesses[index]))
             champion, run_fit = copy.deepcopy(population[bi]), fitnesses[bi]
+            run_cases = (None if cases is None else copy.deepcopy(cases[bi]))
             run_rank = rank_fn(champion, run_fit)
             # Rebirth needs an actual branch point before the stall trigger.
             # Waiting for the first archive interval threw away the initial
@@ -606,11 +627,16 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
             escape_state.record_champion(0, champion, run_fit)
             escape_state.note_contract_progress(cases, fitnesses)
             if best_rank is None or run_rank > best_rank:
-                best_fit, best_genome, best_rank = (
-                    run_fit, copy.deepcopy(champion), run_rank)
+                best_fit, best_genome, best_rank, best_cases = (
+                    run_fit, copy.deepcopy(champion), run_rank,
+                    copy.deepcopy(run_cases))
             messages.put(('gen', try_i, 0, best_fit,
                           sum(fitnesses) / len(fitnesses), run_fit, base_rate,
-                          statistics.pstdev(fitnesses)))
+                          statistics.pstdev(fitnesses),
+                          evaluation_telemetry(0, best_cases)))
+            if record_champions:
+                messages.put(('champion', try_i, 0,
+                              copy.deepcopy(best_genome), best_fit))
             stagnation, mutation_rate = 0, base_rate
             for generation in range(1, gens + 1):
                 if stop_event.is_set():
@@ -659,11 +685,13 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                 stagnation = (
                     0 if scalar_progress or case_progress else stagnation + 1)
                 if escape_state.accepts(generation_rank, run_rank):
-                    run_fit, champion, run_rank = (
-                        fitnesses[gi], copy.deepcopy(population[gi]), generation_rank)
+                    run_fit, champion, run_rank, run_cases = (
+                        fitnesses[gi], copy.deepcopy(population[gi]),
+                        generation_rank, (None if cases is None else copy.deepcopy(cases[gi])))
                     if escape_state.accepts(run_rank, best_rank):
-                        best_fit, best_genome, best_rank = (
-                            run_fit, copy.deepcopy(champion), run_rank)
+                        best_fit, best_genome, best_rank, best_cases = (
+                            run_fit, copy.deepcopy(champion), run_rank,
+                            copy.deepcopy(run_cases))
                 escape_state.record_champion(generation, champion, run_fit)
                 population, fitnesses, cases, rebirth_info = \
                     escape_state.maybe_rebirth(
@@ -689,19 +717,24 @@ def run_evolution(gens, pop, n_chroms, tries, target, arch, messages,
                                  population[index], fitnesses[index]))
                     reborn_rank = rank_fn(population[ri], fitnesses[ri])
                     if escape_state.accepts(reborn_rank, run_rank):
-                        run_fit, champion, run_rank = (
+                        run_fit, champion, run_rank, run_cases = (
                             fitnesses[ri], copy.deepcopy(population[ri]),
-                            reborn_rank)
+                            reborn_rank, (None if cases is None else copy.deepcopy(cases[ri])))
                         if escape_state.accepts(run_rank, best_rank):
-                            best_fit, best_genome, best_rank = (
-                                run_fit, copy.deepcopy(champion), run_rank)
+                            best_fit, best_genome, best_rank, best_cases = (
+                                run_fit, copy.deepcopy(champion), run_rank,
+                                copy.deepcopy(run_cases))
                     messages.put(('rebirth', rebirth_info))
                 escape_state.tick()
                 latest_population, latest_fitnesses = population, fitnesses
                 latest_try, latest_generation = try_i, generation
                 messages.put(('gen', try_i, generation, best_fit,
                               sum(fitnesses) / len(fitnesses), offspring_best,
-                              actual_rate, statistics.pstdev(fitnesses)))
+                              actual_rate, statistics.pstdev(fitnesses),
+                              evaluation_telemetry(generation, best_cases)))
+                if record_champions:
+                    messages.put(('champion', try_i, generation,
+                                  copy.deepcopy(best_genome), best_fit))
                 if escape_active:
                     stats = escape_state.stats()
                     stats['mean_rate'] = population_mutation_rate(

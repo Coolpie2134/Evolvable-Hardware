@@ -42,7 +42,7 @@ _BASELINE_GA_TUNING = {
     'stagnation_beta': 1.0,
 }
 _EXPLORATORY_GA_TUNING = {
-    'mean_mutations': 6.0,
+    'mean_mutations': 2.0,
     'immigrant_fraction': 0.12,
     'tournament_size': 3,
     'elite_count': 3,
@@ -58,35 +58,9 @@ def default_ga_tuning(backend):
               else _BASELINE_GA_TUNING)
     return dict(source)
 
-# The only NV Net substrates exposed for NEW runs. Older node models remain in
-# the engine solely so existing checkpoints and controlled comparisons load.
-#: (tile_arch, node_model, evolve_delay) per profile.
+# Supported Nervous run and checkpoint profile:
+# (tile architecture, physics model, retired delay-vector toggle).
 NV_NEW_RUN_PROFILES = {
-    # ONE profile. The paper's three-circuit tile on the paper's Fig. 1 analog
-    # node - the most physically faithful configuration, and also the best
-    # measured, which is the rare case where fidelity and results agree.
-    #
-    # The topology-vs-physics ablation that the retired 'digital_tri' profile
-    # existed to run has been settled (8 targets x 2 seeds, 40 gens, pop 30):
-    #
-    #     legacy       (single tile, digital)  mean 0.9097   solved 4/8
-    #     digital_tri  (paper tile,  digital)  mean 0.8823   solved 3/8
-    #     analog_tri   (paper tile,  analog)   mean 0.9554   solved 5/8
-    #
-    # The paper's tile ALONE does not help - digital_tri scored below the
-    # single-tile engine. The analog node physics is what does the work.
-    #
-    # Held-out certification decided it. On Toggle, legacy trained to 1.000 on
-    # 5/5 seeds but only 2/5 CERTIFIED - three memorised timing. analog_tri was
-    # 5/5 CERTIFIED. The digital engine's fixed pulse width and rectangular
-    # coincidence window are exploitable timing invariants; the analog node's
-    # window, output width and refractory all EMERGE from charge/leak/comparator
-    # constants, so there is no fixed rectangle to memorise and a circuit has to
-    # work by real dynamics.
-    #
-    # The retired engines remain in the codebase as reference implementations
-    # (tests/test_pulse_models.py, tests/test_node_contracts.py audit them);
-    # they are simply no longer offered for new runs.
     'analog_tri': ('tri3', 'paper_analog', None),
 }
 
@@ -98,12 +72,7 @@ def is_current_nv_profile(ga_config):
 
 
 def validate_new_nv_profile(ga_config):
-    """Reject unsupported architecture/physics pairings for fresh NV runs.
-
-    GAConfig itself remains permissive so the retired engines can still be
-    constructed directly by the audits that test them as reference
-    implementations. They are simply not offered for new runs.
-    """
+    """Reject removed NV profiles at execution and checkpoint-load boundaries."""
     if not is_current_nv_profile(ga_config):
         raise ValueError(
             'new nervous-net runs use the analog tri-circuit profile '
@@ -112,16 +81,7 @@ def validate_new_nv_profile(ga_config):
 
 
 def nv_run_config(**ga):
-    """A runnable configuration for a NEW nervous-net run.
-
-    The one live profile, assembled in a single place. GAConfig's own field
-    defaults still describe the retired single-tile engine because that class
-    doubles as the checkpoint deserialisation target and is constructed
-    partially throughout the tests; shifting those defaults made every
-    partially-built config an invalid tri3/pulse_delay pairing. So the live
-    profile is supplied here instead, and ``validate_new_nv_profile`` remains
-    the single gate that says which pairings a fresh run may use.
-    """
+    """Assemble the supported analog tri-circuit profile."""
     arch, model, evolve_delay = NV_NEW_RUN_PROFILES['analog_tri']
     ga.setdefault('tile_arch', arch)
     ga.setdefault('node_model', model)
@@ -157,16 +117,9 @@ class GAConfig:
     # When false, selected parents are cloned separately and then mutated;
     # crossover is skipped without turning mutation or immigration off.
     recombination_enabled: bool = True
-    # Nervous-net node-timing model (mirrors PulseConfig.model). The dataclass
-    # default stays 'uniform': this class is also the DESERIALISATION target
-    # and is built partially all over the tests, so the live profile is
-    # supplied by nv_run_config() rather than by shifting the field default.
-    node_model: str = 'uniform'
-    # Nervous-net TILE architecture (substrates/nervous/genome.py TILE_ARCHS):
-    # 'single' - one Fig. 3 circuit per tile. 'tri3' - the paper's
-    #            three-circuit tile (three independent L/R/D outputs per tile).
-    # Tri3 supports the fixed digital abstraction and paper_analog physics; the
-    # per-node-type width/delay vectors are single-tile features.
+    # Analog physics is the only runnable Nervous engine. The tile field is
+    # shared by backend-neutral configs; nv_run_config() supplies tri3 for NV.
+    node_model: str = 'paper_analog'
     tile_arch: str = 'single'
     # Compatibility I/O binding strategy
     # (substrates/nervous/io_placement.py IO_STRATEGIES).
@@ -224,11 +177,6 @@ class GAConfig:
     # Useful for an interactive solver bank, but not part of measuring whether
     # a target was solved. Benchmarks disable this extra post-solve search.
     diversify_solvers: bool = True
-    # Reserved / no-op: evaluation now runs one saturated, cancellation-aware
-    # pool pass per generation (runtime.parallel.map_ordered) instead of
-    # chunked barriers, so this multiplier is no longer consumed. Kept as a
-    # validated field so existing v2 checkpoints still round-trip.
-    evaluation_chunk_multiplier: int = 2
     # Local-minimum escape mechanisms (runtime/escape.py). Every one is off by
     # default, so an unconfigured run - and any checkpoint written before the
     # module existed - behaves exactly as it did before.
@@ -309,8 +257,6 @@ class GAConfig:
                 and not 1 <= self.chromosome_count <= MAX_CHROMOSOME_COUNT):
             raise ValueError('chromosome_count must be between 1 and %d' %
                              MAX_CHROMOSOME_COUNT)
-        if self.evaluation_chunk_multiplier < 1:
-            raise ValueError('evaluation_chunk_multiplier must be positive')
         if not isinstance(self.escape, EscapeConfig):
             raise ValueError('escape must be an EscapeConfig')
 
@@ -407,10 +353,11 @@ class RunConfig:
         # coupling while retaining the base delay and other run physics.
         pulse_values.pop('delay_gain', None)
         ga_values = dict(values.get('ga') or {})
+        ga_values.pop('evaluation_chunk_multiplier', None)
         # Older checkpoints stored the timing model only with pulse physics.
         # Promote that value so loading a delay-evolving run cannot quietly
         # disable its mutation operator.
-        model = pulse_values.get('model', ga_values.get('node_model', 'uniform'))
+        model = pulse_values.get('model', ga_values.get('node_model', 'paper_analog'))
         # Width evolution is retired: a checkpoint saved under it is loaded on
         # the paper's fixed-width node instead. The genome's dormant width
         # vector is dropped on load (see checkpoint.genome_from_dict), and the
@@ -420,6 +367,7 @@ class RunConfig:
             model = 'uniform'
             pulse_values['model'] = 'uniform'
         ga_values['node_model'] = model
+        pulse_values.setdefault('model', model)
         return cls(ga=GAConfig.from_dict(ga_values),
                    pulse=PulseConfig(**pulse_values),
                    fnv=FNVConfig.from_dict(values.get('fnv')))

@@ -70,6 +70,149 @@ def test_every_target_contract_has_valid_relation_observable_and_weight():
             assert float(clause.weight) > 0.0, name
 
 
+def test_every_registered_target_has_well_formed_io_and_cases():
+    """Reject malformed target data before it reaches any substrate backend."""
+    for name, target in TARGETS.items():
+        roles = [terminal.role for terminal in target.outputs]
+        assert len(roles) == len(set(roles)), name
+        assert len(target.cases) == 2 ** target.n_inputs, name
+        inputs = [input_bits for input_bits, _ in target.cases]
+        assert len(inputs) == len(set(inputs)), name
+        for input_bits, output_bits in target.cases:
+            assert len(input_bits) == target.n_inputs, name
+            assert len(output_bits) == target.n_outputs, name
+            assert set(input_bits) <= {0, 1}, name
+            assert set(output_bits) <= {0, 1}, name
+
+    for name, target in TEMPORAL_TARGETS.items():
+        roles = [terminal.role for terminal in target.outputs]
+        assert roles and len(roles) == len(set(roles)), name
+        assert target.inputs and target.trials and target.T > 0, name
+        for trial in target.trials:
+            assert len(trial.streams) == target.T, name
+            assert all(len(row) == target.n_inputs and set(row) <= {0, 1}
+                       for row in trial.streams), name
+            assert set(trial.expected) == set(roles), name
+            assert set(trial.expected_events) <= set(roles), name
+            assert set(trial.expected_intervals) <= set(roles), name
+            for values in trial.expected.values():
+                assert len(values) == target.T, name
+                assert set(values) <= {0, 1, None}, name
+            if trial.input_events is not None:
+                assert len(trial.input_events) == target.n_inputs, name
+                for lane in trial.input_events:
+                    assert all(0.0 <= start < target.T and width > 0.0
+                               for start, width in lane), name
+            for events in trial.expected_events.values():
+                assert list(events) == sorted(events), name
+                assert all(0.0 <= event < target.T for event in events), name
+            for intervals in trial.expected_intervals.values():
+                assert all(0.0 <= rise < fall <= target.T
+                           for rise, fall in intervals), name
+            for start, end, bits in trial.case_windows:
+                assert 0.0 <= start < end <= target.T, name
+                assert len(bits) == target.combinational_data_inputs, name
+                assert set(bits) <= {0, 1}, name
+
+
+def test_every_static_truth_table_matches_an_independent_definition():
+    """Pin the intended functions independently of their target builders."""
+    gate_functions = {
+        'AND': lambda a, b: a & b,
+        'OR': lambda a, b: a | b,
+        'XOR': lambda a, b: a ^ b,
+        'NAND': lambda a, b: 1 - (a & b),
+        'NOR': lambda a, b: 1 - (a | b),
+        'XNOR': lambda a, b: 1 - (a ^ b),
+    }
+
+    def intended(name, bits):
+        if name in gate_functions:
+            return (gate_functions[name](*bits),)
+        if name == 'Half adder':
+            a, b = bits
+            return (a ^ b, a & b)
+        if name == 'Full adder':
+            total = sum(bits)
+            return (total & 1, (total >> 1) & 1)
+        if name == '2-bit adder':
+            a0, a1, b0, b1 = bits
+            total = (a0 | (a1 << 1)) + (b0 | (b1 << 1))
+            return tuple((total >> index) & 1 for index in range(3))
+        if name == '2:1 MUX':
+            a, b, select = bits
+            return (b if select else a,)
+        if name == 'Majority-3':
+            return (int(sum(bits) >= 2),)
+        if name == 'Parity-3 (XOR3)':
+            return (bits[0] ^ bits[1] ^ bits[2],)
+        if name == '2-to-4 decoder':
+            selected = bits[0] | (bits[1] << 1)
+            return tuple(int(index == selected) for index in range(4))
+        if name == '2-bit comparator':
+            a = bits[0] | (bits[1] << 1)
+            b = bits[2] | (bits[3] << 1)
+            return (int(a > b), int(a == b), int(a < b))
+        if name == '2x2 multiplier':
+            a = bits[0] | (bits[1] << 1)
+            b = bits[2] | (bits[3] << 1)
+            product = a * b
+            return tuple((product >> index) & 1 for index in range(4))
+        raise AssertionError('missing independent definition for ' + name)
+
+    for name, target in TARGETS.items():
+        for input_bits, output_bits in target.cases:
+            assert output_bits == intended(name, input_bits), (name, input_bits)
+
+
+def test_every_temporal_target_accepts_a_declared_perfect_witness():
+    """Every registered contract must admit fitness 1.0 by construction.
+
+    Most witnesses are the target's declared samples/events/intervals. Cadence
+    targets deliberately leave absolute phase free, so their canonical witness
+    begins at the contract's settle boundary instead of copying a display-only
+    waveform phase.
+    """
+    for name, target in TEMPORAL_TARGETS.items():
+        relations = set(contract_relations(target))
+        samples = {terminal.role: [] for terminal in target.outputs}
+        events = {terminal.role: [] for terminal in target.outputs}
+        intervals = {terminal.role: [] for terminal in target.outputs}
+        for trial in target.trials:
+            for terminal in target.outputs:
+                role = terminal.role
+                expected = list(trial.expected.get(role, ()))
+                samples[role].append([
+                    0 if value is None else int(value)
+                    for value in expected
+                ] + [0] * max(0, target.T - len(expected)))
+                events[role].append([
+                    float(value) for value in _expected_events(trial, role)])
+                intervals[role].append(
+                    [(float(low), float(high)) for low, high in
+                     _waveform_expected(target, trial, role)]
+                    if 'pulse_intervals' in relations else [])
+
+        if 'sustained_cadence' in relations:
+            period = float(target.cadence_period)
+            for trial_index, trial in enumerate(target.trials):
+                kick = _input_edges(trial.streams)[0]
+                start = kick + float(target.cadence_settle)
+                witness = []
+                event = start
+                while event < target.T:
+                    witness.append(event)
+                    event += period
+                for terminal in target.outputs:
+                    events[terminal.role][trial_index] = witness
+
+        witness = TemporalTraces(
+            samples, events=events, intervals=intervals)
+        score, cases, _alignment = score_contract(witness, target)
+        assert score == 1.0, (name, relations, score, cases)
+        assert len(cases) == contract_case_count(target), name
+
+
 def test_missing_truth_table_rows_are_failures_not_a_perfect_prefix():
     target = gate_target('XOR')
     perfect = [[out[0]] for _bits, out in target.cases]

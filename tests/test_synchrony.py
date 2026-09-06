@@ -6,7 +6,7 @@ The project's north-star claim is that the substrate is *genuinely asynchronous*
 (continuous-time, event-driven), not merely a synchronous machine clocked at TICK
 granularity. A single lucky trace cannot establish that; a clock cheat has bitten
 this project before ("combinational scoring was phantom / fixed-tick"). These
-tests exercise the engine (substrates.nervous.pulse.PulseSim, driven through the audited
+tests exercise the engine (substrates.nervous.analog.AnalogPulseSim, driven through the audited
 float path in substrates.nervous.simulation) with metamorphic relations that a truly
 time-invariant system must satisfy and a tick-quantized one cannot:
 
@@ -113,7 +113,7 @@ def test_scale_covariance():
     base = _run_sched(net, net[3], 60.0)
     for k in (2.0, 0.5, 3.7, 0.25):
         cfg = PulseConfig(delay=pulse.DELAY * k, width=pulse.WIDTH * k,
-                          coincidence=pulse.COINC * k)
+                          coincidence=pulse.COINC * k, analog_tau_leak=1.10 * k)
         out = _run_sched(net, sim.scale(net[3], k), 60.0 * k, config=cfg)
         _assert_affine(base, out, k=k, tol=1e-5)
 

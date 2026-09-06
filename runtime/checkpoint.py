@@ -616,6 +616,8 @@ def _reject_retired_nervous_placement(backend, run_config):
     """
     if backend != 'nervous' or run_config is None:
         return
+    from .config import validate_new_nv_profile
+    validate_new_nv_profile(run_config.ga)
     placement = getattr(getattr(run_config, 'ga', None), 'io_placement',
                         'fixed')
     if placement in RETIRED_NERVOUS_PLACEMENTS:
@@ -636,7 +638,13 @@ def load_checkpoint(path):
     except (UnicodeDecodeError, json.JSONDecodeError):
         # Read-only migration path for existing trusted local checkpoints.
         with open(path, 'rb') as handle:
-            return pickle.load(handle)
+            saved = pickle.load(handle)
+        if saved.get('backend') == 'nervous':
+            config = saved.get('run_config')
+            if config is None:
+                raise ValueError('retired Nervous checkpoint without analog profile metadata')
+            _reject_retired_nervous_placement('nervous', config)
+        return saved
     if not str(doc.get('format', '')).startswith(FORMAT):
         raise ValueError('unsupported checkpoint format')
     backend = doc['backend']
@@ -651,6 +659,9 @@ def load_checkpoint(path):
             setattr(
                 target, '_lut_function_families',
                 run_config.ga.lut_function_families)
+        elif backend == 'fnv':
+            setattr(target, '_fnv_families', run_config.fnv.families)
+            setattr(target, '_fnv_readout_mode', run_config.fnv.readout_mode)
         return {'genomes': [genome_from_dict(g, backend) for g in doc['genomes']],
                 'target': target, 'backend': backend,
                 'valid': doc.get('valid', 0.999), 'run_config': run_config,

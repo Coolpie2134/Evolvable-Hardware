@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from runtime.config import (DEFAULT_EVALUATION_WORKERS, GAConfig,
+from runtime.config import (DEFAULT_EVALUATION_WORKERS, FNVConfig, GAConfig,
                                 MAX_CHROMOSOME_COUNT,
                                 MAX_EVALUATION_WORKERS, RunConfig,
                                 default_max_telomere)
@@ -48,29 +48,6 @@ def test_backends_use_physical_fresh_run_telomere_defaults():
     assert GAConfig().max_telomere == 20
 
 
-def test_nervous_routing_overlay_survives_checkpoint_and_signature():
-    genome = random_hex_genome(2)
-    genome.routing_patches = [
-        RoutingPatch(-2, 3, 17),
-        RoutingPatch(4, 1, 9),
-    ]
-    target = TEMPORAL_TARGETS['Veto gate']
-    # Single-arch genomes built inline: this exercises checkpoint/signature
-    # plumbing, not a run, so it keeps the retired engine's architecture.
-    config = RunConfig(ga=GAConfig(
-        chromosome_count=2, tile_arch='single',
-        node_model='pulse_delay'),
-        pulse=PulseConfig(model='pulse_delay'))
-    with tempfile.TemporaryDirectory() as directory:
-        path = os.path.join(directory, 'patched.json')
-        save_checkpoint(
-            path, genome, 0.5, target, None, 17, 'nervous', config)
-        restored = load_checkpoint(path)['best_genome']
-    assert [
-        (patch.x, patch.y, patch.state)
-        for patch in restored.routing_patches
-    ] == [(-2, 3, 17), (4, 1, 9)]
-    assert nv_ga.genome_signature(restored) == nv_ga.genome_signature(genome)
 
 
 _CROSSOVER_CASES = (
@@ -323,9 +300,9 @@ def test_terminal_node_io_config_round_trips_without_wiring_chromosome():
 
 def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
     config = RunConfig(ga=GAConfig(
-        chromosome_count=2, stagnation_beta=1.75,
+        chromosome_count=2, tile_arch="tri3", stagnation_beta=1.75,
         mutation_limit=6.0))
-    genome = random_hex_genome(2)
+    genome = random_hex_genome(2, arch="tri3")
     genome.chromosomes[0].genes = genome.chromosomes[0].genes[:1]
     genome.chromosomes[0].split = 99
     target = TEMPORAL_TARGETS['SR latch']
@@ -343,7 +320,7 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
 
         try:
             save_checkpoint(
-                path, random_hex_genome(1), 0.5, target, None, 12,
+                path, random_hex_genome(1, arch="tri3"), 0.5, target, None, 12,
                 'nervous', config)
         except ValueError:
             pass
@@ -352,7 +329,7 @@ def test_checkpoint_persists_count_and_rejects_genome_config_mismatch():
 
         try:
             save_checkpoint(
-                path, random_hex_genome(2, arch='tri3'), 0.5, target,
+                path, random_hex_genome(2, arch='single'), 0.5, target,
                 None, 12, 'nervous', config)
         except ValueError:
             pass
@@ -974,8 +951,8 @@ def test_solver_generation_breeds_and_counts_distinct_rule_programs():
 def test_solver_generation_snapshot_overwrites_and_records_latest_generation():
     random.seed(7011)
     target = TEMPORAL_TARGETS['Veto gate']
-    config = RunConfig()
-    first_population = [random_hex_genome(2) for _ in range(3)]
+    config = RunConfig(ga=GAConfig(tile_arch="tri3"))
+    first_population = [random_hex_genome(2, arch="tri3") for _ in range(3)]
 
     with tempfile.TemporaryDirectory() as directory:
         path, count = save_solver_generation(
@@ -997,7 +974,7 @@ def test_solver_generation_snapshot_overwrites_and_records_latest_generation():
         # A later unsolved generation replaces the prior solver set instead of
         # leaving stale genomes or accumulating timestamped snapshots.
         path_again, count = save_solver_generation(
-            directory, [random_hex_genome(2)], [0.5], target,
+            directory, [random_hex_genome(2, arch="tri3")], [0.5], target,
             'nervous', config, status='complete', source_try=3,
             source_generation=4)
         second = load_checkpoint(path_again)
@@ -1015,8 +992,8 @@ def test_evaluated_generation_snapshot_retains_failed_population():
     """Diversity must have real genomes to analyse when none is a solver."""
     random.seed(7012)
     target = TEMPORAL_TARGETS['Veto gate']
-    config = RunConfig()
-    population = [random_hex_genome(2) for _ in range(3)]
+    config = RunConfig(ga=GAConfig(tile_arch="tri3"))
+    population = [random_hex_genome(2, arch="tri3") for _ in range(3)]
     fitnesses = [0.72, 0.31, 0.08]
 
     with tempfile.TemporaryDirectory() as directory:
@@ -1035,6 +1012,26 @@ def test_evaluated_generation_snapshot_retains_failed_population():
         'try': 1,
         'generation': 9,
     }
+
+
+def test_fnv_population_snapshot_restores_readout_and_families():
+    from substrates.fnv.genome import random_functional_genome
+    from substrates.snn.targets import get_target
+
+    target = get_target('Half adder')
+    roles = tuple(output.role for output in target.outputs)
+    population = [random_functional_genome(
+        2, families=('LOGIC', 'DELAY'), n_inputs=target.n_inputs,
+        output_roles=roles)]
+    config = RunConfig(fnv=FNVConfig(('LOGIC', 'DELAY'), 'genetic'))
+    with tempfile.TemporaryDirectory() as directory:
+        path, _count = save_evaluated_generation(
+            directory, population, [0.5], target, 'fnv', config,
+            status='complete', source_try=1, source_generation=1)
+        restored = load_checkpoint(path)
+
+    assert restored['target']._fnv_readout_mode == 'genetic'
+    assert restored['target']._fnv_families == ('LOGIC', 'DELAY')
 
 
 def test_stop_saves_the_latest_fully_evaluated_solver_generation():
@@ -1155,26 +1152,3 @@ def test_seeded_lut_runs_do_not_depend_on_what_ran_before_them():
     assert later == first, (
         'a seeded LUT run depends on what ran before it: %d of %d seed genomes '
         'differ' % (sum(1 for a, b in zip(first, later) if a != b), len(first)))
-
-
-def test_timing_assimilation_clones_parent_before_writing_learned_delays():
-    """Write-back must not mutate an evaluated population/cache identity."""
-    random.seed(919)
-    population = [random_hex_genome(2), random_hex_genome(2)]
-    learned = [1.0] * 32
-    learned[7] = 1.125
-    target = TEMPORAL_TARGETS['Toggle flip-flop']
-
-    with mock.patch(
-            'substrates.nervous.temporal.score_temporal_plastic',
-            return_value=(0.9, (0.9,), {'state_delays': learned})) as tune:
-        parents, changed = nv_ga._assimilate_timing_parents(
-            population, [0.9, 0.1], target, count=1,
-            samples=4, seed=23, step=0.08)
-
-    assert changed == {0}
-    assert parents[0] is not population[0]
-    assert parents[0].state_delays == learned
-    assert population[0].state_delays is None
-    assert parents[1] is population[1]
-    assert tune.call_args.kwargs['step'] == 0.08

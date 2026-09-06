@@ -122,7 +122,7 @@ def test_gui_remembers_measured_ga_tuning_per_substrate():
     app._ga_tuning_values = {'snn': App._capture_ga_tuning(app)}
 
     App._switch_ga_tuning_backend(app, 'lut')
-    assert app._mut_var.get() == '6.0'
+    assert app._mut_var.get() == '2.0'
     assert app._imm_var.get() == '0.12'
     assert app._tourn_var.get() == '3'
     assert app._elite_var.get() == '3'

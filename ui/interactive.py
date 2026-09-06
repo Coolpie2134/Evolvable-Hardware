@@ -13,7 +13,7 @@ uses the input and time representation appropriate to its physics:
   * Nervous  - ASYNCHRONOUS continuous-time playback: place input pulses on a
                clickable timeline, then Step / Run in real (possibly sub-tick)
                time and watch pulses propagate with their actual delays, loops
-               latch, and oscillators run. It uses the paper-faithful PulseSim,
+               latch, and oscillators run. It uses the analog tri-circuit simulator,
                the same asynchronous event engine used by Nervous evolution.
   * FNV      - continuous-time playback over FunctionalSim: evolved source pads,
                output-rooted fixed physical components, directed honeycomb

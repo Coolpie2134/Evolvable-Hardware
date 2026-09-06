@@ -5,7 +5,7 @@ running trials, placing outputs, and preparing score bundles.
 The nervous net is a temporal system: a pulse injected by an input circulates
 around a loop of buffers (a stored bit = a circulating pulse) until inhibition
 stops it. The dynamics themselves are the asynchronous edge-triggered pulse
-simulation in substrates/nervous/pulse.py (PulseSim). Event/cadence fitness schedules input
+simulation in substrates/nervous/analog.py (AnalogPulseSim). Event/cadence fitness schedules input
 edges directly in continuous time; only playback and coverage-scored targets
 request sampled tick states (scoring.needs_samples decides).
 
@@ -253,7 +253,7 @@ def run_nervous_events(grid, routing, in_pos, out_pos, streams, T, prune=True,
 def _sample_intervals(intervals, ticks):
     """Reconstruct the engine's half-tick samples from physical intervals.
 
-    PulseSim, AnalogPulseSim, and TriSim all define a wire as high on the
+    AnalogPulseSim and TriSim all define a wire as high on the
     half-open interval ``[start, end)``. Temporal scoring samples at
     ``(tick + 0.5) * TICK``. Replaying those immutable intervals after the run
     is therefore exactly equivalent to building a full-grid state dictionary
@@ -631,101 +631,6 @@ def score_temporal(genome, ttarget):
     return score_contract(traces, ttarget)[0]
 
 
-def score_temporal_plastic(genome, ttarget, samples=8, seed=0, step=None,
-                           return_settings=False):
-    """Locally tune heritable propagation delays without changing the circuit.
-
-    Growth and the trace-fitted output readout happen once. Starting at the
-    genome's inherited ``state_delays``, each tuning step nudges ONE routing state
-    up or down by ``exp(step)`` and keeps the change only when it improves the
-    score. Only routing states present in the grown body are considered. This is
-    deliberately a fine, topology-preserving coordinate search: it never redraws
-    the whole delay vector and never changes the output cell while judging a
-    delay adjustment.
-
-    The function itself does not mutate ``genome``. ``return_settings=True``
-    reports the locally improved vector so the GA can copy it into a breeder and
-    make the adjustment heritable. Returns ``(best_score, best_cases)`` - or
-    ``(best_score, best_cases, {'state_delays': vector|None})`` when settings are
-    requested - or None if the target does not use supported fixed binding.
-    """
-    import math as _math
-    import random as _random
-    from .genome import (DELAY_MULT_MIN, DELAY_MULT_MAX, DELAY_LOG_STEP, MAX_STATE,
-                         default_state_delays)
-    step = DELAY_LOG_STEP if step is None else float(step)
-
-    if io_strategy(ttarget) != 'fixed':
-        return None                      # prototype: fixed-I/O growth only
-    n_cases = contract_case_count(ttarget)
-    arch = getattr(genome, 'arch', 'single')
-
-    def _ret(score, cases, mult):
-        if return_settings:
-            return score, cases, {'state_delays': mult}
-        return score, cases
-
-    grid = grow_nervous(
-        genome, seeds=growth_seeds(ttarget, 'fixed', genome),
-        grid_size=ttarget.grid_size, iters=ttarget.iters)
-    if len(grid) <= ttarget.n_inputs:
-        return _ret(0.0, (0.0,) * n_cases, None)
-    routing, in_pos, _ = interpret_nervous(grid, ttarget, arch=arch)
-    if any(pos not in grid for pos in in_pos):
-        return _ret(0.0, (0.0,) * n_cases, None)
-    config = getattr(ttarget, 'pulse_config', None)
-
-    # Establish the inherited phenotype and choose its readout once. The readout
-    # stays fixed below so an apparent timing improvement cannot actually be a
-    # lucky jump to a different output cell.
-    base_delays = None if arch == 'tri3' else node_delays(genome, grid, config)
-    best_score, best_cases, best_mult = -1.0, None, None
-    out0, traces0 = place_outputs_by_trace(
-        grid, routing, in_pos, ttarget, delays=base_delays, arch=arch)
-    if all(out0.get(t.role) is not None for t in ttarget.outputs):
-        best_score, best_cases, _ = score_contract(traces0, ttarget)
-    tune_delays = (arch != 'tri3' and config is not None
-                   and getattr(config, 'model', 'uniform') == 'pulse_delay')
-    if best_cases is None or not tune_delays or step <= 0:
-        return _ret(best_score if best_cases is not None else 0.0,
-                    best_cases or (0.0,) * n_cases, None)
-
-    inherited = getattr(genome, 'state_delays', None)
-    current_mult = default_state_delays()
-    if inherited:
-        copied = min(len(inherited), MAX_STATE)
-        current_mult[:copied] = list(inherited[:copied])
-    active_states = sorted({
-        state & 0x1F for state in grid.values()
-        if 0 < (state & 0x1F) < MAX_STATE
-    })
-    if not active_states:
-        return _ret(best_score, best_cases, None)
-
-    rng = _random.Random(seed)
-    for _ in range(max(0, int(samples))):
-        state_index = rng.choice(active_states)
-        direction = -1.0 if rng.random() < 0.5 else 1.0
-        candidate = list(current_mult)
-        candidate[state_index] = min(
-            DELAY_MULT_MAX,
-            max(DELAY_MULT_MIN,
-                candidate[state_index] * _math.exp(direction * step)))
-        if candidate[state_index] == current_mult[state_index]:
-            continue
-        delays = {
-            pos: config.delay * candidate[state & 0x1F]
-            for pos, state in grid.items()
-        }
-        traces = trace_fixed_outputs(
-            grid, routing, in_pos, out0, ttarget, delays=delays, arch=arch)
-        if traces is None or getattr(traces, 'overflow', False):
-            continue
-        score, cases, _ = score_contract(traces, ttarget)
-        if score > best_score:
-            current_mult = candidate
-            best_score, best_cases, best_mult = score, cases, list(candidate)
-    return _ret(best_score, best_cases, best_mult)
 
 
 def temporal_report(ttarget, genome=None):

@@ -18,7 +18,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from substrates.nervous import pulse, simulation as sim                # noqa: E402
-from substrates.nervous.pulse import PulseSim, PulseConfig             # noqa: E402
+from substrates.nervous.pulse import PulseConfig             # noqa: E402
 from substrates.nervous.hexgrid import ROUTING_HEX                     # noqa: E402
 from substrates.nervous.temporal import run_nervous_events             # noqa: E402
 
@@ -64,7 +64,7 @@ def test_pulse_width_high_window():
     after, on a single isolated cell."""
     grid = {(0, 0): 0}
     routing = {(0, 0): ROUTING_HEX[0]}
-    s = PulseSim(grid, routing, config=PulseConfig(width=2.0))
+    s = sim.create_simulator(grid, routing, config=PulseConfig(width=2.0))
     s.inject_pulse((0, 0), 5.0, 2.0)
     s.advance_to(20.0)
     assert s.activity_at(5.5) == {(0, 0): 1}    # inside the pulse
@@ -78,7 +78,7 @@ def test_wired_or_extend_no_second_edge():
     leading edge (wired-OR), so `rise_times` records a single edge."""
     grid = {(0, 0): 0}
     routing = {(0, 0): ROUTING_HEX[0]}
-    s = PulseSim(grid, routing, config=PulseConfig(width=3.0))
+    s = sim.create_simulator(grid, routing, config=PulseConfig(width=3.0))
     s.inject_pulse((0, 0), 0.0, 3.0)            # high on [0, 3)
     s.inject_pulse((0, 0), 2.0, 3.0)            # re-driven while high -> [0, 5)
     s.advance_to(20.0)
@@ -93,13 +93,13 @@ def test_terminal_input_is_source_only():
     grid = {source: 2, body: 2}
     routing = {cell: ROUTING_HEX[state] for cell, state in grid.items()}
 
-    reverse = PulseSim(
+    reverse = sim.create_simulator(
         grid, routing, config=PulseConfig(), input_nodes={source})
     reverse.inject_pulse(body, 0.0, 1.0)
     reverse.advance_to(4.0)
     assert reverse.rise_times[source] == []
 
-    forward = PulseSim(
+    forward = sim.create_simulator(
         grid, routing, config=PulseConfig(), input_nodes={source})
     forward.inject_pulse(source, 0.0, 1.0)
     forward.advance_to(4.0)
@@ -111,7 +111,7 @@ def test_terminal_output_is_observable_sink_only():
     source, sink, downstream = (0, 0), (1, 0), (2, 0)
     grid = {source: 0, sink: 2, downstream: 3}
     routing = {cell: ROUTING_HEX[state] for cell, state in grid.items()}
-    terminal = PulseSim(
+    terminal = sim.create_simulator(
         grid, routing, config=PulseConfig(), input_nodes={source},
         output_nodes={sink})
     terminal.inject_pulse(source, 0.0, 1.0)

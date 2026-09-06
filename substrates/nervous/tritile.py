@@ -10,7 +10,7 @@ only broadcast a single state. This module implements the real tile: three
 independently-configured Fig. 3 circuits per tile, one per output direction.
 
 Rather than re-derive the whole event engine, a tri tile is EXPANDED into three
-ordinary single-circuit sub-nodes and simulated on the unchanged PulseSim via
+ordinary single-circuit sub-nodes and simulated on the analog simulator via
 its pre-resolved-``sources`` hook:
 
     tile P, state = 15 bits = chanL | chanR<<5 | chanD<<10
@@ -227,11 +227,11 @@ class _MergedView:
 
 
 class TriSim:
-    """Drop-in for PulseSim over a THREE-circuit-per-tile grid.
+    """Analog simulation over a THREE-circuit-per-tile grid.
 
     Externally keyed by TILE position (x, y): ``inject_pulse``/``activity_at``/
     ``rise_times``/``pulse_intervals``/``ever`` all speak tiles, while the inner
-    PulseSim runs on the expanded sub-node graph. This is what lets the temporal
+    AnalogPulseSim runs on the expanded sub-node graph. This is what lets the temporal
     scorer treat tri and single tiles identically.
     """
 

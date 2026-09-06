@@ -1,60 +1,40 @@
-"""
-substrates/nervous/simulation.py - the single construction and schedule API for nervous
-nets: the audited path for asynchronous robustness testing.
+"""Analog circuit construction and continuous-time stimulus schedules.
 
-temporal.py drives circuits from tick-quantised streams (`start * TICK`, integer
-edges). That is fine for evolution, but it keeps the whole experiment on an
-integer timing lattice - so it cannot certify that behaviour is ASYNCHRONOUS
-rather than merely clocked at TICK granularity. This module drives the same
-`PulseSim` from schedules of arbitrary FLOAT event times, and provides the pure
-schedule primitives the metamorphic synchrony audit and the robustness harness
-are built on.
-
-A `schedule` is a list (one entry per input, in `in_pos` order) of
-`(start_time, width)` float pulse events.
-
-The physical constants (DELAY/WIDTH/TICK/COINC) are read from the `pulse` module
-DYNAMICALLY (not imported by value), so a physics sweep that rebinds
-`pulse.DELAY` is honoured here too instead of using a stale copy.
+Schedules contain (start, width) pulses per logical input. Pure schedule
+transforms support translation, scaling and jitter audits without tick rounding.
+Physics comes from the immutable run configuration.
 """
 from __future__ import annotations
 
 from . import pulse
-from .pulse import PulseSim
 
 
 def create_simulator(grid, routing, max_events=None, config=None, delays=None,
                      sources=None, input_nodes=None, output_nodes=None,
                      taus=None):
-    """Construct the configured simulator used by every Nervous consumer.
+    """Construct analog nodes, optionally with pre-resolved tri-tile wiring.
 
-    ``delays`` ({cell: delay}) is consumed only by width-preserving transport;
-    its output width is derived dynamically from the incoming waveform.
-    ``sources`` ({node: (s1, s2, si)}) pre-resolves feeder nodes for the
-    tri-tile substrate; None keeps the single-circuit hex_dirs decode."""
-    if max_events is None and config is not None:
+    The removed digital delay-vector argument is rejected when populated.
+    """
+    from .analog import AnalogPulseSim, AnalogConfig
+    from .pulse import PulseConfig
+    config = config or PulseConfig()
+    if config.model != 'paper_analog':
+        raise ValueError('Retired nervous-net engine: only paper_analog is supported')
+    if delays:
+        raise ValueError('Evolved digital delays are retired; use analog time constants')
+    if max_events is None:
         max_events = config.event_cap
-    if config is not None and getattr(config, 'model', 'uniform') == 'paper_analog':
-        # The analog Fig. 1 engine is a distinct simulator sharing the same
-        # external surface. Map the run's propagation delay onto the node's
-        # delay; coincidence window and output width are EMERGENT, so COINC and
-        # output WIDTH are not mapped into the node. PulseConfig.width can still
-        # be used upstream as the default EXTERNAL stimulus duration.
-        from .analog import AnalogPulseSim, AnalogConfig
-        acfg = AnalogConfig(threshold=config.analog_threshold,
-                            step=config.analog_step,
-                            tau_leak=config.analog_tau_leak,
-                            hysteresis=config.analog_hysteresis,
-                            delay_prop=config.delay,
-                            event_cap=getattr(config, 'event_cap', 4096))
-        return AnalogPulseSim(grid, routing, max_events=max_events,
-                              config=acfg, sources=sources,
-                              input_nodes=input_nodes,
-                              output_nodes=output_nodes,
-                              taus=taus)
-    return PulseSim(grid, routing, max_events=max_events, config=config,
-                    delays=delays, sources=sources,
-                    input_nodes=input_nodes, output_nodes=output_nodes)
+    acfg = AnalogConfig(threshold=config.analog_threshold,
+                        step=config.analog_step,
+                        tau_leak=config.analog_tau_leak,
+                        hysteresis=config.analog_hysteresis,
+                        delay_prop=config.delay,
+                        event_cap=config.event_cap)
+    return AnalogPulseSim(grid, routing, max_events=max_events,
+                          config=acfg, sources=sources,
+                          input_nodes=input_nodes, output_nodes=output_nodes,
+                          taus=taus)
 
 
 def normalize(schedule):

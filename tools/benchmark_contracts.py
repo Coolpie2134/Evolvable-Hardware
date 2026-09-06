@@ -32,8 +32,6 @@ from substrates.lut.ga import evolve_lut                                    # no
 
 SUBSTRATES = (
     ('snn', None, None),
-    ('nervous_legacy', 'single', 'pulse_delay'),
-    ('nervous_digital_tri', 'tri3', 'uniform'),
     ('nervous_analog_tri', 'tri3', 'paper_analog'),
     ('lut', None, None),
 )
@@ -119,7 +117,12 @@ def _support_reason(substrate, kind, target, model):
 
 def _run(substrate, arch, model, target, generations, pop, chromosomes, seed,
          io_placement='fixed'):
-    target = with_io_placement(copy.deepcopy(target), io_placement)
+    target = copy.deepcopy(target)
+    # Native SNN truth-table Targets deliberately have no asynchronous I/O
+    # placement field. Applying dataclasses.replace(..., io_placement=...) to
+    # them made every static SNN row fail before evolution even started.
+    if hasattr(target, 'io_placement'):
+        target = with_io_placement(target, io_placement)
     if substrate == 'snn':
         return evolve_snn(
             generations=generations, verbose=False, n_chroms=chromosomes,

@@ -139,7 +139,7 @@ def test_lifespan_scoring_extends_the_case_vector_by_one_per_checkpoint():
     from substrates.nervous.objectives import total_case_count
     from substrates.nervous.scoring import contract_case_count
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
-    setattr(target, 'pulse_config', PulseConfig(model='pulse_delay'))
+    setattr(target, 'pulse_config', PulseConfig(model='paper_analog'))
     setattr(target, '_escape',
             EscapeConfig(lifespan_scoring=True, lifespan_checkpoints=4))
     base = contract_case_count(target)
@@ -159,7 +159,7 @@ def test_lifespan_scoring_leaves_the_reported_fitness_at_the_adult_score():
     """The whole safety argument for juvenile credit: it must never inflate the
     number a run reports. A solved run still means the GROWN circuit works."""
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
-    setattr(target, 'pulse_config', PulseConfig(model='pulse_delay'))
+    setattr(target, 'pulse_config', PulseConfig(model='paper_analog'))
     random.seed(23)
     genomes = [random_hex_genome(2) for _ in range(8)]
 
@@ -233,7 +233,7 @@ def test_jitter_variants_are_deterministic_and_probe_both_directions():
     """Determinism is not cosmetic: the fitness cache is keyed on the genome
     alone, so a random jitter would freeze whichever draw happened first into
     that genome's score for the rest of the run."""
-    config = PulseConfig(model='pulse_delay')
+    config = PulseConfig(model='paper_analog')
     escape = EscapeConfig(robustness=True, robustness_samples=2,
                           robustness_jitter=0.2)
     first = jitter_physics(config, escape)
@@ -405,6 +405,13 @@ def test_contract_elites_preserve_lower_average_missing_case_specialists():
             assert any(genome is child for child in offspring)
             assert fitness == 0.8 and vector == (0.8, 0.8)
     assert state.contract_elite_carries == 2
+
+
+def test_fnv_replaces_unbred_contract_survival_with_breeding_quota():
+    config = GAConfig(chromosome_count=2)
+    state = build_escape_state(
+        'fnv', config, chromosome_count=2, fnv_families=('LOGIC',))
+    assert state.contract_parent_survival is False
 
 
 def test_contract_elite_ties_rotate_across_large_case_banks():
@@ -952,7 +959,7 @@ def test_lifespan_and_robustness_survive_a_real_evaluation_pass():
     """Both extra objectives run inside the evaluation worker, where an
     exception would be reported as a dead run rather than a bad score."""
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
-    setattr(target, 'pulse_config', PulseConfig(model='pulse_delay'))
+    setattr(target, 'pulse_config', PulseConfig(model='paper_analog'))
     setattr(target, '_escape', EscapeConfig(
         lifespan_scoring=True, lifespan_checkpoints=2,
         robustness=True, robustness_samples=2))
@@ -984,7 +991,7 @@ def test_a_jitter_probe_never_recurses_into_lifespan_or_robustness():
     in evaluation cost."""
     from substrates.nervous import objectives
     target = dataclasses.replace(TEMPORAL_TARGETS['Veto gate'])
-    setattr(target, 'pulse_config', PulseConfig(model='pulse_delay'))
+    setattr(target, 'pulse_config', PulseConfig(model='paper_analog'))
     escape = EscapeConfig(lifespan_scoring=True, robustness=True,
                           robustness_samples=2)
     setattr(target, '_escape', escape)

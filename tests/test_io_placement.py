@@ -209,8 +209,9 @@ def test_dedicated_io_states_are_one_way_in_the_pulse_engine():
     # A dedicated INPUT (state 16) cannot fire from a neighbour (source-only); a
     # dedicated OUTPUT (state 17) cannot drive a neighbour (sink-only). The
     # one-way physics applies only when the cell is passed as an I/O terminal.
-    from substrates.nervous.pulse import PulseSim, PulseConfig
-    cfg = PulseConfig(model='pulse_delay')
+    from substrates.nervous.pulse import PulseConfig
+    from substrates.nervous.simulation import create_simulator
+    cfg = PulseConfig()
     src = {'X': (None, None, None), 'IN': ('X', 'X', None),
            'DR': (None, None, None), 'OUT': ('DR', 'DR', None),
            'Y': ('OUT', 'OUT', None)}
@@ -218,7 +219,7 @@ def test_dedicated_io_states_are_one_way_in_the_pulse_engine():
     routing = {c: (src[c][0], src[c][1], src[c][2], 'and') for c in src}
 
     def fires(input_nodes, output_nodes):
-        sim = PulseSim(grid, routing, config=cfg, sources=src,
+        sim = create_simulator(grid, routing, config=cfg, sources=src,
                        input_nodes=input_nodes, output_nodes=output_nodes)
         sim.inject_pulse('X', 2.0, 1.0)
         sim.inject_pulse('DR', 2.0, 1.0)

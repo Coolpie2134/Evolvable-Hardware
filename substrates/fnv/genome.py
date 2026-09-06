@@ -25,11 +25,14 @@ from .catalogue import (
     enabled_component_ids, normalise_families,
 )
 
-# Fixed-function phenotypes need many distinct developmental contexts. These are
-# ceilings, not initial sizes: a fresh arm holds a spawn and a few context rules
-# and may grow by ordinary structural mutation.
-MAX_GENES = 64
+# Fixed-function phenotypes need many distinct developmental contexts. The
+# organism-wide placement ceiling is the real complexity bound. A lower
+# per-chromosome ceiling stranded capacity when two outputs occupied one
+# chromosome: near-solvers reached 64 genes while another chromosome stayed
+# empty, making add-gene mutation impossible. Include room for both arm-control
+# genes so this container limit cannot bind before the global placement limit.
 MAX_PLACEMENTS = 128
+MAX_GENES = MAX_PLACEMENTS + 2
 MAX_CHROMS = MAX_CHROMOSOME_COUNT
 MAX_TELOMERE = 32
 #: The only FNV encoding. Earlier ones - the associative CAM genome and the

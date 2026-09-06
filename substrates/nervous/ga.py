@@ -192,27 +192,6 @@ def evaluate_nv_full(genome, target, *, _developed=None):
     escape = getattr(target, '_escape', None)
     lifespan = escape is not None and escape.lifespan_scoring
     n_cases = total_case_count(target)
-    # Optional fine timing: locally hill-climb inherited delays while holding the
-    # grown topology and output readout fixed. Off by default (0), so the ordinary
-    # path below is unchanged.
-    samples = int(getattr(target, '_lifetime_samples', 0) or 0)
-    if samples > 0:
-        from .temporal import score_temporal_plastic
-        seed = int(getattr(target, '_lifetime_seed', 20260727))
-        step = float(getattr(target, '_lifetime_step', DELAY_LOG_STEP))
-        tuned = score_temporal_plastic(
-            genome, target, samples=samples, seed=seed, step=step)
-        if tuned is not None:
-            s, cases = tuned
-            # Lifetime timing plasticity re-tunes delays inside its own session,
-            # so it owns the whole evaluation. Lifespan checkpoints would have to
-            # re-run that session per stage; instead the juvenile slots inherit
-            # the adult score, leaving the case vector the right LENGTH (which is
-            # all epsilon-lexicase requires) without inventing a juvenile measurement.
-            if lifespan:
-                cases = tuple(cases or ()) + (
-                    (float(s),) * escape.lifespan_checkpoints)
-            return s, cases
     snapshots, strategy = None, None
     if lifespan:
         # Grow ONCE and reuse the trajectory: the final snapshot is bit-identical
@@ -313,8 +292,6 @@ def _evaluate_nv_selection_record(genome, target):
     from .objectives import escape_objectives, structural_topology
     escape = getattr(target, '_escape', None)
     lifespan = escape is not None and escape.lifespan_scoring
-    lifetime_samples = int(
-        getattr(target, '_lifetime_samples', 0) or 0)
     developed = None
     if is_branched(genome):
         # Deliberately NOT pre-grown. The grow-once optimisation hands the body
@@ -323,7 +300,7 @@ def _evaluate_nv_selection_record(genome, target):
         # the shared path would silently turn an output-rooted encoding into a
         # branched one with fitted probes, which is a different experiment.
         pass
-    elif not lifespan and lifetime_samples <= 0:
+    elif not lifespan:
         # Behavioral evaluation and the final topology tie-break inspect the
         # same mature phenotype. Grow once and pass that body to both.
         from .nervous import grow_nervous
@@ -1639,37 +1616,6 @@ def next_population(population, fitnesses, make_genome=None, case_vecs=None,
 
 # -- main loop (headless; the GUI runs its own equivalent in app.py) --------------
 
-def _assimilate_timing_parents(population, fitnesses, target, count,
-                               samples, seed, step):
-    """Return a breeding list with locally learned delays made heritable.
-
-    Evaluation already assigned each parent the score/case vector achieved by
-    the deterministic local tuning session. Replaying that session here recovers
-    its winning vector; the selected parent is cloned before write-back so the
-    evaluated population and any cache entries are never mutated in place. With
-    the tuner readout now fixed, the stored fitness and cases describe exactly
-    the delay phenotype written into the clone.
-    """
-    from .temporal import score_temporal_plastic
-
-    parents = list(population)
-    order = sorted(
-        range(len(parents)),
-        key=lambda i: rank_key(parents[i], fitnesses[i]),
-        reverse=True)
-    changed = set()
-    for i in order[:max(0, min(int(count), len(parents)))]:
-        tuned = score_temporal_plastic(
-            parents[i], target, samples=samples, seed=seed, step=step,
-            return_settings=True)
-        won = tuned[2].get('state_delays') if tuned else None
-        if won is None:
-            continue
-        assimilated = clone_genome(parents[i])
-        assimilated.state_delays = list(won)
-        parents[i] = assimilated
-        changed.add(i)
-    return parents, changed
 
 
 def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=True,
@@ -1683,8 +1629,8 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         random.seed(seed)
     if not 1 <= n_chroms <= MAX_CHROMS:
         raise ValueError('n_chroms must be between 1 and %d' % MAX_CHROMS)
-    if tile_arch not in ('single', 'tri3'):
-        raise ValueError("tile_arch must be 'single' or 'tri3'")
+    if tile_arch != 'tri3':
+        raise ValueError('Retired nervous-net architecture: only tri3 is supported')
     # This is also a fresh-run entry point, so apply the same two-profile
     # contract as the desktop controller. With no explicit target physics,
     # choose the current profile belonging to the requested architecture.
@@ -1694,8 +1640,7 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
     from .pulse import PulseConfig
     pulse_config = getattr(target, 'pulse_config', None)
     if pulse_config is None:
-        pulse_config = PulseConfig(
-            model=('paper_analog' if tile_arch == 'tri3' else 'pulse_delay'))
+        pulse_config = PulseConfig()
         setattr(target, 'pulse_config', pulse_config)
     validate_new_nv_profile(GAConfig(
         tile_arch=tile_arch, node_model=pulse_config.model))
@@ -1811,16 +1756,6 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
         _pc = getattr(target, 'pulse_config', None)
         evolve_delay = timing_mutation_flags(
             getattr(_pc, 'model', 'uniform') if _pc is not None else 'uniform')
-        # Lifetime tuning + genetic assimilation config (both opt-in via target
-        # attrs; defaults make the loop byte-identical to before).
-        _lifetime_samples = int(getattr(target, '_lifetime_samples', 0) or 0)
-        _lifetime_seed = int(getattr(target, '_lifetime_seed', 20260727))
-        _lifetime_step = float(
-            getattr(target, '_lifetime_step', DELAY_LOG_STEP))
-        _assimilate_n = (max(1, int(round(pop * 0.10)))
-                         if (_lifetime_samples > 0
-                             and getattr(target, '_lifetime_assimilate', False))
-                         else 0)
         solved_at, stagnation = None, 0
         mut_rate = MEAN_MUTATIONS           # annealing schedule (see MUT_DECAY)
         if verbose:
@@ -1837,23 +1772,6 @@ def evolve_nervous(target, generations=100, pop=POPSIZE, n_chroms=2, verbose=Tru
             # Memetic/Lamarckian write-back: replay the deterministic local
             # timing session for top breeders and copy accepted fine adjustments
             # into cloned parents before reproduction. Off by default.
-            if _assimilate_n and strategy == 'fixed':
-                parents, assimilated = _assimilate_timing_parents(
-                    parents, parent_fitnesses, target, _assimilate_n,
-                    _lifetime_samples, _lifetime_seed, _lifetime_step)
-                if assimilated:
-                    pi = max(
-                        range(pop),
-                        key=lambda i: rank_key(parents[i], parent_fitnesses[i]))
-                    parent_rank = rank_key(
-                        parents[pi], parent_fitnesses[pi])
-                    # Preserve an assimilated version of an equal champion. Its
-                    # score is unchanged, but its accepted timing is now present
-                    # in the genome returned from the run and used for rescue.
-                    if pi in assimilated and parent_rank >= best_rank:
-                        best_rank = parent_rank
-                        best_fitness = parent_fitnesses[pi]
-                        best_genome = clone_genome(parents[pi])
             # One pool, or separate demes at their own mutation rates when
             # islands are on. Shared with the desktop controller.
             offspring = escape_state.breed(

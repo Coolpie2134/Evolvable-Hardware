@@ -1,40 +1,13 @@
-"""
-substrates/nervous - "nervous network" backend (Edwards, *Circuit Morphologies and
-Ontogenies*, EH'02, Architecture 1).
+"""Developmental nervous nets with analog tri-circuit physics.
 
-Fully independent of substrates/snn: its own hex genome + growth, its own targets and
-its own GA. The grown grid is interpreted as a nervous-net array, not an SNN:
-
-  * each grown tile carries either one legacy circuit or three independent
-    L/R/D output circuits. Each 5-bit channel routes neighbours to two
-    excitatory inputs (E1, E2) and one inhibitory input (I1);
-  * a node fires when  (E1 op E2) AND NOT I1  - coincidence detection with an
-    optional inhibitory veto. States 0-15 are the paper's Fig. 3 table (op = AND;
-    each a buffer or an AND, the paper has no disjunction); states 16-31 are OR
-    twins (op = OR, fire on either excitatory input) - a non-paper extension;
-  * fresh runs use the analog three-circuit tile. Retired digital engines remain
-    for checkpoints/ablations: ``uniform`` regenerates one fixed-width pulse,
-    while ``pulse_delay`` preserves the waveform with an evolved delay. Width
-    evolution itself has been removed;
-  * inputs inject onto evolved source-pad nets (wired-OR) and those pads ignore
-    internal feedback. Nothing happens without external input, and memory /
-    oscillation can be a pulse circulating around a loop of buffers "until
-    stopped by application of an inhibitory input" (delay-line memory);
-  * temporal scoring retains raw continuous edge timestamps for point-event
-    relations, uses cadence invariants for autonomous rhythms, and keeps sampled
-    active/quiet windows only where they express persistence. A target-blind
-    GA tie-break favours signal graphs that can actually hold state without
-    changing the declared behavior score.
-
-Quick start
------------
-from substrates.nervous import evolve_nervous, TEMPORAL_TARGETS
-best, fit = evolve_nervous(TEMPORAL_TARGETS['SR latch'], generations=60)
+The current output-rooted encoding grows three independently routed analog
+circuits per tile. Shared low-level growth, observation and scoring utilities
+remain available for reference tests; retired digital engines are not shipped.
 """
 from .hexgrid import hex_dirs, hex_pixel, ROUTING_HEX, routing_kind, node_fires
 from .genome import (HexGene, Chromosome, Genome, random_hex_gene,
                      random_hex_chromosome, random_hex_genome)
-from .pulse import PulseSim, DELAY, WIDTH, COINC, TICK
+from .pulse import DELAY, WIDTH, COINC, TICK
 from .nervous import (ROUTING, SEED_STATE, interpret_nervous, evaluate_nervous,
                       score_nervous, nervous_truth_table, nervous_case_outputs,
                       circuit_summary_nervous, grow_nervous, grow_nervous_snapshots)

@@ -950,7 +950,7 @@ def odd_pulse_selector_oracle(seed=20260716):
     # ~1.5s after the previous accepted one (needs D below that, start- or
     # end-referenced). Only counting the input index satisfies all banks; the
     # best fixed dead time now measures ~0.87, safely below the 0.90
-    # certification bar (see tests/test_pulse_models.py).
+    # certification bar (see tests/test_waveform_contracts.py).
     start = rng.uniform(1.0, 2.0)
     add([(start, 0.5),
          (start + rng.uniform(5.75, 7.0), rng.choice((0.75, 1.0, 1.25)))])

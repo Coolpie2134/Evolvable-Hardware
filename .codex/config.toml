@@ -1,0 +1,5 @@
+sandbox_mode = "workspace-write"
+web_search = "live"
+model_verbosity = "medium"
+model_reasoning_summary = "concise"
+approval_policy = "on-request"

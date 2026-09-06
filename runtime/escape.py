@@ -807,12 +807,13 @@ class EscapeState:
     """
 
     def __init__(self, config=None, mutation_limit=8.0, clone=None,
-                 mutate=None, rank=None):
+                 mutate=None, rank=None, contract_parent_survival=True):
         self.config = config or OFF
         self.mutation_limit = float(mutation_limit)
         self._clone = clone or (lambda genome: genome)
         self._mutate = mutate
         self._rank = rank or (lambda genome, fitness: fitness)
+        self.contract_parent_survival = bool(contract_parent_survival)
         #: ring buffer of (generation, genome, fitness, descriptor)
         self.archive = []
         self.rebirths = 0
@@ -1131,7 +1132,8 @@ class EscapeState:
         # strict generational replacement has deleted it. Island demes and the
         # lineage tail depend on stable slot boundaries, so their own survival
         # rules remain authoritative when explicitly enabled.
-        if (parent_cases is not None and result[2] is not None
+        if (self.contract_parent_survival
+                and parent_cases is not None and result[2] is not None
                 and not self._island_bounds
                 and self._lineage_start is None):
             before = {id(genome) for genome in result[0]}
@@ -1524,8 +1526,13 @@ def build_escape_state(backend, ga_config, chromosome_count=None,
         mutate = lambda genome, rate: _mutate(
             genome, chromosome_count=chromosome_count, evolve_io=evolve_io,
             io_placement=io_placement, mean_mutations=rate)
-    return EscapeState(escape, mutation_limit=limit, clone=clone_genome,
-                       mutate=mutate, rank=rank_key)
+    return EscapeState(
+        escape, mutation_limit=limit, clone=clone_genome,
+        mutate=mutate, rank=rank_key,
+        # FNV explicitly breeds a small quota of case specialists. Keeping the
+        # evaluated parent as well would grant it unbounded survival without
+        # crossing or mutation and double-count the same preservation policy.
+        contract_parent_survival=(backend != 'fnv'))
 
 
 def population_mutation_rate(population, base):

@@ -8,7 +8,7 @@ one broadcast output net. These tests defend the directional tile topology:
   * geometry - the honeycomb back-direction used to wire cross-tile signals is
     unique and mutual;
   * expansion - a grown tri grid becomes three single-circuit sub-nodes per
-    live tile, simulated on the unchanged PulseSim via its pre-resolved sources;
+    live tile, simulated on the analog simulator via its pre-resolved sources;
   * CAPABILITY - a single tri tile routes two independent signals to two
     different outputs WITHOUT merging them, which one broadcast state cannot do;
   * determinism, and that the whole GA path (grow -> interpret -> mutate ->
@@ -243,12 +243,6 @@ def test_generation_stays_homogeneously_tri3():
 
 # -- isolation: the single-tile path is untouched --------------------------------
 
-def test_single_arch_is_default_and_unchanged():
-    g = random_hex_genome(2)
-    assert getattr(g, 'arch', 'single') == 'single'
-    # a single genome grows with 5-bit states only
-    grid = grow_nervous(g, seeds=((0, 0),))
-    assert all(0 <= s < 32 for s in grid.values())
 
 
 # -- standalone runner ------------------------------------------------------------
@@ -312,22 +306,3 @@ def test_widening_a_legacy_state_preserves_its_three_channels():
     for state in range(4096):
         legacy = (state & 0xF, (state >> 4) & 0xF, (state >> 8) & 0xF)
         assert channel_configs(widen_legacy_state(state)) == legacy
-
-
-def test_legacy_tri_checkpoint_is_widened_exactly_once():
-    from runtime.checkpoint import genome_from_dict, genome_to_dict
-    legacy_gene = [0x111, 0x222, 0x333, 0x000, 0x123]     # 12-bit states
-    saved = {'tag': 0, 'arch': 'tri3',
-             'gene_fields': ['ctx_l', 'ctx_r', 'ctx_d', 'self_in', 'self_out'],
-             'chromosomes': [{'tag': 0, 'split': 0, 'telomere': 4,
-                              'genes': [legacy_gene]}],
-             'state_delays': None}                        # no tri_channel_bits
-    genome = genome_from_dict(saved, 'nervous')
-    gene = genome.chromosomes[0].genes[0]
-    assert channel_configs(gene.ctx_l) == (1, 1, 1)
-    assert channel_configs(gene.self_out) == (3, 2, 1)
-
-    # A re-saved genome carries the new width and must NOT widen again.
-    again = genome_from_dict(genome_to_dict(genome, 'nervous'), 'nervous')
-    once = again.chromosomes[0].genes[0]
-    assert (once.ctx_l, once.self_out) == (gene.ctx_l, gene.self_out)

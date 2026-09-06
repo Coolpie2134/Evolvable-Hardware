@@ -121,10 +121,6 @@ class FunctionalSim:
         self._inputs, self._watch = circuit.inputs, circuit.watch
         self.reset()
 
-    def _build_wiring(self):
-        self._inputs, self._watch = _wiring_maps(
-            self.grid, self.input_nodes)
-
     def reset(self):
         self.levels = {cell: 0 for cell in self.grid}
         self._external_depth = {cell: 0 for cell in self.input_nodes

@@ -15,7 +15,7 @@ readout and alignment frozen (no re-fit on validation), and classifies the gap:
     SOLVED / PLATEAU / UNCERTIFIED             (autonomous / documented limit /
                                                 no replayable reference)
 
-One verdict rule, shared by reproduce.py, the evolution controller, and tests.
+One verdict rule, shared by the benchmark runners, the evolution controller, and tests.
 LUT exterior-edge I/O is not certified yet: its frozen readout adapter cannot
 currently replay outside-to-facing-edge links, so certification returns an
 explicit UNCERTIFIED verdict instead of presenting an unaudited score.

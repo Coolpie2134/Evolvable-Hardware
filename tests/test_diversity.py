@@ -25,7 +25,7 @@ from substrates.nervous.targets import (TEMPORAL_TARGETS,
 from runtime.config import GAConfig, RunConfig            # noqa: E402
 
 
-def _target(name='Coincidence (2-in)', model='pulse_delay'):
+def _target(name='Coincidence (2-in)', model='paper_analog'):
     target = TEMPORAL_TARGETS[name]
     config = RunConfig(ga=GAConfig(node_model=model),
                        pulse=PulseConfig(model=model))
@@ -138,25 +138,6 @@ def test_functional_signature_counts_germline_telomere():
             != dv.functional_signature(longer, 'nervous', config))
 
 
-def test_functional_signature_reads_only_the_live_timing_vector():
-    """A dormant vector carried by an old checkpoint must not inflate diversity
-    on a run whose node model never reads it."""
-    genome = random_hex_genome(2)
-    genome.state_delays = [1.0] * 32
-    other = clone_genome(genome)
-    other.state_delays = [1.0] * 32
-    other.state_delays[3] = 2.5
-
-    delay_cfg = RunConfig(ga=GAConfig(node_model='pulse_delay'),
-                          pulse=PulseConfig(model='pulse_delay'))
-    uniform_cfg = RunConfig(ga=GAConfig(node_model='uniform'),
-                            pulse=PulseConfig(model='uniform'))
-    # the model that transports evolved delays sees the difference...
-    assert (dv.functional_signature(genome, 'nervous', delay_cfg)
-            != dv.functional_signature(other, 'nervous', delay_cfg))
-    # ...the one that ignores the vector does not
-    assert (dv.functional_signature(genome, 'nervous', uniform_cfg)
-            == dv.functional_signature(other, 'nervous', uniform_cfg))
 
 
 def test_tri3_functional_signature_ignores_timing_vectors():
@@ -190,22 +171,6 @@ def test_phenotype_signature_is_stable_and_grid_sensitive():
     assert len({s for s in signatures if s is not None}) > 1
 
 
-def test_phenotype_separates_identical_grids_with_different_delays():
-    """Under the legacy profile two genomes can grow the same state grid while
-    carrying different per-node delays - physically different circuits."""
-    target, config = _target()
-    random.seed(5)
-    genome = random_hex_genome(2)
-    genome.state_delays = [1.0] * 32
-    base = dv.phenotype_signature(genome, 'nervous', target, config.pulse)
-    if base is None:
-        return                                  # dead organism; nothing to test
-    slower = clone_genome(genome)
-    slower.state_delays = [2.0] * 32
-    other = dv.phenotype_signature(slower, 'nervous', target, config.pulse)
-    assert other is not None
-    assert other[1] == base[1]                  # identical grown grid
-    assert other != base                        # but not the same circuit
 
 
 # -- probe bank + behaviour ---------------------------------------------------

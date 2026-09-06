@@ -119,7 +119,7 @@ def fit_readout(genome, target, backend='nervous'):
     return FittedReadout(backend, outputs, alignment, score, inputs=fitted_inputs)
 
 
-def score_frozen(genome, target, fitted):
+def score_frozen(genome, target, fitted, *, trace_observer=None):
     """Score fresh schedules without changing the fitted cell or alignment."""
     out_pos = fitted.output_positions
     expected_roles = {terminal.role for terminal in target.outputs}
@@ -224,6 +224,8 @@ def score_frozen(genome, target, fitted):
     else:
         raise ValueError("unknown fitted backend: %s" % fitted.backend)
 
+    if trace_observer is not None:
+        trace_observer(traces)
     if traces is None or getattr(traces, 'overflow', False):
         return 0.0
     return score_contract(

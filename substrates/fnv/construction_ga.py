@@ -21,9 +21,9 @@ from .genome import (
     MAX_INPUT_DISTANCE, MAX_PLACEMENTS, MAX_TOLERANCE, OUT_STATE,
     Chromosome, ContextGene, ControlGene, InputGene, OutputGene, input_ring,
     sync_input_layout, sync_output_layout)
-from .simulation import effective_wiring_edges, facing_direction, source_for_input
+from .simulation import facing_direction, source_for_input
 
-BRANCHED_MUT_OPS = ["tweak", "add_gene", "connect", "block", "del_rule",
+BRANCHED_MUT_OPS = ["tweak", "add_gene", "block", "del_rule",
                     "del_branch", "control", "inputs", "outputs"]
 #: ``block`` is OFF (weight 0). It is mechanically correct - see _add_blocker -
 #: but measured inert, and it cannot work until genes stop going stale: only
@@ -32,32 +32,15 @@ BRANCHED_MUT_OPS = ["tweak", "add_gene", "connect", "block", "del_rule",
 #: over 8 seeds, 200 gens: 6/8 with it against 7/8 without. Re-enable by giving
 #: it weight once genes are kept attached to contexts that currently exist.
 BRANCHED_MUT_WEIGHTS = [
-    0.55, 0.08, 0.15, 0.00, 0.04, 0.01, 0.08, 0.045, 0.045,
+    0.72, 0.14, 0.00, 0.03, 0.005, 0.06, 0.02, 0.025,
 ]
-#: Softmax temperature for the constructive component draw (`_sample_component`).
-#: 0 reproduces the old deterministic argmin; larger values flatten the draw
-#: toward uniform-over-families. 0.75 was chosen as the smallest value that
-#: brought every enabled family into the grown phenotype at a measurable rate
-#: while leaving DELAY the plurality part for plain routing.
-CONSTRUCTION_TEMPERATURE = 0.75
-#: Probability that a constructive step attempts to close a FEEDBACK edge back
-#: into the branch it is already growing, instead of extending forward. Growth
-#: was strictly output-rooted and acyclic, so 0 of 400 grown bodies contained a
-#: cycle - and every stateful target (oscillators, dividers, latches, toggles)
-#: needs one. Reserved for the feedback-closing step; not yet consumed.
-FEEDBACK_CLOSE_PROBABILITY = 0.25
 #: Starting lifespan of a fresh arm.
-ARM_TELOMERE_SEED = (24, 32)
+ARM_TELOMERE_SEED = (10, 18)
 #: Fresh output niches start beyond the compact input cluster.  A root only two
 #: edges from the pads leaves enough room for a read-once gate, but not for the
 #: repeated terminal contacts needed by voting, carry, and multi-bit arithmetic.
 #: Distance remains genetic and may evolve across the full domain afterward.
 OUTPUT_DISTANCE_SEED = (3, 4)
-#: Build a genuinely branching gate crown before terminal tropism takes over.
-#: This is target-blind developmental competence: it supplies reusable input
-#: limbs, not a desired truth table or a prescribed circuit.
-LOGIC_SCAFFOLD_GENES = 6
-MAX_LOGIC_SCAFFOLD_GENES = 12
 #: Starting reach of a fresh arm. Zero is an exact match, which is where this
 #: encoding began; a few units lets a rule apply to neighbouring component types
 #: without reaching across catalogue families.
@@ -623,59 +606,6 @@ def _add_blocker(genome, families, n_inputs):
     return True
 
 
-def _sample_component(viable, families=None):
-    """Family-first softmax draw over equally-routable catalogue parts.
-
-    ``viable`` rows are the candidate tuples built in `_connect_terminal_step`,
-    already filtered to one routability class, ending in the component id.
-
-    Two properties matter and neither is optional:
-
-    * **Family-first.** GATED_OSCILLATOR ships 36 entries and C_ELEMENT ships
-      3. Drawing uniformly over *states* would hand the oscillator family a
-      12x prior for no physical reason. Pick the family first, then a part
-      inside it - the same correction `catalogue.random_component_id` already
-      makes for mutation, which the constructive path never applied.
-    * **Preference is a bias, not a veto.** The remaining keys (pin count,
-      output-arity fit) still favour the tidy part, but through a softmax
-      weight rather than a lexicographic gate, so the untidy part that happens
-      to hold state stays reachable.
-
-    ``CONSTRUCTION_TEMPERATURE == 0`` restores the historical argmin exactly.
-    """
-    if not viable:
-        raise ValueError("_sample_component needs at least one candidate")
-    by_family = {}
-    for row in viable:
-        state = row[-1]
-        # Lower is better, matching the original lexicographic ordering.
-        cost = float(row[6] + row[7])
-        by_family.setdefault(BY_ID[state].family, []).append((cost, state))
-    temperature = float(CONSTRUCTION_TEMPERATURE)
-    if temperature <= 0:
-        best = min(row[6:-1] + (row[-1],) for row in viable)
-        return int(best[-1])
-
-    def _draw(pairs):
-        floor = min(cost for cost, _state in pairs)
-        weights = [math.exp(-(cost - floor) / temperature) for cost, _s in pairs]
-        total = sum(weights)
-        if total <= 0:
-            return random.choice([state for _c, state in pairs])
-        cut = random.random() * total
-        for (_cost, state), weight in zip(pairs, weights):
-            cut -= weight
-            if cut <= 0:
-                return state
-        return pairs[-1][1]
-
-    family_pairs = [
-        (min(cost for cost, _s in parts), family)
-        for family, parts in by_family.items()]
-    family = _draw([(cost, name) for cost, name in family_pairs])
-    return int(_draw(by_family[family]))
-
-
 def _arm_has_output_gene(members, exclude=None):
     return any(gene.spawns_output() for gene in members if gene is not exclude)
 
@@ -779,209 +709,6 @@ def _extend_arm(chromosome, gene, top):
     else:
         chromosome.genes.append(gene)
 
-
-def _reverse_cone(root, edges):
-    reverse = {}
-    for source, destination in edges:
-        reverse.setdefault(destination, set()).add(source)
-    reached, pending = {root}, [root]
-    while pending:
-        destination = pending.pop()
-        for source in reverse.get(destination, ()):
-            if source not in reached:
-                reached.add(source)
-                pending.append(source)
-    return reached
-
-
-def _shared_open_buds(genome, label):
-    """Open source sites feeding two or more cells of one output arm."""
-    trace = develop_constructive(genome, _seeds(genome))
-    pads = set(_seeds(genome))
-    consumers = {}
-    for destination, owner in trace.owners.items():
-        if owner != int(label) or destination not in trace.grid:
-            continue
-        for direction in BY_ID[trace.grid[destination]].inputs:
-            source = source_for_input(destination, direction)
-            if source not in trace.grid and source not in pads:
-                consumers.setdefault(source, set()).add(destination)
-    return sum(len(destinations) >= 2 for destinations in consumers.values())
-
-
-def _connect_terminal_step(genome, families, n_inputs, label=None,
-                           required_inputs=None):
-    """Grow one local bud toward an under-connected source pad.
-
-    This is terminal tropism, not circuit synthesis: it reads only the current
-    physical body and terminal coordinates, never input values or desired
-    outputs. The resulting component is still encoded as an ordinary context
-    rule and must regrow synchronously with the rest of the organism.
-    """
-    if len(placement_genes(genome)) >= MAX_PLACEMENTS:
-        return False
-    seeds = _seeds(genome)
-    pads = set(seeds)
-    if required_inputs is None:
-        goal_pads = pads
-    else:
-        goal_pads = {
-            seeds[int(index)] for index in required_inputs
-            if 0 <= int(index) < len(seeds)}
-    if not goal_pads:
-        return False
-    unwanted_pads = pads - goal_pads
-    trace = develop_constructive(genome, seeds)
-    roots = output_branch_sites(genome)
-    edges = effective_wiring_edges(trace.grid, pads)
-    options = []
-    labels = [int(label)] if label is not None else sorted(roots)
-    for branch_id in labels:
-        root = roots.get(branch_id)
-        if root not in trace.grid:
-            continue
-        cone = _reverse_cone(root, edges)
-        toward_root = {}
-        for source, destination in edges:
-            if source in cone and destination in cone:
-                toward_root.setdefault(source, set()).add(destination)
-        pad_edges = {
-            pad: sum(source == pad and destination in cone
-                     for source, destination in edges)
-            for pad in pads}
-        buds = {}
-        for destination, owner in trace.owners.items():
-            if owner != branch_id or destination not in trace.grid:
-                continue
-            for direction in BY_ID[trace.grid[destination]].inputs:
-                source = source_for_input(destination, direction)
-                if source not in trace.grid and source not in pads:
-                    # Which first-level input limb of the output root owns this
-                    # bud? Grow the least terminal-rich limb first, so a binary
-                    # output does not degenerate into one deep computation arm
-                    # and one direct-input shortcut.
-                    limb = destination
-                    seen = set()
-                    while (limb != root and limb not in seen
-                           and root not in toward_root.get(limb, ())):
-                        seen.add(limb)
-                        destinations = sorted(toward_root.get(limb, ()))
-                        if not destinations:
-                            break
-                        limb = destinations[0]
-                    limb_cone = (
-                        set() if limb == root else _reverse_cone(limb, edges))
-                    limb_edges = sum(
-                        edge_source in pads and edge_destination in limb_cone
-                        for edge_source, edge_destination in edges)
-                    buds.setdefault(source, []).append((
-                        limb_edges, limb_cone.intersection(pads), destination))
-        for pad in goal_pads:
-            for bud, consumers in buds.items():
-                limb_edges = min(row[0] for row in consumers)
-                limb_pads = set().union(*(row[1] for row in consumers))
-                options.append((
-                    int(pad_edges[pad] > 0), int(pad in limb_pads),
-                    limb_edges, -len(consumers), honeycomb_distance(bud, pad),
-                    branch_id, pad, bud))
-    if not options:
-        return False
-    # Keep the route on the strict local terminal gradient. A wider near-best
-    # fringe was measured here and made fresh genome construction materially
-    # slower without increasing terminal coverage.
-    ranked_shapes = sorted(set(row[:5] for row in options))
-    best_shape = ranked_shapes[0]
-    (_already_global, _already_limb, _limb_edges, _fanout, _distance,
-     branch_id, pad, bud) = random.choice(
-        [row for row in options if row[:5] == best_shape])
-    depth = _reach(
-        bud, branch_id, trace.grid, trace.owners, trace.branch_depths)
-    if depth is None:
-        return False
-    required = set(required_output_directions(
-        bud, branch_id, depth, trace.grid, trace.owners,
-        trace.branch_depths))
-    candidates = []
-    for state in enabled_component_ids(families):
-        entry = BY_ID[state]
-        covered = required.intersection(entry.outputs)
-        if not covered or not entry.inputs:
-            continue
-        input_sources = [
-            (direction, source_for_input(bud, direction))
-            for direction in entry.inputs]
-        live_inputs = sum(
-            source in pads
-            or (source in trace.grid
-                and direction in BY_ID[trace.grid[source]].outputs)
-            for direction, source in input_sources)
-        unwanted_inputs = sum(
-            source in unwanted_pads for _direction, source in input_sources)
-        relevant_live_inputs = sum(
-            source in goal_pads
-            or (source in trace.grid
-                and direction in BY_ID[trace.grid[source]].outputs)
-            for direction, source in input_sources)
-        next_distance = min(
-            honeycomb_distance(source, pad)
-            for _direction, source in input_sources)
-        candidates.append((
-            int(not required.issubset(entry.outputs)),
-            -len(covered),
-            unwanted_inputs,
-            -relevant_live_inputs,
-            -live_inputs,
-            next_distance,
-            # PREFERENCE keys. Formerly strict, and that was the single most
-            # damaging line in the substrate: `int(entry.family != "DELAY")`
-            # gave DELAY absolute lexicographic priority over every other
-            # family, and `min()` below made the choice a deterministic argmin
-            # rather than a draw. Measured on 400 grown bodies: DELAY 64.6%,
-            # LOGIC 17.5%, C_ELEMENT 17.9%, and NORMALIZER / HOLD / TOGGLE /
-            # GATED_OSCILLATOR 0.0% - 81 of 117 catalogue entries were enabled
-            # and never once expressed. With no state-holding part and no
-            # feedback edge, every grown circuit was a combinational delay
-            # chain and every stateful target was UNREACHABLE, not merely hard.
-            len(entry.inputs),
-            abs(len(entry.outputs) - len(required)),
-            state))
-    if not candidates:
-        return False
-    # Routability is still decided strictly: anything that cannot be wired at
-    # this bud loses outright. Among the parts that CAN be wired, choose by
-    # softmax sampling over the preference keys instead of argmin, so a
-    # marginally-less-convenient part stays reachable at initialization. This
-    # is what puts HOLD / TOGGLE / GATED_OSCILLATOR / NORMALIZER back into the
-    # developmental repertoire; without them the search cannot express memory.
-    routable = min(row[:6] for row in candidates)
-    viable = [row for row in candidates if row[:6] == routable]
-    state = _sample_component(viable, families)
-
-    around = hex_dirs(*bud)
-    output_sites = set(roots.values()) - pads
-    context = (
-        _state_of(around['L'], trace.grid, pads, output_sites),
-        _state_of(around['R'], trace.grid, pads, output_sites),
-        _state_of(around['D'], trace.grid, pads, output_sites),
-        _state_of(bud, trace.grid, pads, output_sites),
-    )
-    chromosome_index, half = divmod(branch_id - 1, 2)
-    if chromosome_index >= len(genome.chromosomes):
-        return False
-    chromosome = genome.chromosomes[chromosome_index]
-    if len(chromosome.genes) >= MAX_GENES:
-        return False
-    gene_id = int(genome.next_gene_id)
-    gene = ContextGene(
-        gene_id, *context, state, gene_id,
-        min(int(depth), DEPTH_BANDS - 1))
-    genome.next_gene_id = gene_id + 1
-    _extend_arm(chromosome, gene, top=(half == 0))
-    _repair_genome(genome, families, n_inputs)
-    # Do not develop the proposed child to decide whether the gene survives.
-    # The context and bud came from the current body; evaluation and selection
-    # own the consequences of adding it.
-    return True
 
 
 def _add_gene(genome, families, n_inputs):
@@ -1179,8 +906,6 @@ def mutate_branched_once(genome, families, n_inputs, max_telomere=None):
         return changed
     if op == "add_gene":
         return _add_gene(genome, families, n_inputs)
-    if op == "connect":
-        return _connect_terminal_step(genome, families, n_inputs)
     if op == "block":
         return _add_blocker(genome, families, n_inputs)
     if op == "del_rule":
@@ -1298,6 +1023,8 @@ def mutate_branch_function(genome, branch_id=None):
     return True
 
 
+
+
 def random_branched_genome(chromosome_count, families, n_inputs,
                            output_roles=("out0",), input_layout=None,
                            blocks=8, max_telomere=None):
@@ -1336,35 +1063,17 @@ def random_branched_genome(chromosome_count, families, n_inputs,
         if branch_label(chromosome_index, half) in assigned
     ]
     growing = {label for _index, _half, label, _top in slots}
-    life_ceiling = arm_telomere_ceiling(max_telomere)
     # Grow all role germlines together. Building one complete output before the
     # next gave the first role every shared/fanout niche and systematically
     # reduced later outputs to read-once trees. The developmental interpreter
     # is already synchronous; initialization now respects that same biology.
-    for block_index in range(max(1, int(blocks))):
+    for _block_index in range(max(1, int(blocks))):
         round_slots = list(slots)
         random.shuffle(round_slots)
         for chromosome_index, half, label, top in round_slots:
             if label not in growing:
                 continue
             chromosome = genome.chromosomes[chromosome_index]
-            arm = branch_growth_order(chromosome)[0 if top else 1]
-            needed_fanouts = (
-                max(0, int(n_inputs) - 1) if n_inputs >= 3 else 0)
-            scaffold_ready = (
-                block_index >= LOGIC_SCAFFOLD_GENES
-                and (_shared_open_buds(genome, label) >= needed_fanouts
-                     or block_index >= MAX_LOGIC_SCAFFOLD_GENES))
-            if scaffold_ready and _arm_has_output_gene(arm):
-                connected = False
-                for _attempt in range(6):
-                    if _connect_terminal_step(
-                            genome, families, n_inputs, label):
-                        connected = True
-                        break
-                if not connected:
-                    growing.discard(label)
-                continue
             arm = branch_growth_order(chromosome)[0 if top else 1]
             gene_id = int(genome.next_gene_id)
             gene = _random_gene(
@@ -1377,10 +1086,6 @@ def random_branched_genome(chromosome_count, families, n_inputs,
             genome.next_gene_id = gene_id + 1
             _extend_arm(chromosome, gene, top)
             _repair_genome(genome, families, n_inputs)
-            if int(n_inputs) >= 4:
-                control = arm_control(chromosome, half)
-                if control is not None:
-                    control.telomere = life_ceiling
     return _repair_genome(genome, families, n_inputs)
 
 
