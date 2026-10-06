@@ -9,6 +9,16 @@ venv/
 
 # Results (large/generated files)
 results/
+# Local paper drafts and one-off figure exports. Published results live in benchmarks/.
+output/
+
+# Local editor/agent state and credentials
+.codex/
+.claude/
+.agents/
+.env
+.env.*
+!.env.example
 
 # SPICE artifacts
 *.cir

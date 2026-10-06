@@ -47,6 +47,7 @@ class DiversityTab:
         self._worker = None
         self._stop = threading.Event()
         self._after_id = None
+        self._closed = False
         self._build_ui()
 
     # -- UI -------------------------------------------------------------------
@@ -163,7 +164,7 @@ class DiversityTab:
     # -- analysis -------------------------------------------------------------
 
     def analyse(self):
-        if self._worker is not None:
+        if getattr(self, '_closed', False) or self._worker is not None:
             return
         path = self._resolve_path()
         if path is None:
@@ -195,6 +196,20 @@ class DiversityTab:
         self._stop.set()
         self._status.set('Stopping after the current genome...')
         self._stop_btn.config(state='disabled')
+
+    def close(self):
+        """Cancel analysis and polling before the containing window closes."""
+        self._closed = True
+        self._stop.set()
+        if self._after_id is not None:
+            try:
+                self.parent.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        figure = getattr(self, '_fig', None)
+        if figure is not None:
+            plt.close(figure)
 
     def _work(self, path, limit, samples, want_robustness):
         """Worker thread: load, cluster, optionally sample robustness."""
@@ -268,6 +283,9 @@ class DiversityTab:
             self._queue.put(('error', '%s: %s' % (type(exc).__name__, exc)))
 
     def _poll(self):
+        self._after_id = None
+        if getattr(self, '_closed', False):
+            return
         report = None
         try:
             while True:

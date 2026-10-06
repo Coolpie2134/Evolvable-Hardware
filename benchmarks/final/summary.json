@@ -1,0 +1,44 @@
+{
+  "campaign": "multi_target_600gen_20260915",
+  "targets": 63,
+  "cells": 170,
+  "planned_runs": 1700,
+  "skipped_runs": 8,
+  "recorded_runs": 1692,
+  "history_rows": 581468,
+  "population_solved": 626,
+  "trained": 629,
+  "certified": 413,
+  "timed_out": 495,
+  "hard_timeout": 0,
+  "backend_counts": {
+    "fnv": {
+      "recorded_runs": 630,
+      "history_rows": 229169,
+      "population_solved": 230,
+      "trained": 231,
+      "certified": 167,
+      "timed_out": 191,
+      "hard_timeout": 0
+    },
+    "lut": {
+      "recorded_runs": 612,
+      "history_rows": 167571,
+      "population_solved": 246,
+      "trained": 248,
+      "certified": 159,
+      "timed_out": 213,
+      "hard_timeout": 0
+    },
+    "nervous": {
+      "recorded_runs": 450,
+      "history_rows": 184728,
+      "population_solved": 150,
+      "trained": 150,
+      "certified": 87,
+      "timed_out": 91,
+      "hard_timeout": 0
+    }
+  },
+  "verified_curves": 170
+}

@@ -339,6 +339,8 @@ def config_record(args, architectures):
             # fingerprint: resuming a capped sweep into an uncapped one would
             # mix incomparable rows.
             'time_cap': args.time_cap, 'stop_on_solve': args.stop_on_solve,
+            **({'stop_on_population_solve': True} if getattr(
+                args, 'stop_on_population_solve', False) else {}),
         },
         'ga': {
             'mutations': args.mutations, 'immigrants': args.immigrants,
@@ -472,6 +474,7 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
     started = time.time()
     time_cap = float(getattr(args, 'time_cap', 0) or 0)
     stop_on_solve = bool(getattr(args, 'stop_on_solve', False))
+    stop_on_population_solve = bool(getattr(args, 'stop_on_population_solve', False))
 
     def budget(best_fit):
         """Why this run should end early, or None to keep going.
@@ -482,6 +485,8 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
         """
         if stop_on_solve and best_fit >= 1.0:
             return 'solved'
+        if stop_on_population_solve and state.get('population_mean_raw', 0.0) >= 1.0:
+            return 'population solved'
         if time_cap and (time.time() - started) >= time_cap:
             return 'time cap %gs' % time_cap
         return None
@@ -492,7 +497,7 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
                 args.gens, args.pop, args.chroms, args.tries, live_target,
                 arch, messages, stop_event, base_seed=seed, backend=backend,
                 run_config=run_config, results_dir=snapshot_dir,
-                budget=(budget if (time_cap or stop_on_solve) else None),
+                budget=(budget if (time_cap or stop_on_solve or stop_on_population_solve) else None),
                 behavior_checkpoints=getattr(
                     args, 'behavior_checkpoints', ()),
                 **({'record_champions': True} if recorder else {}))
@@ -553,6 +558,21 @@ def run_one(backend, target_name, target, args, seed, snapshot_dir, quiet):
                         round(float(value), 6)
                         for value in telemetry['champion_cases']]
                 state['history'].append(history_entry)
+                state['population_mean_raw'] = float(message[4])
+                if stop_on_population_solve:
+                    history_entry['population_mean_raw'] = float(message[4])
+                live_history = getattr(args, 'live_history', None)
+                if live_history:
+                    from runtime.observation import atomic_observation
+                    try:
+                        atomic_observation(live_history, {
+                            'backend': backend, 'target': target_name, 'seed': seed,
+                            'history': state['history']})
+                    except PermissionError as exc:
+                        # A locked optional progress file must not abort evolution.
+                        # Full history remains in memory and the next write retries it.
+                        print('Live history save deferred: %s' % exc,
+                              file=sys.stderr, flush=True)
                 if (state['first_solved_gen'] is None
                         and best_fit >= SOLVER_VALID):
                     state['first_solved_gen'] = absolute_gen
@@ -1244,6 +1264,10 @@ def build_parser():
     out.add_argument('--stop-on-solve', action='store_true',
                      help='end a run as soon as training fitness reaches 1.0 '
                           'instead of exhausting the generation budget')
+    out.add_argument('--stop-on-population-solve', action='store_true',
+                     help='stop after the observed population mean reaches 1.0')
+    out.add_argument('--live-history', default=None,
+                     help='atomically persist generation history during a run')
     out.add_argument('--progress-every', type=int, default=10,
                      help='print a progress line every N generations (0 = off)')
     out.add_argument(

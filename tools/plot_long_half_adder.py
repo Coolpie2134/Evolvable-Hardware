@@ -4,10 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import sys
 
 ROOT=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(ROOT/'tmp/scientific_plotting'))
 os.environ.setdefault('MPLCONFIGDIR',str(ROOT/'tmp/matplotlib-config'))
 import matplotlib
 matplotlib.use('Agg')
@@ -20,7 +18,7 @@ OUT=ROOT/'results/half_adder_600gen_10seed_20260905'
 def main():
     d=json.loads((OUT/'benchmark.json').read_text());assert d['complete']
     plt.rcParams.update({'svg.fonttype':'none','font.family':'DejaVu Sans','font.size':11})
-    fig,ax=plt.subplots(figsize=(14,8));fig.subplots_adjust(left=.09,right=.97,top=.80,bottom=.16)
+    fig,ax=plt.subplots(figsize=(14,8));fig.subplots_adjust(left=.09,right=.97,top=.96,bottom=.23)
     rows=[];curves=[];rng=np.random.default_rng(202609080)
     for backend,name,color in zip(('nervous','fnv','lut'),('Nervous net','FNV','LUT'),('#3078a8','#bf6b19','#198274')):
         c=next(c for c in d['cells'] if c['backend']==backend)
@@ -42,10 +40,10 @@ def main():
     ax.set_xlim(0,600);ax.set_ylim(0,1.025);ax.set_xticks([0,50,100,200,300,400,500,600])
     ax.set_yticks([0,.25,.5,.75,1],['0%','25%','50%','75%','100%'])
     ax.set_xlabel('Evolutionary generation');ax.set_ylabel('Population mean fitness, averaged across independent runs')
-    ax.axvline(200,color='#88939c',ls=':',lw=1);ax.legend(frameon=False,loc='upper left')
-    fig.suptitle('Temporal half adder: 600 generations of developmental evolution',x=.07,y=.965,ha='left',fontsize=20,weight='bold')
-    fig.text(.07,.90,'30 fresh runs · population 60 · same target and configurations · all runs continue through generation 600',fontsize=11,color='#526371')
-    fig.text(.07,.025,'Lines: arithmetic mean across runs. Shading: pointwise 95% bootstrap interval, resampling whole runs. Dotted line: previous 200-generation horizon.\nNo smoothing, normalization or filled-in tails. Mean refers to selected survivors; FNV/LUT strengthen survivor retention after a training solve.',fontsize=9,color='#526371')
+    ax.legend(frameon=False,loc='lower right')
+    fig.text(.09,.115,'Fig. 1. Temporal half adder: 600 generations of developmental evolution.',fontsize=13)
+    fig.text(.09,.077,'10 independent runs per substrate · population 60 · 600 generations · no restarts or early stopping',fontsize=10)
+    fig.text(.09,.043,'Lines: mean population fitness across runs. Shading: pointwise 95% bootstrap intervals (2,000 whole-run resamples).',fontsize=10)
     for ext in ('png','svg','pdf'):fig.savefig(OUT/f'population_mean_600gen.{ext}',dpi=170,facecolor='white')
     plt.close(fig)
     for name,data in [('run_summary.csv',rows),('curve_data.csv',curves)]:

@@ -1,0 +1,931 @@
+{
+  "cells": [
+    {
+      "backend": "nervous",
+      "id": "and-temporal_nervous",
+      "target": "AND (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "and-temporal_fnv",
+      "target": "AND (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "and-temporal_lut",
+      "target": "AND (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "xor-temporal_nervous",
+      "target": "XOR (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "xor-temporal_fnv",
+      "target": "XOR (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "xor-temporal_lut",
+      "target": "XOR (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "half-adder-temporal_nervous",
+      "target": "Half adder (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "half-adder-temporal_fnv",
+      "target": "Half adder (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "half-adder-temporal_lut",
+      "target": "Half adder (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "toggle-flip-flop_nervous",
+      "target": "Toggle flip-flop"
+    },
+    {
+      "backend": "fnv",
+      "id": "toggle-flip-flop_fnv",
+      "target": "Toggle flip-flop"
+    },
+    {
+      "backend": "lut",
+      "id": "toggle-flip-flop_lut",
+      "target": "Toggle flip-flop"
+    },
+    {
+      "backend": "nervous",
+      "id": "echo-delay-3_nervous",
+      "target": "Echo (delay 3)"
+    },
+    {
+      "backend": "fnv",
+      "id": "echo-delay-3_fnv",
+      "target": "Echo (delay 3)"
+    },
+    {
+      "backend": "lut",
+      "id": "echo-delay-3_lut",
+      "target": "Echo (delay 3)"
+    },
+    {
+      "backend": "nervous",
+      "id": "oscillator_nervous",
+      "target": "Oscillator"
+    },
+    {
+      "backend": "fnv",
+      "id": "oscillator_fnv",
+      "target": "Oscillator"
+    },
+    {
+      "backend": "lut",
+      "id": "oscillator_lut",
+      "target": "Oscillator"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-bit-adder_fnv",
+      "target": "2-bit adder"
+    },
+    {
+      "backend": "lut",
+      "id": "2-bit-adder_lut",
+      "target": "2-bit adder"
+    },
+    {
+      "backend": "nervous",
+      "id": "2-bit-adder-temporal_nervous",
+      "target": "2-bit adder (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-bit-adder-temporal_fnv",
+      "target": "2-bit adder (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "2-bit-adder-temporal_lut",
+      "target": "2-bit adder (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-bit-comparator_fnv",
+      "target": "2-bit comparator"
+    },
+    {
+      "backend": "lut",
+      "id": "2-bit-comparator_lut",
+      "target": "2-bit comparator"
+    },
+    {
+      "backend": "nervous",
+      "id": "2-bit-comparator-temporal_nervous",
+      "target": "2-bit comparator (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-bit-comparator-temporal_fnv",
+      "target": "2-bit comparator (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "2-bit-comparator-temporal_lut",
+      "target": "2-bit comparator (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-to-4-decoder_fnv",
+      "target": "2-to-4 decoder"
+    },
+    {
+      "backend": "lut",
+      "id": "2-to-4-decoder_lut",
+      "target": "2-to-4 decoder"
+    },
+    {
+      "backend": "nervous",
+      "id": "2-to-4-decoder-temporal_nervous",
+      "target": "2-to-4 decoder (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-to-4-decoder-temporal_fnv",
+      "target": "2-to-4 decoder (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "2-to-4-decoder-temporal_lut",
+      "target": "2-to-4 decoder (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-1-mux_fnv",
+      "target": "2:1 MUX"
+    },
+    {
+      "backend": "lut",
+      "id": "2-1-mux_lut",
+      "target": "2:1 MUX"
+    },
+    {
+      "backend": "nervous",
+      "id": "2-1-mux-temporal_nervous",
+      "target": "2:1 MUX (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2-1-mux-temporal_fnv",
+      "target": "2:1 MUX (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "2-1-mux-temporal_lut",
+      "target": "2:1 MUX (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2x2-multiplier_fnv",
+      "target": "2x2 multiplier"
+    },
+    {
+      "backend": "lut",
+      "id": "2x2-multiplier_lut",
+      "target": "2x2 multiplier"
+    },
+    {
+      "backend": "nervous",
+      "id": "2x2-multiplier-temporal_nervous",
+      "target": "2x2 multiplier (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "2x2-multiplier-temporal_fnv",
+      "target": "2x2 multiplier (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "2x2-multiplier-temporal_lut",
+      "target": "2x2 multiplier (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "a-count-multiple-of-3-queried-by-b_nervous",
+      "target": "A-count multiple-of-3 queried by B"
+    },
+    {
+      "backend": "fnv",
+      "id": "a-count-multiple-of-3-queried-by-b_fnv",
+      "target": "A-count multiple-of-3 queried by B"
+    },
+    {
+      "backend": "lut",
+      "id": "a-count-multiple-of-3-queried-by-b_lut",
+      "target": "A-count multiple-of-3 queried by B"
+    },
+    {
+      "backend": "nervous",
+      "id": "a-count-parity-queried-by-b_nervous",
+      "target": "A-count parity queried by B"
+    },
+    {
+      "backend": "fnv",
+      "id": "a-count-parity-queried-by-b_fnv",
+      "target": "A-count parity queried by B"
+    },
+    {
+      "backend": "lut",
+      "id": "a-count-parity-queried-by-b_lut",
+      "target": "A-count parity queried by B"
+    },
+    {
+      "backend": "nervous",
+      "id": "a-first-rendezvous_nervous",
+      "target": "A-first rendezvous"
+    },
+    {
+      "backend": "fnv",
+      "id": "a-first-rendezvous_fnv",
+      "target": "A-first rendezvous"
+    },
+    {
+      "backend": "lut",
+      "id": "a-first-rendezvous_lut",
+      "target": "A-first rendezvous"
+    },
+    {
+      "backend": "fnv",
+      "id": "and_fnv",
+      "target": "AND"
+    },
+    {
+      "backend": "lut",
+      "id": "and_lut",
+      "target": "AND"
+    },
+    {
+      "backend": "nervous",
+      "id": "burst-x3_nervous",
+      "target": "Burst x3"
+    },
+    {
+      "backend": "fnv",
+      "id": "burst-x3_fnv",
+      "target": "Burst x3"
+    },
+    {
+      "backend": "lut",
+      "id": "burst-x3_lut",
+      "target": "Burst x3"
+    },
+    {
+      "backend": "nervous",
+      "id": "c-element-2-in-join_nervous",
+      "target": "C-element (2-in join)"
+    },
+    {
+      "backend": "fnv",
+      "id": "c-element-2-in-join_fnv",
+      "target": "C-element (2-in join)"
+    },
+    {
+      "backend": "lut",
+      "id": "c-element-2-in-join_lut",
+      "target": "C-element (2-in join)"
+    },
+    {
+      "backend": "nervous",
+      "id": "coincidence-2-in_nervous",
+      "target": "Coincidence (2-in)"
+    },
+    {
+      "backend": "fnv",
+      "id": "coincidence-2-in_fnv",
+      "target": "Coincidence (2-in)"
+    },
+    {
+      "backend": "lut",
+      "id": "coincidence-2-in_lut",
+      "target": "Coincidence (2-in)"
+    },
+    {
+      "backend": "nervous",
+      "id": "collision-serializer-2-to-1_nervous",
+      "target": "Collision serializer (2-to-1)"
+    },
+    {
+      "backend": "fnv",
+      "id": "collision-serializer-2-to-1_fnv",
+      "target": "Collision serializer (2-to-1)"
+    },
+    {
+      "backend": "lut",
+      "id": "collision-serializer-2-to-1_lut",
+      "target": "Collision serializer (2-to-1)"
+    },
+    {
+      "backend": "fnv",
+      "id": "count-to-4_fnv",
+      "target": "Count to 4"
+    },
+    {
+      "backend": "lut",
+      "id": "count-to-4_lut",
+      "target": "Count to 4"
+    },
+    {
+      "backend": "fnv",
+      "id": "full-adder_fnv",
+      "target": "Full adder"
+    },
+    {
+      "backend": "lut",
+      "id": "full-adder_lut",
+      "target": "Full adder"
+    },
+    {
+      "backend": "nervous",
+      "id": "full-adder-temporal_nervous",
+      "target": "Full adder (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "full-adder-temporal_fnv",
+      "target": "Full adder (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "full-adder-temporal_lut",
+      "target": "Full adder (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "gap-band-pass-a-b-gap-2-4_nervous",
+      "target": "Gap band-pass (A->B gap 2-4)"
+    },
+    {
+      "backend": "fnv",
+      "id": "gap-band-pass-a-b-gap-2-4_fnv",
+      "target": "Gap band-pass (A->B gap 2-4)"
+    },
+    {
+      "backend": "lut",
+      "id": "gap-band-pass-a-b-gap-2-4_lut",
+      "target": "Gap band-pass (A->B gap 2-4)"
+    },
+    {
+      "backend": "fnv",
+      "id": "gated-d-latch_fnv",
+      "target": "Gated D latch"
+    },
+    {
+      "backend": "lut",
+      "id": "gated-d-latch_lut",
+      "target": "Gated D latch"
+    },
+    {
+      "backend": "nervous",
+      "id": "gated-oscillator_nervous",
+      "target": "Gated oscillator"
+    },
+    {
+      "backend": "fnv",
+      "id": "gated-oscillator_fnv",
+      "target": "Gated oscillator"
+    },
+    {
+      "backend": "lut",
+      "id": "gated-oscillator_lut",
+      "target": "Gated oscillator"
+    },
+    {
+      "backend": "fnv",
+      "id": "half-adder_fnv",
+      "target": "Half adder"
+    },
+    {
+      "backend": "lut",
+      "id": "half-adder_lut",
+      "target": "Half adder"
+    },
+    {
+      "backend": "fnv",
+      "id": "majority-3_fnv",
+      "target": "Majority-3"
+    },
+    {
+      "backend": "lut",
+      "id": "majority-3_lut",
+      "target": "Majority-3"
+    },
+    {
+      "backend": "nervous",
+      "id": "majority-3-temporal_nervous",
+      "target": "Majority-3 (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "majority-3-temporal_fnv",
+      "target": "Majority-3 (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "majority-3-temporal_lut",
+      "target": "Majority-3 (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "nand_fnv",
+      "target": "NAND"
+    },
+    {
+      "backend": "lut",
+      "id": "nand_lut",
+      "target": "NAND"
+    },
+    {
+      "backend": "nervous",
+      "id": "nand-temporal_nervous",
+      "target": "NAND (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "nand-temporal_fnv",
+      "target": "NAND (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "nand-temporal_lut",
+      "target": "NAND (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "nor_fnv",
+      "target": "NOR"
+    },
+    {
+      "backend": "lut",
+      "id": "nor_lut",
+      "target": "NOR"
+    },
+    {
+      "backend": "nervous",
+      "id": "nor-temporal_nervous",
+      "target": "NOR (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "nor-temporal_fnv",
+      "target": "NOR (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "nor-temporal_lut",
+      "target": "NOR (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "or_fnv",
+      "target": "OR"
+    },
+    {
+      "backend": "lut",
+      "id": "or_lut",
+      "target": "OR"
+    },
+    {
+      "backend": "nervous",
+      "id": "or-temporal_nervous",
+      "target": "OR (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "or-temporal_fnv",
+      "target": "OR (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "or-temporal_lut",
+      "target": "OR (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "odd-a-batch-closed-by-b_nervous",
+      "target": "Odd A batch closed by B"
+    },
+    {
+      "backend": "fnv",
+      "id": "odd-a-batch-closed-by-b_fnv",
+      "target": "Odd A batch closed by B"
+    },
+    {
+      "backend": "lut",
+      "id": "odd-a-batch-closed-by-b_lut",
+      "target": "Odd A batch closed by B"
+    },
+    {
+      "backend": "fnv",
+      "id": "odd-pulse-selector_fnv",
+      "target": "Odd pulse selector"
+    },
+    {
+      "backend": "nervous",
+      "id": "one-shot-12-seconds_nervous",
+      "target": "One-shot (12 seconds)"
+    },
+    {
+      "backend": "fnv",
+      "id": "one-shot-12-seconds_fnv",
+      "target": "One-shot (12 seconds)"
+    },
+    {
+      "backend": "lut",
+      "id": "one-shot-12-seconds_lut",
+      "target": "One-shot (12 seconds)"
+    },
+    {
+      "backend": "fnv",
+      "id": "parity-3-xor3_fnv",
+      "target": "Parity-3 (XOR3)"
+    },
+    {
+      "backend": "lut",
+      "id": "parity-3-xor3_lut",
+      "target": "Parity-3 (XOR3)"
+    },
+    {
+      "backend": "nervous",
+      "id": "parity-3-xor3-temporal_nervous",
+      "target": "Parity-3 (XOR3) (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "parity-3-xor3-temporal_fnv",
+      "target": "Parity-3 (XOR3) (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "parity-3-xor3-temporal_lut",
+      "target": "Parity-3 (XOR3) (temporal)"
+    },
+    {
+      "backend": "nervous",
+      "id": "pattern-1000_nervous",
+      "target": "Pattern (1000)"
+    },
+    {
+      "backend": "fnv",
+      "id": "pattern-1000_fnv",
+      "target": "Pattern (1000)"
+    },
+    {
+      "backend": "lut",
+      "id": "pattern-1000_lut",
+      "target": "Pattern (1000)"
+    },
+    {
+      "backend": "nervous",
+      "id": "period-doubler-2x_nervous",
+      "target": "Period doubler (2x)"
+    },
+    {
+      "backend": "fnv",
+      "id": "period-doubler-2x_fnv",
+      "target": "Period doubler (2x)"
+    },
+    {
+      "backend": "lut",
+      "id": "period-doubler-2x_lut",
+      "target": "Period doubler (2x)"
+    },
+    {
+      "backend": "nervous",
+      "id": "period-halver-1-2x_nervous",
+      "target": "Period halver (1/2x)"
+    },
+    {
+      "backend": "fnv",
+      "id": "period-halver-1-2x_fnv",
+      "target": "Period halver (1/2x)"
+    },
+    {
+      "backend": "lut",
+      "id": "period-halver-1-2x_lut",
+      "target": "Period halver (1/2x)"
+    },
+    {
+      "backend": "nervous",
+      "id": "period-stepper_nervous",
+      "target": "Period stepper"
+    },
+    {
+      "backend": "fnv",
+      "id": "period-stepper_fnv",
+      "target": "Period stepper"
+    },
+    {
+      "backend": "lut",
+      "id": "period-stepper_lut",
+      "target": "Period stepper"
+    },
+    {
+      "backend": "nervous",
+      "id": "period-tripler-3x_nervous",
+      "target": "Period tripler (3x)"
+    },
+    {
+      "backend": "fnv",
+      "id": "period-tripler-3x_fnv",
+      "target": "Period tripler (3x)"
+    },
+    {
+      "backend": "lut",
+      "id": "period-tripler-3x_lut",
+      "target": "Period tripler (3x)"
+    },
+    {
+      "backend": "nervous",
+      "id": "refractory-filter-3-seconds_nervous",
+      "target": "Refractory filter (3 seconds)"
+    },
+    {
+      "backend": "fnv",
+      "id": "refractory-filter-3-seconds_fnv",
+      "target": "Refractory filter (3 seconds)"
+    },
+    {
+      "backend": "lut",
+      "id": "refractory-filter-3-seconds_lut",
+      "target": "Refractory filter (3 seconds)"
+    },
+    {
+      "backend": "nervous",
+      "id": "resettable-divide-by-4_nervous",
+      "target": "Resettable divide-by-4"
+    },
+    {
+      "backend": "fnv",
+      "id": "resettable-divide-by-4_fnv",
+      "target": "Resettable divide-by-4"
+    },
+    {
+      "backend": "lut",
+      "id": "resettable-divide-by-4_lut",
+      "target": "Resettable divide-by-4"
+    },
+    {
+      "backend": "nervous",
+      "id": "resettable-toggle_nervous",
+      "target": "Resettable toggle"
+    },
+    {
+      "backend": "fnv",
+      "id": "resettable-toggle_fnv",
+      "target": "Resettable toggle"
+    },
+    {
+      "backend": "lut",
+      "id": "resettable-toggle_lut",
+      "target": "Resettable toggle"
+    },
+    {
+      "backend": "nervous",
+      "id": "rhythm-cascade_nervous",
+      "target": "Rhythm cascade"
+    },
+    {
+      "backend": "fnv",
+      "id": "rhythm-cascade_fnv",
+      "target": "Rhythm cascade"
+    },
+    {
+      "backend": "lut",
+      "id": "rhythm-cascade_lut",
+      "target": "Rhythm cascade"
+    },
+    {
+      "backend": "nervous",
+      "id": "ring-pattern_nervous",
+      "target": "Ring pattern"
+    },
+    {
+      "backend": "fnv",
+      "id": "ring-pattern_fnv",
+      "target": "Ring pattern"
+    },
+    {
+      "backend": "lut",
+      "id": "ring-pattern_lut",
+      "target": "Ring pattern"
+    },
+    {
+      "backend": "nervous",
+      "id": "sr-latch_nervous",
+      "target": "SR latch"
+    },
+    {
+      "backend": "fnv",
+      "id": "sr-latch_fnv",
+      "target": "SR latch"
+    },
+    {
+      "backend": "lut",
+      "id": "sr-latch_lut",
+      "target": "SR latch"
+    },
+    {
+      "backend": "nervous",
+      "id": "sequence-a-b_nervous",
+      "target": "Sequence A->B"
+    },
+    {
+      "backend": "fnv",
+      "id": "sequence-a-b_fnv",
+      "target": "Sequence A->B"
+    },
+    {
+      "backend": "lut",
+      "id": "sequence-a-b_lut",
+      "target": "Sequence A->B"
+    },
+    {
+      "backend": "nervous",
+      "id": "temporal-xor-2-in_nervous",
+      "target": "Temporal XOR (2-in)"
+    },
+    {
+      "backend": "fnv",
+      "id": "temporal-xor-2-in_fnv",
+      "target": "Temporal XOR (2-in)"
+    },
+    {
+      "backend": "lut",
+      "id": "temporal-xor-2-in_lut",
+      "target": "Temporal XOR (2-in)"
+    },
+    {
+      "backend": "nervous",
+      "id": "temporal-sum-deltaa-deltab_nervous",
+      "target": "Temporal sum (deltaA + deltaB)"
+    },
+    {
+      "backend": "fnv",
+      "id": "temporal-sum-deltaa-deltab_fnv",
+      "target": "Temporal sum (deltaA + deltaB)"
+    },
+    {
+      "backend": "lut",
+      "id": "temporal-sum-deltaa-deltab_lut",
+      "target": "Temporal sum (deltaA + deltaB)"
+    },
+    {
+      "backend": "nervous",
+      "id": "veto-gate_nervous",
+      "target": "Veto gate"
+    },
+    {
+      "backend": "fnv",
+      "id": "veto-gate_fnv",
+      "target": "Veto gate"
+    },
+    {
+      "backend": "lut",
+      "id": "veto-gate_lut",
+      "target": "Veto gate"
+    },
+    {
+      "backend": "nervous",
+      "id": "watchdog-timeout-5-seconds_nervous",
+      "target": "Watchdog timeout (5 seconds)"
+    },
+    {
+      "backend": "fnv",
+      "id": "watchdog-timeout-5-seconds_fnv",
+      "target": "Watchdog timeout (5 seconds)"
+    },
+    {
+      "backend": "lut",
+      "id": "watchdog-timeout-5-seconds_lut",
+      "target": "Watchdog timeout (5 seconds)"
+    },
+    {
+      "backend": "fnv",
+      "id": "xnor_fnv",
+      "target": "XNOR"
+    },
+    {
+      "backend": "lut",
+      "id": "xnor_lut",
+      "target": "XNOR"
+    },
+    {
+      "backend": "nervous",
+      "id": "xnor-temporal_nervous",
+      "target": "XNOR (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "xnor-temporal_fnv",
+      "target": "XNOR (temporal)"
+    },
+    {
+      "backend": "lut",
+      "id": "xnor-temporal_lut",
+      "target": "XNOR (temporal)"
+    },
+    {
+      "backend": "fnv",
+      "id": "xor_fnv",
+      "target": "XOR"
+    },
+    {
+      "backend": "lut",
+      "id": "xor_lut",
+      "target": "XOR"
+    }
+  ],
+  "concurrent_jobs": 2,
+  "generations": 600,
+  "hard_cap_s": 900,
+  "plotting": "Carry raw population-perfect terminal observations to 600; truncate each fixed cohort at its shortest other history. Never discard failed runs from a cohort.",
+  "population": 60,
+  "schema": 1,
+  "seed_base": 202609150,
+  "seeds": 10,
+  "slow_policy": "Skip remaining seeds when first two attempts both time out below generation 50.",
+  "stop_on_population_solve": true,
+  "targets": [
+    "AND (temporal)",
+    "XOR (temporal)",
+    "Half adder (temporal)",
+    "Toggle flip-flop",
+    "Echo (delay 3)",
+    "Oscillator",
+    "2-bit adder",
+    "2-bit adder (temporal)",
+    "2-bit comparator",
+    "2-bit comparator (temporal)",
+    "2-to-4 decoder",
+    "2-to-4 decoder (temporal)",
+    "2:1 MUX",
+    "2:1 MUX (temporal)",
+    "2x2 multiplier",
+    "2x2 multiplier (temporal)",
+    "A-count multiple-of-3 queried by B",
+    "A-count parity queried by B",
+    "A-first rendezvous",
+    "AND",
+    "Burst x3",
+    "C-element (2-in join)",
+    "Coincidence (2-in)",
+    "Collision serializer (2-to-1)",
+    "Count to 4",
+    "Full adder",
+    "Full adder (temporal)",
+    "Gap band-pass (A->B gap 2-4)",
+    "Gated D latch",
+    "Gated oscillator",
+    "Half adder",
+    "Majority-3",
+    "Majority-3 (temporal)",
+    "NAND",
+    "NAND (temporal)",
+    "NOR",
+    "NOR (temporal)",
+    "OR",
+    "OR (temporal)",
+    "Odd A batch closed by B",
+    "Odd pulse selector",
+    "One-shot (12 seconds)",
+    "Parity-3 (XOR3)",
+    "Parity-3 (XOR3) (temporal)",
+    "Pattern (1000)",
+    "Period doubler (2x)",
+    "Period halver (1/2x)",
+    "Period stepper",
+    "Period tripler (3x)",
+    "Refractory filter (3 seconds)",
+    "Resettable divide-by-4",
+    "Resettable toggle",
+    "Rhythm cascade",
+    "Ring pattern",
+    "SR latch",
+    "Sequence A->B",
+    "Temporal XOR (2-in)",
+    "Temporal sum (deltaA + deltaB)",
+    "Veto gate",
+    "Watchdog timeout (5 seconds)",
+    "XNOR",
+    "XNOR (temporal)",
+    "XOR"
+  ],
+  "time_cap_s": 600,
+  "workers": 4
+}

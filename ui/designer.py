@@ -38,7 +38,7 @@ round-trip even without a genome.
 Run standalone:  py -m ui.designer
 """
 from __future__ import annotations
-import os, sys, math, json, pickle, dataclasses
+import os, sys, math, json, pickle, dataclasses, copy
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -145,6 +145,9 @@ DESIGN_FORMAT = 'evohw-design-v1'
 # "x,y". Targets are stored by NAME and re-resolved from the registry on load.
 
 def _genome_to_dict(genome, backend):
+    if _is_branched(genome):
+        from runtime.checkpoint import genome_to_dict
+        return genome_to_dict(genome, backend)
     fields = _NV_GENE_FIELDS if backend == 'nervous' else _LUT_GENE_FIELDS
     doc = {'tag': genome.tag,
            'gene_fields': list(fields),
@@ -159,6 +162,9 @@ def _genome_to_dict(genome, backend):
 
 
 def _genome_from_dict(d, backend):
+    if d.get('format_encoding'):
+        from runtime.checkpoint import genome_from_dict
+        return genome_from_dict(d, backend)
     if backend == 'nervous':
         Gene, Chrom, Gen, fields = HexGene, NvChromosome, NvGenome, _NV_GENE_FIELDS
     else:
@@ -175,6 +181,12 @@ def _genome_from_dict(d, backend):
     if backend == 'nervous':
         kwargs['arch'] = d.get('arch', 'single')
     return Gen(**kwargs)
+
+
+def _is_branched(genome):
+    from substrates.nervous.branched import BranchedHexGenome
+    from substrates.lut.branched import BranchedLutGenome
+    return isinstance(genome, (BranchedHexGenome, BranchedLutGenome))
 
 
 def _grid_to_dict(grid, backend):
@@ -382,6 +394,7 @@ class DesignerTab:
         self._nibbles    = {}
         self._traces     = {}
         self._running    = False
+        self._after_id   = None
         self._lut_bind   = None          # (get, set, describe) for the table editor
         self._mono       = ui_compat.mono_family(parent)
         self._build_ui()
@@ -482,7 +495,7 @@ class DesignerTab:
                 'inputs and picking each rule by nearest match. This is one '
                 'way only: it replaces the working grid, and hand edits never '
                 'flow back into the genome.')
-        b = ttk.Button(actions, text='<- To genome', command=self._reverse_to_genome)
+        b = self._reverse_btn = ttk.Button(actions, text='<- To genome', command=self._reverse_to_genome)
         b.pack(side='left', padx=2)
         _Tip(b, 'Attempts to reverse Grow: build a genome that grows back into '
                 'the current working grid, so a hand-built circuit gets '
@@ -744,7 +757,18 @@ class DesignerTab:
     # -- genome operations -------------------------------------------------------
 
     def _random_genome(self):
-        if self.backend == 'nervous':
+        if _is_branched(self.genome):
+            if self.backend == 'nervous':
+                from substrates.nervous.branched_ga import random_branched_hex_genome as factory
+            else:
+                from substrates.lut.branched_ga import random_branched_lut_genome as factory
+            target = self._current_target_obj()
+            self.genome = factory(
+                n_chroms=len(self.genome.chromosomes),
+                n_inputs=getattr(target, 'n_inputs', len(self.in_pos)),
+                output_roles=tuple(o.role for o in target.outputs) if target else ('Q',))
+            note = 'random branched genome'
+        elif self.backend == 'nervous':
             self.genome = random_hex_genome(2, arch=self._nv_arch())
             note = 'random nervous genome'
         else:
@@ -765,6 +789,8 @@ class DesignerTab:
         if self.genome is None:
             self._status.set('No genome: load or randomize one (or design the grid by hand).')
             return
+        if _is_branched(self.genome):
+            self._adopt_genetic_ports()
         if not self.in_pos:
             self._status.set('Designate at least one input cell first (Input mode, or '
                              'Adopt target I/O): inputs are the growth seeds.')
@@ -777,7 +803,10 @@ class DesignerTab:
             it = getattr(t, 'iters', 30) if t else 30
             self.grid = grow_lut(self.genome, seeds=tuple(self.in_pos),
                                  grid_size=gs, iters=it)
-        self.out_pos = {r: p for r, p in self.out_pos.items() if p in self.grid}
+        if _is_branched(self.genome):
+            self._adopt_genetic_ports()
+        else:
+            self.out_pos = {r: p for r, p in self.out_pos.items() if p in self.grid}
         self._grid_edited = self._genome_edited = False
         self._selected = None
         self._reset_sim()
@@ -794,6 +823,10 @@ class DesignerTab:
         into the Genome tab (not yet grown): the working grid is left untouched so
         the hand-built phenotype is preserved; press Grow to realise the genome,
         Score to confirm the outputs still match."""
+        if _is_branched(self.genome):
+            self._status.set('Reverse synthesis is unavailable for branched genomes. '
+                             'Save the design to preserve your circuit edits.')
+            return
         if self._nv_arch() == 'tri3':
             self._status.set('Reverse synthesis currently supports the legacy '
                              'single-output encoding only; the tri3 grid was left unchanged.')
@@ -1009,6 +1042,9 @@ class DesignerTab:
         """Drop never-expressed genes from the LUT genome (neutral: the grown
         organism is unchanged). Uses the designated inputs as growth seeds so the
         expression tally matches how this genome actually develops here."""
+        if _is_branched(self.genome):
+            self._status.set('Compaction is unavailable for branched genomes.')
+            return
         if self.backend != 'lut':
             self._status.set('Compaction applies to the LUT array (dense genomes).')
             return
@@ -1052,6 +1088,9 @@ class DesignerTab:
                            'needs no genome to simulate or score.',
                       foreground='#777').pack(anchor='w', padx=6, pady=6)
             return
+        if _is_branched(g):
+            self._branched_genome_panel()
+            return
         nv = self.backend == 'nervous'
         fields = _NV_GENE_FIELDS if nv else _LUT_GENE_FIELDS
         intro = ('Associative memory: context (L, R, D, self) -> new state,\n'
@@ -1090,6 +1129,37 @@ class DesignerTab:
                           foreground='#a00').pack(anchor='w')
         ttk.Button(self._genome_frame, text='+ chromosome',
                    command=self._add_chrom).pack(anchor='w', pady=4)
+
+    def _branched_genome_panel(self):
+        """Edit the current encoding through the existing checkpoint reader."""
+        ttk.Label(self._genome_frame, text=(
+            'Branched developmental genome\n'
+            'Edit the saved fields below, then Apply genome edits and Grow.\n'
+            'Controls contain each arm\'s tolerance and telomere; inputs and\n'
+            'outputs contain the inherited port positions. Reverse synthesis\n'
+            'and compaction are unavailable for this encoding.'),
+            font=(self._mono, 8)).pack(anchor='w', padx=4, pady=4)
+        editor = scrolledtext.ScrolledText(
+            self._genome_frame, width=58, height=24, wrap='none',
+            font=(self._mono, 9))
+        editor.insert('1.0', json.dumps(_genome_to_dict(self.genome, self.backend), indent=2))
+        editor.pack(fill='both', expand=True)
+
+        def apply_edits():
+            try:
+                genome = _genome_from_dict(json.loads(editor.get('1.0', 'end')), self.backend)
+                if not _is_branched(genome) or not genome.chromosomes:
+                    raise ValueError('Keep the branched encoding and at least one chromosome.')
+            except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                self._status.set('Genome edits were not applied: %s' % exc)
+                return
+            self.genome = genome
+            self._genome_edited = True
+            self._refresh_sync()
+            self._status.set('Genome edits applied. Press Grow to develop them.')
+
+        ttk.Button(self._genome_frame, text='Apply genome edits',
+                   command=apply_edits).pack(anchor='w', pady=4)
 
     def _gene_row(self, chrom, gi, gene, fields, nv):
         row = ttk.Frame(self._genome_frame)
@@ -1640,8 +1710,11 @@ class DesignerTab:
 
     def _refresh_all(self):
         if hasattr(self, '_compact_btn'):      # compaction is LUT-only
-            self._compact_btn.configure(state='normal' if self.backend == 'lut'
+            self._compact_btn.configure(state='normal' if self.backend == 'lut' and not _is_branched(self.genome)
                                         else 'disabled')
+        if hasattr(self, '_reverse_btn'):
+            self._reverse_btn.configure(state='disabled' if _is_branched(self.genome)
+                                        or self._nv_arch() == 'tri3' else 'normal')
         self._set_guide()
         self._rebuild_genome_panel()
         self._rebuild_inspector()
@@ -1738,7 +1811,7 @@ class DesignerTab:
 
     def _nv_schedule_changed(self):
         # a pulse edit invalidates the running playback; rebuild from t=0
-        self._running = False
+        self._stop_playback()
         if hasattr(self, '_run_btn'):
             self._run_btn.config(text='Run')
         self._player = None
@@ -1750,7 +1823,7 @@ class DesignerTab:
         self._refresh_canvas()
 
     def _reset_sim(self):
-        self._running = False
+        self._stop_playback()
         self._player = None
         self._nv_playing = False
         self._tick = 0
@@ -1795,8 +1868,7 @@ class DesignerTab:
 
     def _toggle_run(self):
         if self._running:
-            self._running = False
-            self._run_btn.config(text='Run')
+            self._stop_playback()
         else:
             if not self.grid:
                 self._status.set('Empty grid: place or grow a circuit before Run.')
@@ -1810,6 +1882,7 @@ class DesignerTab:
             self._tick_loop()
 
     def _tick_loop(self):
+        self._after_id = None
         if not self._running:
             return
         advanced = self._step()
@@ -1820,14 +1893,33 @@ class DesignerTab:
                 self._status.set('Playback complete at %.1f seconds.'
                                  % self._player.cursor)
             return
-        self.parent.after(70, self._tick_loop)
+        if self._running:
+            self._after_id = self.parent.after(70, self._tick_loop)
+
+    def _stop_playback(self):
+        self._running = False
+        if getattr(self, '_after_id', None) is not None:
+            try:
+                self.parent.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        if hasattr(self, '_run_btn'):
+            try:
+                self._run_btn.config(text='Run')
+            except tk.TclError:
+                pass
 
     def close(self):
         """Release playback callbacks and matplotlib event bindings."""
-        self._running = False
+        self._stop_playback()
         if getattr(self, '_editor', None) is not None:
             self._editor.disconnect()
             self._editor = None
+        for name in ('fig', '_lut_fig', '_tl_fig'):
+            figure = getattr(self, name, None)
+            if figure is not None:
+                plt.close(figure)
 
     # -- scoring -----------------------------------------------------------------
 
@@ -2075,7 +2167,8 @@ class DesignerTab:
         self._backend_var.set('LUT array (Arch 2)' if backend == 'lut'
                               else 'Nervous net (Arch 1)')
         self._refresh_target_list()
-        self.genome = genome
+        # Designer edits must never mutate the app's active champion.
+        self.genome = genome = copy.deepcopy(genome)
         if target is not None:
             self._loaded_target = target
             # select by registry KEY when one holds this target (keys and .name
@@ -2118,12 +2211,27 @@ class DesignerTab:
                                          grid_size=getattr(target, 'grid_size', 7),
                                          iters=getattr(target, 'iters', 30))
                 self._grid_edited = False
+                if _is_branched(genome):
+                    self._adopt_genetic_ports()
             else:
                 self.grid = {}
         self._selected, self._lut_bind = None, None
         self._reset_sim()
         self._refresh_all()
         self._status.set('Imported %s: %d cells.' % (note, len(self.grid)))
+
+    def _adopt_genetic_ports(self):
+        if self.backend == 'nervous':
+            from substrates.nervous.branched_ga import input_pads
+            from substrates.nervous.branched import output_root_sites
+        else:
+            from substrates.lut.branched_ga import input_pads
+            from substrates.lut.branched import output_root_sites
+        self.in_pos = list(input_pads(self.genome))
+        roots = output_root_sites(self.genome, self.in_pos)
+        self.out_pos = {gene.role: roots[gene.branch_id]
+                        for gene in self.genome.outputs
+                        if roots.get(gene.branch_id) in self.grid}
 
     def _current_target_obj(self):
         t = self._current_target()

@@ -1,3 +1,9 @@
 # Repository files are LF; stop core.autocrlf from converting on checkout so
 # git quits warning "LF will be replaced by CRLF" on every touched file.
 * text=auto eol=lf
+
+# Keep Windows launchers native and publication archives byte-for-byte intact.
+*.bat text eol=crlf
+*.png binary
+*.pdf binary
+*.zip binary

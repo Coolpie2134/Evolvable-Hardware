@@ -64,6 +64,23 @@ def _rows(root):
             if child.winfo_ismapped() and child.winfo_children()]
 
 
+def test_status_is_visible_when_window_height_is_limited():
+    root, app = _app()
+    if root is None:
+        return
+    try:
+        root.geometry('1280x720')
+        for label in BACKEND_LABELS.values():
+            app._backend_var.set(label)
+            app._on_backend_change()
+            root.update()
+            status = app._status_label
+            assert status.winfo_ismapped(), label
+            assert status.winfo_y() + status.winfo_height() <= root.winfo_height(), label
+    finally:
+        _close(root, app)
+
+
 def test_no_control_row_is_too_wide_for_a_laptop_window():
     root, app = _app()
     if root is None:

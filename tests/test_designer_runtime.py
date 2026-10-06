@@ -294,6 +294,57 @@ def test_designer_json_roundtrip_preserves_tri_tile_architecture():
     assert restored.chromosomes == genome.chromosomes
 
 
+def test_designer_roundtrip_preserves_branched_rules_controls_and_ports():
+    from substrates.nervous.branched_ga import random_branched_hex_genome
+    from substrates.lut.branched_ga import random_branched_lut_genome
+    from runtime.checkpoint import genome_to_dict
+    state = random.getstate()
+    try:
+        random.seed(48)
+        for backend, factory in (('nervous', random_branched_hex_genome),
+                                 ('lut', random_branched_lut_genome)):
+            original = factory(n_inputs=3, output_roles=('S', 'C'))
+            document = _genome_to_dict(original, backend)
+            restored = _genome_from_dict(document, backend)
+            assert genome_to_dict(restored, backend) == genome_to_dict(original, backend)
+            assert restored is not original
+    finally:
+        random.setstate(state)
+
+
+def test_designer_import_does_not_share_editable_genes_with_active_solution():
+    from unittest.mock import Mock
+    from substrates.nervous.branched_ga import random_branched_hex_genome
+    from runtime.checkpoint import genome_to_dict
+    original = random_branched_hex_genome()
+    before = genome_to_dict(original, 'nervous')
+    tab = DesignerTab.__new__(DesignerTab)
+    tab._backend_var = Mock()
+    tab._refresh_target_list = Mock()
+    tab._reset_sim = Mock()
+    tab._refresh_all = Mock()
+    tab._status = Mock()
+    tab._adopt_state(original, None, 'nervous', grid={(0, 0): 1},
+                     in_pos=[(0, 0)], out_pos={})
+    tab.genome.chromosomes[0].controls[0].telomere += 1
+    assert genome_to_dict(original, 'nervous') == before
+    assert genome_to_dict(tab.genome, 'nervous') != before
+
+
+def test_designer_import_keeps_genetic_output_sites():
+    from substrates.nervous.branched_ga import random_branched_hex_genome, input_pads
+    from substrates.nervous.branched import output_root_sites
+    genome = random_branched_hex_genome(n_inputs=2, output_roles=('S', 'C'))
+    pads = input_pads(genome)
+    roots = output_root_sites(genome, pads)
+    tab = DesignerTab.__new__(DesignerTab)
+    tab.backend, tab.genome = 'nervous', genome
+    tab.grid = {cell: 1 for cell in roots.values()}
+    tab._adopt_genetic_ports()
+    assert tab.in_pos == list(pads)
+    assert tab.out_pos == {gene.role: roots[gene.branch_id] for gene in genome.outputs}
+
+
 def test_interactive_case_dropdown_loads_each_trial():
     """The Interactive tab exposes EVERY stored test case, not just trial 0:
     selecting a case loads exactly that trial's physical schedule into the
@@ -724,7 +775,10 @@ def test_root_app_launcher_delegates_to_the_packaged_entry_point():
     import app as compatibility_app
     from ui import app as packaged_app
 
-    assert compatibility_app.main is packaged_app.main
+    from unittest.mock import patch
+    with patch.object(packaged_app, 'main') as launch:
+        compatibility_app.main()
+    launch.assert_called_once_with()
 
 
 def test_ui_app_source_can_be_loaded_as_a_direct_script():

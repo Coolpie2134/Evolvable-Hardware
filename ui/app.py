@@ -835,6 +835,9 @@ class App:
         self._abs_gen     = 0
         self._custom      = {}     # name -> Target for user-built targets
         self._periodic_target_cache = {}
+        self._display_solution = None
+        self._dirty_panels = set()
+        self._panel_refresh_job = None
         self.target       = get_target(DEFAULT_TARGET)
         # what the display tabs currently reflect (set on Run / Load):
         self._disp_target  = self.target
@@ -1404,6 +1407,7 @@ class App:
             self._diversity_frame,
             get_population_path=lambda: self._diversity_population_path,
             mono=self._mono)
+        nb.bind('<<NotebookTabChanged>>', self._on_tab_changed)
 
         self._status = tk.StringVar(
             value='Ready: pick a substrate and target, set parameters, click Run (or Load Saved).')
@@ -1411,7 +1415,7 @@ class App:
             self.root, textvariable=self._status, anchor='w',
             relief='sunken', padding=(6, 2), wraplength=1000, justify='left')
         self._status_label.pack(
-            fill='x', side='bottom', padx=4, pady=(0, 4))
+            fill='x', side='bottom', padx=4, pady=(0, 4), before=nb)
 
         # Text-bearing header/status widgets follow the actual window width.
         # Fixed wrap lengths left the model note in a narrow block at fullscreen.
@@ -1697,6 +1701,7 @@ class App:
 
     def _build_evolve_tab(self, nb):
         frame = ttk.Frame(nb)
+        self._evolve_frame = frame
         nb.add(frame, text='Evolution')
         left = ttk.Frame(frame)
         left.pack(side='left', fill='both', expand=True)
@@ -1749,6 +1754,7 @@ class App:
 
     def _build_growth_tab(self, nb):
         frame = ttk.Frame(nb)
+        self._growth_frame = frame
         nb.add(frame, text='Circuit Growth')
         self._growth_fig = plt.figure(figsize=(9.5, 9.5))
         self._growth_fig.patch.set_facecolor('#f5f5f5')
@@ -1759,6 +1765,7 @@ class App:
 
     def _build_voltage_tab(self, nb):
         frame = ttk.Frame(nb)
+        self._voltage_frame = frame
         nb.add(frame, text='Voltage Traces')
         self._volt_tab = frame
         self._volt_fig = plt.figure(figsize=(11, 7.5))
@@ -1782,6 +1789,7 @@ class App:
 
     def _build_genome_tab(self, nb):
         frame = ttk.Frame(nb)
+        self._genome_frame = frame
         nb.add(frame, text='Genome')
         # A genome runs to dozens of genes. In a fixed-height figure they were
         # either crushed together or, past a cap, silently dropped with a
@@ -1854,6 +1862,9 @@ class App:
         self._genome_resize_job = None
         if self._genome_last is None:
             self._sync_genome_scroll()
+            return
+        if not self._genome_view.winfo_ismapped():
+            self._dirty_panels.add('genome')
             return
         self._draw_genome(*self._genome_last)
 
@@ -2517,6 +2528,10 @@ class App:
         self._disp_backend   = backend
 
         self._gen_history.clear()
+        self._display_solution = None
+        self._dirty_panels.clear()
+        self._genome_last = None
+        self._interactive._stop()
         self.best_genome = None
         self.best_fitness = 0.0
         self._abs_gen = 0
@@ -2862,7 +2877,7 @@ class App:
                 kind = msg[0]
                 if kind == 'gen':
                     (_, try_n, gen, best_f, mean_f, offspring_best,
-                     mutation_rate, fitness_std) = msg
+                     mutation_rate, fitness_std) = msg[:8]
                     self._abs_gen += 1
                     self._gen_history.append(
                         (self._abs_gen, best_f, mean_f, offspring_best,
@@ -3080,7 +3095,8 @@ class App:
         self._stop_event.set()
         self._pause_event.clear()
         for tab in (getattr(self, '_interactive', None),
-                    getattr(self, '_designer', None)):
+                    getattr(self, '_designer', None),
+                    getattr(self, '_diversity', None)):
             if tab is not None:
                 tab.close()
         if self._poll_job is not None:
@@ -3090,6 +3106,10 @@ class App:
                 pass
             self._poll_job = None
         ui_compat.cancel_after_callbacks(self.root)
+        for name in ('_fit_fig', '_growth_fig', '_volt_fig', '_genome_fig'):
+            figure = getattr(self, name, None)
+            if figure is not None:
+                plt.close(figure)
         self.root.destroy()
 
     # -- display updates -------------------------------------------------------
@@ -3099,10 +3119,46 @@ class App:
         return ('   seed=%d' % s) if s is not None else ''
 
     def _update_all(self, genome, fitness):
-        self._update_truth_table(genome)
-        self._draw_growth(genome, fitness)
-        self._draw_voltages(genome)
-        self._draw_genome(genome, fitness)
+        """Invalidate analysis views; render only the visible view on demand."""
+        self._display_solution = (genome, fitness)
+        self._dirty_panels = {'evolution', 'growth', 'voltage', 'genome', 'interactive'}
+        self._interactive._stop()
+        self._on_tab_changed()
+
+    def _on_tab_changed(self, _event=None):
+        if self._panel_refresh_job is None:
+            self._panel_refresh_job = self.root.after_idle(self._refresh_visible_panel)
+
+    def _refresh_visible_panel(self):
+        self._panel_refresh_job = None
+        selected = self._nb.select()
+        panels = {'evolution': self._evolve_frame, 'growth': self._growth_frame,
+                  'voltage': self._voltage_frame, 'genome': self._genome_frame,
+                  'interactive': self._interactive_frame}
+        for name, frame in panels.items():
+            if str(frame) == selected and name in self._dirty_panels:
+                try:
+                    self._render_panel(name)
+                except Exception as exc:
+                    self._status.set('Could not display %s: %s: %s' %
+                                     (name, type(exc).__name__, exc))
+                break
+
+    def _render_panel(self, name):
+        if self._display_solution is None:
+            return
+        genome, fitness = self._display_solution
+        if name == 'evolution':
+            self._update_truth_table(genome)
+        elif name == 'growth':
+            self._draw_growth(genome, fitness)
+        elif name == 'voltage':
+            self._draw_voltages(genome)
+        elif name == 'genome':
+            self._draw_genome(genome, fitness)
+        elif name == 'interactive':
+            self._interactive.sync()
+        self._dirty_panels.discard(name)
 
     def _set_tt(self, text, title=None):
         if title is not None and getattr(self, '_tt_frame', None) is not None:
@@ -4135,6 +4191,14 @@ class App:
     def _save_pngs(self):
         if self.best_genome is None:
             self._status.set('No genome loaded: nothing to save.')
+            return
+        # Hidden panels may not have been opened since loading this solution.
+        try:
+            for name in ('growth', 'voltage', 'genome'):
+                if name in self._dirty_panels:
+                    self._render_panel(name)
+        except Exception as exc:
+            self._status.set('Could not prepare PNG export: %s' % exc)
             return
         os.makedirs(RESULTS_DIR, exist_ok=True)
         safe = ''.join(c if c.isalnum() else '_' for c in self._disp_target.name)

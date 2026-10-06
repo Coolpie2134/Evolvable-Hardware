@@ -139,6 +139,7 @@ class InteractiveTab:
         self._circuit    = None                # current loaded circuit context
         self._state      = {}                  # nervous activity map
         self._running    = False
+        self._after_id   = None
         # Sticky across reloads: the control is rebuilt with every circuit, so
         # without this the view would silently snap back to branch colouring
         # every time a new solution is loaded.
@@ -875,14 +876,22 @@ class InteractiveTab:
             self._tick_loop()
 
     def _tick_loop(self):
+        self._after_id = None
         if not self._running:
             return
         self._step()
         interval = 90 if self._backend == 'snn' else 70
-        self.parent.after(interval, self._tick_loop)
+        if self._running:
+            self._after_id = self.parent.after(interval, self._tick_loop)
 
     def _stop(self):
         self._running = False
+        if getattr(self, '_after_id', None) is not None:
+            try:
+                self.parent.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
         if hasattr(self, '_run_btn'):
             try:
                 self._run_btn.config(text='Run')
@@ -895,6 +904,9 @@ class InteractiveTab:
         if getattr(self, '_editor', None) is not None:
             self._editor.disconnect()
             self._editor = None
+        figure = getattr(self, 'fig', None)
+        if figure is not None:
+            plt.close(figure)
 
     # -- SNN LIF playback (membrane charge -> spikes over 20 ms) ---------------------
 

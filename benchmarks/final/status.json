@@ -1,0 +1,84 @@
+{
+  "active": [],
+  "complete": true,
+  "finished": 1692,
+  "paused": false,
+  "pid": 29964,
+  "planned": 1700,
+  "queued": 0,
+  "skipped": [
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 2,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 3,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 4,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 5,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 6,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 7,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 8,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    },
+    {
+      "cell": {
+        "backend": "lut",
+        "id": "2x2-multiplier-temporal_lut",
+        "target": "2x2 multiplier (temporal)"
+      },
+      "index": 9,
+      "reason": "Skip remaining seeds when first two attempts both time out below generation 50."
+    }
+  ],
+  "updated": 1790051131.5845609
+}
